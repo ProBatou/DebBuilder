@@ -1,0 +1,61 @@
+name: GitHub Release
+
+"on":
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing version tag to release, for example v0.1.6"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release tag
+        id: release_tag
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="${{ inputs.tag }}"
+          fi
+
+          if [[ ! "$tag" =~ ^v[0-9A-Za-z._-]+$ ]]; then
+            echo "Release tag must start with v and contain only letters, digits, dots, underscores, or hyphens: $tag" >&2
+            exit 1
+          fi
+
+          git fetch --force --tags origin "refs/tags/$tag:refs/tags/$tag"
+          git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null
+
+          {
+            echo "tag=$tag"
+            echo "title=DebBuilder $tag"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release_tag.outputs.tag }}
+          TITLE: ${{ steps.release_tag.outputs.title }}
+        run: |
+          gh release create "$TAG" \
+            --verify-tag \
+            --title "$TITLE" \
+            --generate-notes \
+            --latest

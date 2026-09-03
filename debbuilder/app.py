@@ -70,7 +70,7 @@ OIDC_CLIENT_ID = os.environ.get("DEBBUILDER_OIDC_CLIENT_ID", "")
 OIDC_REDIRECT_URI = os.environ.get("DEBBUILDER_OIDC_REDIRECT_URI", "")
 SESSIONS: dict[str, dict] = {}
 
-for d in (EXAMPLES, USER_WORKFLOWS, RUNS):
+for d in (USER_WORKFLOWS, RUNS):
     d.mkdir(parents=True, exist_ok=True)
 
 PUBLIC_REPO_PREFIXES = ("/dists/", "/pool/")

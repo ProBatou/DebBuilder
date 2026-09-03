@@ -67,14 +67,15 @@
     "config_files": [
       {
         "source": "ssh-notify.sh",
-        "destination": "/etc/profile.d/ssh-notify.sh"
+        "destination": "/etc/profile.d/ssh-notify.sh",
+        "policy": "replace"
       },
       {
         "source": "ssh-notify.conf.template",
-        "destination": "/etc/ssh-notify.conf"
+        "destination": "/etc/ssh-notify.conf",
+        "policy": "dpkg_conffile"
       }
     ],
-    "config_policy": "dpkg_conffile",
     "maintainer_scripts": {
       "preinst": "",
       "postinst": "",
@@ -83,7 +84,6 @@
     }
   },
   "service": {
-    "configured": false,
     "enabled": false,
     "name": "",
     "description": "",

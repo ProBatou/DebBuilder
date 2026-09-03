@@ -360,8 +360,8 @@ class AdminApiTests(unittest.TestCase):
             "package": {"name": "v1-demo", "architecture": "all", "runtime_dependencies": ["python3"]},
             "source": {"provider": "github", "repository": "example/v1-demo", "tracking": "latest_release", "version": {"source": "tag"}},
             "build": {"extra_dependencies": ["python3-dev"], "commands": ["python3 -m build"], "working_directory": ".", "output": {"mode": "path", "path": "dist"}},
-            "install": {"destination": "/opt/v1-demo", "owner": {"user": "root", "group": "root"}},
-            "service": {"name": "v1-demo.service", "user": "v1-demo", "group": "v1-demo", "command": "/usr/bin/python3 /opt/v1-demo/server.py"},
+            "install": {"destination": "/opt/v1-demo", "owner": {"user": "root", "group": "root"}, "config_policy": "replace", "config_files": [{"source": "demo.conf", "destination": "/etc/v1-demo.conf"}]},
+            "service": {"configured": True, "name": "v1-demo.service", "user": "v1-demo", "group": "v1-demo", "command": "/usr/bin/python3 /opt/v1-demo/server.py"},
         }
         status, _ = self.request("POST", "/api/workflows/v1-demo", {"workflow": recipe})
         self.assertEqual(status, 200)
@@ -369,10 +369,14 @@ class AdminApiTests(unittest.TestCase):
         self.assertEqual(stored["schema_version"], 1)
         self.assertNotIn("package_name", stored)
         self.assertNotIn("github_repository", stored)
+        self.assertNotIn("config_policy", stored["install"])
+        self.assertEqual(stored["install"]["config_files"][0]["policy"], "replace")
+        self.assertNotIn("configured", stored["service"])
         _, loaded = self.request("GET", "/api/workflows/v1-demo")
         self.assertEqual(loaded["build"]["extra_dependencies"], ["python3-dev"])
         self.assertEqual(loaded["install"]["owner"]["user"], "root")
         self.assertEqual(loaded["service"]["user"], "v1-demo")
+        self.assertTrue(loaded["service"]["configured"])
 
     def test_readonly_recipe_cannot_be_deleted(self):
         with self.assertRaises(urllib.error.HTTPError) as ctx:

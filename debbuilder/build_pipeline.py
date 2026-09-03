@@ -225,10 +225,10 @@ def run_pipeline(recipe: dict, *, store: BuildStore, dry_run: bool, recipe_id: s
             metadata_step, metadata_started = _start_step(run, store, "debian_metadata")
             _finish_step(run, store, metadata_step, metadata_started, status="success", summary="DEBIAN/control and package scripts generated", details={"control":staging["control"],"conffiles":staging["conffiles"],"configurations":staging["configurations"],"maintainer_scripts":staging["maintainer_scripts"]})
             systemd_step, systemd_started = _start_step(run, store, "systemd")
-            if staging["systemd"]["enabled"]:
+            if staging["systemd"]["configured"]:
                 _finish_step(run, store, systemd_step, systemd_started, status="success", summary=f"Generated {staging['systemd']['path']}", details=staging["systemd"])
             else:
-                _finish_step(run, store, systemd_step, systemd_started, status="skipped", summary="Service disabled in Recipe", details=staging["systemd"])
+                _finish_step(run, store, systemd_step, systemd_started, status="skipped", summary="No systemd service configured", details=staging["systemd"])
         except debian_packaging.PackagingError as exc:
             stage = "debian_metadata" if exc.code == "invalid_debian_metadata" else "systemd" if exc.code == "invalid_systemd_service" else "staging"
             failed_step = _step(run, stage)

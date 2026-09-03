@@ -82,7 +82,6 @@
     "directory_mode": "0755",
     "file_mode": "0644",
     "config_files": [],
-    "config_policy": "dpkg_conffile",
     "maintainer_scripts": {
       "preinst": "",
       "postinst": "install -d -m 0750 -o seerr -g seerr /var/lib/seerr\ninstall -d -m 0750 -o seerr -g seerr /var/lib/seerr/db",
@@ -91,7 +90,6 @@
     }
   },
   "service": {
-    "configured": true,
     "enabled": true,
     "name": "seerr.service",
     "description": "Seerr media request manager",

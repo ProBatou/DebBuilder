@@ -139,6 +139,7 @@ def prepare_staging(recipe: dict, build_result: dict, workspace: str | Path, *, 
         except ValueError as exc:
             raise PackagingError("invalid_install_content", "Build output is outside workspace/source") from exc
     content_source = content_sources[0]
+    source_root = (workspace / "source").resolve()
     content_available = all(path.exists() for path in content_sources)
     if not content_available and not preview:
         raise PackagingError("invalid_install_content", "Resolved build output does not exist")
@@ -157,27 +158,27 @@ def prepare_staging(recipe: dict, build_result: dict, workspace: str | Path, *, 
     generated: dict[str, list[str]] = {}
     owner = install["owner"]
     postinst = generated.setdefault("postinst", [])
-    if owner.get("create_group"):
+    if owner.get("create_group") and owner["group"] != "root":
         postinst.append(f"getent group {owner['group']} >/dev/null 2>&1 || addgroup --system {owner['group']}")
-    if owner.get("create_user"):
+    if owner.get("create_user") and owner["user"] != "root":
         postinst.append(f"id -u {owner['user']} >/dev/null 2>&1 || adduser --system --ingroup {owner['group']} --no-create-home {owner['user']}")
     if include_output and (owner.get("user") or owner.get("group")):
         postinst.append(f"chown -R {owner['user']}:{owner['group']} {install['destination']}")
 
     conffiles, configurations = [], []
     for configured in install["config_files"]:
-        destination_path = str(configured if isinstance(configured, str) else configured["destination"])
-        source_name = destination_path.lstrip("/") if isinstance(configured, str) else str(configured["source"])
-        source_file = (content_source / source_name).resolve(strict=False)
+        destination_path = str(configured["destination"])
+        source_name = str(configured["source"])
+        source_file = (source_root / source_name).resolve(strict=False)
         try:
-            source_file.relative_to(content_source)
+            source_file.relative_to(source_root)
         except ValueError as exc:
-            raise PackagingError("unsafe_configuration_source", f"Configuration source escapes build output: {source_name}") from exc
+            raise PackagingError("unsafe_configuration_source", f"Configuration source escapes acquired source: {source_name}") from exc
         if source_file.is_symlink() or not source_file.is_file():
             if not preview:
                 raise PackagingError("configuration_source_missing", f"Configuration source file is missing: {source_name}")
             preview_warnings.append(f"Configuration source is unavailable during preview: {source_name}")
-        policy = install["config_policy"]
+        policy = configured.get("policy", install.get("config_policy", "dpkg_conffile"))
         if policy == "create_if_missing":
             template = staging / "usr" / "share" / recipe["package"]["name"] / "config-templates" / destination_path.lstrip("/")
             template.parent.mkdir(parents=True, exist_ok=True)
@@ -201,9 +202,9 @@ def prepare_staging(recipe: dict, build_result: dict, workspace: str | Path, *, 
 
     service = recipe["service"]
     unit_text, unit_path = "", ""
-    if service["enabled"]:
+    if service["configured"]:
         if not service.get("command"):
-            raise PackagingError("invalid_systemd_service", "Enabled systemd service requires ExecStart command")
+            raise PackagingError("invalid_systemd_service", "Configured systemd service requires ExecStart command")
         try:
             unit_text = generate_unit(service)
         except ValueError as exc:
@@ -213,8 +214,10 @@ def prepare_staging(recipe: dict, build_result: dict, workspace: str | Path, *, 
         unit_target.write_text(unit_text)
         unit_target.chmod(0o644)
         unit_path = "/" + unit_target.relative_to(staging).as_posix()
-        postinst += ["systemctl daemon-reload || true", f"systemctl enable {service['name']} || true", f"systemctl restart {service['name']} || true"]
-        generated.setdefault("prerm", []).append(f"if [ \"$1\" = remove ]; then systemctl stop {service['name']} || true; fi")
+        postinst.append("systemctl daemon-reload || true")
+        if service["enabled"]:
+            postinst += [f"systemctl enable {service['name']} || true", f"systemctl restart {service['name']} || true"]
+            generated.setdefault("prerm", []).append(f"if [ \"$1\" = remove ]; then systemctl stop {service['name']} || true; fi")
         generated.setdefault("postrm", []).append("systemctl daemon-reload || true")
 
     control = generate_control(recipe, build_result["version"])
@@ -236,7 +239,7 @@ def prepare_staging(recipe: dict, build_result: dict, workspace: str | Path, *, 
         "staging_directory": str(staging), "install_destination": install["destination"], "include_output": include_output,
         "content_source": str(content_source), "content_sources": [str(path) for path in content_sources], "content_available": content_available, "content_files": copied, "preview": preview, "warnings": preview_warnings,
         "version": build_result["version"], "control": control, "conffiles": conffiles, "configurations": configurations,
-        "maintainer_scripts": scripts, "systemd": {"enabled": service["enabled"], "path": unit_path, "content": unit_text},
+        "maintainer_scripts": scripts, "systemd": {"configured": service["configured"], "enabled": service["enabled"], "path": unit_path, "content": unit_text},
         "ownership": {"user": owner["user"], "group": owner["group"], "applied_by": "postinst"},
         "permissions": {"directories": install["directory_mode"], "files": install["file_mode"]},
     }

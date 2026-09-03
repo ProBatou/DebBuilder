@@ -5,7 +5,6 @@ import ast
 import configparser
 import json
 import re
-import shlex
 import tomllib
 from pathlib import Path
 
@@ -154,11 +153,15 @@ def _setup_cfg_metadata(path: Path, warnings: list[str]) -> dict:
 
 
 def _requirements(root: Path) -> list[Path]:
-    paths = sorted(path for path in root.glob("requirements*.txt") if path.is_file())
+    paths = []
+    default = root / "requirements.txt"
+    if default.is_file():
+        paths.append(default)
+    paths.extend(sorted(path for path in root.glob("requirements-*.txt") if path.is_file()))
     directory = root / "requirements"
     if directory.is_dir():
         paths.extend(sorted(path for path in directory.glob("*.txt") if path.is_file()))
-    return _unique(paths)
+    return sorted(_unique(paths))
 
 
 def _detect_python(source: Path, root: Path) -> dict | None:
@@ -178,6 +181,7 @@ def _detect_python(source: Path, root: Path) -> dict | None:
     backend_requires: list[str] = []
     declared_dependencies: list[str] = []
     entry_points: list[str] = [f"{path.name} (__main__)" for path in entrypoint_files]
+    optional_dependencies: list[str] = []
     dependency_sources: list[Path] = []
     lockfiles = [path for path in (poetry_lock, uv_lock) if path.is_file()]
     pyproject_data = {}
@@ -195,8 +199,16 @@ def _detect_python(source: Path, root: Path) -> dict | None:
         backend_requires = [str(row) for row in build_system.get("requires", []) if isinstance(row, str)] if isinstance(build_system.get("requires"), list) else []
         python_requirement = str(project.get("requires-python") or "")
         declared_dependencies.extend(_dependency_names(project.get("dependencies")))
-        scripts = project.get("scripts") if isinstance(project.get("scripts"), dict) else {}
-        entry_points.extend(f"{name} = {target}" for name, target in scripts.items() if isinstance(target, str))
+        for section in ("scripts", "gui-scripts"):
+            scripts = project.get(section) if isinstance(project.get(section), dict) else {}
+            entry_points.extend(f"{name} = {target}" for name, target in scripts.items() if isinstance(target, str))
+        groups = project.get("entry-points") if isinstance(project.get("entry-points"), dict) else {}
+        for group, values in groups.items():
+            if isinstance(values, dict):
+                entry_points.extend(f"{group}: {name} = {target}" for name, target in values.items() if isinstance(target, str))
+        optional = project.get("optional-dependencies") if isinstance(project.get("optional-dependencies"), dict) else {}
+        for values in optional.values():
+            optional_dependencies.extend(_dependency_names(values))
         poetry_dependencies = poetry.get("dependencies") if isinstance(poetry.get("dependencies"), dict) else {}
         if not python_requirement and poetry_dependencies.get("python"):
             python_requirement = str(poetry_dependencies["python"])
@@ -236,34 +248,48 @@ def _detect_python(source: Path, root: Path) -> dict | None:
     dependency_sources.extend(lockfiles)
 
     tools = pyproject_data.get("tool") if isinstance(pyproject_data.get("tool"), dict) else {}
-    buildable = bool(setup_py.is_file() or setup_cfg.is_file() or (pyproject.is_file() and (pyproject_data.get("build-system") or pyproject_data.get("project") or tools.get("poetry") or tools.get("setuptools"))))
+    buildable = bool(setup_py.is_file() or setup_cfg.is_file() or (pyproject.is_file() and pyproject_data.get("build-system")))
     if buildable:
         build_mode = "wheel"
         commands = ["python3 -m build"]
         build_dependencies = ["python3", "python3-build"]
-    elif requirement_files:
-        build_mode = "environment"
-        commands = ["python3 -m venv .debbuilder-venv"] + [f".debbuilder-venv/bin/python -m pip install -r {shlex.quote(path.relative_to(root).as_posix())}" for path in requirement_files]
-        build_dependencies = ["python3", "python3-venv"]
     else:
         build_mode = "source"
         commands = []
-        build_dependencies = ["python3"]
-        if metadata_files and not source_application:
-            warnings.append("No generic Python build command could be inferred; configure the Recipe explicitly")
+        build_dependencies = []
+
+    packaging_tool = ""
+    if poetry_lock.is_file() or isinstance(tools.get("poetry"), dict):
+        packaging_tool = "poetry"
+    elif uv_lock.is_file() or isinstance(tools.get("uv"), dict):
+        packaging_tool = "uv"
+    elif pipfile.is_file():
+        packaging_tool = "pipenv"
+    elif requirement_files:
+        packaging_tool = "requirements"
+    elif backend_module:
+        packaging_tool = _backend_name(backend_module)
+
+    display_name = "Python · PEP 517 package" if buildable else "Python · source application · no build"
 
     marker_files = list(metadata_files)
     if source_application:
         marker_files.extend(entrypoint_files)
         marker_files.extend(package / "__init__.py" for package in packages)
     return {
-        "project_type": "python", "display_name": "Python", "detected_files": _relative(source, _unique(marker_files)),
+        "project_type": "python", "display_name": display_name, "detected_files": _relative(source, _unique(marker_files)),
         "build_dependencies": build_dependencies, "proposed_commands": commands, "warnings": warnings,
         "build_mode": build_mode, "build_backend": _backend_name(backend_module), "build_backend_module": backend_module,
         "build_backend_requires": backend_requires, "python_requirement": python_requirement,
         "dependency_sources": _relative(source, _unique(dependency_sources)), "lockfile": _relative(source, lockfiles)[0] if lockfiles else "",
         "lockfiles": _relative(source, lockfiles), "declared_dependencies": _unique(declared_dependencies),
-        "entry_point_hints": _unique(entry_points), "package_directories": _relative(source, packages),
+        "optional_dependencies": _unique(optional_dependencies), "entry_point_hints": _unique(entry_points),
+        "package_directories": _relative(source, packages), "packaging_tool": packaging_tool,
+        "python_runtime_requirement": python_requirement,
+        "python_runtime_dependencies": _unique(declared_dependencies),
+        "python_packaging_requirements": backend_requires,
+        "debian_runtime_dependencies": [],
+        "build_description": "Build a Python distribution with the declared PEP 517 backend" if buildable else "No build command is required; package the selected source files directly",
     }
 
 

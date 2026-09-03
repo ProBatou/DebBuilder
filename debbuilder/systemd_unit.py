@@ -14,8 +14,6 @@ def _safe(value: object) -> str:
 
 
 def generate_unit(service: dict) -> str:
-    if not service.get("enabled"):
-        return ""
     unit = ["[Unit]"]
     if service.get("description"):
         unit.append(f"Description={_safe(service['description'])}")

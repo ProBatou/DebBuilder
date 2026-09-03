@@ -27,6 +27,10 @@ class SystemdUnitTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "single-line"):
             generate_unit({"enabled": True, "description": "bad\nvalue", "command": "/bin/true"})
 
+    def test_unit_generation_does_not_depend_on_boot_enablement(self):
+        unit = generate_unit({"enabled": False, "name": "demo.service", "command": "/bin/true"})
+        self.assertIn("ExecStart=/bin/true", unit)
+
 
 if __name__ == "__main__":
     unittest.main()

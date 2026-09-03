@@ -71,6 +71,7 @@ class RecipeSchemaTests(unittest.TestCase):
         self.assertEqual(recipe["build"]["detected_project"], "static")
         self.assertEqual(recipe["install"]["content"]["source"], "configured_files")
         self.assertEqual(recipe["install"]["config_files"][0]["source"], ".bashrc")
+        self.assertEqual(recipe["install"]["config_files"][0]["policy"], "dpkg_conffile")
         self.assertEqual(recipe["install"]["destination"], "")
         self.assertFalse(recipe["install"]["owner"]["create_user"])
         self.assertFalse(recipe["install"]["owner"]["create_group"])
@@ -85,8 +86,31 @@ class RecipeSchemaTests(unittest.TestCase):
             "install": {"content": {"source": "configured_files"}, "config_files": mappings, "config_policy": "replace"},
         })
         self.assertEqual(stored["install"]["content"]["source"], "configured_files")
-        self.assertEqual(stored["install"]["config_files"], mappings)
-        self.assertEqual(recipe_for_storage(stored)["install"]["config_files"], mappings)
+        expected = [{**mapping, "policy": "replace"} for mapping in mappings]
+        self.assertEqual(stored["install"]["config_files"], expected)
+        self.assertNotIn("config_policy", stored["install"])
+        self.assertEqual(recipe_for_storage(stored)["install"]["config_files"], expected)
+
+    def test_mapping_policy_is_local_and_overrides_legacy_global_policy(self):
+        stored = recipe_for_storage({
+            "name": "mapped", "package_name": "mapped",
+            "install": {"config_policy": "replace", "config_files": [
+                "/etc/mapped/legacy.conf",
+                {"source": "owned.sh", "destination": "/etc/profile.d/owned.sh", "policy": "dpkg_conffile"},
+            ]},
+        })
+        self.assertEqual([row["policy"] for row in stored["install"]["config_files"]], ["replace", "dpkg_conffile"])
+        with self.assertRaisesRegex(ValueError, "unsupported configuration policy"):
+            validate_recipe_metadata({"name": "mapped", "install": {"config_files": [
+                {"source": "bad", "destination": "/etc/bad", "policy": "unknown"},
+            ]}})
+
+    def test_root_accounts_are_never_created(self):
+        recipe = validate_recipe_metadata({"name": "demo", "install": {"owner": {
+            "user": "root", "group": "root", "create_user": True, "create_group": True,
+        }}})
+        self.assertFalse(recipe["install"]["owner"]["create_user"])
+        self.assertFalse(recipe["install"]["owner"]["create_group"])
 
     def test_unconfigured_service_has_no_fictitious_defaults(self):
         recipe = validate_recipe_metadata({"name": "demo", "package_name": "demo", "github_repository": "owner/demo", "service": {"enabled": False}})
@@ -94,6 +118,16 @@ class RecipeSchemaTests(unittest.TestCase):
         self.assertFalse(recipe["service"]["enabled"])
         for key in ("name", "user", "group", "type", "restart", "command"):
             self.assertEqual(recipe["service"][key], "")
+
+    def test_service_configuration_is_derived_and_not_stored_as_a_second_state(self):
+        complete = validate_recipe_metadata({"name": "demo", "service": {"configured": False, "enabled": False, "name": "demo.service", "command": "/usr/bin/demo"}})
+        self.assertTrue(complete["service"]["configured"])
+        stored = recipe_for_storage(complete)
+        self.assertNotIn("configured", stored["service"])
+        self.assertTrue(validate_recipe_metadata(stored)["service"]["configured"])
+        partial = validate_recipe_metadata({"name": "demo", "service": {"configured": True, "user": "demo"}})
+        self.assertFalse(partial["service"]["configured"])
+        self.assertEqual(partial["service"]["user"], "demo")
 
 
 if __name__ == "__main__":

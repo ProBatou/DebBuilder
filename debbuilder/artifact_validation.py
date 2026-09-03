@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .build_models import utc_now
 from .build_store import BuildStore
-from .recipe_schema import recipe_for_storage
+from .recipe_schema import validate_recipe_metadata
 from .validation_backend import BackendError, OciSystemdBackend
 from .validation_profiles import node_satisfies, python_satisfies, resolve_profile
 
@@ -128,7 +128,7 @@ def validate_artifact(run_id: str, *, store: BuildStore, previous_artifact: str 
         "backend": {}, "profile": selected_profile, "checks": [], "commands": commands, "error": None,
     }
     checks = result["checks"]
-    snapshot_recipe = recipe_for_storage(json.loads((workspace / "recipe.json").read_text()))
+    snapshot_recipe = validate_recipe_metadata(json.loads((workspace / "recipe.json").read_text()))
     upstream_mode = snapshot_recipe.get("artifact", {}).get("mode") == "upstream_deb"
     expected_scripts = sorted(next((step.get("details", {}).get("maintainer_scripts", {}) for step in run["steps"] if step.get("name") == "debian_metadata"), {}))
     inspected_scripts = sorted(artifact_data.get("inspection", {}).get("maintainer_scripts", []))
@@ -155,6 +155,7 @@ def validate_artifact(run_id: str, *, store: BuildStore, previous_artifact: str 
     recipe = snapshot_recipe
     package = recipe["package"]["name"]
     configs = artifact_data.get("inspection", {}).get("conffiles", []) if upstream_mode else _config_paths(run)
+    config_policies = {row["destination"]: row["policy"] for row in recipe["install"]["config_files"]} if not upstream_mode else {}
     marker = f"debbuilder-validation-{validation_id}"
     installed = False
     try:
@@ -206,7 +207,7 @@ def validate_artifact(run_id: str, *, store: BuildStore, previous_artifact: str 
             for path in configs:
                 _execute(backend, ["test", "-f", path], checks, f"configuration_present:{path}")
                 if previous_container:
-                    if recipe["install"]["config_policy"] == "replace":
+                    if config_policies.get(path, "dpkg_conffile") == "replace":
                         _execute(backend, ["grep", "--fixed-strings", "--quiet", marker, path], checks, f"configuration_replaced:{path}", accepted={1})
                     else:
                         _execute(backend, ["grep", "--fixed-strings", "--quiet", marker, path], checks, f"configuration_preserved:{path}")
@@ -215,12 +216,14 @@ def validate_artifact(run_id: str, *, store: BuildStore, previous_artifact: str 
                 _execute(backend, ["systemctl", "daemon-reload"], checks, "systemd_daemon_reload")
                 for unit_path in unit_paths:
                     _execute(backend, ["systemctl", "cat", Path(unit_path).name], checks, f"systemd_unit_present:{Path(unit_path).name}")
-            elif service["enabled"]:
+            elif service["configured"]:
                 _execute(backend, ["systemctl", "daemon-reload"], checks, "systemd_daemon_reload")
-                _execute(backend, ["systemctl", "is-enabled", "--quiet", service["name"]], checks, "systemd_enabled")
-                _execute(backend, ["systemctl", "is-active", "--quiet", service["name"]], checks, "systemd_active")
-                _execute(backend, ["sleep", "2"], checks, "systemd_startup_grace", timeout=10)
-                _execute(backend, ["systemctl", "is-active", "--quiet", service["name"]], checks, "systemd_active_after_grace")
+                _execute(backend, ["systemctl", "cat", service["name"]], checks, f"systemd_unit_present:{service['name']}")
+                if service["enabled"]:
+                    _execute(backend, ["systemctl", "is-enabled", "--quiet", service["name"]], checks, "systemd_enabled")
+                    _execute(backend, ["systemctl", "is-active", "--quiet", service["name"]], checks, "systemd_active")
+                    _execute(backend, ["sleep", "2"], checks, "systemd_startup_grace", timeout=10)
+                    _execute(backend, ["systemctl", "is-active", "--quiet", service["name"]], checks, "systemd_active_after_grace")
             remove = _execute(backend, ["dpkg", "--remove", package], checks, "package_remove", timeout=300)
             if remove.get("accepted"):
                 if not upstream_mode and recipe["install"]["content"]["source"] != "configured_files":
@@ -229,7 +232,7 @@ def validate_artifact(run_id: str, *, store: BuildStore, previous_artifact: str 
                     inactive = backend.exec(["systemctl", "is-active", "--quiet", service["name"]], accepted_exit_codes={3, 4})
                     _check(checks, "systemd_inactive_after_remove", bool(inactive.get("accepted")), details={"exit_code": inactive.get("exit_code")})
                 for path in configs:
-                    expected = recipe["install"]["config_policy"] in {"dpkg_conffile", "create_if_missing"}
+                    expected = config_policies.get(path, "dpkg_conffile") in {"dpkg_conffile", "create_if_missing"}
                     arguments = ["test", "-e", path] if expected else ["test", "!", "-e", path]
                     check = backend.exec(arguments, accepted_exit_codes={0})
                     _check(checks, f"configuration_after_remove:{path}", bool(check.get("accepted")), details={"expected_present": expected})
@@ -237,7 +240,7 @@ def validate_artifact(run_id: str, *, store: BuildStore, previous_artifact: str 
             if purge.get("accepted"):
                 for path in configs:
                     _execute(backend, ["test", "!", "-e", path], checks, f"configuration_absent_after_purge:{path}")
-                if not upstream_mode and service["enabled"]:
+                if not upstream_mode and service["configured"]:
                     _execute(backend, ["test", "!", "-e", f"/usr/lib/systemd/system/{service['name']}"], checks, "systemd_unit_absent_after_purge")
                 absent = backend.exec(["dpkg-query", "--show", package], accepted_exit_codes={1})
                 _check(checks, "package_absent_after_purge", bool(absent.get("accepted")), details={"exit_code": absent.get("exit_code")})

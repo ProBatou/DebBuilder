@@ -54,14 +54,18 @@ def _environment(value, what: str) -> dict[str, str]:
     return rows
 
 
-def _config_files(value) -> list[str | dict]:
+def _config_files(value, default_policy: str) -> list[dict]:
     rows = _list(value, "install.config_files")
     normalized = []
     for row in rows:
         if isinstance(row, str) and row.strip():
-            normalized.append(row.strip())
+            destination = row.strip()
+            normalized.append({"source": destination.lstrip("/"), "destination": destination, "policy": default_policy})
         elif isinstance(row, dict) and isinstance(row.get("source"), str) and isinstance(row.get("destination"), str):
-            normalized.append({"source": row["source"].strip(), "destination": row["destination"].strip()})
+            normalized.append({
+                "source": row["source"].strip(), "destination": row["destination"].strip(),
+                "policy": str(row.get("policy") or default_policy),
+            })
         else:
             raise ValueError("install.config_files must contain paths or source/destination mappings")
     return normalized
@@ -110,8 +114,16 @@ def normalize_recipe(workflow: dict, *, compatibility_aliases: bool = True) -> d
     output_paths = _string_list(output_in.get("paths"), "build.output.paths")
     content_source = str(content_in.get("source") or "build_output")
     install_destination = "" if content_source == "configured_files" else str(install_in.get("destination") or f"/opt/{package_name}")
-    service_configured = bool(service_in.get("configured", service_in.get("enabled", False) or bool(service_in.get("command"))))
+    service_requested = bool(service_in.get("configured") or service_in.get("enabled") or any(
+        service_in.get(key) for key in (
+            "name", "description", "user", "group", "command", "environment_files", "environment", "after", "wants",
+            "requires", "restart_sec", "timeout_start_sec", "timeout_stop_sec", "kill_signal", "exec_start_pre",
+            "exec_start_post", "exec_stop", "standard_output", "standard_error", "working_directory",
+        )
+    ))
+    service_configured = bool(str(service_in.get("name") or "").strip() and str(service_in.get("command") or "").strip())
     service_enabled = bool(service_in.get("enabled", False))
+    config_policy = str(install_in.get("config_policy") or "dpkg_conffile")
     recipe = {
         "schema_version": SCHEMA_VERSION,
         "name": name,
@@ -158,22 +170,23 @@ def normalize_recipe(workflow: dict, *, compatibility_aliases: bool = True) -> d
             "content": {"source": content_source, "path": str(content_in.get("path") or "")},
             "owner": {
                 "user": str(owner_in.get("user") or package_name), "group": str(owner_in.get("group") or package_name),
-                "create_user": owner_in.get("create_user", False), "create_group": owner_in.get("create_group", False),
+                "create_user": owner_in.get("create_user", False) if str(owner_in.get("user") or package_name) != "root" else False,
+                "create_group": owner_in.get("create_group", False) if str(owner_in.get("group") or package_name) != "root" else False,
             },
             "directory_mode": str(install_in.get("directory_mode") or "0755"),
             "file_mode": str(install_in.get("file_mode") or "0644"),
-            "config_files": _config_files(install_in.get("config_files")),
-            "config_policy": str(install_in.get("config_policy") or "dpkg_conffile"),
+            "config_files": _config_files(install_in.get("config_files"), config_policy),
+            "config_policy": config_policy,
             "maintainer_scripts": {key: str(scripts_in.get(key) or "") for key in ("preinst", "postinst", "prerm", "postrm")},
         },
         "service": {
             "configured": service_configured, "enabled": service_enabled,
-            "name": str(service_in.get("name") or "") if service_configured else "",
-            "description": str(service_in.get("description") or package_name) if service_configured else "",
-            "type": str(service_in.get("type") or "simple") if service_configured else "",
-            "user": str(service_in.get("user") or "") if service_configured else "",
-            "group": str(service_in.get("group") or "") if service_configured else "",
-            "restart": str(service_in.get("restart") or "on-failure") if service_configured else "", "command": str(service_in.get("command") or ""),
+            "name": str(service_in.get("name") or ""),
+            "description": str(service_in.get("description") or package_name) if service_requested else "",
+            "type": str(service_in.get("type") or "simple") if service_requested else "",
+            "user": str(service_in.get("user") or ""),
+            "group": str(service_in.get("group") or ""),
+            "restart": str(service_in.get("restart") or "on-failure") if service_requested else "", "command": str(service_in.get("command") or ""),
             "environment_files": _string_list(service_in.get("environment_files"), "service.environment_files"),
             "environment": _environment(service_in.get("environment"), "service.environment"),
             "after": _string_list(service_in.get("after"), "service.after"), "wants": _string_list(service_in.get("wants"), "service.wants"),
@@ -188,13 +201,6 @@ def normalize_recipe(workflow: dict, *, compatibility_aliases: bool = True) -> d
         },
         "steps": normalize_steps(workflow),
     }
-    if not service_configured:
-        recipe["service"] = {
-            "configured": False, "enabled": False, "name": "", "description": "", "type": "", "user": "", "group": "",
-            "restart": "", "command": "", "environment_files": [], "environment": {}, "after": [], "wants": [], "requires": [],
-            "restart_sec": "", "timeout_start_sec": "", "timeout_stop_sec": "", "kill_signal": "", "exec_start_pre": [],
-            "exec_start_post": [], "exec_stop": [], "standard_output": "", "standard_error": "", "working_directory": "",
-        }
     if compatibility_aliases:
         recipe.update({"package_name": package_name, "github_repository": repository, "version_tracking": tracking, "version_source": version_source})
         if expression:
@@ -290,11 +296,13 @@ def validate_recipe_metadata(workflow: dict) -> dict:
     if install["content"]["source"] not in {"build_output", "source", "configured_files"}:
         raise ValueError("unsupported install content source")
     for configured in install["config_files"]:
-        path = configured if isinstance(configured, str) else configured["destination"]
-        source_path = path.lstrip("/") if isinstance(configured, str) else configured["source"]
+        path = configured["destination"]
+        source_path = configured["source"]
         if not re.fullmatch(r"/[A-Za-z0-9._+/-]+", path) or ".." in path.split("/"):
             raise ValueError("configuration files must use safe absolute paths")
         _safe_relative(source_path, "configuration source")
+        if configured["policy"] not in CONFIG_POLICIES:
+            raise ValueError("unsupported configuration policy")
     for key in ("create_user", "create_group"):
         if not isinstance(install["owner"][key], bool):
             raise ValueError(f"install.owner.{key} must be a boolean")
@@ -327,6 +335,8 @@ def recipe_for_storage(workflow: dict) -> dict:
         recipe.pop(key, None)
     if recipe["build"]["output"]["mode"] != "path":
         recipe["build"]["output"].pop("path", None)
+    recipe["install"].pop("config_policy", None)
+    recipe["service"].pop("configured", None)
     return recipe
 
 

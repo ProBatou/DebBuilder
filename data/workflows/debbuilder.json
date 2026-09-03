@@ -14,9 +14,9 @@
       "python3",
       "ca-certificates",
       "dpkg",
-      "adduser",
       "reprepro",
-      "podman"
+      "podman",
+      "gnupg"
     ]
   },
   "source": {
@@ -43,59 +43,19 @@
       "server.py",
       "debbuilder/__init__.py"
     ],
-    "detected_dependencies": [
-      "python3"
-    ],
+    "detected_dependencies": [],
     "extra_dependencies": [],
-    "source_changes": [
-      {
-        "operation": "replace",
-        "path": "debbuilder/app.py",
-        "search": "DATA = ROOT / \"data\"",
-        "content": "DATA = Path(os.environ.get(\"DEBBUILDER_DATA_DIR\", str(ROOT / \"data\"))).expanduser()\nREPOSITORY_ROOT = Path(os.environ.get(\"DEBBUILDER_REPO_ROOT\", \"/var/www/html\"))"
-      },
-      {
-        "operation": "replace",
-        "path": "debbuilder/app.py",
-        "search": "allowed_previous_roots=(Path(\"/var/www/html/pool\"),),",
-        "content": "allowed_previous_roots=(REPOSITORY_ROOT / \"pool\",),"
-      },
-      {
-        "operation": "replace",
-        "path": "debbuilder/app.py",
-        "search": "def publish_build_artifact(run_id: str, payload: dict | None = None) -> dict:\n    payload = payload or {}\n    apt = repo_settings()\n    return artifact_publication.publish_artifact(\n        run_id, store=BuildStore(DATA / \"builds\"), repo_root=Path(\"/var/www/html\"),",
-        "content": "def publish_build_artifact(run_id: str, payload: dict | None = None) -> dict:\n    payload = payload or {}\n    apt = repo_settings()\n    return artifact_publication.publish_artifact(\n        run_id, store=BuildStore(DATA / \"builds\"), repo_root=REPOSITORY_ROOT,"
-      },
-      {
-        "operation": "replace",
-        "path": "debbuilder/app.py",
-        "search": "def reconcile_build_publication(run_id: str, payload: dict | None = None) -> dict:\n    apt = repo_settings()\n    return artifact_publication.reconcile_publication(\n        run_id, store=BuildStore(DATA / \"builds\"), repo_root=Path(\"/var/www/html\"),",
-        "content": "def reconcile_build_publication(run_id: str, payload: dict | None = None) -> dict:\n    apt = repo_settings()\n    return artifact_publication.reconcile_publication(\n        run_id, store=BuildStore(DATA / \"builds\"), repo_root=REPOSITORY_ROOT,"
-      },
-      {
-        "operation": "create_file",
-        "path": "debbuilder/debbuilder.env",
-        "content": "DEBBUILDER_HOST=127.0.0.1\nDEBBUILDER_PORT=8099\nDEBBUILDER_DATA_DIR=/var/lib/debbuilder\nDEBBUILDER_REPO_ROOT=/var/lib/debbuilder/repository\nDEBBUILDER_REPO_URL=http://127.0.0.1:8099\nDEBBUILDER_SUITE=Luminous\nDEBBUILDER_COMPONENT=main\nDEBBUILDER_AUTH_MODE=none\nDEBBUILDER_ALLOW_REAL_RUN=0\nDEBBUILDER_ALLOW_UNSAFE_BUILD_COMMAND=0\nDEBBUILDER_BUILD_TEMP_DIR=/var/lib/debbuilder/build-workspaces/${WORKFLOW_NAME}\nGNUPGHOME=/var/lib/debbuilder/.gnupg\n"
-      },
-      {
-        "operation": "replace",
-        "path": "debbuilder/command_runner.py",
-        "search": "BASE_ENV_KEYS = (\"PATH\", \"LANG\", \"LC_ALL\", \"TZ\")",
-        "content": "BASE_ENV_KEYS = (\"PATH\", \"LANG\", \"LC_ALL\", \"TZ\", \"GNUPGHOME\")"
-      }
-    ],
+    "source_changes": [],
     "commands": [],
     "timeout": 120,
     "environment": {},
     "working_directory": ".",
     "output": {
       "mode": "paths",
-      "path": "",
       "paths": [
         "debbuilder",
         "server.py",
-        "static",
-        "examples"
+        "static"
       ]
     }
   },
@@ -115,26 +75,25 @@
     "file_mode": "0644",
     "config_files": [
       {
-        "source": "debbuilder.env",
-        "destination": "/etc/debbuilder/debbuilder.env"
+        "source": "packaging/debbuilder.env",
+        "destination": "/etc/debbuilder/debbuilder.env",
+        "policy": "create_if_missing"
       }
     ],
-    "config_policy": "create_if_missing",
     "maintainer_scripts": {
-      "preinst": "getent group debbuilder >/dev/null 2>&1 || addgroup --system debbuilder\nid -u debbuilder >/dev/null 2>&1 || adduser --system --ingroup debbuilder --home /var/lib/debbuilder --no-create-home --shell /usr/sbin/nologin debbuilder\ninstall -d -m 0750 -o debbuilder -g debbuilder /var/lib/debbuilder /var/lib/debbuilder/workflows /var/lib/debbuilder/runs /var/lib/debbuilder/builds /var/lib/debbuilder/build-workspaces /var/lib/debbuilder/repository",
+      "preinst": "install -d -m 0750 -o root -g root /var/lib/debbuilder /var/lib/debbuilder/workflows /var/lib/debbuilder/runs /var/lib/debbuilder/builds /var/lib/debbuilder/build-workspaces /var/lib/debbuilder/repository\ninstall -d -m 0700 -o root -g root /var/lib/debbuilder/.gnupg",
       "postinst": "",
       "prerm": "",
-      "postrm": "if [ \"$1\" = purge ]; then\n  rm -rf -- /var/lib/debbuilder\n  deluser --system debbuilder >/dev/null 2>&1 || true\n  delgroup --system debbuilder >/dev/null 2>&1 || true\nfi"
+      "postrm": "if [ \"$1\" = purge ]; then\n  rm -rf -- /var/lib/debbuilder\nfi"
     }
   },
   "service": {
-    "configured": true,
     "enabled": true,
     "name": "debbuilder.service",
     "description": "DebBuilder Debian package pipeline",
     "type": "simple",
-    "user": "debbuilder",
-    "group": "debbuilder",
+    "user": "root",
+    "group": "root",
     "restart": "on-failure",
     "command": "/usr/bin/python3 /opt/debbuilder/server.py",
     "environment_files": [

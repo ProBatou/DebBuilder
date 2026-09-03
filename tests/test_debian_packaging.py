@@ -80,7 +80,10 @@ class DebianPackagingTests(unittest.TestCase):
                 {"output": {"path": str(workspace / "source")}, "version": "1.0-1"}, workspace,
             )
             self.assertEqual(result["conffiles"], [])
+            self.assertTrue(result["systemd"]["configured"])
             self.assertFalse(result["systemd"]["enabled"])
+            self.assertTrue((workspace / "staging/usr/lib/systemd/system/demo.service").is_file())
+            self.assertNotIn("systemctl enable demo.service", result["maintainer_scripts"]["postinst"])
             self.assertTrue((workspace / "staging/usr/share/demo/config-templates/etc/demo/demo.conf").is_file())
             self.assertIn("if [ ! -e /etc/demo/demo.conf ]", result["maintainer_scripts"]["postinst"])
             self.assertIn('if [ "$1" = purge ]; then rm -f /etc/demo/demo.conf; fi', result["maintainer_scripts"]["postrm"])
@@ -97,6 +100,35 @@ class DebianPackagingTests(unittest.TestCase):
             self.assertFalse(result["include_output"])
             self.assertFalse((workspace / "staging/opt/demo").exists())
             self.assertEqual((workspace / "staging/etc/demo/demo.conf").read_text(), "port=8080\n")
+
+    def test_each_mapping_uses_its_own_debian_policy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = self.make_workspace(temporary)
+            (workspace / "source/profile.sh").write_text("echo demo\n")
+            configured = packaging_recipe(service=False)
+            configured["install"]["content"]["source"] = "configured_files"
+            configured["install"]["config_files"] = [
+                {"source": "profile.sh", "destination": "/etc/profile.d/demo.sh", "policy": "replace"},
+                {"source": "etc/demo/demo.conf", "destination": "/etc/demo/demo.conf", "policy": "dpkg_conffile"},
+            ]
+            result = debian_packaging.prepare_staging(
+                configured, {"output": {"path": str(workspace / "source")}, "version": "1.0-1"}, workspace,
+            )
+            self.assertEqual(result["conffiles"], ["/etc/demo/demo.conf"])
+            self.assertEqual([row["policy"] for row in result["configurations"]], ["replace", "dpkg_conffile"])
+
+    def test_root_owner_never_generates_account_creation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = self.make_workspace(temporary)
+            configured = packaging_recipe(service=False)
+            configured["install"]["owner"] = {"user": "root", "group": "root", "create_user": True, "create_group": True}
+            configured["install"]["config_files"] = []
+            result = debian_packaging.prepare_staging(
+                configured, {"output": {"path": str(workspace / "source")}, "version": "1.0-1"}, workspace,
+            )
+            postinst = result["maintainer_scripts"].get("postinst", "")
+            self.assertNotIn("adduser", postinst)
+            self.assertNotIn("addgroup", postinst)
 
     def test_multiple_build_outputs_keep_relative_paths_below_install_directory(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -124,6 +156,25 @@ class DebianPackagingTests(unittest.TestCase):
             self.assertIn("dist/app.js", result["content_files"])
             self.assertIn("public/index.html", result["content_files"])
             self.assertIn("package.json", result["content_files"])
+
+    def test_configuration_mapping_is_resolved_from_source_not_first_selected_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = self.make_workspace(temporary)
+            (workspace / "source/app").mkdir()
+            (workspace / "source/app/main.py").write_text("print('ok')\n")
+            (workspace / "source/packaging").mkdir()
+            (workspace / "source/packaging/demo.env").write_text("DEMO=1\n")
+            recipe = packaging_recipe(service=False, policy="create_if_missing")
+            recipe["install"]["config_files"] = [{
+                "source": "packaging/demo.env", "destination": "/etc/demo/demo.env", "policy": "create_if_missing",
+            }]
+            result = debian_packaging.prepare_staging(
+                recipe,
+                {"output": {"mode": "paths", "paths": [{"path": str(workspace / "source/app")}]}, "version": "1.0-1"},
+                workspace,
+            )
+            self.assertEqual((workspace / "staging/usr/share/demo/config-templates/etc/demo/demo.env").read_text(), "DEMO=1\n")
+            self.assertFalse((workspace / "staging/opt/demo/packaging").exists())
 
     def test_preserves_safe_relative_symlinked_payload(self):
         with tempfile.TemporaryDirectory() as temporary:

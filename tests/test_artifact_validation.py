@@ -85,6 +85,14 @@ class PythonBackend(FakeBackend):
         return result
 
 
+class MixedPolicyBackend(FakeBackend):
+    def exec(self, arguments, **kwargs):
+        result = super().exec(arguments, **kwargs)
+        if arguments[:3] == ["grep", "--fixed-strings", "--quiet"] and arguments[-1] == "/etc/demo/owned.sh":
+            result.update({"exit_code": 1, "status": "failed", "accepted": 1 in (kwargs.get("accepted_exit_codes") or {0})})
+        return result
+
+
 class ArtifactValidationTests(unittest.TestCase):
     def successful_run(self, root, configured=None):
         store = BuildStore(Path(root) / "builds")
@@ -219,6 +227,28 @@ class ArtifactValidationTests(unittest.TestCase):
             self.assertEqual(sum(call[:3] == ["systemctl", "is-active", "--quiet"] for call in calls), 3)
             self.assertTrue(any(check["name"] == "systemd_active_after_grace" for check in result["checks"]))
             self.assertTrue(any(check["name"] == "configuration_preserved:/etc/demo/demo.conf" for check in result["checks"]))
+
+    def test_upgrade_checks_each_mapping_policy_independently(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            configured = recipe(configs=[
+                {"source": "owned.sh", "destination": "/etc/demo/owned.sh", "policy": "replace"},
+                {"source": "demo.conf", "destination": "/etc/demo/demo.conf", "policy": "dpkg_conffile"},
+            ])
+            store, run = self.successful_run(temporary, configured)
+            run = store.load(run["id"])
+            next(step for step in run["steps"] if step["name"] == "staging")["details"] = {"configurations": [
+                {"destination": "/etc/demo/owned.sh"}, {"destination": "/etc/demo/demo.conf"},
+            ]}
+            store.save(run)
+            old_dir = Path(temporary) / "builds/old-run/artifacts"
+            old_dir.mkdir(parents=True)
+            previous = old_dir / "demo_0.9-1_all.deb"
+            previous.write_bytes(b"old")
+            result = artifact_validation.validate_artifact(run["id"], store=store, previous_artifact=str(previous), backend_factory=MixedPolicyBackend)
+            names = {check["name"] for check in result["checks"]}
+            self.assertEqual(result["status"], "success")
+            self.assertIn("configuration_replaced:/etc/demo/owned.sh", names)
+            self.assertIn("configuration_preserved:/etc/demo/demo.conf", names)
 
     def test_requires_successful_run_and_confines_previous_artifact(self):
         with tempfile.TemporaryDirectory() as temporary:

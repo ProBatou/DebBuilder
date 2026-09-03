@@ -24,12 +24,64 @@ function refreshRecipeApplicability() {
   if ($('recipeArtifactPatternField')) $('recipeArtifactPatternField').hidden = !upstreamArtifact;
   const configuredFiles = $('installContentSource')?.value === 'configured_files';
   if ($('installDestination')) { $('installDestination').disabled = configuredFiles; $('installDestination').closest('label').hidden = configuredFiles; }
-  if ($('installMappingTitle')) $('installMappingTitle').textContent = configuredFiles ? 'Custom mappings' : 'Additional configuration mappings';
-  if ($('installMappingHelp')) $('installMappingHelp').textContent = configuredFiles ? 'Only these files from the primary resolved build output are installed at their absolute destinations.' : 'Optionally map files from the primary resolved build output to additional absolute paths.';
+  if ($('installAutomaticGroup')) $('installAutomaticGroup').hidden = configuredFiles;
+  if ($('installMappingTitle')) $('installMappingTitle').textContent = configuredFiles ? 'Custom mappings' : 'Additional mappings';
+  if ($('installMappingHelp')) $('installMappingHelp').textContent = configuredFiles ? 'These mappings are the complete installed content for this package.' : 'Optionally install extra files from the selected build output at specific absolute paths.';
   renderInstallContentSummary();
-  const configured = !!$('serviceConfigured')?.checked;
-  document.querySelectorAll('.recipe-service-card input, .recipe-service-card select, .recipe-service-card textarea').forEach(field => { if (field.id !== 'serviceConfigured') field.disabled = !configured; });
-  if (!configured && $('serviceEnabled')) $('serviceEnabled').checked = false;
+  const staticMappingsOnly = $('buildDetectedProject')?.dataset.value === 'static' && lines(value('buildCommands')).length === 0 && configuredFiles;
+  if ($('staticSourceSummary')) $('staticSourceSummary').hidden = !staticMappingsOnly;
+  if ($('buildCommandsSection')) $('buildCommandsSection').hidden = staticMappingsOnly;
+  if ($('buildOutputSection')) $('buildOutputSection').hidden = staticMappingsOnly;
+  if ($('serviceEmptyState')) $('serviceEmptyState').hidden = !!window.recipeServiceVisible;
+  if ($('serviceConfiguration')) $('serviceConfiguration').hidden = !window.recipeServiceVisible;
+}
+
+function renderAccountProvisioning(owner = {}) {
+  const user = value('installOwnerUser');
+  const group = value('installOwnerGroup');
+  const createUser = owner.create_user === true;
+  const createGroup = owner.create_group === true;
+  let mode = 'existing';
+  if ((user !== 'root' || group !== 'root') && createUser === (user !== 'root') && createGroup === (group !== 'root')) mode = 'ensure';
+  else if (createUser || createGroup) mode = 'custom';
+  setValue('installAccountProvisioning', mode);
+  const customOption = $('installAccountProvisioning')?.querySelector('option[value="custom"]');
+  if (customOption) customOption.hidden = mode !== 'custom';
+  if ($('installAccountProvisioningAdvanced')) $('installAccountProvisioningAdvanced').hidden = mode !== 'custom';
+}
+
+function refreshAccountProvisioning() {
+  const user = value('installOwnerUser');
+  const group = value('installOwnerGroup');
+  let mode = $('installAccountProvisioning')?.value || 'existing';
+  if (user === 'root' && group === 'root') { mode = 'existing'; setValue('installAccountProvisioning', mode); }
+  if (mode === 'ensure') { $('installCreateUser').checked = user !== 'root'; $('installCreateGroup').checked = group !== 'root'; }
+  if (mode === 'existing') { $('installCreateUser').checked = false; $('installCreateGroup').checked = false; }
+  const customOption = $('installAccountProvisioning')?.querySelector('option[value="custom"]');
+  if (customOption) customOption.hidden = mode !== 'custom';
+  if ($('installAccountProvisioningAdvanced')) $('installAccountProvisioningAdvanced').hidden = mode !== 'custom';
+}
+
+const SERVICE_FIELD_IDS = ['serviceName','serviceUser','serviceGroup','serviceCommand','serviceEnvironmentFiles','serviceEnvironment','serviceAfter','serviceWants','serviceRequires','serviceRestartSec','serviceTimeoutStartSec','serviceTimeoutStopSec','serviceKillSignal','serviceExecStartPre','serviceExecStartPost','serviceExecStop','serviceStandardOutput','serviceStandardError'];
+
+function configureService() {
+  window.recipeServiceVisible = true;
+  if (!value('serviceType')) setValue('serviceType', 'simple');
+  if (!value('serviceRestart')) setValue('serviceRestart', 'on-failure');
+  refreshRecipeApplicability();
+  $('serviceName')?.focus();
+}
+
+function removeService() {
+  if (!confirm('Remove this systemd service configuration?')) return;
+  window.recipeServiceVisible = false;
+  SERVICE_FIELD_IDS.forEach(id => setValue(id, ''));
+  setValue('serviceType', ''); setValue('serviceRestart', '');
+  if ($('serviceEnabled')) $('serviceEnabled').checked = false;
+  window.recipeAdvancedFields.service_description = '';
+  window.recipeAdvancedFields.service_working_directory = '';
+  refreshRecipeApplicability();
+  scheduleRecipeAutosave();
 }
 
 function projectDisplayName(projectType) {
@@ -39,7 +91,6 @@ function projectDisplayName(projectType) {
 function buildEnvironmentState(detection) {
   if (!detection?.project_type) return {key:'not-detected', label:'Not detected'};
   if (detection.project_type === 'nodejs' && !detection.node_version) return {key:'partially-detected', label:'Partially detected'};
-  if (detection.project_type === 'python' && (!detection.python_requirement || !detection.build_backend || detection.build_backend === 'unspecified')) return {key:'partially-detected', label:'Partially detected'};
   return {key:'detected', label:'Detected'};
 }
 
@@ -53,11 +104,18 @@ function renderBuildEnvironment(detection = {}) {
   const buildDependencies = detection.build_dependencies || [];
   if ($('buildDetectedFiles')) { $('buildDetectedFiles').textContent = detectedFiles.join(' · ') || 'No source inspected yet'; $('buildDetectedFiles').dataset.value = detectedFiles.join('\n'); }
   if ($('buildDetectedDependencies')) { $('buildDetectedDependencies').textContent = buildDependencies.join(', ') || 'None'; $('buildDetectedDependencies').dataset.value = buildDependencies.join('\n'); }
-  const runtimeApplicable = projectType === 'nodejs' || projectType === 'python';
-  if ($('buildRuntimeFact')) $('buildRuntimeFact').hidden = !runtimeApplicable;
-  if ($('buildDetectedRuntime')) $('buildDetectedRuntime').textContent = (projectType === 'nodejs' ? detection.node_version : detection.python_requirement) || 'Not declared';
-  if ($('buildPackagingFact')) $('buildPackagingFact').hidden = projectType !== 'python';
-  if ($('buildDetectedPackaging')) $('buildDetectedPackaging').textContent = detection.build_backend && detection.build_backend !== 'unspecified' ? detection.build_backend : 'Not detected';
+  if ($('buildDependenciesSummary')) $('buildDependenciesSummary').hidden = buildDependencies.length === 0;
+}
+
+function renderDependencyCheck(dependencies) {
+  const checked = dependencies !== undefined && dependencies !== null;
+  const available = dependencies?.available || [];
+  const missing = dependencies?.missing || [];
+  if ($('buildDependencyPending')) $('buildDependencyPending').hidden = checked;
+  if ($('buildDependencyResults')) $('buildDependencyResults').hidden = !checked;
+  if ($('buildAvailableDependencies')) $('buildAvailableDependencies').textContent = available.join(', ') || 'None';
+  if ($('buildMissingDependencies')) $('buildMissingDependencies').textContent = missing.join(', ') || 'None';
+  $('buildDependencyState')?.classList.toggle('has-missing', checked && missing.length > 0);
 }
 
 function renderInstallContentSummary() {
@@ -65,16 +123,20 @@ function renderInstallContentSummary() {
   if (!summary) return;
   const mode = $('installContentSource')?.value || 'build_output';
   if (mode === 'configured_files') {
-    summary.innerHTML = '<strong>Custom mappings</strong><span>Each selected source is installed only at its configured absolute destination.</span>';
+    summary.innerHTML = '';
     return;
   }
   const destination = value('installDestination') || `/opt/${value('recipeMetaPackage') || value('recipeMetaName') || 'package'}`;
   const output = collectBuildOutput();
-  let rows = [];
-  if (output.mode === 'paths') rows = output.paths.map(path => `${path} → ${destination}/${path}`);
-  else if (output.mode === 'path') rows = [`Contents of ${output.path || 'selected path'} → ${destination}/…`];
-  else rows = [`Entire source tree → ${destination}/…`];
-  summary.innerHTML = `<strong>${mode === 'source' ? 'Prepared source' : 'Full build output'}</strong><span>Relative paths are preserved below the install directory.</span><code>${rows.map(esc).join('<br>')}</code>`;
+  let rows;
+  if (output.mode === 'paths') {
+    rows = output.paths.map(path => ({source:path, destination:`${destination}/${path.replace(/^\.\/+/, '')}`}));
+  } else if (output.mode === 'path') {
+    rows = [{source:output.path || 'Selected path', destination:`${destination}/…`}];
+  } else {
+    rows = [{source:'Entire source tree', destination:`${destination}/…`}];
+  }
+  summary.innerHTML = rows.map(row => installMappingRowHtml(row)).join('');
 }
 
 function formatBuildAudit(build) {
@@ -97,9 +159,7 @@ async function dryRun() {
     if (!(wf.build?.commands || []).length) renderBuildCommands(data.detection.proposed_commands);
   }
   if (data.dependencies) {
-    $('buildAvailableDependencies').textContent = data.dependencies.available.join(', ') || 'None';
-    $('buildMissingDependencies').textContent = data.dependencies.missing.join(', ') || 'None';
-    $('buildDependencyState').classList.toggle('has-missing', data.dependencies.missing.length > 0);
+    renderDependencyCheck(data.dependencies);
   }
   await loadExecutions();
 }
@@ -249,7 +309,11 @@ refreshWorkflows().then(() => loadSelectedWorkflow()).catch(e => console.error('
 
 $('recipeMetaVersionSource')?.addEventListener('change',toggleVersionExpression);
 $('installContentSource')?.addEventListener('change',refreshRecipeApplicability);
-$('serviceConfigured')?.addEventListener('change',refreshRecipeApplicability);
+$('installDestination')?.addEventListener('input',renderInstallContentSummary);
+$('installAccountProvisioning')?.addEventListener('change',refreshAccountProvisioning);
+['installOwnerUser','installOwnerGroup'].forEach(id => $(id)?.addEventListener('input',refreshAccountProvisioning));
+$('btnConfigureService')?.addEventListener('click',configureService);
+$('btnRemoveService')?.addEventListener('click',removeService);
 $('newRecipeVersionSource')?.addEventListener('change',toggleNewVersionExpression);
 $('newRecipeTracking')?.addEventListener('change',toggleNewVersionExpression);
 ['recipeMetaName','recipeMetaPackage','recipeMetaGithub','recipeMetaSourceRef','recipeMetaVersionExpression'].forEach(id => $(id)?.addEventListener('input',scheduleRecipeAutosave));

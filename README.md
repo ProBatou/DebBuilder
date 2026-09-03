@@ -5,7 +5,7 @@ DebBuilder is a self-hosted console for building, validating, and publishing Deb
 ## Current features
 
 - GitHub release, tag, and source-archive acquisition;
-- project and dependency detection;
+- Node.js, Python, Rust, and static project detection;
 - declarative source modifications and source builds;
 - upstream Debian artifact validation;
 - Debian package and systemd unit generation;
@@ -39,6 +39,8 @@ Main variables:
 
 - `DEBBUILDER_HOST`
 - `DEBBUILDER_PORT`
+- `DEBBUILDER_DATA_DIR`
+- `DEBBUILDER_REPO_ROOT`
 - `DEBBUILDER_REPO_URL`
 - `DEBBUILDER_SUITE`
 - `DEBBUILDER_COMPONENT`
@@ -48,8 +50,19 @@ Main variables:
 - `DEBBUILDER_ALLOW_UNSAFE_BUILD_COMMAND`
 - `DEBBUILDER_BUILD_TEMP_DIR`
 - `DEBBUILDER_NTFY_TOKEN`
+- `GNUPGHOME`
 
-Secrets and local runtime state are stored under `data/` and are not intended for Git.
+Secrets and local runtime state are stored under `DEBBUILDER_DATA_DIR` (the source-tree `data/` directory by default) and are not intended for Git. Packaged deployments use `/var/lib/debbuilder`; their non-secret defaults are installed from `packaging/debbuilder.env` into `/etc/debbuilder/debbuilder.env` without overwriting an existing administrator-owned file.
+
+## Python projects
+
+Python detection recognizes `pyproject.toml`, `setup.py`, `setup.cfg`, `requirements.txt`, `requirements-*.txt`, `Pipfile`, `poetry.lock`, and `uv.lock`. It parses declared build-system, interpreter, dependency, and entry-point metadata without executing project files and without translating PyPI names into Debian package names.
+
+Projects with an explicit PEP 517 build system receive `python3 -m build` as a reviewable proposal. Source applications such as DebBuilder have no compilation step: the selected runtime files are packaged directly. A lone helper `.py` file is not a strong Python marker.
+
+## Packaged service privileges
+
+The current package runs `debbuilder.service` as root. Real builds write isolated workspaces, OCI validation starts privileged systemd containers through Podman, and APT publication needs access to reprepro and its signing keyring. A dedicated unprivileged service account would require a separately designed rootless-Podman setup (including subordinate IDs and runtime directories) or privileged helpers; the package does not pretend that such a boundary already exists.
 
 ## Run locally
 
@@ -93,4 +106,4 @@ DebBuilder is meant to be self-hosted and operated by trusted administrators.
 
 ## Version
 
-The initial public release is DebBuilder 0.1.0.
+The current release is DebBuilder 0.1.1.

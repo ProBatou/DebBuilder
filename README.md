@@ -52,6 +52,8 @@ Main variables:
 
 Secrets and local runtime state are stored under `DEBBUILDER_DATA_DIR` (the source-tree `data/` directory by default) and are not intended for Git. Packaged deployments use `/var/lib/debbuilder`; their non-secret defaults are installed from `packaging/debbuilder.env` into `/etc/debbuilder/debbuilder.env` without overwriting an existing administrator-owned file.
 
+Build tools are resolved from the same effective `PATH` used to run build commands. Administrators can extend the DebBuilder service's `PATH` in `/etc/debbuilder/debbuilder.env`, while a Recipe can provide a build-specific `PATH` through its build environment. Tools found there do not need to be owned by a Debian package; manually added build dependencies remain Debian packages checked with `dpkg-query`.
+
 ## Python projects
 
 Python detection recognizes `pyproject.toml`, `setup.py`, `setup.cfg`, `requirements.txt`, `requirements-*.txt`, `Pipfile`, `poetry.lock`, and `uv.lock`. It parses declared build-system, interpreter, dependency, and entry-point metadata without executing project files and without translating PyPI names into Debian package names.

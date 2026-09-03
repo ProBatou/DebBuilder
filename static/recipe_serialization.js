@@ -183,6 +183,7 @@ function collectWorkflow() {
       detected_project: $('buildDetectedProject')?.dataset.value || null,
       detected_files: lines($('buildDetectedFiles')?.dataset.value),
       detected_dependencies: lines($('buildDetectedDependencies')?.dataset.value),
+      detected_tools: lines($('buildDetectedTools')?.dataset.value),
       extra_dependencies: [...window.recipeExtraDependencies],
       source_changes: window.recipeSourceChanges.map(change => ({...change})),
       commands: lines(value('buildCommands')),
@@ -266,7 +267,7 @@ function renderWorkflow(wf) {
     setValue('recipeMetaTracking', source.tracking || 'latest_release'); setValue('recipeMetaSourceRef', source.ref || ''); setValue('recipeMetaVersionSource', source.version?.source || 'tag'); setValue('recipeMetaVersionExpression', source.version?.expression || '');
     setValue('recipeArtifactMode', artifact.mode || 'source_build'); setValue('recipeArtifactPattern', artifact.name_pattern || ''); setValue('recipeArtifactName', artifact.asset_name || ''); setValue('recipeArtifactFiles', (artifact.selected_files || []).join('\n'));
     $('recipeMetaActive').checked = wf.active !== false;
-    if (typeof renderBuildEnvironment === 'function') renderBuildEnvironment({project_type:build.detected_project || '', detected_files:build.detected_files || [], build_dependencies:build.detected_dependencies || []});
+    if (typeof renderBuildEnvironment === 'function') renderBuildEnvironment({project_type:build.detected_project || '', detected_files:build.detected_files || [], build_dependencies:build.detected_dependencies || [], system_build_dependencies:build.detected_dependencies || [], build_tools:build.detected_tools || []});
     window.recipeExtraDependencies = [...(build.extra_dependencies || [])]; window.recipeSourceChanges = (build.source_changes || []).map(change => ({...change}));
     renderDependencyChips(); renderSourceChanges(); renderBuildCommands(build.commands || []);
     if (typeof renderDependencyCheck === 'function') renderDependencyCheck();

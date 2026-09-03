@@ -156,6 +156,7 @@ def run_pipeline(recipe: dict, *, store: BuildStore, dry_run: bool, recipe_id: s
                 detection = {
                     "project_type": "upstream_archive", "display_name": "Upstream release artifact · no source build",
                     "detected_files": [row["relative_path"] for row in source["selected_files"]], "build_dependencies": [],
+                    "system_build_dependencies": [], "build_tools": [], "tool_version_requirements": {},
                     "proposed_commands": [], "warnings": [], "selected_asset": source["asset"], "selected_files": source["selected_files"],
                 }
             else:
@@ -174,17 +175,24 @@ def run_pipeline(recipe: dict, *, store: BuildStore, dry_run: bool, recipe_id: s
         else:
             try:
                 dependencies = dependency_check(
-                    detection["build_dependencies"], canonical["build"]["extra_dependencies"],
-                    workspace=run["workspace"],
+                    detection.get("system_build_dependencies", detection.get("build_dependencies", [])),
+                    canonical["build"]["extra_dependencies"], tools=detection.get("build_tools", []),
+                    tool_version_requirements=detection.get("tool_version_requirements", {}),
+                    workspace=source["source_directory"], working_directory=canonical["build"]["working_directory"],
+                    environment=canonical["build"]["environment"],
                 )
+                store.append_event(run, f"Build tools available: {', '.join(dependencies.get('available_tools', [])) or 'none'}")
+                store.append_event(run, f"Build tools unavailable: {', '.join(dependencies.get('missing_tools', [])) or 'none'}")
                 store.append_event(run, f"Dependencies detected: {', '.join(dependencies['detected']) or 'none'}")
                 store.append_event(run, f"Dependencies manually added: {', '.join(dependencies['manually_added']) or 'none'}")
                 store.append_event(run, f"Dependencies available: {', '.join(dependencies['available']) or 'none'}")
                 store.append_event(run, f"Dependencies missing: {', '.join(dependencies['missing']) or 'none'}")
-                summary = f"{len(dependencies['available'])} available, {len(dependencies['missing'])} missing"
+                summary = f"{len(dependencies.get('available_tools', []))} tools available; {len(dependencies['available'])} system dependencies installed, {len(dependencies['missing'])} missing"
                 _finish_step(run, store, dependencies_step, dependencies_started, status="success", summary=summary, details=dependencies)
             except dependency_checker.DependencyError as exc:
                 state = exc.details
+                store.append_event(run, f"Build tools available: {', '.join(state.get('available_tools', [])) or 'none'}")
+                store.append_event(run, f"Build tools unavailable: {', '.join(state.get('missing_tools', [])) or 'none'}", level="error" if state.get("missing_tools") else "info")
                 store.append_event(run, f"Dependencies detected: {', '.join(state.get('detected', [])) or 'none'}")
                 store.append_event(run, f"Dependencies manually added: {', '.join(state.get('manually_added', [])) or 'none'}")
                 store.append_event(run, f"Dependencies available: {', '.join(state.get('available', [])) or 'none'}")

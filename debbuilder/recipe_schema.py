@@ -177,6 +177,7 @@ def normalize_recipe(workflow: dict, *, compatibility_aliases: bool = True) -> d
             "detected_project": build_in.get("detected_project"),
             "detected_files": _string_list(build_in.get("detected_files"), "build.detected_files"),
             "detected_dependencies": _string_list(build_in.get("detected_dependencies"), "build.detected_dependencies"),
+            "detected_tools": _string_list(build_in.get("detected_tools"), "build.detected_tools"),
             "extra_dependencies": _string_list(build_in.get("extra_dependencies"), "build.extra_dependencies"),
             "source_changes": _list(build_in.get("source_changes"), "build.source_changes"),
             "commands": _string_list(build_in.get("commands"), "build.commands"),

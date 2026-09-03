@@ -62,7 +62,15 @@ def _detect_node(source: Path, root: Path) -> dict | None:
     dependencies = ["nodejs", "npm"] if package_manager == "npm" else ["nodejs"]
     scripts = data.get("scripts") if isinstance(data, dict) and isinstance(data.get("scripts"), dict) else {}
     strong_application = bool(scripts.get("build") or scripts.get("start") or data.get("main") or data.get("bin") or data.get("workspaces"))
-    return {"project_type": "nodejs", "display_name": f"Node.js · {package_manager}", "detected_files": _relative(source, files), "build_dependencies": dependencies, "proposed_commands": commands, "warnings": warnings, "package_manager": package_manager, "package_manager_spec": package_manager_spec, "node_version": str(engines.get("node") or ""), "strong_application": strong_application}
+    build_tools = ["node", package_manager]
+    if package_manager in {"pnpm", "yarn"}:
+        build_tools.insert(1, "corepack")
+    tool_requirements = {}
+    if engines.get("node"):
+        tool_requirements["node"] = str(engines["node"])
+    if package_manager_spec.startswith(f"{package_manager}@"):
+        tool_requirements[package_manager] = package_manager_spec.split("@", 1)[1]
+    return {"project_type": "nodejs", "display_name": f"Node.js · {package_manager}", "detected_files": _relative(source, files), "build_dependencies": dependencies, "system_build_dependencies": [], "build_tools": build_tools, "tool_version_requirements": tool_requirements, "proposed_commands": commands, "warnings": warnings, "package_manager": package_manager, "package_manager_spec": package_manager_spec, "node_version": str(engines.get("node") or ""), "strong_application": strong_application}
 
 
 def _dependency_names(values) -> list[str]:
@@ -281,7 +289,10 @@ def _detect_python(source: Path, root: Path) -> dict | None:
         marker_files.extend(package / "__init__.py" for package in packages)
     return {
         "project_type": "python", "display_name": display_name, "detected_files": _relative(source, _unique(marker_files)),
-        "build_dependencies": build_dependencies, "proposed_commands": commands, "warnings": warnings,
+        "build_dependencies": build_dependencies, "system_build_dependencies": ["python3-build"] if buildable else [],
+        "build_tools": ["python3"] if buildable else [],
+        "tool_version_requirements": {"python3": python_requirement} if buildable and python_requirement else {},
+        "proposed_commands": commands, "warnings": warnings,
         "build_mode": build_mode, "build_backend": _backend_name(backend_module), "build_backend_module": backend_module,
         "build_backend_requires": backend_requires, "python_requirement": python_requirement,
         "dependency_sources": _relative(source, _unique(dependency_sources)), "lockfile": _relative(source, lockfiles)[0] if lockfiles else "",
@@ -417,7 +428,10 @@ def _detect_rust(source: Path, root: Path) -> dict | None:
     display_name = f"Rust · Cargo · toolchain {channel}" if channel else "Rust · Cargo"
     return {
         "project_type": "rust", "display_name": display_name, "detected_files": _relative(source, _unique(files)),
-        "build_dependencies": ["cargo", "rustc"], "proposed_commands": [command], "warnings": warnings,
+        "build_dependencies": ["cargo", "rustc"], "system_build_dependencies": [],
+        "build_tools": ["cargo", "rustc"],
+        "tool_version_requirements": {"rustc": f">={package.get('rust_version')}"} if package.get("rust_version") else {},
+        "proposed_commands": [command], "warnings": warnings,
         "lockfile": lock.relative_to(source).as_posix() if lock.is_file() else "", "locked": bool(lock.is_file() and binary_packages),
         "toolchain": toolchain, "cargo_config": cargo_config,
         "package_name": package.get("name", ""), "package_version": package.get("version", ""),
@@ -442,7 +456,8 @@ def _detect_static(source: Path, root: Path) -> dict | None:
         return None
     return {
         "project_type": "static", "display_name": "Static files · no build",
-        "detected_files": _relative(source, markers), "build_dependencies": [],
+        "detected_files": _relative(source, markers), "build_dependencies": [], "system_build_dependencies": [],
+        "build_tools": [], "tool_version_requirements": {},
         "proposed_commands": [], "warnings": [],
     }
 

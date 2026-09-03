@@ -207,6 +207,8 @@ class ProjectDetectionTests(unittest.TestCase):
             result = detect_project(root)
         self.assertEqual(result["project_type"], "rust")
         self.assertEqual(result["build_dependencies"], ["cargo", "rustc"])
+        self.assertEqual(result["build_tools"], ["cargo", "rustc"])
+        self.assertEqual(result["system_build_dependencies"], [])
         self.assertEqual(result["proposed_commands"], ["cargo build --release"])
 
     def test_rust_application_lockfile_enables_locked_build(self):

@@ -105,9 +105,12 @@ function renderBuildEnvironment(detection = {}) {
   if (badge) { badge.className = `detection-badge ${state.key}`; badge.querySelector('strong').textContent = state.label; }
   if ($('buildDetectedProject')) { $('buildDetectedProject').textContent = detection.display_name || projectDisplayName(projectType); $('buildDetectedProject').dataset.value = projectType; }
   const detectedFiles = detection.detected_files || [];
-  const buildDependencies = detection.build_dependencies || [];
+  const buildTools = detection.build_tools || [];
+  const buildDependencies = detection.system_build_dependencies || detection.build_dependencies || [];
   if ($('buildDetectedFiles')) { $('buildDetectedFiles').textContent = detectedFiles.join(' · ') || 'No source inspected yet'; $('buildDetectedFiles').dataset.value = detectedFiles.join('\n'); }
+  if ($('buildDetectedTools')) { $('buildDetectedTools').textContent = buildTools.join(', ') || 'None'; $('buildDetectedTools').dataset.value = buildTools.join('\n'); }
   if ($('buildDetectedDependencies')) { $('buildDetectedDependencies').textContent = buildDependencies.join(', ') || 'None'; $('buildDetectedDependencies').dataset.value = buildDependencies.join('\n'); }
+  if ($('buildToolsSummary')) $('buildToolsSummary').hidden = buildTools.length === 0;
   if ($('buildDependenciesSummary')) $('buildDependenciesSummary').hidden = buildDependencies.length === 0;
 }
 
@@ -115,11 +118,16 @@ function renderDependencyCheck(dependencies) {
   const checked = dependencies !== undefined && dependencies !== null;
   const available = dependencies?.available || [];
   const missing = dependencies?.missing || [];
+  const availableTools = dependencies?.available_tools || [];
+  const missingTools = dependencies?.missing_tools || [];
   if ($('buildDependencyPending')) $('buildDependencyPending').hidden = checked;
   if ($('buildDependencyResults')) $('buildDependencyResults').hidden = !checked;
   if ($('buildAvailableDependencies')) $('buildAvailableDependencies').textContent = available.join(', ') || 'None';
   if ($('buildMissingDependencies')) $('buildMissingDependencies').textContent = missing.join(', ') || 'None';
-  $('buildDependencyState')?.classList.toggle('has-missing', checked && missing.length > 0);
+  if ($('buildAvailableTools')) $('buildAvailableTools').textContent = availableTools.join(', ') || 'None';
+  if ($('buildMissingTools')) $('buildMissingTools').textContent = missingTools.join(', ') || 'None';
+  if ($('buildToolDetails')) $('buildToolDetails').innerHTML = (dependencies?.tool_checks || []).map(row => `<small><strong>${esc(row.tool)}</strong> · ${esc(row.status)} · ${esc(row.path || 'not found')}${row.version ? ` · ${esc(row.version)}` : ''}</small>`).join('');
+  $('buildDependencyState')?.classList.toggle('has-missing', checked && (missing.length > 0 || missingTools.length > 0));
 }
 
 function renderInstallContentSummary() {

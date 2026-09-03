@@ -74,6 +74,13 @@ class StaticRecipeTests(unittest.TestCase):
             self.assertTrue(reloaded["service"]["configured"])
         self.assertEqual(self.load("debbuilder")["install"]["config_files"][0]["policy"], "create_if_missing")
 
+    def test_debbuilder_recipe_preserves_apache_traversal_to_public_repository(self):
+        recipe = self.load("debbuilder")
+        preinst = recipe["install"]["maintainer_scripts"]["preinst"].splitlines()
+        self.assertIn("install -d -m 0751 -o root -g root /var/lib/debbuilder", preinst)
+        self.assertIn("install -d -m 0751 -o root -g root /var/lib/debbuilder/repository", preinst)
+        self.assertFalse(any("0750" in line and line.endswith("/var/lib/debbuilder/repository") for line in preinst))
+
     def test_seerr_recipe_contains_the_audited_runtime_payload_and_sqlite_directory(self):
         recipe = self.load("seerr")
         self.assertEqual(recipe["package"]["version_revision"], "2")

@@ -6,10 +6,42 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from debbuilder.command_runner import parse_command, resolve_working_directory, run_command
+from debbuilder.command_runner import controlled_environment, parse_command, resolve_working_directory, run_command
 
 
 class CommandRunnerTests(unittest.TestCase):
+    def test_controlled_environment_preserves_source_home_without_workspace_substitution(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary) / "workspace"
+            workspace.mkdir()
+            source_home = Path(temporary) / "real-home"
+            source_home.mkdir()
+            environment = controlled_environment(
+                workspace,
+                environ={"HOME": str(source_home), "PATH": "/custom/bin", "UNRELATED": "ignored"},
+            )
+        self.assertEqual(environment["HOME"], str(source_home))
+        self.assertNotEqual(environment["HOME"], str(workspace.resolve()))
+        self.assertNotIn("UNRELATED", environment)
+
+    def test_controlled_environment_does_not_hardcode_root_when_home_is_absent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            environment = controlled_environment(temporary, environ={"PATH": "/custom/bin"})
+        self.assertNotIn("HOME", environment)
+        self.assertNotIn("/root", environment.values())
+
+    def test_recipe_environment_can_explicitly_override_home(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source_home = str(Path(temporary) / "source-home")
+            recipe_home = str(Path(temporary) / "recipe-home")
+            environment = controlled_environment(
+                temporary,
+                additions={"HOME": recipe_home, "CUSTOM": "value"},
+                environ={"HOME": source_home, "PATH": "/custom/bin"},
+            )
+        self.assertEqual(environment["HOME"], recipe_home)
+        self.assertEqual(environment["CUSTOM"], "value")
+
     def test_rejects_shell_operators_and_cd_with_clear_errors(self):
         rejected = ["echo ok && touch bad", "echo ok | tee out", "echo ok > out", "echo $(id)", "echo `id`", "one; two"]
         for command in rejected:

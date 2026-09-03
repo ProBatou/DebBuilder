@@ -10,7 +10,7 @@ from pathlib import Path
 
 SECRET_KEY = re.compile(r"(?i)(token|secret|password|passwd|api[_-]?key|credential)")
 SECRET_OPTION = re.compile(r"(?i)^--?(?:token|secret|password|passwd|api[_-]?key|credential)(?:=|$)")
-BASE_ENV_KEYS = ("PATH", "LANG", "LC_ALL", "TZ")
+BASE_ENV_KEYS = ("PATH", "LANG", "LC_ALL", "TZ", "HOME")
 
 
 class CommandValidationError(ValueError):
@@ -77,7 +77,6 @@ def controlled_environment(workspace: str | Path, additions: dict[str, str] | No
     source = os.environ if environ is None else environ
     result = {key: source[key] for key in BASE_ENV_KEYS if source.get(key)}
     result.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
-    result["HOME"] = str(Path(workspace).resolve())
     for key, value in (additions or {}).items():
         if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) or not isinstance(value, str):
             raise CommandValidationError("environment variables require valid names and string values")

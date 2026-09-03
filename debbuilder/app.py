@@ -61,8 +61,6 @@ RUNS = DATA / "runs"
 REPO_DEFAULT = os.environ.get("DEBBUILDER_REPO_URL", "https://repo.example.invalid")
 SUITE_DEFAULT = os.environ.get("DEBBUILDER_SUITE", "stable")
 COMPONENT_DEFAULT = os.environ.get("DEBBUILDER_COMPONENT", "main")
-DRY_RUN_ONLY = os.environ.get("DEBBUILDER_ALLOW_REAL_RUN", "0") != "1"
-ALLOW_UNSAFE_BUILD_COMMAND = os.environ.get("DEBBUILDER_ALLOW_UNSAFE_BUILD_COMMAND", "0") == "1"
 AUTH_MODE = os.environ.get("DEBBUILDER_AUTH_MODE", "none").lower()  # none|header|oidc
 AUTH_HEADER = os.environ.get("DEBBUILDER_AUTH_HEADER", "X-Forwarded-User")
 OIDC_ISSUER = os.environ.get("DEBBUILDER_OIDC_ISSUER", "https://auth.example.invalid").rstrip("/")
@@ -167,7 +165,6 @@ def parse_package_version(packages_text: str, package: str) -> str | None:
 
 def generate_script(workflow: dict, dry_run=True) -> str:
     script_generator.REPO_SETTINGS_PROVIDER = repo_settings
-    script_generator.EFFECTIVE_BUILD_PROVIDER = effective_build
     return script_generator.generate_script(normalize_recipe(workflow), dry_run=dry_run)
 
 
@@ -207,12 +204,6 @@ def version_is_newer(candidate: str, published: str) -> bool:
         return True
     result = subprocess.run(["dpkg", "--compare-versions", candidate, "gt", published], check=False)
     return result.returncode == 0
-
-
-def recipe_workdir(workflow: dict) -> Path:
-    template = str(effective_build()["temp_dir"])
-    value = template.replace("${WORKFLOW_NAME}", sanitize_id(str(workflow.get("name") or "workflow")))
-    return Path(require_abs_safe_path(value, "build temp directory"))
 
 
 def notify_pipeline(status: str, package: str, version: str, detail: str = "") -> None:
@@ -823,8 +814,6 @@ def settings_defaults() -> dict:
         oidc_issuer=OIDC_ISSUER,
         oidc_client_id=OIDC_CLIENT_ID,
         oidc_redirect_uri=OIDC_REDIRECT_URI,
-        dry_run_only=DRY_RUN_ONLY,
-        allow_unsafe_build_command=ALLOW_UNSAFE_BUILD_COMMAND,
     )
 
 
@@ -838,10 +827,6 @@ def repo_settings() -> dict:
 
 def effective_security() -> dict:
     return app_settings()["security"]
-
-
-def effective_build() -> dict:
-    return app_settings()["build"]
 
 
 def settings_view() -> dict:
@@ -866,7 +851,6 @@ def package_lifecycle_operation(name: str, action: str, payload: dict) -> dict:
         package_store=package_store,
         deb_inspector=deb_inspector,
         operations=operations,
-        effective_build=effective_build,
         repo_settings=repo_settings,
     )
 

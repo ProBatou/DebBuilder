@@ -1,8 +1,6 @@
 let currentSettings = null;
 let settingsDirty = false;
-let settingsSaveTimer = null;
 let settingsSaving = false;
-let settingsSaveAgain = false;
 
 function fieldInput(id, label, value, attrs=''){
   return `<label class="settings-field" for="${id}">
@@ -27,10 +25,10 @@ function secretInput(id, label, configured, noun='secret'){
   </label>`;
 }
 
-function scheduleSettingsSave(){
+function markSettingsDirty(){
   settingsDirty = true;
-  clearTimeout(settingsSaveTimer);
-  settingsSaveTimer = setTimeout(()=>saveAllSettings(), 650);
+  const status = $('settingsSaveStatus');
+  if (status) { status.textContent = 'Unsaved changes'; status.dataset.state = 'pending'; }
 }
 
 async function loadSettings(){
@@ -67,11 +65,6 @@ function settingsPayload(){
       oidc_issuer: oidcIssuer,
       oidc_client_id: oidcClientId,
       oidc_redirect_uri: oidcRedirectUri
-    },
-    build: {
-      allow_real_run: $('settingAllowRealRun').checked,
-      allow_unsafe_build_command: $('settingAllowUnsafeBuild').checked,
-      temp_dir: $('settingBuildTempDir').value.trim()
     }
   };
   const token = $('settingGithubToken').value.trim();
@@ -85,7 +78,7 @@ function settingsPayload(){
 function renderSettingsPage(){
   const s = currentSettings || {};
   const general = s.general || {}, apt = s.apt || {}, github = s.github || {};
-  const notifications = s.notifications || {}, security = s.security || {}, build = s.build || {};
+  const notifications = s.notifications || {}, security = s.security || {};
   const notificationType = notifications.type === 'ntfy' ? 'ntfy' : 'none';
   const tokenConfigured = !!github.token_configured;
   const ntfyTokenConfigured = !!notifications.token_configured;
@@ -141,28 +134,14 @@ function renderSettingsPage(){
         </div>
       </div>
       </section>
-
-      <section class="settings-section settings-card editable-settings-card execution-settings-card">
-        <header class="settings-section-head"><div><h3>Execution safety</h3><p class="muted">Safety guards applied to builds and real executions.</p></div></header>
-        <div class="execution-options">
-        <label class="settings-check"><input id="settingAllowRealRun" type="checkbox" ${build.allow_real_run ? 'checked' : ''}><span>Allow Real Run</span></label>
-        <label class="settings-check"><input id="settingAllowUnsafeBuild" type="checkbox" ${build.allow_unsafe_build_command ? 'checked' : ''}><span>Allow unsafe build commands</span></label>
-        ${fieldInput('settingBuildTempDir','Build temp directory',build.temp_dir || '/tmp/debbuilder-${WORKFLOW_NAME}','required')}
-        </div>
-      </section>
     </div>
+    <div class="settings-save-bar"><span id="settingsSaveStatus" data-state="saved" aria-live="polite">All changes saved</span><button id="btnSaveSettings" class="btn-primary" type="submit">Save settings</button></div>
   </form>`;
 
-  $('settingsForm')?.addEventListener('input', scheduleSettingsSave);
-  $('settingsForm')?.addEventListener('change', scheduleSettingsSave);
-  $('settingsForm')?.addEventListener('submit', ev=>ev.preventDefault());
-  $('settingAllowRealRun')?.addEventListener('change', ev => {
-    if (ev.target.checked && !confirm('Allow Real Run lets DebBuilder execute recipes on the server. Confirm enabling it?')) ev.target.checked = false;
-  });
-  $('settingAllowUnsafeBuild')?.addEventListener('change', ev => {
-    if (ev.target.checked && !confirm('Allow unsafe build commands enables arbitrary command execution in recipes. Confirm enabling it?')) ev.target.checked = false;
-  });
-  $('testNtfyButton')?.addEventListener('click', testNtfyNotification);
+  $('settingsForm')?.addEventListener('input', markSettingsDirty);
+  $('settingsForm')?.addEventListener('change', markSettingsDirty);
+  $('settingsForm')?.addEventListener('submit', ev=>{ ev.preventDefault(); saveAllSettings().catch(()=>{}); });
+  $('testNtfyButton')?.addEventListener('click', ()=>testNtfyNotification().catch(()=>{}));
 }
 
 async function testNtfyNotification(){
@@ -181,19 +160,21 @@ async function testNtfyNotification(){
 }
 
 async function saveAllSettings(){
-  clearTimeout(settingsSaveTimer);
-  if (!settingsDirty && !settingsSaveAgain) return;
-  if (settingsSaving) { settingsSaveAgain = true; return; }
+  if (!settingsDirty || settingsSaving) return;
   const form = $('settingsForm');
   if (form && !form.reportValidity()) {
     console.warn('Settings autosave skipped: invalid field');
     return;
   }
   settingsSaving = true;
-  settingsDirty = false;
+  const status = $('settingsSaveStatus');
+  const button = $('btnSaveSettings');
+  if (status) { status.textContent = 'Saving…'; status.dataset.state = 'saving'; }
+  if (button) button.disabled = true;
   try {
     const r = await postJson('/api/settings', settingsPayload());
     currentSettings = r.settings;
+    settingsDirty = false;
     const githubToken = $('settingGithubToken');
     const ntfyToken = $('settingNtfyToken');
     const oidcSecret = $('settingOidcSecret');
@@ -204,14 +185,14 @@ async function saveAllSettings(){
       const repo = currentSettings.apt.repository || '';
       document.getElementById('status').textContent = repo ? `curl -fsSL ${repo.replace(/\/$/, '')}/install.sh | sudo bash` : 'APT repository not configured';
     }
+    if (status) { status.textContent = 'All changes saved'; status.dataset.state = 'saved'; }
   } catch (err) {
     settingsDirty = true;
-    console.error('Settings autosave failed:', err);
+    if (status) { status.textContent = `Save failed: ${err.message || err}`; status.dataset.state = 'error'; }
+    console.error('Settings save failed:', err);
+    throw err;
   } finally {
     settingsSaving = false;
-    if (settingsSaveAgain || settingsDirty) {
-      settingsSaveAgain = false;
-      settingsSaveTimer = setTimeout(()=>saveAllSettings(), 500);
-    }
+    if (button) button.disabled = false;
   }
 }

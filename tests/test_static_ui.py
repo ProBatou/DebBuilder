@@ -189,7 +189,28 @@ class StaticUiTests(unittest.TestCase):
         self.assertIn('id="btnRemoveService"', html)
         self.assertIn("Enable at boot", html)
         self.assertIn("window.recipeServiceVisible", app + serialization)
+        self.assertIn("!!String(service.name || '').trim() && !!String(service.command || '').trim()", serialization)
         self.assertNotIn("configured: serviceConfigured", serialization)
+
+    def test_final_ux_pass_uses_compact_shared_components(self):
+        html = self.read("static/index.html")
+        admin = self.read("static/admin.js")
+        settings = self.read("static/settings.js")
+        serialization = self.read("static/recipe_serialization.js")
+        css = self.read("static/style.css")
+        self.assertEqual(html.count('<span class="nav-icon" aria-hidden="true"><svg'), 5)
+        for emoji in ("📊", "📦", "🧱", "📋", "⚙️"):
+            self.assertNotIn(emoji, html)
+        self.assertNotIn('id="dashboardHealthState"', html)
+        self.assertNotIn("function renderHealthState", admin)
+        self.assertIn("dashboard-repo-summary", admin + css)
+        self.assertIn("No build commands required.", html + serialization)
+        self.assertIn("--control-height:38px", css)
+        self.assertIn('class="span-2 boolean-field"', html)
+        self.assertNotIn("settingAllowRealRun", settings)
+        self.assertNotIn("settingAllowUnsafeBuild", settings)
+        self.assertNotIn("settingBuildTempDir", settings)
+        self.assertIn('id="btnSaveSettings"', settings)
 
     def test_installation_preview_is_derived_from_build_output_for_all_modes(self):
         html = self.read("static/index.html")

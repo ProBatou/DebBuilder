@@ -15,7 +15,6 @@ def package_lifecycle_operation(
     package_store,
     deb_inspector,
     operations,
-    effective_build: Callable[[], dict],
     repo_settings: Callable[[], dict],
 ) -> dict:
     pkg = get_package(name)
@@ -68,8 +67,6 @@ def package_lifecycle_operation(
         return {"ok": True, "package": name, "verification": verification}
     if action == "publish":
         dry_run = bool(payload.get("dry_run", True))
-        if not dry_run and not effective_build()["allow_real_run"]:
-            raise PermissionError("real publication disabled; enable real run and provide explicit confirmation")
         deb = payload.get("deb") or pkg.get("build", {}).get("last_artifact")
         if not deb:
             raise ValueError("deb path required")

@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>DebBuilder</title>
-  <link rel="stylesheet" href="/style.css?v=20260903-2" />
+  <link rel="stylesheet" href="/style.css?v=20260903-3" />
 </head>
 <body>
   <header class="mobile-topbar" aria-label="Mobile navigation">
@@ -19,23 +19,20 @@
         <button id="btnSidebarCompact" class="sidebar-toggle" title="Collapse menu" aria-label="Collapse menu" aria-pressed="false">←</button>
       </div>
       <nav class="nav">
-        <button class="nav-link active" data-view="dashboard" title="Dashboard"><span class="nav-icon">📊</span><span class="nav-label">Dashboard</span></button>
-        <button class="nav-link" data-view="packages" title="Packages"><span class="nav-icon">📦</span><span class="nav-label">Packages</span></button>
-        <button class="nav-link" data-view="recipes" title="Recipes"><span class="nav-icon">🧱</span><span class="nav-label">Recipes</span></button>
-        <button class="nav-link" data-view="logs" title="Logs"><span class="nav-icon">📋</span><span class="nav-label">Logs</span></button>
-        <button class="nav-link" data-view="settings" title="Settings"><span class="nav-icon">⚙️</span><span class="nav-label">Settings</span></button>
+        <button class="nav-link active" data-view="dashboard" title="Dashboard"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 13h6V4H4v9Zm0 7h6v-4H4v4Zm10 0h6v-9h-6v9Zm0-16v4h6V4h-6Z"/></svg></span><span class="nav-label">Dashboard</span></button>
+        <button class="nav-link" data-view="packages" title="Packages"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Zm0 2.3L7 8l5 2.7L17 8l-5-2.7Zm-6 4.4v5.6l5 2.8v-5.7L6 9.7Zm7 8.4 5-2.8V9.7l-5 2.7v5.7Z"/></svg></span><span class="nav-label">Packages</span></button>
+        <button class="nav-link" data-view="recipes" title="Recipes"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Zm0 2v6h6V5H5Zm8 0v6h6V5h-6ZM5 13v6h6v-6H5Zm8 0v6h6v-6h-6Z"/></svg></span><span class="nav-label">Recipes</span></button>
+        <button class="nav-link" data-view="logs" title="Logs"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 3h12a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Zm1 5v2h10V8H7Zm0 4v2h10v-2H7Zm0 4v2h7v-2H7Z"/></svg></span><span class="nav-label">Logs</span></button>
+        <button class="nav-link" data-view="settings" title="Settings"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M10.9 2h2.2l.5 2.1c.6.2 1.1.4 1.6.7L17 3.7l1.6 1.6-1.1 1.8c.3.5.5 1 .7 1.6l2.1.5v2.2l-2.1.5c-.2.6-.4 1.1-.7 1.6l1.1 1.8-1.6 1.6-1.8-1.1c-.5.3-1 .5-1.6.7l-.5 2.1h-2.2l-.5-2.1a7 7 0 0 1-1.6-.7L7 16.9l-1.6-1.6 1.1-1.8a7 7 0 0 1-.7-1.6l-2.1-.5V9.2l2.1-.5c.2-.6.4-1.1.7-1.6L5.4 5.3 7 3.7l1.8 1.1c.5-.3 1-.5 1.6-.7l.5-2.1ZM12 8a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z"/></svg></span><span class="nav-label">Settings</span></button>
       </nav>
       <div class="status" id="status" role="button" tabindex="0" title="Click to copy command">loading…</div>
     </aside>
     <main class="content">
       <section class="view active" id="view-dashboard">
-        <div class="page-head"><h2>Dashboard</h2><p>Source → build → APT publication overview.</p></div>
+        <div class="page-head"><h2>Dashboard</h2><p>Source → Build → Validation → Publication · what needs your attention.</p></div>
         <div class="dashboard-shell">
           <div class="metrics dashboard-metrics" id="dashboardMetrics"></div>
-          <div class="dashboard-grid">
-            <section class="card dashboard-card dashboard-repo-card"><div id="dashboardRepoState">Loading repository…</div></section>
-            <section class="card dashboard-card dashboard-health-card"><div id="dashboardHealthState">Loading health…</div></section>
-          </div>
+          <section class="card dashboard-card dashboard-repo-card"><div id="dashboardRepoState">Loading repository…</div></section>
           <section class="card dashboard-card"><div class="section-title"><h3>Package tracking</h3><button class="btn-primary" onclick="switchView('packages')">View packages</button></div><div id="dashboardPackageFlow" class="dashboard-package-flow">Loading…</div></section>
           <section class="card dashboard-card"><div class="section-title"><h3>Latest operations</h3><button onclick="switchView('logs')">View logs</button></div><div id="latestOperations" class="list muted">Loading…</div></section>
         </div>
@@ -96,7 +93,7 @@
               <div class="build-layout">
                 <section class="build-section"><div class="build-section-head"><h3>Build environment</h3><span class="detection-badge not-detected" id="buildDetectionBadge"><span></span><strong>Not detected</strong></span></div><div class="build-environment-summary"><strong class="build-environment-project" id="buildDetectedProject">Not detected</strong><p class="build-environment-line" id="buildDependenciesSummary" hidden><span>Dependencies:</span><strong id="buildDetectedDependencies">None</strong></p><p class="build-environment-line"><span>Detected from:</span><strong id="buildDetectedFiles">No source inspected yet</strong></p></div><div class="dependency-row"><div><small>Manually added</small><div class="dependency-chips" id="buildDependencyChips"></div></div><button type="button" class="ghost compact-button" id="btnAddBuildDependency">+ Add dependency</button></div><div class="build-dependency-state" id="buildDependencyState"><p class="dependency-check-pending" id="buildDependencyPending"><span>Status:</span><strong>Not checked</strong></p><div class="dependency-check-results" id="buildDependencyResults" hidden><span>Available: <strong id="buildAvailableDependencies">None</strong></span><span>Missing: <strong id="buildMissingDependencies">None</strong></span></div></div></section>
                 <section class="build-section"><div class="build-section-head"><div><h3>Source changes</h3><p>Based on searched text content, never on line numbers.</p></div><button type="button" id="btnAddSourceChange">+ Add source change</button></div><div class="source-change-list" id="sourceChangeList"></div></section>
-                <section class="build-section" id="buildCommandsSection"><div class="build-section-head"><div><h3>Build commands</h3><p>Commands suggested from the detected project.</p></div><button type="button" class="ghost compact-button" id="btnEditBuildCommands">Edit commands</button></div><pre class="build-command-preview" id="buildCommandPreview"><code>No build commands configured.</code></pre><label class="build-command-editor hidden" id="buildCommandEditor"><span>One command per line</span><textarea id="buildCommands" rows="3"></textarea><small>Commands are executed directly; shell operators are not supported.</small></label></section>
+                <section class="build-section" id="buildCommandsSection"><div class="build-section-head"><div><h3>Build commands</h3><p>Commands suggested from the detected project.</p></div><button type="button" class="ghost compact-button" id="btnEditBuildCommands">Edit commands</button></div><div class="build-command-preview build-command-empty" id="buildCommandPreview">No build commands required.</div><label class="build-command-editor hidden" id="buildCommandEditor"><span>One command per line</span><textarea id="buildCommands" rows="3"></textarea><small>Commands are executed directly; shell operators are not supported.</small></label></section>
                 <section class="build-section static-source-summary" id="staticSourceSummary" hidden><div class="build-section-head"><h3>Static source</h3></div><p>No build step is required.</p><p>Source files are used directly by Debian installation mappings.</p></section>
                 <section class="build-section build-output-section" id="buildOutputSection"><div class="build-section-head"><div><h3>Build output</h3><p>Which files and directories constitute the result of the build?</p></div><span class="value-origin configured-origin">Configured</span></div><div class="build-output-controls"><label><span>Mode</span><select id="buildOutputMode"><option value="source">Entire source tree</option><option value="path">Single path</option><option value="paths">Multiple paths</option></select></label><label id="buildOutputPathField" hidden><span>Included path</span><input id="buildOutputPath" placeholder="Relative file or directory path"></label></div><div id="buildOutputPathsEditor" class="build-output-paths" hidden><div class="build-output-list-head"><span>Included paths</span><button type="button" class="ghost compact-button" id="btnAddBuildOutputPath">+ Add path</button></div><div id="buildOutputPathList" class="build-output-path-list"></div><p id="buildOutputPathEmpty" class="build-output-empty" hidden>Add at least one file or directory path.</p></div><div id="buildOutputSuggestions" class="build-output-suggestions" hidden><div class="build-output-list-head"><span>Detected suggestions</span><small>Suggestions are not included until you add them.</small></div><div id="buildOutputSuggestionList" class="build-output-suggestion-list"></div></div></section>
                 <details class="build-advanced"><summary>Advanced options</summary><div class="build-advanced-grid"><label><span>Working directory</span><input id="buildWorkingDirectory" value="."></label><label><span>Environment variables</span><textarea id="buildEnvironment" rows="2"></textarea></label></div></details>
@@ -165,11 +162,11 @@
               <div id="serviceConfiguration" hidden>
               <div class="service-primary-groups">
                 <div class="recipe-form-group service-general-group"><span class="recipe-group-title">General service settings</span><div class="recipe-step-fields recipe-step-fields-wide">
-                  <label class="span-2"><span>Enable at boot</span><input id="serviceEnabled" type="checkbox"></label>
-                  <label class="span-2"><span>Type</span><select id="serviceType"><option>simple</option><option>exec</option><option>forking</option><option>oneshot</option><option>notify</option><option>dbus</option></select></label>
                   <label class="span-3"><span>Service name</span><input id="serviceName" required></label>
+                  <label class="span-2"><span>Type</span><select id="serviceType"><option>simple</option><option>exec</option><option>forking</option><option>oneshot</option><option>notify</option><option>dbus</option></select></label>
                   <label class="span-2"><span>User</span><input id="serviceUser"></label>
                   <label class="span-2"><span>Group</span><input id="serviceGroup"></label>
+                  <label class="span-2 boolean-field"><span>Enable at boot</span><input id="serviceEnabled" type="checkbox"></label>
                   <label class="span-3"><span>Restart</span><select id="serviceRestart"><option>on-failure</option><option>always</option><option>no</option><option>on-abnormal</option><option>on-watchdog</option><option>on-abort</option></select></label>
                 </div></div>
                 <div class="recipe-form-group service-command-group"><span class="recipe-group-title">Command</span><div class="recipe-step-fields recipe-step-fields-wide">

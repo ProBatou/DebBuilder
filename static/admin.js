@@ -15,12 +15,9 @@ function compactPackageRow(p){
 }
 function renderRepoState(settings, packages){
   const apt=(settings||{}).apt||{}; const archs=[...new Set(packages.map(p=>p.architecture||'all'))].sort();
-  return `<div class="dashboard-card-head"><div><h3>APT repository</h3><p class="muted">Published state read from configuration and the package index.</p></div>${statusBadge('LIVE READ','active')}</div><div class="dashboard-kv"><span>URL</span><strong>${esc(apt.repository||'—')}</strong><span>Distribution</span><strong>${esc(apt.distribution||'—')}</strong><span>Component</span><strong>${esc(apt.component||'—')}</strong><span>Detected architectures</span><strong>${esc(archs.join(', ')||apt.architecture||'—')}</strong></div>`;
-}
-function renderHealthState(settings, counts){
-  const sec=(settings||{}).security||{}; const build=(settings||{}).build||{};
-  const protectedOk=sec.real_run_protected && sec.unsafe_build_command_protected && !build.allow_real_run && !build.allow_unsafe_build_command;
-  return `<div class="dashboard-card-head"><div><h3>Execution safety</h3><p class="muted">Summary of active protections before build/publication.</p></div>${statusBadge(protectedOk?'PROTECTED':'CHECK', protectedOk?'active':'warning')}</div><div class="dashboard-health-grid"><div class="dashboard-health-item"><strong>${counts.github}</strong><span>GitHub sources</span></div><div class="dashboard-health-item"><strong>${counts.local}</strong><span>Local sources</span></div><div class="dashboard-health-item"><strong>${counts.with_recipe}</strong><span>Linked recipes</span></div><div class="dashboard-health-item"><strong>${build.allow_real_run?'Yes':'No'}</strong><span>Real Run allowed</span></div></div>`;
+  const healthy=!!(apt.repository&&apt.distribution&&apt.component);
+  const repository=String(apt.repository||'Not configured').replace(/^https?:\/\//,'').replace(/\/$/,'');
+  return `<div class="dashboard-repo-summary"><h3>APT repository</h3><span>${esc(repository)} · ${esc(apt.distribution||'—')} · ${esc(apt.component||'—')} · ${esc(archs.join(', ')||apt.architecture||'—')}</span>${statusBadge(healthy?'CONFIGURED':'CHECK',healthy?'active':'warning')}</div>`;
 }
 async function loadDashboard(){
   const [dash,pkgData,settingsData]=await Promise.all([getJson('/api/dashboard'),getJson('/api/packages'),getJson('/api/settings')]);
@@ -32,11 +29,10 @@ async function loadDashboard(){
     metricCard(counts.failed + (d.errors||0),'Alerts / errors','packages or executions',counts.failed||d.errors?'danger':''),
   ].join('');
   if($('dashboardRepoState')) $('dashboardRepoState').innerHTML=renderRepoState(settingsData.settings, packages);
-  if($('dashboardHealthState')) $('dashboardHealthState').innerHTML=renderHealthState(settingsData.settings, counts);
   const priority=packages.slice().sort((a,b)=>{
     const rank={failed:0,update_available:1,publication_available:2,build_available:3,not_published:4,recipe_missing:5,up_to_date:9,ready:9,unknown:8};
     return (rank[dashboardLifecycleState(a)]??7)-(rank[dashboardLifecycleState(b)]??7) || a.name.localeCompare(b.name);
-  }).slice(0,8);
+  }).slice(0,12);
   if($('dashboardPackageFlow')) $('dashboardPackageFlow').innerHTML=priority.map(compactPackageRow).join('') || '<p class="muted">No tracked packages.</p>';
   $('latestOperations').classList.add('latest-ops');
   $('latestOperations').innerHTML=(d.latest_operations||[]).map(e=>`<div class="item" role="button" onclick="switchView('logs'); openExecution('${esc(e.id)}')"><div class="item-title"><span>${esc(packageLabelForExecution(e))} · ${esc(e.action||'build')}</span>${badge(e.status)}</div><div class="item-meta">${esc(e.id)} · ${fmtTime(e.updated)}</div></div>`).join('') || '<p class="muted">No recent operation.</p>';
@@ -114,8 +110,7 @@ async function buildPackage(name,dryRun=true){
     await Promise.all([loadExecutions(),loadPackages()]);
     await openPackage(name);
   } catch(error) {
-    if(!dryRun && /real run|disabled/i.test(error.message)) alert('Real build disabled. Enable “Allow Real Run” in Settings, then try again.');
-    else alert(`${dryRun ? 'Test' : 'Build'} failed: ${error.message}`);
+    alert(`${dryRun ? 'Test' : 'Build'} failed: ${error.message}`);
   }
 }
 async function duplicateRecipe(id){ const wf=await getJson('/api/workflows/'+encodeURIComponent(id)); const name=prompt('Copy name', id+'-copy'); if(!name)return; wf.name=name; const newId=wf.name.replace(/[^a-zA-Z0-9_.+-]/g,'-'); await postJson('/api/workflows/'+newId,{workflow:wf}); await refreshWorkflows(); $('workflowSelect').value=newId; await loadSelectedWorkflow(); }

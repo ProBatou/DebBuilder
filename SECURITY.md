@@ -8,8 +8,8 @@ DebBuilder is designed for trusted self-hosted use. Treat it as an administrativ
 
 - Do not commit `data/*.json`, run logs, workflow state, tokens or generated secrets.
 - Use environment variables or the local settings page for deployment-specific values.
-- Keep `DEBBUILDER_ALLOW_REAL_RUN=0` unless you intentionally want server-side execution.
-- Keep `DEBBUILDER_ALLOW_UNSAFE_BUILD_COMMAND=0` unless you fully trust every recipe author.
+- Restrict recipe editing to trusted administrators. Build commands run without a shell, reject shell operators and command substitution, use a bounded workspace, and receive a controlled environment.
+- Real builds and publications require explicit UI confirmation; publication also validates its package-and-version confirmation token.
 
 ## Public paths
 

@@ -171,8 +171,7 @@ class AdminApiTests(unittest.TestCase):
         status, detail = self.request("GET", "/api/executions/20260822-031400")
         self.assertIn("ok", detail["execution"]["log"])
         status, settings = self.request("GET", "/api/settings")
-        self.assertFalse(settings["settings"]["build"]["allow_real_run"])
-        self.assertFalse(settings["settings"]["build"]["allow_unsafe_build_command"])
+        self.assertNotIn("build", settings["settings"])
         self.assertEqual(settings["settings"]["github"]["token"], "masked")
 
     def test_execution_list_does_not_include_staging_inventory_or_manifest_contents(self):
@@ -389,6 +388,14 @@ class AdminApiTests(unittest.TestCase):
             self.request("POST", "/api/run", {"workflow":{"name":"disabled","active":False,"steps":[]}, "dry_run":True})
         self.assertEqual(ctx.exception.code, 409)
 
+    def test_real_build_uses_structured_pipeline_without_legacy_settings_gate(self):
+        workflow = {"name": "enabled", "active": True, "steps": []}
+        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": "real-run", "status": "success"}) as run:
+            status, response = self.request("POST", "/api/run", {"workflow": workflow, "dry_run": False})
+        self.assertEqual(status, 200)
+        self.assertEqual(response["run_id"], "real-run")
+        run.assert_called_once_with(workflow, dry_run=False)
+
     def test_dry_run_creates_structured_workspace_and_is_visible_in_logs(self):
         workflow = {
             "name": "structured", "package_name": "structured", "github_repository": "example/structured", "active": True,
@@ -424,17 +431,15 @@ class AdminApiTests(unittest.TestCase):
         self.assertEqual(result["validation"]["status"], "success")
         validate.assert_called_once_with("run-one", {"previous_artifact": ""})
 
-    def test_oidc_and_execution_settings_round_trip_without_exposing_secret(self):
+    def test_oidc_settings_round_trip_without_exposing_secret(self):
         payload = {
             "security": {"auth_mode": "oidc", "oidc_issuer": "https://id.example.test", "oidc_client_id": "debbuilder", "oidc_redirect_uri": "https://apt.example.test/auth/callback", "oidc_client_secret": "very-private-client-secret"},
-            "build": {"allow_real_run": True, "allow_unsafe_build_command": True, "temp_dir": "/srv/builds/debbuilder-${WORKFLOW_NAME}"},
         }
         view = server.update_settings(payload)
         self.assertEqual(view["security"]["auth_mode"], "oidc")
         self.assertTrue(view["security"]["oidc_client_secret_configured"])
         self.assertNotIn("very-private", json.dumps(view))
-        self.assertTrue(view["build"]["allow_real_run"])
-        self.assertTrue(view["build"]["allow_unsafe_build_command"])
+        self.assertNotIn("build", view)
         server.update_settings({"security": {**view["security"], "oidc_client_secret": ""}})
         self.assertEqual(server.oidc_client_secret(server.DATA), "very-private-client-secret")
         disabled = server.update_settings({"security": {"auth_mode": "none", "oidc_issuer": "", "oidc_client_id": "", "oidc_redirect_uri": ""}})
@@ -448,10 +453,10 @@ class AdminApiTests(unittest.TestCase):
         self.assertGreaterEqual(len(first), 40)
         self.assertEqual((server.DATA / "secrets.json").stat().st_mode & 0o777, 0o600)
 
-    def test_build_temp_directory_rejects_system_and_traversal_paths(self):
-        for path in ("/", "/etc", "/tmp/../etc", "relative/build"):
-            with self.assertRaises(ValueError, msg=path):
-                server.update_settings({"build": {"temp_dir": path}})
+    def test_legacy_build_settings_are_ignored(self):
+        view = server.update_settings({"build": {"allow_real_run": False, "allow_unsafe_build_command": True, "temp_dir": "/tmp/apt-blockly-workflow"}})
+        self.assertNotIn("build", view)
+        self.assertNotIn("build", json.loads((server.DATA / "settings.json").read_text()))
 
     def test_oidc_protects_admin_but_public_repository_paths_are_exempt(self):
         server.update_settings({"security": {"auth_mode": "oidc", "oidc_issuer": "https://id.example.test", "oidc_client_id": "deb", "oidc_redirect_uri": "https://apt.example.test/auth/callback", "oidc_client_secret": "test-only-client-secret"}})

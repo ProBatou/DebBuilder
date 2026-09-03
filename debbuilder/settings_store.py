@@ -13,7 +13,7 @@ _SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 _ARCHES = {"all", "amd64", "arm64", "armhf", "i386"}
 
 
-def default_settings(repo_url: str, suite: str, component: str, architecture: str = "amd64", public_url: str = "", *, security: dict | None = None, build: dict | None = None) -> dict:
+def default_settings(repo_url: str, suite: str, component: str, architecture: str = "amd64", public_url: str = "", *, security: dict | None = None) -> dict:
     return {
         "general": {
             "app_name": "DebBuilder",
@@ -35,7 +35,6 @@ def default_settings(repo_url: str, suite: str, component: str, architecture: st
             "topic": "debbuilder",
         },
         "security": security or {"auth_mode": "none", "oidc_issuer": "", "oidc_client_id": "", "oidc_redirect_uri": ""},
-        "build": build or {"allow_real_run": False, "allow_unsafe_build_command": False, "temp_dir": "/tmp/debbuilder-${WORKFLOW_NAME}"},
     }
 
 
@@ -262,24 +261,6 @@ def validate_settings(payload: dict, current: dict) -> dict:
         result["security"]["oidc_issuer"] = _validate_url(str(security.get("oidc_issuer", result["security"].get("oidc_issuer", ""))), "OIDC issuer", allow_empty=mode != "oidc")
         result["security"]["oidc_client_id"] = _validate_label(str(security.get("oidc_client_id", result["security"].get("oidc_client_id", ""))), "OIDC client ID", max_len=255, allow_empty=mode != "oidc")
         result["security"]["oidc_redirect_uri"] = _validate_url(str(security.get("oidc_redirect_uri", result["security"].get("oidc_redirect_uri", ""))), "OIDC redirect URI", allow_empty=mode != "oidc")
-
-    if "build" in payload:
-        build = payload.get("build")
-        if not isinstance(build, dict):
-            raise ValueError("build settings must be an object")
-        for key in ("allow_real_run", "allow_unsafe_build_command"):
-            if key in build and not isinstance(build[key], bool):
-                raise ValueError(f"{key} must be a boolean")
-            if key in build:
-                result["build"][key] = build[key]
-        temp_dir = str(build.get("temp_dir", result["build"]["temp_dir"])).strip()
-        expanded = temp_dir.replace("${WORKFLOW_NAME}", "workflow")
-        parsed = Path(expanded)
-        if not temp_dir.startswith("/") or ".." in parsed.parts or parsed in {Path("/"), Path("/etc"), Path("/usr"), Path("/var"), Path("/home"), Path("/root")}:
-            raise ValueError("build temp directory must be a safe absolute subdirectory")
-        if not re.fullmatch(r"[A-Za-z0-9_./${}-]+", temp_dir):
-            raise ValueError("build temp directory contains unsupported characters")
-        result["build"]["temp_dir"] = temp_dir
 
     return result
 

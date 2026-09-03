@@ -99,8 +99,8 @@ def create_handler(api):
             path = parsed.path
             if path == "/api/status":
                 apt = api.repo_settings()
-                security, build = api.effective_security(), api.effective_build()
-                api.json_response(self, {"ok": True, "repo_default": apt["repository"], "suite_default": apt["distribution"], "component_default": apt["component"], "arch_default": apt["architecture"], "notification_type": api.app_settings()["notifications"].get("type", "none"), "dry_run_only": not build["allow_real_run"], "auth_mode": security["auth_mode"], "workflow_dirs": {"examples": str(api.EXAMPLES), "user": str(api.USER_WORKFLOWS)}})
+                security = api.effective_security()
+                api.json_response(self, {"ok": True, "repo_default": apt["repository"], "suite_default": apt["distribution"], "component_default": apt["component"], "arch_default": apt["architecture"], "notification_type": api.app_settings()["notifications"].get("type", "none"), "auth_mode": security["auth_mode"], "workflow_dirs": {"examples": str(api.EXAMPLES), "user": str(api.USER_WORKFLOWS)}})
             elif path == "/api/auth/status":
                 api.json_response(self, {"ok": True, "auth_mode": api.effective_security()["auth_mode"], "user": self.headers.get(api.AUTH_HEADER, "") or api.oidc_session_user(self.headers)})
             elif path == "/api/dashboard":
@@ -186,9 +186,6 @@ def create_handler(api):
                     api.json_response(self, {"error": "recipe is disabled"}, 409)
                     return
                 dry_run = bool(data.get("dry_run", True))
-                if not dry_run and not api.effective_build()["allow_real_run"]:
-                    api.json_response(self, {"error": "real runs are disabled in System & Security settings"}, 403)
-                    return
                 api.json_response(self, api.run_recipe_pipeline(workflow, dry_run=dry_run))
                 return
             if self.path.startswith("/api/executions/") and self.path.endswith("/validate"):

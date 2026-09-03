@@ -6,9 +6,6 @@ import shlex
 from .recipe_schema import normalize_steps, uses_automatic_pipeline, validate_recipe_metadata
 
 REPO_SETTINGS_PROVIDER = None
-EFFECTIVE_BUILD_PROVIDER = None
-
-
 def _repo_settings() -> dict:
     if REPO_SETTINGS_PROVIDER is None:
         return {"repository": "https://repo.example.invalid", "distribution": "stable", "component": "main", "architecture": "amd64"}

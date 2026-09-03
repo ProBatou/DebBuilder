@@ -27,8 +27,6 @@ def defaults_from_environment(
     oidc_issuer: str,
     oidc_client_id: str,
     oidc_redirect_uri: str,
-    dry_run_only: bool,
-    allow_unsafe_build_command: bool,
 ) -> dict:
     return default_settings(
         repo_default,
@@ -42,11 +40,6 @@ def defaults_from_environment(
             "oidc_client_id": oidc_client_id,
             "oidc_redirect_uri": oidc_redirect_uri,
         },
-        build={
-            "allow_real_run": not dry_run_only,
-            "allow_unsafe_build_command": allow_unsafe_build_command,
-            "temp_dir": os.environ.get("DEBBUILDER_BUILD_TEMP_DIR", "/tmp/debbuilder-${WORKFLOW_NAME}"),
-        },
     )
 
 
@@ -59,7 +52,6 @@ def public_settings_view(*, data_dir: Path, root: Path, settings: dict, port: in
     general.update({"port": port, "workdir": str(root)})
     return {
         "general": general,
-        "build": settings["build"],
         "apt": settings["apt"],
         "github": {
             "api_url": settings["github"]["api_url"],

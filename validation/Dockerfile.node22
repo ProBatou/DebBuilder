@@ -1,0 +1,20 @@
+FROM node:22.22.1-bookworm-slim@sha256:af5818e10f6294a719b4314f34ec03d8e8ad8f571a8d23742418790e6ebb5c90
+
+ENV container=docker
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd systemd-sysv dbus dpkg curl \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && systemctl mask systemd-remount-fs.service systemd-logind.service getty.target console-getty.service
+
+RUN mkdir -p /tmp/nodejs-profile/DEBIAN /tmp/nodejs-profile/usr/bin \
+    && printf 'Package: nodejs\nVersion: 22.22.1-1\nArchitecture: amd64\nMaintainer: DebBuilder <root@localhost>\nDescription: Node.js runtime supplied by the controlled validation profile\n' > /tmp/nodejs-profile/DEBIAN/control \
+    && ln -s /usr/local/bin/node /tmp/nodejs-profile/usr/bin/node \
+    && dpkg-deb --build --root-owner-group /tmp/nodejs-profile /tmp/nodejs-profile.deb \
+    && dpkg --install /tmp/nodejs-profile.deb \
+    && rm -rf /tmp/nodejs-profile /tmp/nodejs-profile.deb \
+    && node --version \
+    && dpkg-query --show --showformat='${Status} ${Version}\n' nodejs | grep '^install ok installed 22.22.1-1$'
+
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]

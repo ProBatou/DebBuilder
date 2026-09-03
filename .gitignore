@@ -1,0 +1,44 @@
+# Python and test caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# JavaScript dependencies
+node_modules/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+secrets/
+credentials/
+
+# Runtime state. Recipes are project data and remain versioned.
+data/*
+!data/.gitkeep
+!data/workflows/
+!data/workflows/**
+
+# Legacy/runtime work directories
+/runs/
+/workflows/
+/package-sources/
+/source/
+/staging/
+/artifacts/
+/dist/
+/validation/runtime/
+
+# Generated Debian artifacts and runtime logs
+*.deb
+*.ddeb
+*.changes
+*.buildinfo
+*.dsc
+*.orig.tar.*
+*.debian.tar.*
+*.log
+*.out
+
+# Editor and operating-system files
+.DS_Store

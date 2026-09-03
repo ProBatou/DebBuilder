@@ -1,0 +1,265 @@
+// --- Admin console layer: Package / Recipe / Execution navigation ---
+const adminState = {packages: [], executions: [], selectedPackage: null};
+function badge(status){ const value=status||'unknown'; return `<span class="badge ${esc(value)}">${esc(STATUS_LABELS[value]||value)}</span>`; }
+function packageLabelForExecution(e){ if(e.package) return e.package; const match = adminState.packages.find(p => e.id && e.id.includes(p.name)); return match ? match.name : (e.action || 'Operation'); }
+function switchView(name){ closeMobileNav(); closeLogDetail(); document.querySelectorAll('.nav-link').forEach(b=>b.classList.toggle('active', b.dataset.view===name)); document.querySelectorAll('.view').forEach(v=>v.classList.toggle('active', v.id==='view-'+name)); if(name==='packages') loadPackages(); if(name==='logs') loadExecutions(); if(name==='settings') loadSettings(); if(name==='dashboard') loadDashboard(); }
+function dashboardLifecycleState(p){
+  return lifecycleState(p);
+}
+function metricCard(value,label,detail='',tone=''){
+  return `<div class="metric dashboard-metric ${tone}"><strong>${esc(value)}</strong><span>${esc(label)}</span>${detail?`<em>${esc(detail)}</em>`:''}</div>`;
+}
+function compactPackageRow(p){
+  const v=p.version||{}; const state=dashboardLifecycleState(p);
+  return `<div class="dashboard-package-row" role="button" onclick="switchView('packages'); openPackage('${esc(p.name)}')"><div class="dashboard-package-identity"><strong>${esc(p.name)}</strong><span>${esc(sourceLabel(p))}</span></div><div class="dashboard-package-version"><span>Published</span><strong>${esc(v.published||p.apt_version||'—')}</strong></div><div class="dashboard-package-version"><span>Source</span><strong>${esc(v.source||p.upstream_version||'—')}</strong></div><div class="dashboard-package-state">${badge(state)}</div></div>`;
+}
+function renderRepoState(settings, packages){
+  const apt=(settings||{}).apt||{}; const archs=[...new Set(packages.map(p=>p.architecture||'all'))].sort();
+  return `<div class="dashboard-card-head"><div><h3>APT repository</h3><p class="muted">Published state read from configuration and the package index.</p></div>${statusBadge('LIVE READ','active')}</div><div class="dashboard-kv"><span>URL</span><strong>${esc(apt.repository||'—')}</strong><span>Distribution</span><strong>${esc(apt.distribution||'—')}</strong><span>Component</span><strong>${esc(apt.component||'—')}</strong><span>Detected architectures</span><strong>${esc(archs.join(', ')||apt.architecture||'—')}</strong></div>`;
+}
+function renderHealthState(settings, counts){
+  const sec=(settings||{}).security||{}; const build=(settings||{}).build||{};
+  const protectedOk=sec.real_run_protected && sec.unsafe_build_command_protected && !build.allow_real_run && !build.allow_unsafe_build_command;
+  return `<div class="dashboard-card-head"><div><h3>Execution safety</h3><p class="muted">Summary of active protections before build/publication.</p></div>${statusBadge(protectedOk?'PROTECTED':'CHECK', protectedOk?'active':'warning')}</div><div class="dashboard-health-grid"><div class="dashboard-health-item"><strong>${counts.github}</strong><span>GitHub sources</span></div><div class="dashboard-health-item"><strong>${counts.local}</strong><span>Local sources</span></div><div class="dashboard-health-item"><strong>${counts.with_recipe}</strong><span>Linked recipes</span></div><div class="dashboard-health-item"><strong>${build.allow_real_run?'Yes':'No'}</strong><span>Real Run allowed</span></div></div>`;
+}
+async function loadDashboard(){
+  const [dash,pkgData,settingsData]=await Promise.all([getJson('/api/dashboard'),getJson('/api/packages'),getJson('/api/settings')]);
+  const d=dash.dashboard||{}; const packages=pkgData.packages||[]; const counts={total:d.packages||0,update_available:d.updates||0,publication_available:d.ready_to_publish||0,failed:d.package_errors||0,github:d.github_sources||0,local:d.local_sources||0,with_recipe:d.linked_recipes||0};
+  $('dashboardMetrics').innerHTML=[
+    metricCard(counts.total,'Tracked packages',`${counts.github} GitHub · ${counts.local} local`),
+    metricCard(counts.update_available,'Source updates','source > published',counts.update_available?'warning':''),
+    metricCard(counts.publication_available,'Ready to publish','verified build not published',counts.publication_available?'success':''),
+    metricCard(counts.failed + (d.errors||0),'Alerts / errors','packages or executions',counts.failed||d.errors?'danger':''),
+  ].join('');
+  if($('dashboardRepoState')) $('dashboardRepoState').innerHTML=renderRepoState(settingsData.settings, packages);
+  if($('dashboardHealthState')) $('dashboardHealthState').innerHTML=renderHealthState(settingsData.settings, counts);
+  const priority=packages.slice().sort((a,b)=>{
+    const rank={failed:0,update_available:1,publication_available:2,build_available:3,not_published:4,recipe_missing:5,up_to_date:9,ready:9,unknown:8};
+    return (rank[dashboardLifecycleState(a)]??7)-(rank[dashboardLifecycleState(b)]??7) || a.name.localeCompare(b.name);
+  }).slice(0,8);
+  if($('dashboardPackageFlow')) $('dashboardPackageFlow').innerHTML=priority.map(compactPackageRow).join('') || '<p class="muted">No tracked packages.</p>';
+  $('latestOperations').classList.add('latest-ops');
+  $('latestOperations').innerHTML=(d.latest_operations||[]).map(e=>`<div class="item" role="button" onclick="switchView('logs'); openExecution('${esc(e.id)}')"><div class="item-title"><span>${esc(packageLabelForExecution(e))} · ${esc(e.action||'build')}</span>${badge(e.status)}</div><div class="item-meta">${esc(e.id)} · ${fmtTime(e.updated)}</div></div>`).join('') || '<p class="muted">No recent operation.</p>';
+}
+function lifecycleState(p){ return p.lifecycle_display_status || p.lifecycle_state || p.status || 'unknown'; }
+function sourceLabel(p){ const src=p.source||{}; if(src.repository) return `${src.type || 'github'} · ${src.repository}`; return src.type || 'local'; }
+function sourceRefLabel(p){ const src=p.source||{}; return src.release || src.tag || src.branch || src.commit || src.default_branch || '—'; }
+function packageMatches(p){ const q=($('packageSearch')?.value||'').toLowerCase(); const f=$('packageFilter')?.value||'all'; const text=[p.name,p.apt_version,p.upstream_version,p.architecture,p.recipe,(p.source||{}).repository,lifecycleState(p)].join(' ').toLowerCase(); return (!q||text.includes(q)) && (f==='all'||p.status===f||lifecycleState(p)===f); }
+function packageByName(name){ return adminState.packages.find(p=>p.name===name); }
+function packageVersionLabel(p){ return p.apt_version || (p.version||{}).published || 'not published'; }
+function recipeIdFromPackageName(name){ return name.replace(/[^a-zA-Z0-9_.+-]/g,'-'); }
+function renderPackageOptions(){
+  if($('packageOptions')) $('packageOptions').innerHTML=adminState.packages.map(p=>`<option value="${esc(p.name)}">${esc(packageVersionLabel(p))}</option>`).join('');
+  const select=$('newRecipePackage');
+  if(!select) return;
+  const previous=select.value;
+  const available=adminState.packages.filter(p=>!p.recipe);
+  select.innerHTML=available.map(p=>`<option value="${esc(p.name)}">${esc(p.name)} · ${esc(packageVersionLabel(p))}</option>`).join('') || '<option value="">No package available without a recipe</option>';
+  select.disabled=available.length===0;
+  if(previous && available.some(p=>p.name===previous)) select.value=previous;
+  if(!select.value && available.length) select.selectedIndex=0;
+  syncNewRecipeFromPackage();
+}
+async function loadPackages(){ const data=await getJson('/api/packages'); adminState.packages=data.packages||[]; renderPackageOptions(); renderPackages(); }
+function scheduleBackgroundPackageRefresh(){ [2500,8000].forEach(delay=>setTimeout(()=>loadPackages().catch(()=>{}),delay)); }
+function actionButtons(p){
+  const name=esc(p.name); const state=lifecycleState(p); const buttons=[];
+  if(p.recipe) buttons.push(`<button class="btn-primary" onclick="openLinkedRecipe('${esc(p.recipe)}')">Open recipe</button>`);
+  else buttons.push(`<button class="btn-primary" onclick="createRecipeForPackage('${name}')">Create recipe</button>`);
+  if(p.recipe) buttons.push(`<button class="btn-warning" onclick="buildPackage('${name}',true)">Test</button>`);
+  if(p.recipe && BUILDABLE_PACKAGE_STATES.has(state)) buttons.push(`<button class="btn-success" onclick="buildPackage('${name}',false)">Build</button>`);
+  if((p.build||{}).last_artifact) buttons.push(`<button class="btn-primary" onclick="verifyPackageDeb('${name}')">Verify</button>`);
+  if(state==='publication_available') buttons.push(`<button class="btn-danger" onclick="publishPackage('${name}')">Publish</button>`);
+  return buttons.join('');
+}
+function renderPackages(){
+  const rows=adminState.packages.filter(packageMatches);
+  if($('packageCount')) $('packageCount').textContent=`${rows.length} shown`;
+  $('packageList').innerHTML=rows.map(p=>{
+    const v=p.version||{};
+    return `<article class="package-row lifecycle" onclick="openPackage('${esc(p.name)}')"><div><div class="package-name">${esc(p.name)}</div><div class="package-sub">${esc(sourceLabel(p))}${p.recipe ? ` · recipe ${esc(p.recipe)}` : ''}</div></div><div>${badge(lifecycleState(p))}</div><div><div class="package-sub">Published version</div><strong>${esc(v.published||p.apt_version||'Not published')}</strong></div><div><div class="package-sub">Available version</div><strong>${esc(v.source||p.upstream_version||'Unknown')}</strong><div class="package-sub">Ref ${esc(sourceRefLabel(p))}</div></div><div><div class="package-sub">Build / arch</div><strong>${esc((v.candidate || (p.build||{}).last_status) || 'Never built')} · ${esc(p.architecture||'all')}</strong></div></article>`;
+  }).join('') || '<p class="muted">No package.</p>';
+}
+function closePackageDrawer(){ $('packageDrawer')?.classList.remove('open'); $('packageDrawer')?.setAttribute('aria-hidden','true'); }
+async function openPackage(name){
+  adminState.selectedPackage=name;
+  const p=adminState.packages.find(packageRow=>packageRow.name===name);
+  if(!p) throw new Error('Package not found in the loaded list');
+  const src=p.source||{}; const v=p.version||{}; const b=p.build||{}; const repo=p.repository||{};
+  if($('packageDrawerTitle')) $('packageDrawerTitle').textContent=p.name;
+  $('packageDrawer')?.classList.add('open'); $('packageDrawer')?.setAttribute('aria-hidden','false');
+  const validation=p.validation||{}; const publication=p.publication||{}; const artifactName=(b.last_artifact||'').split('/').pop(); const artifact=[artifactName,b.artifact_source,b.artifact_sha256].filter(Boolean).join(' · ');
+  $('packageDetail').innerHTML=`<div class="package-lifecycle-panel"><section><h3>General</h3><dl><dt>Linked recipe</dt><dd>${esc(p.recipe||'None')}</dd><dt>Description</dt><dd>${esc(p.description||'Not set')}</dd><dt>Architecture</dt><dd>${esc(p.architecture||'all')}</dd><dt>Dependencies</dt><dd>${esc(p.depends||'None declared')}</dd></dl></section><section><h3>Source</h3><dl><dt>Type</dt><dd>${esc(src.type||'Unknown')}</dd><dt>Repository</dt><dd>${esc(src.repository||'Not set')}</dd><dt>Strategy</dt><dd>${esc(p.tracking||p.version_strategy||v.strategy||'Not set')}</dd><dt>Resolved ref</dt><dd>${esc(sourceRefLabel(p))}</dd><dt>Latest resolved release</dt><dd>${esc(src.latest_release||'Not fetched')}</dd></dl></section><section><h3>Versions</h3><dl><dt>Available upstream version</dt><dd>${esc(v.source||p.upstream_version||'Unknown')}</dd><dt>Candidate Debian version</dt><dd>${esc(v.candidate||'None')}</dd><dt>Published version</dt><dd>${esc(v.published||p.apt_version||'Not published')}</dd><dt>State</dt><dd>${badge(lifecycleState(p))}</dd></dl></section><section><h3>Build</h3><dl><dt>Method</dt><dd>${esc(b.method||'Not set')}</dd><dt>Last status</dt><dd>${esc(b.last_status||'Never built')}</dd><dt>Last build</dt><dd>${esc(b.last_build_id||'None')}</dd><dt>Last artifact</dt><dd>${esc(artifact||'None')}</dd></dl></section><section><h3>Validation & publication</h3><dl><dt>Last validation</dt><dd>${validation.status?`${esc(validation.status)} · ${esc(validation.finished_at||validation.started_at||'')}`:'Not run'}</dd><dt>Last publication</dt><dd>${publication.status?`${esc(publication.status)} · ${esc(publication.finished_at||publication.requested_at||'')}`:'Not published by DebBuilder'}</dd><dt>Published version</dt><dd>${esc(publication.published_version||v.published||'None')}</dd></dl></section><section><h3>APT repository</h3><dl><dt>Repository</dt><dd>${esc(repo.url||'Not configured')}</dd><dt>Distribution</dt><dd>${esc(repo.distribution||'Not configured')}</dd><dt>Component</dt><dd>${esc(repo.component||'Not configured')}</dd><dt>Architectures</dt><dd>${esc((repo.architectures||[p.architecture||'all']).join(', '))}</dd><dt>Publication</dt><dd>${repo.published ? 'Published' : 'Not published'}</dd></dl></section></div><div class="actions package-actions">${actionButtons(p)}</div><h3>History</h3>${(p.history||[]).map(e=>`<div class="item" onclick="switchView('logs'); closePackageDrawer(); openExecution('${esc(e.id)}')"><div class="item-title"><span>${esc(e.id)} · ${esc(e.action)}</span>${badge(e.status)}</div><div class="item-meta">${fmtTime(e.updated)}</div></div>`).join('') || '<p class="muted">No linked history.</p>'}<div class="danger-zone"><button class="danger" onclick="deletePackageUi('${esc(p.name)}')">Delete from DebBuilder</button><p class="muted">Does not delete the package from the APT repository.</p></div>`;
+}
+async function createPackageUi(){ const name=prompt('Debian package name?'); if(!name) return; const repo=prompt('Optional GitHub repository (owner/repo)?',''); const body={name, architecture:'all', source: repo?{type:'github', repository:repo}:{type:'manual'}}; await postJson('/api/packages', body); await loadPackages(); await openPackage(name); }
+async function openLinkedRecipe(recipe){ closePackageDrawer(); switchView('recipes'); await refreshWorkflows(); $('workflowSelect').value=recipe; await loadSelectedWorkflow(); }
+async function createRecipeForPackage(name){ closePackageDrawer(); switchView('recipes'); await loadPackages(); newRecipeUi(name); }
+async function deletePackageUi(name){ if(!confirm(`Delete ${name} from DebBuilder?\nThe package will NOT be removed from the APT repository.`)) return; const r=await fetch('/api/packages/'+encodeURIComponent(name), {method:'DELETE'}); const j=await r.json(); if(!r.ok) throw new Error(j.error||r.statusText); closePackageDrawer(); await loadPackages(); }
+async function verifyPackageDeb(name){ const deb=prompt('Path to the .deb to verify', ''); if(!deb) return; const res=await postJson('/api/packages/'+encodeURIComponent(name)+'/verify-deb', {deb}); alert(`.deb verification: ${res.verification.ok ? 'OK' : 'ERROR'}\nPackage: ${res.verification.package}\nVersion: ${res.verification.version}\nArchitecture: ${res.verification.architecture}`); }
+async function publishPackage(name){
+  const p=adminState.packages.find(row=>row.name===name); const build=p?.build||{}; const version=(p?.version||{}).candidate||'';
+  if(!build.last_build_id||!version) throw new Error('No validated Build Run is ready to publish');
+  const confirmation=`publish:${name}:${version}`;
+  if(!confirm(`Publish the validated artifact ${name} ${version} to APT?\n\nRequired confirmation: ${confirmation}`)) return;
+  const res=await postJson(`/api/executions/${encodeURIComponent(build.last_build_id)}/publish`,{confirm:confirmation});
+  alert(`Publication: ${res.publication.status}${res.publication.error ? `\n${res.publication.error.message}` : ''}`); await loadPackages();
+}
+async function buildPackage(name,dryRun=true){
+  const p=adminState.packages.find(x=>x.name===name); if(!p||!p.recipe){ alert('No linked recipe.'); return; }
+  if(!dryRun && !confirm(`Really build ${name} and validate the resulting package?`)) return;
+  const wf=await getJson('/api/workflows/'+encodeURIComponent(p.recipe));
+  try {
+    const run=await postJson('/api/run',{workflow:wf,dry_run:dryRun});
+    alert(dryRun ? `Test finished: ${run.run_id} · code ${run.returncode}` : `Build finished: ${run.run_id} · status ${run.status || run.returncode}`);
+    await Promise.all([loadExecutions(),loadPackages()]);
+    await openPackage(name);
+  } catch(error) {
+    if(!dryRun && /real run|disabled/i.test(error.message)) alert('Real build disabled. Enable “Allow Real Run” in Settings, then try again.');
+    else alert(`${dryRun ? 'Test' : 'Build'} failed: ${error.message}`);
+  }
+}
+async function duplicateRecipe(id){ const wf=await getJson('/api/workflows/'+encodeURIComponent(id)); const name=prompt('Copy name', id+'-copy'); if(!name)return; wf.name=name; const newId=wf.name.replace(/[^a-zA-Z0-9_.+-]/g,'-'); await postJson('/api/workflows/'+newId,{workflow:wf}); await refreshWorkflows(); $('workflowSelect').value=newId; await loadSelectedWorkflow(); }
+function syncNewRecipeFromPackage(packageName){
+  const select=$('newRecipePackage');
+  const selectedName=packageName || select?.value || '';
+  const pkg=packageByName(selectedName);
+  if(select && packageName && Array.from(select.options).some(option=>option.value===packageName)) select.value=packageName;
+  if($('newRecipeName')) $('newRecipeName').value=selectedName;
+  if($('newRecipeGithub')) $('newRecipeGithub').value=pkg?.source?.repository || '';
+}
+function newRecipeUi(packageName=''){
+  renderPackageOptions();
+  syncNewRecipeFromPackage(packageName);
+  $('newRecipeDialog')?.showModal();
+  ($('newRecipePackage')?.disabled ? $('cancelNewRecipe') : $('newRecipeGithub'))?.focus();
+}
+async function createRecipeFromDialog(){
+  const packageName=$('newRecipePackage').value.trim();
+  if(!packageName){ alert('Create a package first, then attach a recipe to it.'); return; }
+  const workflow={name:packageName,package_name:packageName,github_repository:$('newRecipeGithub').value.trim(),version_tracking:$('newRecipeTracking').value,version_source:$('newRecipeVersionSource').value,active:true,steps:[]};
+  if (workflow.version_tracking !== 'latest_release') workflow.source={repository:workflow.github_repository,tracking:workflow.version_tracking,ref:$('newRecipeSourceRef').value.trim(),version:{source:workflow.version_source}};
+  if (workflow.version_source === 'regex') workflow.version_expression = $('newRecipeVersionExpression').value.trim();
+  currentRecipeId=recipeIdFromPackageName(packageName); renderWorkflow(workflow); $('recipeTitle').textContent=workflow.name; $('newRecipeDialog').close(); switchView('recipes'); autosaveRevision += 1; await saveRecipeNow(); await Promise.all([refreshWorkflows(),loadPackages()]); $('workflowSelect').value=currentRecipeId;
+}
+async function loadExecutions(){ const data=await getJson('/api/executions'); adminState.executions=data.executions||[]; renderExecutions(); }
+function renderExecutions(){ const q=($('logSearch')?.value||'').toLowerCase(); const st=$('logStatus')?.value||'all'; const rows=adminState.executions.filter(e=>(st==='all'||e.status===st||e.lifecycle_status===st)&&(!q||JSON.stringify(e).toLowerCase().includes(q))); $('executionList').innerHTML=rows.map(e=>`<div class="item" onclick="openExecution('${esc(e.id)}')"><div class="item-title"><span>${esc(packageLabelForExecution(e))} · ${esc(e.action)}</span>${badge(e.lifecycle_status||e.status)}</div><div class="item-meta">Build ${esc(e.build_status||e.status)} · Validation ${esc(e.validation_status||'not_run')} · Publication ${esc(e.publication_status||'not_run')} · ${esc(e.id)} · ${fmtTime(e.updated)}</div></div>`).join('') || '<p class="muted logs-empty-message">No logs available.</p>'; document.querySelector('.logs-layout')?.classList.toggle('logs-empty', adminState.executions.length===0); }
+async function openExecution(id){ const e=(await getJson('/api/executions/'+encodeURIComponent(id))).execution; const artifact=e.artifact||{}; const validation=(e.validations||[]).slice(-1)[0]||{}; const publication=(e.publications||[]).slice(-1)[0]||{}; const source=(e.steps||[]).find(step=>step.name==='source')?.details||{}; const staging=(e.steps||[]).find(step=>step.name==='staging')?.details||{}; const version=typeof e.version==='object'?e.version:{debian:e.version}; const meta=[['Run ID', '#'+e.id],['Package', e.package||e.recipe_id||'—'],['Recipe', e.recipe_id||'—'],['Mode', e.mode||e.action||'—'],['Source', source.repository||'—'],['Resolved ref', source.ref||source.tag||'—'],['Upstream', version.upstream||'—'],['Debian version', version.debian||'—'],['Status', e.status],['Date', fmtTime(e.updated||e.created_at_epoch)],['Artifact', (artifact.path||'').split('/').pop()||'—'],['Size', artifact.size||'—'],['SHA-256', artifact.sha256||'—'],['Validation', validation.status||'Not run'],['Publication', publication.status||'Not run']]; const symbols={pending:'○',running:'◌',success:'✓',failed:'✕',skipped:'–'}; const buildStep=(e.steps||[]).find(step=>step.name==='build'); if($('executionMeta')) $('executionMeta').innerHTML=meta.map(([k,v])=>`<div class="meta-cell"><span>${esc(k)}</span>${esc(v)}</div>`).join(''); if($('executionSteps')) $('executionSteps').innerHTML=(e.steps||[]).map(s=>`<span class="step-chip ${esc(s.status||'pending')}">${symbols[s.status]||'○'} ${esc(s.name)} · ${esc(s.status||'pending')}</span>`).join(''); const structuredError=e.error?`\n\nStructured error\n${JSON.stringify(e.error,null,2)}`:''; const stagingCount=Number(staging.content_file_count); const displayLog=Number.isFinite(stagingCount)?(e.log||'No log.').replace(/Staging prepared with [\d, ]+ application files/g,`Staging prepared with ${stagingCount.toLocaleString('en-US')} application files`):(e.log||'No log.'); $('executionDetail').textContent=displayLog+'\n\n'+formatBuildAudit(buildStep?.details)+structuredError; if(isMobileViewport()) document.body.classList.add('mobile-log-open'); }
+const openExecutionDetail = openExecution;
+openExecution = async function(id) {
+  await openExecutionDetail(id);
+  const label = [...document.querySelectorAll('#executionMeta .meta-cell span')].find(node => node.textContent === 'Status');
+  if (label) label.textContent = 'Build status';
+  const execution = (await getJson('/api/executions/'+encodeURIComponent(id))).execution;
+  const validation = (execution.validations || []).slice(-1)[0] || {};
+  if (validation.profile && $('executionMeta')) {
+    const node = (validation.checks || []).find(check => check.name === 'toolchain_node');
+    $('executionMeta').insertAdjacentHTML('beforeend', `<div class="meta-cell"><span>Validation backend</span>${esc(validation.backend?.runtime || '—')}</div><div class="meta-cell"><span>Profile</span>${esc(validation.profile.name || '—')}</div><div class="meta-cell"><span>Node</span>${esc(node?.details?.actual || 'Not required')}</div><div class="meta-cell"><span>Network</span>${esc(validation.backend?.network || 'disabled')}</div>`);
+  }
+};
+function isMobileViewport(){ return window.matchMedia('(max-width: 899px)').matches; }
+function setMobileNav(open){ document.body.classList.toggle('mobile-nav-open', !!open); const btn=$('btnMobileMenu'); if(btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false'); const bd=$('mobileNavBackdrop'); if(bd) bd.hidden=!open; }
+function closeMobileNav(){ setMobileNav(false); }
+function closeLogDetail(){ document.body.classList.remove('mobile-log-open'); }
+function handleResponsiveResize(){
+  closeMobileNav(); closeLogDetail();
+}
+
+function setSidebarCompact(compact) {
+  document.body.classList.toggle('sidebar-collapsed', !!compact);
+  const button = $('btnSidebarCompact');
+  if (!button) return;
+  button.textContent = compact ? '›' : '‹';
+  button.setAttribute('aria-pressed', compact ? 'true' : 'false');
+  button.setAttribute('aria-label', compact ? 'Expand menu' : 'Collapse menu');
+  button.title = compact ? 'Expand menu' : 'Collapse menu';
+}
+
+function toggleSidebarCompact() {
+  const compact = !document.body.classList.contains('sidebar-collapsed');
+  localStorage.setItem('debBuilderSidebarCompact', compact ? '1' : '0');
+  setSidebarCompact(compact);
+}
+
+function restoreSidebarPreference() {
+  setSidebarCompact(localStorage.getItem('debBuilderSidebarCompact') === '1');
+}
+
+async function copyInstallCommand() {
+  const status = $('status');
+  const command = status?.textContent?.trim();
+  if (!status || !command || !command.startsWith('curl ')) return;
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(command);
+  } else {
+    const input = document.createElement('textarea');
+    input.value = command;
+    input.style.position = 'fixed';
+    input.style.opacity = '0';
+    document.body.appendChild(input);
+    input.select();
+    document.execCommand('copy');
+    input.remove();
+  }
+  status.classList.add('copied');
+  setTimeout(() => {
+    status.classList.remove('copied');
+  }, 1200);
+}
+
+const sourceChangeDefinitions={replace:{operation:'replace',fields:[['path','Target file','input'],['search','Content to find','textarea'],['content','Replace with','textarea']]},before:{operation:'insert_before',fields:[['path','Target file','input'],['search','Matching text to find','textarea'],['content','Content to add before','textarea']]},after:{operation:'insert_after',fields:[['path','Target file','input'],['search','Matching text to find','textarea'],['content','Content to add after','textarea']]},remove:{operation:'remove',fields:[['path','Target file','input'],['search','Exact content to find and remove','textarea']]},create:{operation:'create_file',fields:[['path','New file path','input'],['content','File contents','textarea']]},'delete-file':{operation:'remove_file',fields:[['path','Path of the file to delete','input']]}};
+let editingSourceChangeIndex=null;
+function sourceChoiceForOperation(operation){return Object.keys(sourceChangeDefinitions).find(key=>sourceChangeDefinitions[key].operation===operation)||'replace';}
+function selectSourceChangeType(type,change={}){const definition=sourceChangeDefinitions[type]||sourceChangeDefinitions.replace;document.querySelectorAll('[data-change-type]').forEach(button=>button.classList.toggle('active',button.dataset.changeType===type));$('sourceChangeDialog').dataset.changeType=type;$('sourceChangeFields').innerHTML=definition.fields.map(([key,label,kind])=>`<label><span>${label}</span>${kind==='textarea'?`<textarea data-change-field="${key}" rows="3">${esc(change[key]||'')}</textarea>`:`<input data-change-field="${key}" value="${esc(change[key]||'')}">`}</label>`).join('')+'<div class="change-preview single"><span class="recipe-group-title">Result preview</span><p>The validated change will be applied to the isolated source workspace before build commands.</p></div>';}
+function openSourceChangeDialog(type='replace',index=null){editingSourceChangeIndex=index;const change=index===null?{}:window.recipeSourceChanges[index];selectSourceChangeType(change?.operation?sourceChoiceForOperation(change.operation):type,change||{});$('sourceChangeDialog').showModal();}
+function confirmSourceChange(){const type=$('sourceChangeDialog').dataset.changeType||'replace';const definition=sourceChangeDefinitions[type];const change={operation:definition.operation};$('sourceChangeFields').querySelectorAll('[data-change-field]').forEach(field=>{change[field.dataset.changeField]=field.value;});if(editingSourceChangeIndex===null)window.recipeSourceChanges.push(change);else window.recipeSourceChanges[editingSourceChangeIndex]=change;renderSourceChanges();scheduleRecipeAutosave();$('sourceChangeDialog').close();}
+
+function wireAdmin() {
+  restoreSidebarPreference();
+  document.querySelectorAll('.nav-link').forEach(button => button.addEventListener('click', () => switchView(button.dataset.view)));
+  $('packageSearch')?.addEventListener('input', renderPackages);
+  $('packageFilter')?.addEventListener('change', renderPackages);
+  $('logSearch')?.addEventListener('input', renderExecutions);
+  $('logStatus')?.addEventListener('change', renderExecutions);
+  $('btnNewPackage')?.addEventListener('click', () => createPackageUi().catch(error => alert(error.message)));
+  $('btnNewRecipe')?.addEventListener('click', newRecipeUi);
+  $('recipeMetaName')?.addEventListener('input', event => {$('recipeTitle').textContent = event.target.value || 'Recipe';});
+  $('newRecipePackage')?.addEventListener('change', event => syncNewRecipeFromPackage(event.target.value));
+  $('newRecipeForm')?.addEventListener('submit', event => {
+    event.preventDefault();
+    if (event.currentTarget.reportValidity()) createRecipeFromDialog().catch(reportAutosaveError);
+  });
+  $('cancelNewRecipe')?.addEventListener('click', () => $('newRecipeDialog').close());
+  $('btnClosePackageDrawer')?.addEventListener('click', closePackageDrawer);
+  $('packageDrawerBackdrop')?.addEventListener('click', closePackageDrawer);
+  $('btnSidebarCompact')?.addEventListener('click', toggleSidebarCompact);
+  $('status')?.addEventListener('click', () => copyInstallCommand().catch(() => {}));
+  $('status')?.addEventListener('keydown', event => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      copyInstallCommand().catch(() => {});
+    }
+  });
+  $('btnMobileMenu')?.addEventListener('click', () => setMobileNav(!document.body.classList.contains('mobile-nav-open')));
+  $('mobileNavBackdrop')?.addEventListener('click', closeMobileNav);
+  $('btnCloseLogDetail')?.addEventListener('click', closeLogDetail);
+  $('btnAddSourceChange')?.addEventListener('click',()=>openSourceChangeDialog());
+  $('sourceChangeList')?.addEventListener('click',event=>{const edit=event.target.closest('[data-edit-change-index]');const remove=event.target.closest('[data-remove-change-index]');if(edit)openSourceChangeDialog('replace',Number(edit.dataset.editChangeIndex));if(remove){window.recipeSourceChanges.splice(Number(remove.dataset.removeChangeIndex),1);renderSourceChanges();scheduleRecipeAutosave();}});
+  document.querySelectorAll('[data-change-type]').forEach(button=>button.addEventListener('click',()=>selectSourceChangeType(button.dataset.changeType)));
+  ['btnCloseSourceChange','btnCancelSourceChange'].forEach(id=>$(id)?.addEventListener('click',()=>$('sourceChangeDialog').close()));
+  $('btnConfirmSourceChange')?.addEventListener('click',confirmSourceChange);
+  $('btnEditBuildCommands')?.addEventListener('click',()=>{$('buildCommandPreview').classList.toggle('hidden');$('buildCommandEditor').classList.toggle('hidden');$('btnEditBuildCommands').textContent=$('buildCommandEditor').classList.contains('hidden')?'Edit commands':'View preview';});
+  $('btnAddBuildDependency')?.addEventListener('click',()=>{const dependency=prompt('Debian build dependency name');if(dependency&&!window.recipeExtraDependencies.includes(dependency.trim())){window.recipeExtraDependencies.push(dependency.trim());renderDependencyChips();scheduleRecipeAutosave();}});
+  $('buildDependencyChips')?.addEventListener('click',event=>{const remove=event.target.closest('[data-remove-dependency]');if(remove){window.recipeExtraDependencies.splice(Number(remove.dataset.removeDependency),1);renderDependencyChips();scheduleRecipeAutosave();}});
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape') { closeMobileNav(); closeLogDetail(); closePackageDrawer(); }
+  });
+  window.addEventListener('resize', handleResponsiveResize);
+  window.addEventListener('orientationchange', () => setTimeout(handleResponsiveResize, 250));
+  handleResponsiveResize();
+  loadDashboard().catch(error => { if ($('latestOperations')) $('latestOperations').textContent = error.message; });
+  loadPackages().catch(() => {});
+  scheduleBackgroundPackageRefresh();
+  loadExecutions().catch(() => {});
+}
+
+wireAdmin();

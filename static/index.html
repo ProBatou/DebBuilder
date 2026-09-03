@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DebBuilder</title>
+  <link rel="stylesheet" href="/style.css?v=20260902-16" />
+</head>
+<body>
+  <header class="mobile-topbar" aria-label="Mobile navigation">
+    <div class="mobile-brand"><strong>DebBuilder</strong><span>Debian console</span></div>
+    <button id="btnMobileMenu" class="mobile-menu-btn" aria-expanded="false" aria-controls="mobileNavPanel">☰</button>
+  </header>
+  <div id="mobileNavBackdrop" class="mobile-nav-backdrop" hidden></div>
+  <div class="app-shell">
+    <aside class="sidebar" id="mobileNavPanel">
+      <div class="brand">
+        <div class="brand-text"><h1>DebBuilder</h1><p>Personal Debian console</p></div>
+        <button id="btnSidebarCompact" class="sidebar-toggle" title="Collapse menu" aria-label="Collapse menu" aria-pressed="false">←</button>
+      </div>
+      <nav class="nav">
+        <button class="nav-link active" data-view="dashboard" title="Dashboard"><span class="nav-icon">📊</span><span class="nav-label">Dashboard</span></button>
+        <button class="nav-link" data-view="packages" title="Packages"><span class="nav-icon">📦</span><span class="nav-label">Packages</span></button>
+        <button class="nav-link" data-view="recipes" title="Recipes"><span class="nav-icon">🧱</span><span class="nav-label">Recipes</span></button>
+        <button class="nav-link" data-view="logs" title="Logs"><span class="nav-icon">📋</span><span class="nav-label">Logs</span></button>
+        <button class="nav-link" data-view="settings" title="Settings"><span class="nav-icon">⚙️</span><span class="nav-label">Settings</span></button>
+      </nav>
+      <div class="status" id="status" role="button" tabindex="0" title="Click to copy command">loading…</div>
+    </aside>
+    <main class="content">
+      <section class="view active" id="view-dashboard">
+        <div class="page-head"><h2>Dashboard</h2><p>Source → build → APT publication overview.</p></div>
+        <div class="dashboard-shell">
+          <div class="metrics dashboard-metrics" id="dashboardMetrics"></div>
+          <div class="dashboard-grid">
+            <section class="card dashboard-card dashboard-repo-card"><div id="dashboardRepoState">Loading repository…</div></section>
+            <section class="card dashboard-card dashboard-health-card"><div id="dashboardHealthState">Loading health…</div></section>
+          </div>
+          <section class="card dashboard-card"><div class="section-title"><h3>Package tracking</h3><button class="btn-primary" onclick="switchView('packages')">View packages</button></div><div id="dashboardPackageFlow" class="dashboard-package-flow">Loading…</div></section>
+          <section class="card dashboard-card"><div class="section-title"><h3>Latest operations</h3><button onclick="switchView('logs')">View logs</button></div><div id="latestOperations" class="list muted">Loading…</div></section>
+        </div>
+      </section>
+
+      <section class="view" id="view-packages">
+        <div class="page-head split"><div><h2>Packages</h2><p>Managed Debian package entities, separate from automated recipes.</p></div><button id="btnNewPackage">+ New package</button></div>
+        <div class="filters package-filters"><input id="packageSearch" placeholder="Search packages…" /><select id="packageFilter"><option value="all">All</option><option value="ready">Up to date / OK</option><option value="update_available">Update available</option><option value="failed">Error</option><option value="recipe_missing">Recipe needed</option></select></div>
+        <section class="card package-board"><div class="section-title"><h3>Known packages</h3><span class="muted" id="packageCount"></span></div><div id="packageList" class="package-list">Loading…</div></section>
+        <aside id="packageDrawer" class="drawer" aria-hidden="true"><div class="drawer-backdrop" id="packageDrawerBackdrop"></div><div class="drawer-panel"><div class="drawer-head"><div><span class="eyebrow">Package detail</span><h2 id="packageDrawerTitle">Package</h2></div><button id="btnClosePackageDrawer">Close</button></div><div id="packageDetail" class="detail muted">Select a package.</div></div></aside>
+      </section>
+
+      <section class="view" id="view-recipes">
+        <div class="recipe-workspace recipe-blank-workspace">
+          <section class="recipe-main recipe-blank-main">
+            <div class="recipe-toolbar recipe-simple-toolbar card">
+              <label class="recipe-picker"><span>Recipe</span><select id="workflowSelect"></select></label>
+              <button id="btnNewRecipe">+ New</button>
+              <button class="danger" id="btnDeleteRecipeTop">Delete</button>
+              <button id="btnDryRun">Dry-run</button>
+              <button id="btnBuildReal">Build</button>
+              <button class="ghost" id="btnRuns">Runs</button>
+              <input id="workflowName" type="hidden" />
+            </div>
+
+            <section class="recipe-draft-card recipe-source-card card" aria-label="Recipe GitHub source">
+              <div class="section-title recipe-draft-head">
+                <div>
+                  <span class="eyebrow">Step 1</span>
+                  <h2>GitHub source</h2>
+                  <span id="recipeTitle" class="hidden">Recipe</span>
+                </div>
+                <input id="recipeMetaActive" type="checkbox" checked hidden>
+              </div>
+              <div class="recipe-metadata" aria-label="Recipe metadata">
+                <input id="recipeMetaName" type="hidden">
+                <input id="recipeMetaPackage" type="hidden">
+                <label><span>GitHub project</span><input id="recipeMetaGithub" placeholder="owner/repository" pattern="[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"></label>
+                <label><span>Artifact workflow</span><select id="recipeArtifactMode"><option value="source_build">Build from source</option><option value="upstream_deb">Use upstream Debian package</option></select></label>
+                <label id="recipeArtifactPatternField" hidden><span>Release asset pattern</span><input id="recipeArtifactPattern" placeholder="*-linux-x64.deb"></label>
+                <label><span>Tracking</span><select id="recipeMetaTracking"><option value="latest_release">Latest release</option><option value="tag">Explicit tag</option><option value="manual">Manual ref</option></select></label>
+                <label id="recipeSourceRefField" hidden><span>GitHub ref</span><input id="recipeMetaSourceRef" placeholder="v1.2.3, main, or commit SHA"></label>
+                <label><span>Debian version</span><select id="recipeMetaVersionSource"><option value="tag">From GitHub tag</option><option value="release_name">From release name</option><option value="regex">Custom expression</option><option value="build">Provided by build</option></select></label>
+                <label id="recipeVersionExpressionField" hidden><span>Expression / regex</span><input id="recipeMetaVersionExpression"></label>
+              </div>
+              <datalist id="packageOptions"></datalist>
+            </section>
+
+            <section class="recipe-step-card recipe-build-card card" aria-label="Build step">
+              <div class="section-title recipe-draft-head">
+                <div>
+                  <span class="eyebrow">Step 2</span>
+                  <h2>Build</h2>
+                  <p>Prepares the source project before creating the Debian package.</p>
+                </div>
+                <span class="step-note">Recipe v1</span>
+              </div>
+              <div class="build-layout">
+                <section class="build-section"><div class="build-section-head"><div><h3>Build environment</h3><p>Automatically detected from the project files.</p></div><span class="detection-badge"><span></span> Detected</span></div><div class="build-detection-grid"><div class="build-detection-item"><span class="build-item-icon">⬡</span><div><small>Detected project</small><strong id="buildDetectedProject">Not detected</strong><span id="buildDetectedFiles">No source inspected yet</span></div></div><div class="build-detection-item"><span class="build-item-icon">⌘</span><div><small>Detected dependencies</small><strong id="buildDetectedDependencies">None</strong><span>Availability will be checked before build</span></div></div></div><div class="dependency-row"><div><small>Manually added</small><div class="dependency-chips" id="buildDependencyChips"></div></div><button type="button" class="ghost compact-button" id="btnAddBuildDependency">+ Add dependency</button></div><div class="build-dependency-state" id="buildDependencyState"><span><small>Available</small><strong id="buildAvailableDependencies">Not checked</strong></span><span><small>Missing</small><strong id="buildMissingDependencies">Not checked</strong></span></div></section>
+                <section class="build-section"><div class="build-section-head"><div><h3>Source changes</h3><p>Based on searched text content, never on line numbers.</p></div><button type="button" id="btnAddSourceChange">+ Add source change</button></div><div class="source-change-list" id="sourceChangeList"></div></section>
+                <section class="build-section"><div class="build-section-head"><div><h3>Build commands</h3><p>Commands suggested from the detected project.</p></div><button type="button" class="ghost compact-button" id="btnEditBuildCommands">Edit commands</button></div><pre class="build-command-preview" id="buildCommandPreview"><code>No build commands configured.</code></pre><label class="build-command-editor hidden" id="buildCommandEditor"><span>One command per line</span><textarea id="buildCommands" rows="3"></textarea><small>Commands are executed directly; shell operators are not supported.</small></label></section>
+                <details class="build-advanced"><summary>Advanced options</summary><div class="build-advanced-grid"><label><span>Working directory</span><input id="buildWorkingDirectory" value="."></label><label><span>Environment variables</span><textarea id="buildEnvironment" rows="2"></textarea></label><label><span>Expected output</span><input id="buildExpectedOutput"></label></div></details>
+              </div>
+            </section>
+
+            <section class="recipe-step-card recipe-install-card card" aria-label="Debian packaging and installation step">
+              <div class="section-title recipe-draft-head">
+                <div>
+                  <span class="eyebrow">Step 3</span>
+                  <h2>Debian installation</h2>
+                </div>
+                <span class="step-note">Recipe v1</span>
+              </div>
+              <div class="recipe-form-stack">
+                <div class="recipe-form-group install-general-group">
+                  <span class="recipe-group-title">General</span>
+                  <div class="recipe-step-fields recipe-step-fields-wide">
+                    <label class="span-2"><span>Architecture</span><select id="packageArchitecture"><option>amd64</option><option>all</option><option>arm64</option><option>armhf</option></select></label>
+                    <label class="span-2"><span>Section</span><input id="packageSection" value="misc"></label>
+                    <label class="span-2"><span>Priority</span><select id="packagePriority"><option>optional</option><option>required</option><option>important</option><option>standard</option><option>extra</option></select></label>
+                    <label class="span-6"><span>Maintainer</span><input id="packageMaintainer" placeholder="Name &lt;email@example.org&gt;"></label>
+                    <label class="span-12"><span>Runtime Depends</span><input id="packageRuntimeDependencies"></label>
+                    <label class="span-12"><span>Description</span><textarea id="packageDescription" rows="2"></textarea></label>
+                    <label class="span-4"><span>Install directory</span><input id="installDestination"></label>
+                    <label class="span-4"><span>Installed content</span><select id="installContentSource"><option value="build_output">Full build output</option><option value="source">Prepared source</option><option value="configured_files">Configured files only</option></select></label>
+                    <label class="span-2"><span>Dirs</span><select id="installDirectoryMode"><option>0755</option><option>0750</option><option>0700</option></select></label>
+                    <label class="span-2"><span>Files</span><select id="installFileMode"><option>0644</option><option>0640</option><option>0600</option></select></label>
+                    <label class="span-6"><span>User</span><input id="installOwnerUser"></label>
+                    <label class="span-6"><span>Group</span><input id="installOwnerGroup"></label>
+                    <label class="span-6"><span>Create application user</span><input id="installCreateUser" type="checkbox"></label>
+                    <label class="span-6"><span>Create application group</span><input id="installCreateGroup" type="checkbox"></label>
+                  </div>
+                </div>
+                <div class="recipe-form-group install-config-group">
+                  <span class="recipe-group-title">Configuration</span>
+                  <div class="recipe-step-fields recipe-step-fields-wide">
+                    <label class="span-8"><span>Configuration files</span><textarea id="installConfigFiles" rows="3"></textarea></label>
+                    <label class="span-4"><span>Configuration rule</span><select id="installConfigPolicy"><option value="dpkg_conffile">Preserve if existing</option><option value="replace">Replace on every install</option><option value="create_if_missing">Create only if missing</option></select></label>
+                  </div>
+                </div>
+                <div class="recipe-form-group install-scripts-group">
+                  <span class="recipe-group-title">Maintainer scripts</span>
+                  <div class="maintainer-script-grid" aria-label="Debian maintainer scripts">
+                    <label><span>preinst</span><textarea id="maintainerPreinst" rows="3"></textarea></label>
+                    <label><span>postinst</span><textarea id="maintainerPostinst" rows="3"></textarea></label>
+                    <label><span>prerm</span><textarea id="maintainerPrerm" rows="3"></textarea></label>
+                    <label><span>postrm</span><textarea id="maintainerPostrm" rows="3"></textarea></label>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section class="recipe-step-card recipe-service-card card" aria-label="systemd service step">
+              <div class="section-title recipe-draft-head">
+                <div>
+                  <span class="eyebrow">Step 4</span>
+                  <h2>Service</h2>
+                  <p>Optional configuration when the application should run after installation.</p>
+                </div>
+                <span class="step-note">systemd</span>
+              </div>
+              <div class="service-primary-groups">
+                <div class="recipe-form-group service-general-group"><span class="recipe-group-title">General service settings</span><div class="recipe-step-fields recipe-step-fields-wide">
+                  <label class="span-2"><span>Configured</span><input id="serviceConfigured" type="checkbox"></label>
+                  <label class="span-2"><span>Enabled</span><input id="serviceEnabled" type="checkbox"></label>
+                  <label class="span-2"><span>Type</span><select id="serviceType"><option>simple</option><option>exec</option><option>forking</option><option>oneshot</option><option>notify</option><option>dbus</option></select></label>
+                  <label class="span-3"><span>Service name</span><input id="serviceName"></label>
+                  <label class="span-2"><span>User</span><input id="serviceUser"></label>
+                  <label class="span-2"><span>Group</span><input id="serviceGroup"></label>
+                  <label class="span-3"><span>Restart</span><select id="serviceRestart"><option>on-failure</option><option>always</option><option>no</option><option>on-abnormal</option><option>on-watchdog</option><option>on-abort</option></select></label>
+                </div></div>
+                <div class="recipe-form-group service-command-group"><span class="recipe-group-title">Command</span><div class="recipe-step-fields recipe-step-fields-wide">
+                  <label class="span-12"><span>Command</span><textarea id="serviceCommand" rows="2"></textarea></label>
+                </div></div>
+              </div>
+              <details class="systemd-advanced">
+                <summary>Advanced options</summary>
+                <div class="systemd-advanced-groups">
+                  <div class="recipe-form-group">
+                    <span class="recipe-group-title">Environment</span>
+                    <div class="recipe-step-fields recipe-step-fields-wide">
+                      <label class="span-5"><span>EnvironmentFile</span><input id="serviceEnvironmentFiles"></label>
+                      <label class="span-7"><span>Environment</span><textarea id="serviceEnvironment" rows="2"></textarea></label>
+                    </div>
+                  </div>
+                  <div class="recipe-form-group">
+                    <span class="recipe-group-title">Dependencies</span>
+                    <div class="recipe-step-fields recipe-step-fields-wide">
+                      <label class="span-4"><span>After</span><input id="serviceAfter"></label>
+                      <label class="span-4"><span>Wants</span><input id="serviceWants"></label>
+                      <label class="span-4"><span>Requires</span><input id="serviceRequires" value=""></label>
+                    </div>
+                  </div>
+                  <div class="recipe-form-group">
+                    <span class="recipe-group-title">Lifecycle and timers</span>
+                    <div class="recipe-step-fields recipe-step-fields-wide">
+                      <label class="span-3"><span>RestartSec</span><input id="serviceRestartSec"></label>
+                      <label class="span-3"><span>TimeoutStartSec</span><input id="serviceTimeoutStartSec"></label>
+                      <label class="span-3"><span>TimeoutStopSec</span><input id="serviceTimeoutStopSec"></label>
+                      <label class="span-3"><span>KillSignal</span><select id="serviceKillSignal"><option value="">Not set</option><option>SIGTERM</option><option>SIGINT</option><option>SIGKILL</option><option>SIGHUP</option></select></label>
+                    </div>
+                  </div>
+                  <div class="recipe-form-group">
+                    <span class="recipe-group-title">Commands</span>
+                    <div class="recipe-step-fields recipe-step-fields-wide">
+                      <label class="span-4"><span>ExecStartPre</span><textarea id="serviceExecStartPre" rows="2"></textarea></label>
+                      <label class="span-4"><span>ExecStartPost</span><textarea id="serviceExecStartPost" rows="2"></textarea></label>
+                      <label class="span-4"><span>ExecStop</span><textarea id="serviceExecStop" rows="2"></textarea></label>
+                    </div>
+                  </div>
+                  <div class="recipe-form-group">
+                    <span class="recipe-group-title">Output</span>
+                    <div class="recipe-step-fields recipe-step-fields-wide">
+                      <label class="span-6"><span>StandardOutput</span><select id="serviceStandardOutput"><option value="">Not set</option><option>journal</option><option>inherit</option><option>null</option><option>append:/var/log/debbuilder.log</option></select></label>
+                      <label class="span-6"><span>StandardError</span><select id="serviceStandardError"><option value="">Not set</option><option>journal</option><option>inherit</option><option>null</option><option>append:/var/log/debbuilder.err</option></select></label>
+                    </div>
+                  </div>
+                </div>
+              </details>
+            </section>
+
+          </section>
+        </div>
+      </section>
+
+      <section class="view" id="view-logs">
+        <div class="page-head"><h2>Logs</h2><p>Executions linked to packages when available.</p></div>
+        <div class="filters"><input id="logSearch" placeholder="Search logs…" /><select id="logStatus"><option value="all">All statuses</option><option value="success">Success</option><option value="running">Running</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option></select></div>
+        <div class="logs-layout"><section class="card logs-list-card"><h3>Executions</h3><div id="executionList" class="list compact-list">Loading…</div></section><section class="card logs-detail-card"><div class="log-detail-head"><h3>Execution detail</h3><button id="btnCloseLogDetail" class="mobile-only">Close</button></div><div id="executionMeta" class="execution-meta muted">Select an execution.</div><div id="executionSteps" class="steps"></div><pre id="executionDetail" class="logbox">No log selected.</pre></section></div>
+      </section>
+
+      <section class="view" id="view-settings">
+        <div class="page-head"><h2>Editable settings</h2><p>Active APT repository configuration, stored locally outside Git.</p></div>
+        <div id="settingsPanel" class="settings-grid">Loading…</div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="newRecipeDialog" class="recipe-dialog">
+    <form id="newRecipeForm" method="dialog">
+      <header><h3>New recipe</h3><p>Choose an existing package; the recipe will be attached to it.</p></header>
+      <input id="newRecipeName" type="hidden">
+      <label><span>Debian package</span><select id="newRecipePackage" required></select><small>Create the package on the Packages page first if needed.</small></label>
+      <label><span>GitHub project</span><input id="newRecipeGithub" placeholder="owner/repository" required pattern="[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"></label>
+      <label><span>Tracking</span><select id="newRecipeTracking"><option value="latest_release">Latest release</option><option value="tag">Explicit tag</option><option value="manual">Manual ref</option></select></label>
+      <label id="newRecipeSourceRefField" hidden><span>GitHub ref</span><input id="newRecipeSourceRef" placeholder="v1.2.3, main, or commit SHA"></label>
+      <label><span>Debian version</span><select id="newRecipeVersionSource"><option value="tag">From GitHub tag</option><option value="release_name">From release name</option><option value="regex">Custom expression</option><option value="build">Provided by build</option></select></label>
+      <label id="newRecipeVersionExpressionField" hidden><span>Expression / regex</span><input id="newRecipeVersionExpression"></label>
+      <div class="actions"><button type="button" id="cancelNewRecipe">Cancel</button><button type="submit" class="btn-primary">Create recipe</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="sourceChangeDialog" class="recipe-dialog source-change-dialog">
+    <form method="dialog" id="sourceChangeForm">
+      <header class="source-change-dialog-head"><div><span class="eyebrow">Source change</span><h3>Add source change</h3><p>Choose an action based on the file contents.</p></div><button type="button" class="ghost dialog-close" id="btnCloseSourceChange" aria-label="Close">×</button></header>
+      <fieldset class="change-type-picker"><legend>Action type</legend><button type="button" class="change-choice active" data-change-type="replace"><strong>Replace</strong><span>Replace exact text or a block</span></button><button type="button" class="change-choice" data-change-type="before"><strong>Add before</strong><span>Insert before matching text</span></button><button type="button" class="change-choice" data-change-type="after"><strong>Add after</strong><span>Insert after matching text</span></button><button type="button" class="change-choice" data-change-type="remove"><strong>Remove</strong><span>Remove exact text or a block</span></button><button type="button" class="change-choice" data-change-type="create"><strong>Create file</strong><span>Set its path and contents</span></button><button type="button" class="change-choice" data-change-type="delete-file"><strong>Delete file</strong><span>Choose the file to delete</span></button></fieldset>
+      <div id="sourceChangeFields" class="source-change-fields"></div>
+      <div class="actions"><button type="button" class="ghost" id="btnCancelSourceChange">Cancel</button><button type="button" class="btn-primary" id="btnConfirmSourceChange">Add to list</button></div>
+    </form>
+  </dialog>
+
+
+  <script src="/ui_core.js?v=20260902-1"></script>
+  <script src="/settings.js?v=20260901-10"></script>
+  <script src="/recipe_serialization.js?v=20260902-2"></script>
+  <script src="/app.js?v=20260902-1"></script>
+  <script src="/admin.js?v=20260902-5"></script>
+</body>
+</html>

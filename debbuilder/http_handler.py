@@ -1,0 +1,310 @@
+"""HTTP routing for the DebBuilder application.
+
+The handler is built from the application module so routes stay thin and all
+business operations remain independently testable.  Keeping the module as a
+dependency object also preserves the historical ``debbuilder.app`` facade.
+"""
+from __future__ import annotations
+
+import json
+import sys
+import time
+import urllib.parse
+from http.server import BaseHTTPRequestHandler
+from urllib.parse import urlparse
+
+from . import __version__
+
+
+def create_handler(api):
+    """Return a request handler bound to the public application facade."""
+
+    class Handler(BaseHTTPRequestHandler):
+        server_version = f"debbuilder/{__version__}"
+
+        def log_message(self, fmt, *args):
+            sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+
+        def _authorized(self) -> bool:
+            if api.is_request_authorized(self.headers):
+                return True
+            if api.effective_security()["auth_mode"] == "oidc" and self.command == "GET" and not self.path.startswith("/api/"):
+                try:
+                    url, _state = api.oidc_authorize_url(self.path or "/")
+                except Exception as exc:
+                    api.text_response(self, str(exc), 500)
+                    return False
+                self.send_response(302)
+                self.send_header("Location", url)
+                self.end_headers()
+                return False
+            api.json_response(self, {"error": "unauthorized"}, 401)
+            return False
+
+        def do_HEAD(self):
+            if api.is_public_repo_path(urlparse(self.path).path):
+                self.send_response(404)
+                self.end_headers()
+                return
+            if self._authorized():
+                self.send_response(200)
+                self.end_headers()
+
+        def do_GET(self):
+            parsed = urlparse(self.path)
+            if api.is_public_repo_path(parsed.path):
+                api.text_response(self, "not found", 404)
+                return
+            if parsed.path in {"/auth/callback", "/auth/pocketid/callback"}:
+                self._oidc_callback(parsed)
+                return
+            if parsed.path in {"/logout", "/auth/logout"}:
+                self._logout()
+                return
+            if not self._authorized():
+                return
+            if self._get_api(parsed):
+                return
+            self._serve_static(parsed.path)
+
+        def _oidc_callback(self, parsed):
+            query = urllib.parse.parse_qs(parsed.query)
+            code = (query.get("code") or [""])[0]
+            state = (query.get("state") or [""])[0]
+            pending = api.SESSIONS.pop(f"state:{state}", None)
+            if not code or not pending or pending.get("expires", 0) < time.time():
+                api.text_response(self, "Invalid or expired OIDC callback", 400)
+                return
+            try:
+                cookie = api.create_session(api.exchange_oidc_code(code, pending.get("nonce", ""), pending.get("code_verifier", "")))
+            except Exception as exc:
+                api.text_response(self, f"OIDC login failed: {exc}", 500)
+                return
+            self.send_response(302)
+            self.send_header("Set-Cookie", f"debbuilder_session={urllib.parse.quote(cookie)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=86400")
+            self.send_header("Location", pending.get("return_to") or "/")
+            self.end_headers()
+
+        def _logout(self):
+            cookies = api.parse_cookies(api._header_value(self.headers, "Cookie"))
+            session_id = api.unsign_value(cookies.get("debbuilder_session", ""))
+            if session_id:
+                api.SESSIONS.pop(session_id, None)
+            self.send_response(302)
+            self.send_header("Set-Cookie", "debbuilder_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0")
+            self.send_header("Location", "/")
+            self.end_headers()
+
+        def _get_api(self, parsed) -> bool:
+            path = parsed.path
+            if path == "/api/status":
+                apt = api.repo_settings()
+                security, build = api.effective_security(), api.effective_build()
+                api.json_response(self, {"ok": True, "repo_default": apt["repository"], "suite_default": apt["distribution"], "component_default": apt["component"], "arch_default": apt["architecture"], "notification_type": api.app_settings()["notifications"].get("type", "none"), "dry_run_only": not build["allow_real_run"], "auth_mode": security["auth_mode"], "workflow_dirs": {"examples": str(api.EXAMPLES), "user": str(api.USER_WORKFLOWS)}})
+            elif path == "/api/auth/status":
+                api.json_response(self, {"ok": True, "auth_mode": api.effective_security()["auth_mode"], "user": self.headers.get(api.AUTH_HEADER, "") or api.oidc_session_user(self.headers)})
+            elif path == "/api/dashboard":
+                api.json_response(self, {"dashboard": api.dashboard_summary()})
+            elif path == "/api/packages":
+                api.json_response(self, {"packages": api.list_packages()})
+            elif path.startswith("/api/packages/"):
+                self._get_package(path)
+            elif path == "/api/recipes":
+                api.json_response(self, {"recipes": api.list_recipes()})
+            elif path == "/api/executions":
+                api.json_response(self, {"executions": api.list_executions()})
+            elif path.startswith("/api/executions/"):
+                self._get_execution(path)
+            elif path == "/api/settings":
+                api.json_response(self, {"settings": api.settings_view()})
+            elif path == "/api/workflows":
+                api.json_response(self, {"workflows": api.list_workflows()})
+            elif path == "/api/runs":
+                api.json_response(self, {"runs": api.list_runs()})
+            elif path.startswith("/api/workflows/"):
+                self._get_workflow(path)
+            else:
+                return False
+            return True
+
+        def _get_package(self, path: str):
+            name = urllib.parse.unquote(path.rsplit("/", 1)[-1])
+            try:
+                package = api.get_package(name)
+            except ValueError as exc:
+                api.json_response(self, {"error": str(exc)}, 400)
+                return
+            api.json_response(self, {"package": package} if package else {"error": "not found"}, 200 if package else 404)
+
+        def _get_execution(self, path: str):
+            run_id = urllib.parse.unquote(path.rsplit("/", 1)[-1])
+            try:
+                execution = api.get_execution(run_id)
+            except ValueError as exc:
+                api.json_response(self, {"error": str(exc)}, 400)
+                return
+            api.json_response(self, {"execution": execution} if execution else {"error": "not found"}, 200 if execution else 404)
+
+        def _get_workflow(self, path: str):
+            workflow_id = path.rsplit("/", 1)[-1]
+            try:
+                workflow_file = api.workflow_path(workflow_id)
+            except ValueError as exc:
+                api.json_response(self, {"error": str(exc)}, 400)
+                return
+            if not workflow_file:
+                api.json_response(self, {"error": "not found"}, 404)
+                return
+            api.json_response(self, api.read_workflow_file(workflow_file))
+
+        def _serve_static(self, path: str):
+            path = "/index.html" if path == "/" else path
+            static_file = (api.STATIC / path.lstrip("/")).resolve()
+            if not str(static_file).startswith(str(api.STATIC.resolve())) or not static_file.exists():
+                api.text_response(self, "not found", 404)
+                return
+            content_type = "text/html; charset=utf-8" if static_file.suffix == ".html" else "application/javascript; charset=utf-8" if static_file.suffix == ".js" else "text/css; charset=utf-8"
+            api.text_response(self, static_file.read_text(), 200, content_type, "no-cache, must-revalidate")
+
+        def do_POST(self):
+            if not self._authorized():
+                return
+            try:
+                data = api.read_body(self)
+                self._post(data)
+            except Exception as exc:
+                api.json_response(self, {"error": str(exc)}, 400)
+
+        def _post(self, data: dict):
+            if self.path == "/api/generate":
+                workflow = data.get("workflow", data)
+                api.json_response(self, {"script": api.generate_script(workflow, dry_run=True), "summary": api.summarize(workflow)})
+                return
+            if self.path == "/api/run":
+                workflow = data.get("workflow", data)
+                if workflow.get("active") is False:
+                    api.json_response(self, {"error": "recipe is disabled"}, 409)
+                    return
+                dry_run = bool(data.get("dry_run", True))
+                if not dry_run and not api.effective_build()["allow_real_run"]:
+                    api.json_response(self, {"error": "real runs are disabled in System & Security settings"}, 403)
+                    return
+                api.json_response(self, api.run_recipe_pipeline(workflow, dry_run=dry_run))
+                return
+            if self.path.startswith("/api/executions/") and self.path.endswith("/validate"):
+                run_id = urllib.parse.unquote(self.path[len("/api/executions/"):-len("/validate")].strip("/"))
+                try:
+                    result = api.validate_build_artifact(run_id, data)
+                except api.artifact_validation.ValidationError as exc:
+                    api.json_response(self, {"error": {"code": exc.code, "message": str(exc), "details": exc.details}}, 400)
+                    return
+                api.json_response(self, {"validation": result}, 200 if result["status"] == "success" else 422)
+                return
+            if self.path.startswith("/api/executions/") and self.path.endswith("/publish"):
+                run_id = urllib.parse.unquote(self.path[len("/api/executions/"):-len("/publish")].strip("/"))
+                try:
+                    result = api.publish_build_artifact(run_id, data)
+                except api.artifact_publication.PublicationError as exc:
+                    api.json_response(self, {"error": {"code": exc.code, "message": str(exc), "details": exc.details}}, 400)
+                    return
+                api.json_response(self, {"publication": result}, 200 if result["status"] == "success" else 422)
+                return
+            if self.path.startswith("/api/executions/") and self.path.endswith("/reconcile-publication"):
+                run_id = urllib.parse.unquote(self.path[len("/api/executions/"):-len("/reconcile-publication")].strip("/"))
+                result = api.reconcile_build_publication(run_id, data)
+                api.json_response(self, {"publication": result}, 200 if result["status"] == "success" else 422)
+                return
+            if self.path == "/api/settings":
+                api.json_response(self, {"ok": True, "settings": api.update_settings(data)})
+                return
+            if self.path == "/api/packages":
+                api.json_response(self, {"ok": True, "package": api.create_or_update_package(data)})
+                return
+            for suffix in ("refresh-source", "check-updates", "verify-deb", "publish"):
+                marker = f"/{suffix}"
+                if self.path.startswith("/api/packages/") and self.path.endswith(marker):
+                    self._post_package_lifecycle(suffix, marker, data)
+                    return
+            if self.path.startswith("/api/packages/"):
+                name = urllib.parse.unquote(self.path.rsplit("/", 1)[-1])
+                try:
+                    package = api.create_or_update_package(data, name=name)
+                except KeyError:
+                    api.json_response(self, {"error": "not found"}, 404)
+                    return
+                api.json_response(self, {"ok": True, "package": package})
+                return
+            if self.path.startswith("/api/workflows/"):
+                self._save_workflow(data)
+                return
+            api.json_response(self, {"error": "not found"}, 404)
+
+        def _post_package_lifecycle(self, suffix: str, marker: str, data: dict):
+            name = urllib.parse.unquote(self.path[len("/api/packages/"):-len(marker)].rstrip("/"))
+            try:
+                result = api.package_lifecycle_operation(name, suffix, data)
+            except KeyError:
+                api.json_response(self, {"error": "not found"}, 404)
+                return
+            except PermissionError as exc:
+                api.json_response(self, {"error": str(exc)}, 403)
+                return
+            api.json_response(self, result)
+
+        def _save_workflow(self, data: dict):
+            workflow_id = api.sanitize_id(self.path.rsplit("/", 1)[-1])
+            workflow = data.get("workflow", data)
+            workflow["name"] = workflow.get("name") or workflow_id
+            normalized = api.validate_recipe_metadata(workflow)
+            stored = api.recipe_for_storage(normalized)
+            destination = api.workflow_path(workflow_id, for_write=True)
+            assert destination is not None
+            api.storage.save_json(destination, stored)
+            previous_id = str(data.get("previous_id") or "")
+            if previous_id and previous_id != workflow_id:
+                previous = api.workflow_path(previous_id)
+                if previous and previous.parent == api.USER_WORKFLOWS.resolve():
+                    previous.unlink()
+            api.associate_workflow_package(workflow_id, normalized, previous_id)
+            api.json_response(self, {"ok": True, "id": workflow_id, "path": str(destination)})
+
+        def do_DELETE(self):
+            if not self._authorized():
+                return
+            parsed = urlparse(self.path)
+            try:
+                if parsed.path.startswith("/api/workflows/"):
+                    self._delete_workflow(parsed.path)
+                    return
+                if parsed.path.startswith("/api/packages/"):
+                    self._delete_package(parsed)
+                    return
+                api.json_response(self, {"error": "not found"}, 404)
+            except Exception as exc:
+                api.json_response(self, {"error": str(exc)}, 400)
+
+        def _delete_workflow(self, path: str):
+            workflow_id = urllib.parse.unquote(path.rsplit("/", 1)[-1])
+            try:
+                api.delete_workflow(workflow_id)
+            except FileNotFoundError:
+                api.json_response(self, {"error": "recipe not found"}, 404)
+                return
+            except PermissionError as exc:
+                api.json_response(self, {"error": str(exc)}, 403)
+                return
+            api.json_response(self, {"ok": True, "id": workflow_id, "deleted_from_repository": False})
+
+        def _delete_package(self, parsed):
+            name = urllib.parse.unquote(parsed.path.rsplit("/", 1)[-1])
+            query = urllib.parse.parse_qs(parsed.query)
+            delete_repo = (query.get("delete_repo") or [""])[0] in {"1", "true", "yes"}
+            confirm = (query.get("confirm") or [""])[0]
+            try:
+                api.delete_package(name, delete_repo=delete_repo, confirm=confirm)
+            except PermissionError as exc:
+                api.json_response(self, {"error": str(exc)}, 403)
+                return
+            api.json_response(self, {"ok": True, "id": name, "deleted_from_repo": False})
+
+    return Handler

@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "name": "ssh-notify",
+  "active": true,
+  "package": {
+    "name": "ssh-notify",
+    "version_revision": "1",
+    "architecture": "all",
+    "section": "admin",
+    "priority": "optional",
+    "maintainer": "ProBatou <probatou@users.noreply.github.com>",
+    "description": "Send an HTTP notification when a shell session is opened",
+    "runtime_dependencies": [
+      "curl"
+    ]
+  },
+  "source": {
+    "provider": "github",
+    "repository": "ProBatou/ssh-notify",
+    "tracking": "latest_release",
+    "ref": "",
+    "version": {
+      "source": "tag",
+      "expression": ""
+    }
+  },
+  "artifact": {
+    "mode": "source_build",
+    "type": "deb",
+    "architecture": "all",
+    "name_pattern": "",
+    "match_package": true,
+    "match_version": true
+  },
+  "build": {
+    "detected_project": "static",
+    "detected_files": [
+      "ssh-notify.conf.template",
+      "ssh-notify.sh"
+    ],
+    "detected_dependencies": [],
+    "extra_dependencies": [],
+    "source_changes": [],
+    "commands": [],
+    "timeout": 120,
+    "environment": {},
+    "working_directory": ".",
+    "output": {
+      "mode": "source",
+      "path": ""
+    }
+  },
+  "install": {
+    "destination": "",
+    "content": {
+      "source": "configured_files",
+      "path": ""
+    },
+    "owner": {
+      "user": "root",
+      "group": "root",
+      "create_user": false,
+      "create_group": false
+    },
+    "directory_mode": "0755",
+    "file_mode": "0644",
+    "config_files": [
+      {
+        "source": "ssh-notify.sh",
+        "destination": "/etc/profile.d/ssh-notify.sh"
+      },
+      {
+        "source": "ssh-notify.conf.template",
+        "destination": "/etc/ssh-notify.conf"
+      }
+    ],
+    "config_policy": "dpkg_conffile",
+    "maintainer_scripts": {
+      "preinst": "",
+      "postinst": "",
+      "prerm": "",
+      "postrm": ""
+    }
+  },
+  "service": {
+    "configured": false,
+    "enabled": false,
+    "name": "",
+    "description": "",
+    "type": "",
+    "user": "",
+    "group": "",
+    "restart": "",
+    "command": "",
+    "environment_files": [],
+    "environment": {},
+    "after": [],
+    "wants": [],
+    "requires": [],
+    "restart_sec": "",
+    "timeout_start_sec": "",
+    "timeout_stop_sec": "",
+    "kill_signal": "",
+    "exec_start_pre": [],
+    "exec_start_post": [],
+    "exec_stop": [],
+    "standard_output": "",
+    "standard_error": "",
+    "working_directory": ""
+  },
+  "steps": []
+}

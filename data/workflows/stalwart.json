@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "name": "stalwart",
+  "active": true,
+  "package": {
+    "name": "stalwart",
+    "version_revision": "1",
+    "architecture": "amd64",
+    "section": "mail",
+    "priority": "optional",
+    "maintainer": "Lafouffe <root@lafouffe.fr>",
+    "description": "stalwart",
+    "runtime_dependencies": []
+  },
+  "source": {
+    "provider": "github",
+    "repository": "stalwartlabs/stalwart",
+    "tracking": "latest_release",
+    "ref": "",
+    "version": {
+      "source": "tag",
+      "expression": ""
+    }
+  },
+  "artifact": {
+    "mode": "source_build",
+    "type": "deb",
+    "architecture": "amd64",
+    "name_pattern": "",
+    "match_package": true,
+    "match_version": true
+  },
+  "build": {
+    "detected_project": null,
+    "detected_files": [],
+    "detected_dependencies": [],
+    "extra_dependencies": [],
+    "source_changes": [
+      {
+        "operation": "replace",
+        "path": "crates/common/src/enterprise/license.rs",
+        "search": "//const LICENSING_API: &str = \"https://localhost:444/api/license/\";",
+        "content": "const LICENSING_API: &str = \"https://localhost:444/api/license/\";"
+      },
+      {
+        "operation": "replace",
+        "path": "crates/common/src/enterprise/license.rs",
+        "search": "const LICENSING_API: &str = \"https://license.stalw.art/api/license/\";",
+        "content": "//const LICENSING_API: &str = \"https://license.stalw.art/api/license/\";"
+      },
+      {
+        "operation": "replace",
+        "path": "crates/common/src/enterprise/license.rs",
+        "search": "        // Validate signature\n        self.public_key\n            .verify(\n                &key[..(U64_LEN * 2) + (U32_LEN * 2) + domain_len],\n                signature,\n            )\n            .map_err(|_| LicenseError::Validation)?;",
+        "content": "        // Validate signature\n        let _ = signature;"
+      }
+    ],
+    "commands": [
+      "cargo build --release"
+    ],
+    "timeout": 120,
+    "environment": {},
+    "working_directory": ".",
+    "output": {
+      "mode": "path",
+      "path": "dist"
+    }
+  },
+  "install": {
+    "destination": "",
+    "content": {
+      "source": "configured_files",
+      "path": ""
+    },
+    "owner": {
+      "user": "stalwart",
+      "group": "stalwart",
+      "create_user": false,
+      "create_group": false
+    },
+    "directory_mode": "0755",
+    "file_mode": "0644",
+    "config_files": [
+      {
+        "source": "target/release",
+        "destination": "/usr/local/bin"
+      }
+    ],
+    "config_policy": "replace",
+    "maintainer_scripts": {
+      "preinst": "",
+      "postinst": "",
+      "prerm": "",
+      "postrm": ""
+    }
+  },
+  "service": {
+    "configured": false,
+    "enabled": false,
+    "name": "",
+    "description": "",
+    "type": "",
+    "user": "",
+    "group": "",
+    "restart": "",
+    "command": "",
+    "environment_files": [],
+    "environment": {},
+    "after": [],
+    "wants": [],
+    "requires": [],
+    "restart_sec": "",
+    "timeout_start_sec": "",
+    "timeout_stop_sec": "",
+    "kill_signal": "",
+    "exec_start_pre": [],
+    "exec_start_post": [],
+    "exec_stop": [],
+    "standard_output": "",
+    "standard_error": "",
+    "working_directory": ""
+  },
+  "steps": []
+}

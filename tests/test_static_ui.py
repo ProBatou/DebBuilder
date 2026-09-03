@@ -1,4 +1,6 @@
+import json
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -6,6 +8,43 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class StaticUiTests(unittest.TestCase):
+    def test_execution_lifecycle_actions_cover_all_run_states(self):
+        core = self.read("static/ui_core.js")
+        scenarios = [
+            {"name": "validation_needed", "run": {"mode": "build", "status": "success", "artifact": {"path": "demo.deb"}}},
+            {"name": "validation_running", "pending": "validation", "run": {"mode": "build", "status": "success", "artifact": {"path": "demo.deb"}}},
+            {"name": "ready_to_publish", "run": {"mode": "build", "status": "success", "artifact": {"path": "demo.deb"}, "validations": [{"status": "success"}]}},
+            {"name": "validation_failed", "run": {"mode": "build", "status": "success", "artifact": {"path": "demo.deb"}, "validations": [{"status": "failed"}]}},
+            {"name": "published", "run": {"mode": "build", "status": "success", "artifact": {"path": "demo.deb"}, "validations": [{"status": "success"}], "publications": [{"status": "success"}]}},
+            {"name": "build_failed", "run": {"mode": "build", "status": "failed", "artifact": {"path": "demo.deb"}}},
+            {"name": "dry_run", "run": {"mode": "dry_run", "status": "prepared", "artifact": {}}},
+        ]
+        script = "global.window={};\n" + core + "\nconst scenarios=" + json.dumps(scenarios) + "; process.stdout.write(JSON.stringify(Object.fromEntries(scenarios.map(row=>[row.name,executionLifecycleModel(row.run,row.pending||'')]))));"
+        models = json.loads(subprocess.run(["node", "-e", script], check=True, text=True, capture_output=True).stdout)
+        self.assertTrue(models["validation_needed"]["canValidate"])
+        self.assertFalse(models["validation_needed"]["canPublish"])
+        self.assertEqual(models["validation_running"]["validationStatus"], "running")
+        self.assertTrue(models["validation_running"]["validationDisabled"])
+        self.assertTrue(models["ready_to_publish"]["canPublish"])
+        self.assertEqual(models["validation_failed"]["validationStatus"], "failed")
+        self.assertTrue(models["validation_failed"]["canValidate"])
+        self.assertFalse(models["published"]["canValidate"])
+        self.assertFalse(models["published"]["canPublish"])
+        self.assertFalse(models["build_failed"]["canValidate"])
+        self.assertFalse(models["dry_run"]["canValidate"])
+        self.assertFalse(models["dry_run"]["canPublish"])
+
+    def test_execution_detail_exposes_existing_validation_and_publication_endpoints(self):
+        html = self.read("static/index.html")
+        admin = self.read("static/admin.js")
+        self.assertIn('id="executionLifecycle"', html)
+        self.assertIn('data-execution-action="validate"', admin)
+        self.assertIn('data-execution-action="publish"', admin)
+        self.assertIn("/validate`,{}", admin)
+        self.assertIn("/publish`,{confirm:confirmation}", admin)
+        self.assertIn("confirmation=`publish:${packageName}:${packageVersion}`", admin)
+        self.assertIn("model.validationStatus==='failed'?lifecycleFailureDetails", admin)
+
     def test_recipe_serialization_preserves_advanced_pipeline_fields(self):
         script = (ROOT / "static/recipe_serialization.js").read_text()
         self.assertIn("output: collectBuildOutput()", script)
@@ -257,10 +296,13 @@ class StaticUiTests(unittest.TestCase):
             "update_available": "Update available",
             "build_required": "Build needed",
             "build_success": "Validation needed",
+            "validation_needed": "Validation needed",
             "publication_available": "Ready to publish",
             "published": "Published",
             "build_failed": "Build failed",
+            "validating": "Validating",
             "validation_failed": "Validation failed",
+            "publishing": "Publishing",
             "publication_failed": "Publication failed",
         }
         for state, label in expected.items():
@@ -269,6 +311,18 @@ class StaticUiTests(unittest.TestCase):
         self.assertIn("STATUS_LABELS[value]", admin)
         self.assertIn("function dashboardLifecycleState(p){\n  return lifecycleState(p);\n}", admin)
         self.assertNotIn("Success / Published", labels)
+
+    def test_dashboard_packages_and_details_use_canonical_lifecycle_status(self):
+        admin = self.read("static/admin.js")
+        self.assertIn("badge(e.lifecycle_status||e.status)", admin)
+        self.assertIn("function lifecycleState(p){ return p.lifecycle_display_status", admin)
+        self.assertIn("Current lifecycle", admin)
+        self.assertIn("Latest built version", admin)
+        self.assertIn("Latest run status", admin)
+        self.assertIn("remains published", admin)
+        self.assertIn("state==='validation_needed'||state==='validation_failed'", admin)
+        self.assertIn("state==='ready_to_publish'||state==='publication_failed'", admin)
+        self.assertIn("async function validatePackage", admin)
 
     def test_build_audit_displays_effective_command_and_working_directory(self):
         app = (ROOT / "static" / "app.js").read_text()

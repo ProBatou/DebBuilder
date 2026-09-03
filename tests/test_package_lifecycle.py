@@ -121,12 +121,44 @@ class DebInspectorTests(unittest.TestCase):
 
 class PackageStoreTests(unittest.TestCase):
     def test_lifecycle_display_statuses(self):
-        status = package_store.lifecycle_display_status
-        self.assertEqual(status("success"), "build_success")
+        status = package_store.derive_lifecycle_status
+        self.assertEqual(status("success"), "validation_needed")
+        self.assertEqual(status("success", "running"), "validating")
+        self.assertEqual(status("success", "failed"), "validation_failed")
         self.assertEqual(status("success", "success"), "ready_to_publish")
+        self.assertEqual(status("success", "success", "running"), "publishing")
         self.assertEqual(status("success", "success", "failed"), "publication_failed")
         self.assertEqual(status("success", "success", "success"), "published")
         self.assertEqual(status("failed"), "build_failed")
+
+    def test_run_summary_never_borrows_lifecycle_events_from_an_older_run(self):
+        def summary(run):
+            validation = (run.get("validations") or [{}])[-1].get("status", "not_run")
+            publication = (run.get("publications") or [{}])[-1].get("status", "not_run")
+            return {
+                "id": run["id"], "status": run["status"], "updated": run.get("updated", 0),
+                "lifecycle_status": package_store.derive_lifecycle_status(run["status"], validation, publication),
+            }
+
+        runs = [
+            {"id": "new", "mode": "build", "status": "success", "artifact": {"path": "new.deb"}, "validations": [], "publications": []},
+            {"id": "old", "mode": "build", "status": "success", "artifact": {"path": "old.deb"}, "validations": [{"status": "success"}], "publications": [{"status": "success"}]},
+        ]
+        state = package_store.summarize_runs(runs, summary)
+        self.assertEqual(state["last_real"]["lifecycle_status"], "validation_needed")
+        self.assertEqual(state["successful"]["id"], "new")
+        self.assertIsNone(state["latest_validation"])
+        self.assertIsNone(state["latest_publication"])
+
+    def test_failed_dry_run_does_not_replace_latest_real_run(self):
+        summary = lambda run: {"id": run["id"], "status": run["status"]}
+        state = package_store.summarize_runs([
+            {"id": "dry", "mode": "dry_run", "status": "failed"},
+            {"id": "real", "mode": "build", "status": "success", "artifact": {"path": "app.deb"}},
+        ], summary)
+        self.assertEqual(state["last_real"]["id"], "real")
+        self.assertEqual(state["last_dry_run"]["id"], "dry")
+
     def test_enrich_package_preserves_existing_fields_and_adds_lifecycle_sections(self):
         pkg = {"name": "code-server", "apt_version": "4.133.0", "architecture": "amd64", "recipe": "code-server-recipe", "source": {"type": "github", "repository": "coder/code-server"}}
         enriched = package_store.enrich_package(pkg, published_version="4.134.0", source_version="4.134.0")

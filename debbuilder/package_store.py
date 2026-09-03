@@ -14,20 +14,32 @@ def _event_epoch(value, fallback):
         return fallback
 
 
-def lifecycle_display_status(build_status: str, validation_status: str = "not_run", publication_status: str = "not_run") -> str:
+def derive_lifecycle_status(build_status: str, validation_status: str = "not_run", publication_status: str = "not_run") -> str:
+    """Return the canonical user-facing state of one real Build Run."""
     if build_status == "failed":
         return "build_failed"
+    if build_status == "running":
+        return "building"
     if build_status != "success":
         return build_status or "unknown"
+    if validation_status == "running":
+        return "validating"
     if validation_status == "failed":
         return "validation_failed"
     if validation_status != "success":
-        return "build_success"
+        return "validation_needed"
+    if publication_status == "running":
+        return "publishing"
     if publication_status == "failed":
         return "publication_failed"
     if publication_status == "success":
         return "published"
     return "ready_to_publish"
+
+
+def lifecycle_display_status(build_status: str, validation_status: str = "not_run", publication_status: str = "not_run") -> str:
+    """Compatibility entry point for callers predating the canonical name."""
+    return derive_lifecycle_status(build_status, validation_status, publication_status)
 
 
 def summarize_runs(runs: list[dict], summary) -> dict:
@@ -36,8 +48,8 @@ def summarize_runs(runs: list[dict], summary) -> dict:
     last_dry = next((run for run in runs if run.get("mode") == "dry_run"), None)
     successful = next((run for run in runs if run.get("mode") == "build" and run.get("status") == "success" and (run.get("artifact") or {}).get("path")), None)
     resolved = next((run for run in runs if (run.get("version") or {}).get("upstream")), None)
-    validation_run = next((run for run in runs if run.get("validations")), None)
-    publication_run = next((run for run in runs if run.get("publications")), None)
+    latest_validation = (last_real.get("validations") or [])[-1] if last_real and last_real.get("validations") else None
+    latest_publication = (last_real.get("publications") or [])[-1] if last_real and last_real.get("publications") else None
     history = []
     for run in runs:
         build = summary(run)
@@ -51,8 +63,8 @@ def summarize_runs(runs: list[dict], summary) -> dict:
         "last_dry_run": summary(last_dry) if last_dry else None,
         "successful": successful,
         "resolved": resolved,
-        "latest_validation": validation_run["validations"][-1] if validation_run else None,
-        "latest_publication": publication_run["publications"][-1] if publication_run else None,
+        "latest_validation": latest_validation,
+        "latest_publication": latest_publication,
         "history": sorted(history, key=lambda row: row.get("updated") or 0, reverse=True),
     }
 

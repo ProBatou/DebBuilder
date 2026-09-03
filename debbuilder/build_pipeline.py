@@ -310,7 +310,7 @@ def execution_summary(run: dict) -> dict:
     publications = run.get("publications") or []
     validation_status = validations[-1]["status"] if validations else "not_run"
     publication_status = publications[-1]["status"] if publications else "not_run"
-    from .package_store import lifecycle_display_status
+    from .package_store import derive_lifecycle_status
     return {
         "id": run["id"], "package": run.get("recipe_id", ""),
         "action": "dry-run" if run.get("mode") == "dry_run" else "build",
@@ -318,7 +318,7 @@ def execution_summary(run: dict) -> dict:
         "status": run.get("status", "pending"), "build_status": run.get("status", "pending"), "updated": run.get("created_at_epoch"),
         "duration": run.get("duration"), "workspace": run.get("workspace", ""),
         "validation_count": len(validations), "validation_status": validation_status, "publication_status": publication_status,
-        "lifecycle_status": lifecycle_display_status(run.get("status", "pending"), validation_status, publication_status),
+        "lifecycle_status": derive_lifecycle_status(run.get("status", "pending"), validation_status, publication_status),
     }
 
 

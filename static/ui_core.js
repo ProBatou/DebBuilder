@@ -13,8 +13,11 @@ const STATUS_LABELS = {
   recipe_missing: 'Recipe needed',
   success: 'Success',
   build_success: 'Validation needed',
+  validation_needed: 'Validation needed',
   build_failed: 'Build failed',
+  validating: 'Validating',
   validation_failed: 'Validation failed',
+  publishing: 'Publishing',
   publication_failed: 'Publication failed',
   ready_to_publish: 'Ready to publish',
   published: 'Published',
@@ -36,6 +39,24 @@ const BUILDABLE_PACKAGE_STATES = new Set([
   'failed',
 ]);
 window.BUILDABLE_PACKAGE_STATES = BUILDABLE_PACKAGE_STATES;
+
+function executionLifecycleModel(execution, pendingAction = '') {
+  const validation = (execution.validations || []).slice(-1)[0] || {};
+  const publication = (execution.publications || []).slice(-1)[0] || {};
+  const buildStatus = execution.status || 'pending';
+  const validationStatus = pendingAction === 'validation' ? 'running' : (validation.status || 'not_run');
+  const publicationStatus = pendingAction === 'publication' ? 'running' : (publication.status || 'not_run');
+  const buildReady = execution.mode === 'build' && buildStatus === 'success' && !!execution.artifact?.path;
+  const published = publicationStatus === 'success';
+  return {
+    buildStatus, validationStatus, publicationStatus, validation, publication,
+    canValidate: buildReady && !published && validationStatus !== 'success',
+    validationDisabled: validationStatus === 'running',
+    canPublish: buildReady && validationStatus === 'success' && !published,
+    publicationDisabled: publicationStatus === 'running',
+  };
+}
+window.executionLifecycleModel = executionLifecycleModel;
 
 function esc(value) {
   return String(value ?? '').replace(/[&<>'"]/g, character => ({

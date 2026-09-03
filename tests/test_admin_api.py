@@ -93,11 +93,13 @@ class AdminApiTests(unittest.TestCase):
         packages = [
             {"name": "same", "lifecycle_state": "up_to_date", "version": {"source": "3.4.1", "published": "3.4.1-2"}},
             {"name": "new", "lifecycle_state": "update_available", "version": {"source": "3.4.2", "published": "3.4.1-2"}},
+            {"name": "pending", "lifecycle_state": "publication_available", "lifecycle_display_status": "validation_needed", "version": {"source": "3.4.3", "published": "3.4.1-2"}},
         ]
         with mock.patch("debbuilder.app.list_packages", return_value=packages), mock.patch("debbuilder.app.list_executions", return_value=[]):
             summary = server.dashboard_summary()
-        self.assertEqual(summary["state_counts"], {"up_to_date": 1, "update_available": 1})
+        self.assertEqual(summary["state_counts"], {"up_to_date": 1, "update_available": 1, "validation_needed": 1})
         self.assertEqual(summary["packages_by_state"]["up_to_date"][0]["name"], "same")
+        self.assertEqual(summary["packages_by_state"]["validation_needed"][0]["name"], "pending")
 
     def test_package_list_prefers_live_apt_repository_versions_when_available(self):
         (server.DATA / "settings.json").write_text(json.dumps({"apt": {"repository": "https://repo.example.test", "distribution": "testing", "component": "main", "architecture": "amd64"}}))
@@ -141,6 +143,88 @@ class AdminApiTests(unittest.TestCase):
             self.assertEqual(package["publication"]["status"], "success")
             self.assertTrue(package["history"])
             self.assertEqual(package["lifecycle_state"], "up_to_date")
+
+    def test_package_lifecycle_tracks_latest_real_run_without_hiding_repository_version(self):
+        recipe = {
+            "schema_version": 1, "name": "debbuilder-recipe", "active": True,
+            "package": {"name": "debbuilder", "architecture": "all", "maintainer": "Demo <demo@example.test>", "description": "Demo"},
+            "source": {"provider": "github", "repository": "owner/debbuilder", "tracking": "latest_release", "version": {"source": "tag"}},
+        }
+        (server.USER_WORKFLOWS / "debbuilder-recipe.json").write_text(json.dumps(recipe))
+        store = BuildStore(server.DATA / "builds")
+
+        def build_run(run_id, version, created_at):
+            run = store.create(recipe, recipe_id="debbuilder-recipe", mode="build", run_id=run_id)
+            artifact = Path(run["workspace"]) / f"artifacts/debbuilder_{version}_all.deb"
+            artifact.write_bytes(b"deb")
+            run.update({
+                "status": "success", "created_at": created_at, "created_at_epoch": 1,
+                "version": {"upstream": version.split("-")[0], "debian": version},
+                "artifact": {"path": str(artifact), "size": 3, "sha256": run_id, "inspection": {"package": "debbuilder", "version": version, "architecture": "all"}},
+            })
+            store.save(run)
+            return run, artifact
+
+        old, old_artifact = build_run("old-published", "0.1.3-2", "2026-01-01T00:00:00+00:00")
+        old["validations"] = [{"id": "old-validation", "artifact": str(old_artifact), "status": "success"}]
+        old["publications"] = [{"id": "old-publication", "status": "success", "published_version": "0.1.3-2"}]
+        store.save(old)
+        current, current_artifact = build_run("current-build", "0.1.4-2", "2026-01-02T00:00:00+00:00")
+
+        published_old = [{"Package": "debbuilder", "Version": "0.1.3-2", "Architecture": "all", "Filename": "pool/debbuilder_0.1.3-2_all.deb"}]
+        with mock.patch("debbuilder.app.live_published_index", return_value=published_old):
+            package = server.get_package("debbuilder")
+        self.assertEqual(package["lifecycle_display_status"], "validation_needed")
+        self.assertEqual(package["version"]["published"], "0.1.3-2")
+        self.assertEqual(package["version"]["candidate"], "0.1.4-2")
+        self.assertEqual(package["build"]["latest_run_id"], "current-build")
+        self.assertIsNone(package["validation"])
+        self.assertIsNone(package["publication"])
+
+        current["validations"] = [{"id": "current-validation", "artifact": str(current_artifact), "status": "success"}]
+        store.save(current)
+        with mock.patch("debbuilder.app.live_published_index", return_value=published_old):
+            package = server.get_package("debbuilder")
+        self.assertEqual(package["lifecycle_display_status"], "ready_to_publish")
+        self.assertTrue(package["build"]["ready_to_publish"])
+
+        current["publications"] = [{"id": "current-publication", "status": "success", "published_version": "0.1.4-2"}]
+        store.save(current)
+        published_current = [{**published_old[0], "Version": "0.1.4-2"}]
+        with mock.patch("debbuilder.app.live_published_index", return_value=published_current):
+            package = server.get_package("debbuilder")
+        self.assertEqual(package["lifecycle_display_status"], "published")
+        self.assertEqual(package["version"]["published"], "0.1.4-2")
+
+        failed = store.create(recipe, recipe_id="debbuilder-recipe", mode="build", run_id="latest-failure")
+        failed.update({"status": "failed", "created_at": "2026-01-03T00:00:00+00:00", "created_at_epoch": 2, "version": {"upstream": "0.1.5", "debian": "0.1.5-1"}})
+        store.save(failed)
+        with mock.patch("debbuilder.app.live_published_index", return_value=published_current):
+            package = server.get_package("debbuilder")
+        self.assertEqual(package["lifecycle_display_status"], "build_failed")
+        self.assertEqual(package["version"]["published"], "0.1.4-2")
+        self.assertEqual(package["build"]["latest_run_id"], "latest-failure")
+        self.assertEqual(package["build"]["latest_status"], "failed")
+        self.assertIsNone(package["validation"])
+        self.assertIsNone(package["publication"])
+
+    def test_failed_dry_run_keeps_package_without_pending_real_run_up_to_date(self):
+        recipe = {
+            "schema_version": 1, "name": "stable-recipe", "active": True,
+            "package": {"name": "stable", "architecture": "all", "maintainer": "Demo <demo@example.test>", "description": "Stable"},
+            "source": {"provider": "github", "repository": "owner/stable", "tracking": "latest_release", "version": {"source": "tag"}},
+        }
+        (server.USER_WORKFLOWS / "stable-recipe.json").write_text(json.dumps(recipe))
+        store = BuildStore(server.DATA / "builds")
+        dry = store.create(recipe, recipe_id="stable-recipe", mode="dry_run", run_id="failed-dry-run")
+        dry.update({"status": "failed", "version": {"upstream": "1.0.0", "debian": "1.0.0-1"}})
+        store.save(dry)
+        published = [{"Package": "stable", "Version": "1.0.0-1", "Architecture": "all", "Filename": "pool/stable_1.0.0-1_all.deb"}]
+        with mock.patch("debbuilder.app.live_published_index", return_value=published):
+            package = server.get_package("stable")
+        self.assertEqual(package["lifecycle_display_status"], "up_to_date")
+        self.assertEqual(package["version"]["published"], "1.0.0-1")
+        self.assertIsNone(package["build"]["latest_run"])
 
     def test_get_package_detail_and_missing_package(self):
         status, data = self.request("GET", "/api/packages/webapp")

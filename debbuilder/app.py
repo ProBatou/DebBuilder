@@ -572,8 +572,6 @@ def list_packages() -> list[dict]:
         run_state = package_store.summarize_runs(matching_runs, build_pipeline.execution_summary)
         successful, resolved = run_state["successful"], run_state["resolved"]
         candidate = (successful.get("version") or {}).get("debian", "") if successful else ""
-        validations = successful.get("validations", []) if successful else []
-        publications = successful.get("publications", []) if successful else []
         latest_validation = run_state["latest_validation"]
         latest_publication = run_state["latest_publication"]
         verified = bool(successful and latest_validation and latest_validation.get("status") == "success" and latest_validation.get("artifact") == successful["artifact"].get("path"))
@@ -604,15 +602,18 @@ def list_packages() -> list[dict]:
         state_source = candidate if upstream and built_upstream == upstream else upstream
         candidate_newer = version_is_newer(candidate, published_version) if candidate and published_version and candidate != published_version else None
         item = package_store.enrich_package(pkg, published_version=published_version, source_version=upstream, built_version=candidate, has_verified_build=verified, state_source_version=state_source, candidate_is_newer=candidate_newer)
-        item["build"].update({"validated": verified, "last_real": run_state["last_real"], "last_dry_run": run_state["last_dry_run"] or legacy_dry})
-        item["build"]["ready_to_publish"] = item["lifecycle_state"] == "publication_available"
+        item["build"].update({
+            "validated": verified,
+            "latest_run": run_state["last_real"],
+            "latest_run_id": (run_state["last_real"] or {}).get("id", ""),
+            "latest_status": (run_state["last_real"] or {}).get("status", ""),
+            "last_real": run_state["last_real"],
+            "last_dry_run": run_state["last_dry_run"] or legacy_dry,
+        })
         item["validation"] = latest_validation
         item["publication"] = latest_publication
-        item["lifecycle_display_status"] = package_store.lifecycle_display_status(
-            (run_state["last_real"] or {}).get("status", ""),
-            (latest_validation or {}).get("status", "not_run"),
-            (latest_publication or {}).get("status", "not_run"),
-        ) if run_state["last_real"] else item["lifecycle_state"]
+        item["lifecycle_display_status"] = (run_state["last_real"] or {}).get("lifecycle_status") or item["lifecycle_state"]
+        item["build"]["ready_to_publish"] = item["lifecycle_display_status"] == "ready_to_publish"
         item["repository"].update({"url": apt["repository"], "distribution": apt["distribution"], "component": apt["component"]})
         enriched.append(item)
     return sorted(enriched, key=lambda p: p.get("name", ""))
@@ -779,7 +780,7 @@ def dashboard_summary() -> dict:
     state_counts: dict[str, int] = {}
     packages_by_state: dict[str, list[dict]] = {}
     for pkg in packages:
-        state = pkg.get("lifecycle_state") or pkg.get("status") or "unknown"
+        state = pkg.get("lifecycle_display_status") or pkg.get("lifecycle_state") or pkg.get("status") or "unknown"
         state_counts[state] = state_counts.get(state, 0) + 1
         packages_by_state.setdefault(state, []).append({
             "name": pkg.get("name"),
@@ -788,14 +789,15 @@ def dashboard_summary() -> dict:
             "build": pkg.get("build"),
             "repository": pkg.get("repository"),
             "lifecycle_state": state,
+            "lifecycle_display_status": state,
         })
     return {
         "packages": len(packages),
         "updates": state_counts.get("update_available", 0),
-        "ready_to_publish": state_counts.get("publication_available", 0),
+        "ready_to_publish": state_counts.get("ready_to_publish", 0) + state_counts.get("publication_available", 0),
         "builds": len(executions),
         "errors": sum(1 for e in executions if e.get("status") == "failed"),
-        "package_errors": state_counts.get("failed", 0),
+        "package_errors": sum(state_counts.get(state, 0) for state in ("failed", "build_failed", "validation_failed", "publication_failed")),
         "linked_recipes": sum(1 for pkg in packages if pkg.get("recipe")),
         "github_sources": sum(1 for pkg in packages if (pkg.get("source") or {}).get("repository")),
         "local_sources": sum(1 for pkg in packages if not (pkg.get("source") or {}).get("repository")),

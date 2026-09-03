@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import configparser
+import glob
 import json
 import re
 import tomllib
@@ -59,7 +60,9 @@ def _detect_node(source: Path, root: Path) -> dict | None:
     package_manager_spec = data.get("packageManager", "") if isinstance(data, dict) else ""
     engines = data.get("engines", {}) if isinstance(data, dict) and isinstance(data.get("engines"), dict) else {}
     dependencies = ["nodejs", "npm"] if package_manager == "npm" else ["nodejs"]
-    return {"project_type": "nodejs", "display_name": f"Node.js · {package_manager}", "detected_files": _relative(source, files), "build_dependencies": dependencies, "proposed_commands": commands, "warnings": warnings, "package_manager": package_manager, "package_manager_spec": package_manager_spec, "node_version": str(engines.get("node") or "")}
+    scripts = data.get("scripts") if isinstance(data, dict) and isinstance(data.get("scripts"), dict) else {}
+    strong_application = bool(scripts.get("build") or scripts.get("start") or data.get("main") or data.get("bin") or data.get("workspaces"))
+    return {"project_type": "nodejs", "display_name": f"Node.js · {package_manager}", "detected_files": _relative(source, files), "build_dependencies": dependencies, "proposed_commands": commands, "warnings": warnings, "package_manager": package_manager, "package_manager_spec": package_manager_spec, "node_version": str(engines.get("node") or ""), "strong_application": strong_application}
 
 
 def _dependency_names(values) -> list[str]:
@@ -293,15 +296,137 @@ def _detect_python(source: Path, root: Path) -> dict | None:
     }
 
 
+def _rust_toolchain(root: Path, files: list[Path], warnings: list[str]) -> dict:
+    plain = root / "rust-toolchain"
+    manifest = root / "rust-toolchain.toml"
+    if manifest.is_file():
+        files.append(manifest)
+        try:
+            data = tomllib.loads(manifest.read_text(errors="strict"))
+            toolchain = data.get("toolchain") if isinstance(data.get("toolchain"), dict) else {}
+            return {
+                "channel": str(toolchain.get("channel") or ""),
+                "profile": str(toolchain.get("profile") or ""),
+                "components": [str(row) for row in toolchain.get("components", []) if isinstance(row, str)],
+                "targets": [str(row) for row in toolchain.get("targets", []) if isinstance(row, str)],
+                "source": _relative(root, [manifest])[0],
+            }
+        except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+            warnings.append("rust-toolchain.toml could not be parsed")
+            return {"channel": "", "profile": "", "components": [], "targets": [], "source": manifest.name}
+    if plain.is_file():
+        files.append(plain)
+        try:
+            return {"channel": plain.read_text(errors="strict").strip(), "profile": "", "components": [], "targets": [], "source": plain.name}
+        except (OSError, UnicodeError):
+            warnings.append("rust-toolchain could not be parsed")
+            return {"channel": "", "profile": "", "components": [], "targets": [], "source": plain.name}
+    return {"channel": "", "profile": "", "components": [], "targets": [], "source": ""}
+
+
+def _cargo_manifest(path: Path, warnings: list[str]) -> dict:
+    try:
+        data = tomllib.loads(path.read_text(errors="strict"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+        warnings.append(f"{path.name} could not be parsed")
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _rust_package(path: Path, data: dict, root: Path) -> dict | None:
+    package = data.get("package") if isinstance(data.get("package"), dict) else None
+    if not package:
+        return None
+    bins = []
+    declared_bins = data.get("bin") if isinstance(data.get("bin"), list) else []
+    for item in declared_bins:
+        if isinstance(item, dict):
+            bins.append({"name": str(item.get("name") or package.get("name") or ""), "path": str(item.get("path") or "src/main.rs")})
+    if not bins and (path.parent / "src/main.rs").is_file():
+        bins.append({"name": str(package.get("name") or ""), "path": "src/main.rs"})
+    features = data.get("features") if isinstance(data.get("features"), dict) else {}
+    return {
+        "name": str(package.get("name") or ""),
+        "version": str(package.get("version") or ""),
+        "rust_version": str(package.get("rust-version") or ""),
+        "default_run": str(package.get("default-run") or ""),
+        "manifest": path.relative_to(root).as_posix(),
+        "binaries": bins,
+        "default_features": [str(row) for row in features.get("default", []) if isinstance(row, str)],
+    }
+
+
+def _workspace_manifest_paths(root: Path, workspace: dict) -> list[Path]:
+    paths = []
+    for member in workspace.get("members", []) if isinstance(workspace.get("members"), list) else []:
+        if not isinstance(member, str) or Path(member).is_absolute() or ".." in Path(member).parts:
+            continue
+        for match in sorted(glob.glob(str(root / member))):
+            manifest = Path(match) / "Cargo.toml"
+            if manifest.is_file():
+                paths.append(manifest)
+    return _unique(paths)
+
+
 def _detect_rust(source: Path, root: Path) -> dict | None:
     manifest = root / "Cargo.toml"
     if not manifest.is_file():
         return None
+    warnings: list[str] = []
     files = [manifest]
     lock = root / "Cargo.lock"
     if lock.is_file():
         files.append(lock)
-    return {"project_type": "rust", "display_name": "Rust · Cargo", "detected_files": _relative(source, files), "build_dependencies": ["cargo", "rustc"], "proposed_commands": ["cargo build --release"], "warnings": []}
+    toolchain = _rust_toolchain(root, files, warnings)
+    cargo_config = {}
+    cargo_config_path = next((path for path in (root / ".cargo/config.toml", root / ".cargo/config") if path.is_file()), None)
+    if cargo_config_path:
+        files.append(cargo_config_path)
+        cargo_config = _cargo_manifest(cargo_config_path, warnings)
+
+    root_data = _cargo_manifest(manifest, warnings)
+    workspace = root_data.get("workspace") if isinstance(root_data.get("workspace"), dict) else {}
+    member_paths = _workspace_manifest_paths(root, workspace)
+    files.extend(member_paths)
+    packages = []
+    root_package = _rust_package(manifest, root_data, root)
+    if root_package:
+        packages.append(root_package)
+    for member_path in member_paths:
+        package = _rust_package(member_path, _cargo_manifest(member_path, warnings), root)
+        if package:
+            packages.append(package)
+
+    binary_packages = [package for package in packages if package["binaries"]]
+    command = "cargo build --release"
+    if lock.is_file() and binary_packages:
+        command += " --locked"
+    selected_package = binary_packages[0]["name"] if len(binary_packages) == 1 and workspace else ""
+    if selected_package:
+        command += f" --package {selected_package}"
+    suggested_outputs = []
+    selected_binaries = binary_packages[0]["binaries"] if len(binary_packages) == 1 else []
+    for binary in selected_binaries:
+        if binary["name"]:
+            suggested_outputs.append(f"target/release/{binary['name']}")
+
+    workspace_members = [str(row) for row in workspace.get("members", []) if isinstance(row, str)] if workspace else []
+    default_members = [str(row) for row in workspace.get("default-members", []) if isinstance(row, str)] if workspace else []
+    package = root_package or (binary_packages[0] if len(binary_packages) == 1 else None) or {}
+    channel = toolchain["channel"]
+    display_name = f"Rust · Cargo · toolchain {channel}" if channel else "Rust · Cargo"
+    return {
+        "project_type": "rust", "display_name": display_name, "detected_files": _relative(source, _unique(files)),
+        "build_dependencies": ["cargo", "rustc"], "proposed_commands": [command], "warnings": warnings,
+        "lockfile": lock.relative_to(source).as_posix() if lock.is_file() else "", "locked": bool(lock.is_file() and binary_packages),
+        "toolchain": toolchain, "cargo_config": cargo_config,
+        "package_name": package.get("name", ""), "package_version": package.get("version", ""),
+        "rust_version": package.get("rust_version", ""), "default_run": package.get("default_run", ""),
+        "workspace_members": workspace_members, "workspace_default_members": default_members,
+        "packages": packages, "binary_targets": [binary for row in binary_packages for binary in row["binaries"]],
+        "default_features": package.get("default_features", []), "selected_package": selected_package,
+        "suggested_output_paths": suggested_outputs,
+    }
 
 
 def _detect_static(source: Path, root: Path) -> dict | None:
@@ -324,7 +449,10 @@ def _detect_static(source: Path, root: Path) -> dict | None:
 
 def detect_project(source_directory: str | Path, *, working_directory: str = ".") -> dict:
     source, root = _project_root(source_directory, working_directory)
-    candidates = [candidate for candidate in (_detect_node(source, root), _detect_python(source, root), _detect_rust(source, root)) if candidate]
+    node, python, rust = _detect_node(source, root), _detect_python(source, root), _detect_rust(source, root)
+    if rust and rust.get("workspace_members") and node and not node.get("strong_application"):
+        node = None
+    candidates = [candidate for candidate in (node, python, rust) if candidate]
     if not candidates:
         static = _detect_static(source, root)
         if static:

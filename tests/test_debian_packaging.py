@@ -122,6 +122,7 @@ class DebianPackagingTests(unittest.TestCase):
             workspace = self.make_workspace(temporary)
             configured = packaging_recipe(service=False)
             configured["install"]["owner"] = {"user": "root", "group": "root", "create_user": True, "create_group": True}
+            configured["install"]["account"] = {"user": "root", "group": "root", "create_user": True, "create_group": True}
             configured["install"]["config_files"] = []
             result = debian_packaging.prepare_staging(
                 configured, {"output": {"path": str(workspace / "source")}, "version": "1.0-1"}, workspace,
@@ -207,6 +208,35 @@ class DebianPackagingTests(unittest.TestCase):
             self.assertTrue((workspace / "staging/usr/lib/systemd/system/demo.service").is_file())
             self.assertFalse(any((workspace / "artifacts").iterdir()))
 
+    def test_fhs_executable_mapping_account_and_persistent_directories(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = self.make_workspace(temporary)
+            recipe = packaging_recipe(service=False)
+            recipe["install"].update({
+                "destination": "", "content": {"source": "configured_files"},
+                "owner": {"user": "root", "group": "root", "create_user": False, "create_group": False},
+                "account": {"user": "demo", "group": "demo", "create_user": True, "create_group": True},
+                "directories": [{"path": "/etc/demo", "owner": "demo", "group": "demo", "mode": "0750"}, {"path": "/var/lib/demo", "owner": "demo", "group": "demo", "mode": "0750"}],
+                "config_files": [{"source": "bin/demo", "destination": "/usr/bin/demo", "policy": "replace", "owner": "root", "group": "root", "mode": "0755"}],
+            })
+            recipe = validate_recipe_metadata(recipe)
+            result = debian_packaging.prepare_staging(recipe, {"output": {"path": str(workspace / "source")}, "version": "1.0-1"}, workspace)
+            binary = workspace / "staging/usr/bin/demo"
+            self.assertTrue(binary.is_file())
+            self.assertEqual(binary.stat().st_mode & 0o777, 0o755)
+            self.assertIn("adduser --system --ingroup demo --no-create-home demo", result["maintainer_scripts"]["postinst"])
+            self.assertIn("install -d -m 0750 -o demo -g demo /var/lib/demo", result["maintainer_scripts"]["postinst"])
+            self.assertIn("Depends: ca-certificates, adduser", result["control"])
+            self.assertEqual(result["configurations"][0]["owner"], "root")
+            self.assertEqual(result["configurations"][0]["mode"], "0755")
+
+    def test_mapping_defaults_remain_backward_compatible(self):
+        recipe = packaging_recipe(service=False)
+        mapping = recipe["install"]["config_files"][0]
+        self.assertNotIn("mode", mapping)
+        self.assertNotIn("owner", mapping)
+        self.assertEqual(recipe["install"]["account"]["user"], "demo-app")
+
     @unittest.skipUnless(shutil.which("dpkg-deb"), "dpkg-deb unavailable")
     def test_builds_and_inspects_real_deb_in_artifacts(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -221,7 +251,7 @@ class DebianPackagingTests(unittest.TestCase):
             self.assertEqual(len(artifact["sha256"]), 64)
             self.assertGreater(artifact["size"], 0)
             self.assertEqual(artifact["inspection"]["package"], "demo")
-            self.assertEqual(artifact["inspection"]["depends"], "ca-certificates")
+            self.assertEqual(artifact["inspection"]["depends"], "ca-certificates, adduser")
             root_entry = next(row for row in artifact["inspection"]["files"] if row["path"] == "./")
             self.assertEqual(root_entry["mode"], "drwxr-xr-x")
 

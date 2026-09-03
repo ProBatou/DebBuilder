@@ -4,6 +4,33 @@ from debbuilder.recipe_schema import normalize_recipe, recipe_for_storage, valid
 
 
 class RecipeSchemaTests(unittest.TestCase):
+    def test_upstream_archive_fhs_account_directories_and_mapping_overrides(self):
+        recipe = validate_recipe_metadata({
+            "name": "demo", "package": {"name": "demo", "architecture": "amd64"},
+            "source": {"repository": "owner/demo", "tracking": "latest_release"},
+            "artifact": {"mode": "upstream_archive", "type": "archive", "asset_name": "demo.tar.gz", "selected_files": ["demo"]},
+            "install": {"content": {"source": "configured_files"}, "owner": {"user": "root", "group": "root"}, "account": {"user": "demo", "group": "demo", "create_user": True, "create_group": True}, "directories": [{"path": "/var/lib/demo", "owner": "demo", "group": "demo", "mode": "0750"}], "config_files": [{"source": "demo", "destination": "/usr/bin/demo", "policy": "replace", "owner": "root", "group": "root", "mode": "0755"}]},
+            "service": {"name": "demo.service", "command": "/usr/bin/demo", "conflicts": ["other.service"], "limit_nofile": "65536", "kill_mode": "process", "syslog_identifier": "demo", "ambient_capabilities": ["CAP_NET_BIND_SERVICE"]},
+        })
+        self.assertEqual(recipe["artifact"]["selected_files"], ["demo"])
+        self.assertEqual(recipe["install"]["config_files"][0]["mode"], "0755")
+        self.assertEqual(recipe["install"]["account"]["user"], "demo")
+        self.assertEqual(recipe["service"]["ambient_capabilities"], ["CAP_NET_BIND_SERVICE"])
+
+    def test_fhs_and_advanced_systemd_validation_rejects_unsafe_values(self):
+        cases = [
+            {"install": {"destination": "/usr/bin/../../tmp"}},
+            {"install": {"directories": [{"path": "/var/lib/other", "owner": "root", "group": "root"}]}},
+            {"service": {"name": "demo.service", "command": "/bin/true", "conflicts": ["bad"]}},
+            {"service": {"name": "demo.service", "command": "/bin/true", "ambient_capabilities": ["NET_ADMIN"]}},
+        ]
+        for changes in cases:
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                validate_recipe_metadata({"name": "demo", "package": {"name": "demo"}, **changes})
+
+        with self.assertRaisesRegex(ValueError, "artifact type"):
+            validate_recipe_metadata({"name": "demo", "package": {"name": "demo"}, "artifact": {"mode": "source_build", "type": "zip"}})
+
     def test_flat_recipe_is_migrated_to_recipe_v1(self):
         recipe = normalize_recipe({
             "name": "demo-recipe", "package_name": "demo", "github_repository": "owner/demo",

@@ -9,7 +9,7 @@ import time
 
 from .build_models import utc_now
 from .build_store import BuildStore
-from . import build_executor, deb_inspector, debian_packaging, dependency_checker, project_detection, source_acquisition, source_changes, upstream_artifact
+from . import build_executor, deb_inspector, debian_packaging, dependency_checker, project_detection, source_acquisition, source_changes, upstream_archive, upstream_artifact
 from .recipe_schema import validate_recipe_metadata
 
 
@@ -134,7 +134,8 @@ def run_pipeline(recipe: dict, *, store: BuildStore, dry_run: bool, recipe_id: s
     store.append_event(run, "Recipe snapshot created and isolated workspace prepared.")
     if canonical["artifact"]["mode"] == "upstream_deb":
         return _run_upstream_artifact(canonical, run, store=store, dry_run=dry_run, github_token=github_token, acquirer=upstream_acquirer)
-    acquire = acquire or source_acquisition.acquire_source
+    archive_mode = canonical["artifact"]["mode"] == "upstream_archive"
+    acquire = acquire or (upstream_archive.acquire if archive_mode else source_acquisition.acquire_source)
     detector = detector or project_detection.detect_project
     dependency_check = dependency_check or dependency_checker.check_dependencies
     change_applier = change_applier or source_changes.apply_changes
@@ -144,14 +145,21 @@ def run_pipeline(recipe: dict, *, store: BuildStore, dry_run: bool, recipe_id: s
         run["version"] = {"upstream": source["upstream_version"], "debian": source["debian_version"]}
         summary = f"{source['repository']} {source['ref'] or source['tag']} → Debian {source['debian_version']}"
         _finish_step(run, store, source_step, source_started, status="success", summary=summary, details=source)
-    except source_acquisition.SourceError as exc:
+    except (source_acquisition.SourceError, upstream_archive.UpstreamArchiveError) as exc:
         error = {"stage": "source", "code": exc.code, "message": str(exc)}
         _finish_step(run, store, source_step, source_started, status="failed", summary=str(exc), error=error)
         run.update({"status": "failed", "error": error})
     if run["status"] != "failed":
         detection_step, detection_started = _start_step(run, store, "detection")
         try:
-            detection = detector(source["source_directory"], working_directory=canonical["build"]["working_directory"])
+            if archive_mode:
+                detection = {
+                    "project_type": "upstream_archive", "display_name": "Upstream release artifact · no source build",
+                    "detected_files": [row["relative_path"] for row in source["selected_files"]], "build_dependencies": [],
+                    "proposed_commands": [], "warnings": [], "selected_asset": source["asset"], "selected_files": source["selected_files"],
+                }
+            else:
+                detection = detector(source["source_directory"], working_directory=canonical["build"]["working_directory"])
             summary = f"{detection['display_name']} from {', '.join(detection['detected_files'])}"
             _finish_step(run, store, detection_step, detection_started, status="success", summary=summary, details=detection)
         except project_detection.DetectionError as exc:
@@ -160,59 +168,72 @@ def run_pipeline(recipe: dict, *, store: BuildStore, dry_run: bool, recipe_id: s
             run.update({"status": "failed", "error": error})
     if run["status"] != "failed":
         dependencies_step, dependencies_started = _start_step(run, store, "dependencies")
-        try:
-            dependencies = dependency_check(
-                detection["build_dependencies"], canonical["build"]["extra_dependencies"],
-                workspace=run["workspace"],
-            )
-            store.append_event(run, f"Dependencies detected: {', '.join(dependencies['detected']) or 'none'}")
-            store.append_event(run, f"Dependencies manually added: {', '.join(dependencies['manually_added']) or 'none'}")
-            store.append_event(run, f"Dependencies available: {', '.join(dependencies['available']) or 'none'}")
-            store.append_event(run, f"Dependencies missing: {', '.join(dependencies['missing']) or 'none'}")
-            summary = f"{len(dependencies['available'])} available, {len(dependencies['missing'])} missing"
-            _finish_step(run, store, dependencies_step, dependencies_started, status="success", summary=summary, details=dependencies)
-        except dependency_checker.DependencyError as exc:
-            state = exc.details
-            store.append_event(run, f"Dependencies detected: {', '.join(state.get('detected', [])) or 'none'}")
-            store.append_event(run, f"Dependencies manually added: {', '.join(state.get('manually_added', [])) or 'none'}")
-            store.append_event(run, f"Dependencies available: {', '.join(state.get('available', [])) or 'none'}")
-            store.append_event(run, f"Dependencies missing: {', '.join(state.get('missing', [])) or 'none'}", level="error")
-            error = {"stage": "dependencies", "code": exc.code, "message": str(exc), "details": exc.details}
-            _finish_step(run, store, dependencies_step, dependencies_started, status="failed", summary=str(exc), details=exc.details, error=error)
-            run.update({"status": "failed", "error": error})
+        if archive_mode:
+            dependencies = {"detected": [], "manually_added": [], "requested": [], "available": [], "missing": []}
+            _finish_step(run, store, dependencies_step, dependencies_started, status="skipped", summary="No build dependencies: upstream release artifact", details={**dependencies, "reason": "upstream_archive"})
+        else:
+            try:
+                dependencies = dependency_check(
+                    detection["build_dependencies"], canonical["build"]["extra_dependencies"],
+                    workspace=run["workspace"],
+                )
+                store.append_event(run, f"Dependencies detected: {', '.join(dependencies['detected']) or 'none'}")
+                store.append_event(run, f"Dependencies manually added: {', '.join(dependencies['manually_added']) or 'none'}")
+                store.append_event(run, f"Dependencies available: {', '.join(dependencies['available']) or 'none'}")
+                store.append_event(run, f"Dependencies missing: {', '.join(dependencies['missing']) or 'none'}")
+                summary = f"{len(dependencies['available'])} available, {len(dependencies['missing'])} missing"
+                _finish_step(run, store, dependencies_step, dependencies_started, status="success", summary=summary, details=dependencies)
+            except dependency_checker.DependencyError as exc:
+                state = exc.details
+                store.append_event(run, f"Dependencies detected: {', '.join(state.get('detected', [])) or 'none'}")
+                store.append_event(run, f"Dependencies manually added: {', '.join(state.get('manually_added', [])) or 'none'}")
+                store.append_event(run, f"Dependencies available: {', '.join(state.get('available', [])) or 'none'}")
+                store.append_event(run, f"Dependencies missing: {', '.join(state.get('missing', [])) or 'none'}", level="error")
+                error = {"stage": "dependencies", "code": exc.code, "message": str(exc), "details": exc.details}
+                _finish_step(run, store, dependencies_step, dependencies_started, status="failed", summary=str(exc), details=exc.details, error=error)
+                run.update({"status": "failed", "error": error})
     if run["status"] != "failed":
         changes_step, changes_started = _start_step(run, store, "source_changes")
-        try:
-            changes = change_applier(
-                source["source_directory"], canonical["build"]["source_changes"],
-                on_applied=lambda item: store.append_event(run, f"Source change {item['index']}/{len(canonical['build']['source_changes'])}: {item['path']} {item['operation']} applied"),
-            )
-            summary = f"{changes['applied_count']}/{changes['requested']} source changes applied"
-            _finish_step(run, store, changes_step, changes_started, status="success", summary=summary, details=changes)
-        except source_changes.SourceChangeError as exc:
-            error = {"stage": "source_changes", "code": exc.code, "message": str(exc), "change_index": exc.index, "details": exc.details}
-            details = {"requested": len(canonical["build"]["source_changes"]), "failed_index": exc.index, **exc.details}
-            _finish_step(run, store, changes_step, changes_started, status="failed", summary=str(exc), details=details, error=error)
-            run.update({"status": "failed", "error": error})
+        if archive_mode:
+            _finish_step(run, store, changes_step, changes_started, status="skipped", summary="No source changes: upstream release artifact", details={"requested": 0, "applied_count": 0, "applied": [], "reason": "upstream_archive"})
+        else:
+            try:
+                changes = change_applier(
+                    source["source_directory"], canonical["build"]["source_changes"],
+                    on_applied=lambda item: store.append_event(run, f"Source change {item['index']}/{len(canonical['build']['source_changes'])}: {item['path']} {item['operation']} applied"),
+                )
+                summary = f"{changes['applied_count']}/{changes['requested']} source changes applied"
+                _finish_step(run, store, changes_step, changes_started, status="success", summary=summary, details=changes)
+            except source_changes.SourceChangeError as exc:
+                error = {"stage": "source_changes", "code": exc.code, "message": str(exc), "change_index": exc.index, "details": exc.details}
+                details = {"requested": len(canonical["build"]["source_changes"]), "failed_index": exc.index, **exc.details}
+                _finish_step(run, store, changes_step, changes_started, status="failed", summary=str(exc), details=details, error=error)
+                run.update({"status": "failed", "error": error})
     if run["status"] != "failed":
         build_step, build_started = _start_step(run, store, "build")
-        try:
-            def command_completed(result):
-                build_step.setdefault("details", {}).setdefault("commands", []).append(result)
-                store.save_command_result(run["id"], result)
-                store.append_event(run, f"Build command {result['index']}: {result['status']} (exit {result.get('exit_code')}, {result['duration']}s)")
-            build = build_executor.execute_build(
-                canonical, detection, source["source_directory"], dry_run=dry_run,
-                on_result=command_completed,
-            )
-            if dry_run:
-                _finish_step(run, store, build_step, build_started, status="skipped", summary=f"Dry-run validated {len(build['plan']['commands'])} commands; none executed", details=build)
-            else:
-                _finish_step(run, store, build_step, build_started, status="success", summary=f"{len(build['commands'])} build commands completed", details=build)
-        except build_executor.BuildError as exc:
-            error = {"stage": "build", "code": exc.code, "message": str(exc), "details": exc.details}
-            _finish_step(run, store, build_step, build_started, status="failed", summary=str(exc), details=exc.details, error=error)
-            run.update({"status": "failed", "error": error})
+        if archive_mode:
+            selected_paths = [{"path": row["path"]} for row in source["selected_files"]]
+            output = {"mode": "paths", "paths": selected_paths} if len(selected_paths) > 1 else {"mode": "path", **selected_paths[0]}
+            build = {"executed": False, "reason": "upstream_archive", "plan": {"commands": [], "working_directory": ".", "environment": {}, "output": output}, "commands": [], "output": output}
+            _finish_step(run, store, build_step, build_started, status="skipped", summary="Upstream release artifact · no source build", details=build)
+        else:
+            try:
+                def command_completed(result):
+                    build_step.setdefault("details", {}).setdefault("commands", []).append(result)
+                    store.save_command_result(run["id"], result)
+                    store.append_event(run, f"Build command {result['index']}: {result['status']} (exit {result.get('exit_code')}, {result['duration']}s)")
+                build = build_executor.execute_build(
+                    canonical, detection, source["source_directory"], dry_run=dry_run,
+                    on_result=command_completed,
+                )
+                if dry_run:
+                    _finish_step(run, store, build_step, build_started, status="skipped", summary=f"Dry-run validated {len(build['plan']['commands'])} commands; none executed", details=build)
+                else:
+                    _finish_step(run, store, build_step, build_started, status="success", summary=f"{len(build['commands'])} build commands completed", details=build)
+            except build_executor.BuildError as exc:
+                error = {"stage": "build", "code": exc.code, "message": str(exc), "details": exc.details}
+                _finish_step(run, store, build_step, build_started, status="failed", summary=str(exc), details=exc.details, error=error)
+                run.update({"status": "failed", "error": error})
     if run["status"] != "failed":
         staging_step, staging_started = _start_step(run, store, "staging")
         try:

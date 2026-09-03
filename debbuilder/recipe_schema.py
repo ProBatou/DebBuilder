@@ -12,7 +12,7 @@ STANDARD_STEP_TYPES = frozenset()
 SUPPORTED_STEP_TYPES = STANDARD_STEP_TYPES
 SOURCE_CHANGE_TYPES = {"replace", "insert_before", "insert_after", "remove", "create_file", "remove_file"}
 OUTPUT_MODES = {"path", "paths", "source"}
-ARTIFACT_MODES = {"source_build", "upstream_deb"}
+ARTIFACT_MODES = {"source_build", "upstream_deb", "upstream_archive"}
 CONFIG_POLICIES = {"dpkg_conffile", "replace", "create_if_missing"}
 SERVICE_TYPES = {"simple", "exec", "forking", "oneshot", "notify", "dbus"}
 RESTART_POLICIES = {"", "no", "always", "on-success", "on-failure", "on-abnormal", "on-abort", "on-watchdog"}
@@ -62,12 +62,29 @@ def _config_files(value, default_policy: str) -> list[dict]:
             destination = row.strip()
             normalized.append({"source": destination.lstrip("/"), "destination": destination, "policy": default_policy})
         elif isinstance(row, dict) and isinstance(row.get("source"), str) and isinstance(row.get("destination"), str):
-            normalized.append({
+            item = {
                 "source": row["source"].strip(), "destination": row["destination"].strip(),
                 "policy": str(row.get("policy") or default_policy),
-            })
+            }
+            for key in ("owner", "group", "mode"):
+                if key in row and str(row.get(key) or "").strip():
+                    item[key] = str(row[key]).strip()
+            normalized.append(item)
         else:
             raise ValueError("install.config_files must contain paths or source/destination mappings")
+    return normalized
+
+
+def _directories(value) -> list[dict]:
+    rows = _list(value, "install.directories")
+    normalized = []
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("path"), str):
+            raise ValueError("install.directories must contain directory objects")
+        normalized.append({
+            "path": row["path"].strip(), "owner": str(row.get("owner") or "root"),
+            "group": str(row.get("group") or "root"), "mode": str(row.get("mode") or "0755"),
+        })
     return normalized
 
 
@@ -100,6 +117,7 @@ def normalize_recipe(workflow: dict, *, compatibility_aliases: bool = True) -> d
     version_in = _dict(source_in.get("version"), "source.version")
     output_in = _dict(build_in.get("output"), "build.output")
     owner_in = _dict(install_in.get("owner"), "install.owner")
+    account_in = _dict(install_in.get("account"), "install.account")
     content_in = _dict(install_in.get("content"), "install.content")
     scripts_in = _dict(install_in.get("maintainer_scripts"), "install.maintainer_scripts")
     name = str(workflow.get("name") or "recipe")
@@ -152,6 +170,8 @@ def normalize_recipe(workflow: dict, *, compatibility_aliases: bool = True) -> d
             "name_pattern": str(artifact_in.get("name_pattern") or ""),
             "match_package": artifact_in.get("match_package", True),
             "match_version": artifact_in.get("match_version", True),
+            "asset_name": str(artifact_in.get("asset_name") or ""),
+            "selected_files": _string_list(artifact_in.get("selected_files"), "artifact.selected_files"),
         },
         "build": {
             "detected_project": build_in.get("detected_project"),
@@ -173,6 +193,13 @@ def normalize_recipe(workflow: dict, *, compatibility_aliases: bool = True) -> d
                 "create_user": owner_in.get("create_user", False) if str(owner_in.get("user") or package_name) != "root" else False,
                 "create_group": owner_in.get("create_group", False) if str(owner_in.get("group") or package_name) != "root" else False,
             },
+            "account": {
+                "user": str(account_in.get("user") or owner_in.get("user") or package_name),
+                "group": str(account_in.get("group") or owner_in.get("group") or package_name),
+                "create_user": account_in.get("create_user", owner_in.get("create_user", False)),
+                "create_group": account_in.get("create_group", owner_in.get("create_group", False)),
+            },
+            "directories": _directories(install_in.get("directories")),
             "directory_mode": str(install_in.get("directory_mode") or "0755"),
             "file_mode": str(install_in.get("file_mode") or "0644"),
             "config_files": _config_files(install_in.get("config_files"), config_policy),
@@ -198,6 +225,11 @@ def normalize_recipe(workflow: dict, *, compatibility_aliases: bool = True) -> d
             "exec_stop": _string_list(service_in.get("exec_stop"), "service.exec_stop"),
             "standard_output": str(service_in.get("standard_output") or ""), "standard_error": str(service_in.get("standard_error") or ""),
             "working_directory": str(service_in.get("working_directory") or ""),
+            "conflicts": _string_list(service_in.get("conflicts"), "service.conflicts"),
+            "limit_nofile": str(service_in.get("limit_nofile") or ""),
+            "kill_mode": str(service_in.get("kill_mode") or ""),
+            "syslog_identifier": str(service_in.get("syslog_identifier") or ""),
+            "ambient_capabilities": _string_list(service_in.get("ambient_capabilities"), "service.ambient_capabilities"),
         },
         "steps": normalize_steps(workflow),
     }
@@ -259,12 +291,23 @@ def validate_recipe_metadata(workflow: dict) -> dict:
         raise ValueError("build.timeout must be between 1 and 3600 seconds")
     if artifact["mode"] not in ARTIFACT_MODES:
         raise ValueError("unsupported artifact mode")
-    if artifact["type"] != "deb":
+    if artifact["mode"] in {"source_build", "upstream_deb"} and artifact["type"] != "deb":
         raise ValueError("unsupported upstream artifact type")
+    if artifact["mode"] == "upstream_archive" and artifact["type"] not in {"archive", "tar.gz", "tgz", "tar.xz", "zip"}:
+        raise ValueError("unsupported upstream archive type")
     if artifact["architecture"] not in SAFE_ARCH:
         raise ValueError("unsupported artifact architecture")
     if len(artifact["name_pattern"]) > 200 or any(character in artifact["name_pattern"] for character in "\r\n"):
         raise ValueError("artifact.name_pattern is invalid")
+    if len(artifact["asset_name"]) > 200 or any(character in artifact["asset_name"] for character in "/\\\r\n"):
+        raise ValueError("artifact.asset_name is invalid")
+    if artifact["mode"] == "upstream_archive":
+        if bool(artifact["asset_name"]) == bool(artifact["name_pattern"]):
+            raise ValueError("upstream_archive requires exactly one of asset_name or name_pattern")
+        if not artifact["selected_files"]:
+            raise ValueError("upstream_archive requires selected_files")
+        for selected in artifact["selected_files"]:
+            _safe_relative(selected, "artifact.selected_files entry")
     if not isinstance(artifact["match_package"], bool) or not isinstance(artifact["match_version"], bool):
         raise ValueError("artifact matching flags must be booleans")
     if build["detected_project"] not in {None, "nodejs", "python", "rust", "static"}:
@@ -287,8 +330,12 @@ def validate_recipe_metadata(workflow: dict) -> dict:
     if install["content"]["source"] == "configured_files":
         if install["destination"]:
             raise ValueError("install.destination is not applicable to configured_files")
-    elif not re.fullmatch(r"/opt/[A-Za-z0-9._+/-]+", install["destination"]) or ".." in install["destination"].split("/"):
-        raise ValueError("install.destination must be below /opt")
+    elif not (
+        re.fullmatch(r"/opt/[A-Za-z0-9._+/-]+", install["destination"])
+        or install["destination"] in {"/usr/bin", "/usr/sbin"}
+        or re.fullmatch(rf"/usr/(?:lib|share)/{re.escape(package['name'])}(?:/[A-Za-z0-9._+/-]+)?", install["destination"])
+    ) or ".." in install["destination"].split("/"):
+        raise ValueError("install.destination must be a supported FHS package path")
     if install["directory_mode"] not in {"0755", "0750", "0700"} or install["file_mode"] not in {"0644", "0640", "0600"}:
         raise ValueError("unsupported install permissions")
     if install["config_policy"] not in CONFIG_POLICIES:
@@ -303,11 +350,24 @@ def validate_recipe_metadata(workflow: dict) -> dict:
         _safe_relative(source_path, "configuration source")
         if configured["policy"] not in CONFIG_POLICIES:
             raise ValueError("unsupported configuration policy")
-    for key in ("create_user", "create_group"):
-        if not isinstance(install["owner"][key], bool):
-            raise ValueError(f"install.owner.{key} must be a boolean")
-    for key in ("user", "group"):
-        require_safe_name(install["owner"][key], f"install owner {key}")
+        if configured.get("mode") and not re.fullmatch(r"0[0-7]{3}", configured["mode"]):
+            raise ValueError("configuration mapping mode must be an octal file mode")
+        for key in ("owner", "group"):
+            if configured.get(key):
+                require_safe_name(configured[key], f"configuration mapping {key}")
+    for section in ("owner", "account"):
+        for key in ("create_user", "create_group"):
+            if not isinstance(install[section][key], bool):
+                raise ValueError(f"install.{section}.{key} must be a boolean")
+        for key in ("user", "group"):
+            require_safe_name(install[section][key], f"install {section} {key}")
+    for directory in install["directories"]:
+        if not re.fullmatch(rf"/(?:etc|var/lib|var/log)/{re.escape(package['name'])}(?:/[A-Za-z0-9._+/-]+)?", directory["path"]) or ".." in directory["path"].split("/"):
+            raise ValueError("install directory must be a safe package-specific persistent path")
+        if directory["mode"] not in {"0755", "0750", "0700"}:
+            raise ValueError("unsupported persistent directory mode")
+        require_safe_name(directory["owner"], "persistent directory owner")
+        require_safe_name(directory["group"], "persistent directory group")
     service = recipe["service"]
     if not isinstance(service["enabled"], bool):
         raise ValueError("service.enabled must be a boolean")
@@ -325,6 +385,17 @@ def validate_recipe_metadata(workflow: dict) -> dict:
         for key in ("user", "group"):
             if service[key]:
                 require_safe_name(service[key], f"service {key}")
+    for unit in service["conflicts"]:
+        if not re.fullmatch(r"[A-Za-z0-9_.@-]+\.service", unit):
+            raise ValueError("service.conflicts must contain service unit names")
+    if service["limit_nofile"] and not re.fullmatch(r"[1-9][0-9]*|infinity", service["limit_nofile"]):
+        raise ValueError("service.limit_nofile is invalid")
+    if service["kill_mode"] not in {"", "control-group", "mixed", "process", "none"}:
+        raise ValueError("service.kill_mode is invalid")
+    if service["syslog_identifier"] and not re.fullmatch(r"[A-Za-z0-9_.@-]+", service["syslog_identifier"]):
+        raise ValueError("service.syslog_identifier is invalid")
+    if any(not re.fullmatch(r"CAP_[A-Z0-9_]+", value) for value in service["ambient_capabilities"]):
+        raise ValueError("service.ambient_capabilities contains an invalid capability")
     return recipe
 
 

@@ -4,11 +4,12 @@ DebBuilder is a self-hosted console for building, validating, and publishing Deb
 
 ## Current features
 
-- GitHub release, tag, and source-archive acquisition;
+- GitHub release, tag, source-archive, and official release-asset acquisition;
 - Node.js, Python, Rust, and static project detection;
 - declarative source modifications and source builds;
 - upstream Debian artifact validation;
-- Debian package and systemd unit generation;
+- FHS-aware Debian package generation with per-file ownership and modes;
+- service-account, persistent-directory, and advanced systemd unit generation;
 - Podman-based validation profiles and toolchains;
 - `reprepro` publication and reconciliation;
 - package lifecycle and Build Run tracking;
@@ -103,4 +104,4 @@ DebBuilder is meant to be self-hosted and operated by trusted administrators.
 
 ## Version
 
-The current release is DebBuilder 0.1.1.
+The current release is DebBuilder 0.1.3.

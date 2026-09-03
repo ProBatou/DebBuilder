@@ -31,6 +31,25 @@ class SystemdUnitTests(unittest.TestCase):
         unit = generate_unit({"enabled": False, "name": "demo.service", "command": "/bin/true"})
         self.assertIn("ExecStart=/bin/true", unit)
 
+    def test_advanced_directives_are_rendered_and_lists_are_repeated(self):
+        unit = generate_unit({
+            "description": "Mail", "conflicts": ["postfix.service", "exim4.service"], "after": ["network-online.target"],
+            "type": "simple", "user": "mail", "group": "mail", "command": "/usr/bin/mail",
+            "limit_nofile": "65536", "kill_mode": "process", "kill_signal": "SIGINT", "restart": "on-failure", "restart_sec": "5",
+            "syslog_identifier": "mail", "ambient_capabilities": ["CAP_NET_BIND_SERVICE"],
+        })
+        self.assertIn("Conflicts=postfix.service\nConflicts=exim4.service", unit)
+        self.assertIn("LimitNOFILE=65536", unit)
+        self.assertIn("KillMode=process", unit)
+        self.assertIn("KillSignal=SIGINT", unit)
+        self.assertIn("SyslogIdentifier=mail", unit)
+        self.assertIn("AmbientCapabilities=CAP_NET_BIND_SERVICE", unit)
+
+    def test_absent_advanced_directives_are_omitted(self):
+        unit = generate_unit({"command": "/bin/true"})
+        for directive in ("Conflicts=", "LimitNOFILE=", "KillMode=", "SyslogIdentifier=", "AmbientCapabilities="):
+            self.assertNotIn(directive, unit)
+
 
 if __name__ == "__main__":
     unittest.main()

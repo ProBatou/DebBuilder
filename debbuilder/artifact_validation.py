@@ -69,14 +69,17 @@ def _payload_state(backend, recipe: dict, checks: list[dict], name: str) -> list
                 row["type"] = "f"
             rows.append(row)
     owner = recipe["install"]["owner"]
-    ownership_ok = bool(rows) and all(row["user"] == owner["user"] and row["group"] == owner["group"] for row in rows)
+    expected_by_path = {row["destination"]: {"user": row.get("owner") or owner["user"], "group": row.get("group") or owner["group"]} for row in recipe["install"]["config_files"]}
+    ownership_ok = bool(rows) and all(row["user"] == expected_by_path.get(row["path"], owner)["user"] and row["group"] == expected_by_path.get(row["path"], owner)["group"] for row in rows)
     inventory = {"count": len(rows), "sample": rows[:100], "sample_truncated": len(rows) > 100}
-    _check(checks, f"{name}_ownership", ownership_ok, details={"expected": {"user": owner["user"], "group": owner["group"]}, **inventory})
+    _check(checks, f"{name}_ownership", ownership_ok, details={"default": {"user": owner["user"], "group": owner["group"]}, "overrides": expected_by_path, **inventory})
     directory_mode = recipe["install"]["directory_mode"].lstrip("0") or "0"
     file_mode = recipe["install"]["file_mode"].lstrip("0") or "0"
+    mode_by_path = {row["destination"]: (row.get("mode") or recipe["install"]["file_mode"]).lstrip("0") or "0" for row in recipe["install"]["config_files"]}
     permissions_ok = bool(rows) and all(
         True if row["type"] == "l"
         else row["mode"] == directory_mode if row["type"] == "d"
+        else row["mode"] == mode_by_path[row["path"]] if row["path"] in mode_by_path
         else (int(row["mode"], 8) & ~0o111) == int(file_mode, 8) and (int(row["mode"], 8) & 0o111) in {0, 0o111}
         for row in rows
     )
@@ -192,6 +195,17 @@ def validate_artifact(run_id: str, *, store: BuildStore, previous_artifact: str 
             package_status = backend.exec(["dpkg-query", "--show", "--showformat=${Status}\\n", package], accepted_exit_codes={0})
             status_ok = bool(package_status.get("accepted")) and package_status.get("stdout", "").strip() == "install ok installed"
             _check(checks, "package_status_installed", status_ok, details={"status": package_status.get("stdout", "").strip()}, error=package_status.get("stderr") or "Package is not fully installed")
+            account = recipe["install"].get("account") or recipe["install"]["owner"]
+            if account.get("create_group") and account["group"] != "root":
+                _execute(backend, ["getent", "group", account["group"]], checks, "service_group_present")
+            if account.get("create_user") and account["user"] != "root":
+                _execute(backend, ["getent", "passwd", account["user"]], checks, "service_user_present")
+            for directory in recipe["install"].get("directories") or []:
+                state = _execute(backend, ["stat", "--format=%a|%U|%G", directory["path"]], checks, f"persistent_directory_present:{directory['path']}")
+                expected = f"{directory['mode'].lstrip('0')}|{directory['owner']}|{directory['group']}"
+                _check(checks, f"persistent_directory_metadata:{directory['path']}", state.get("stdout", "").strip() == expected, details={"expected": expected, "actual": state.get("stdout", "").strip()})
+                writer = directory["owner"] if directory["owner"] != "root" else "root"
+                _execute(backend, ["runuser", "-u", writer, "--", "touch", f"{directory['path']}/.debbuilder-validation-marker"], checks, f"persistent_directory_writable:{directory['path']}")
             if upstream_mode:
                 inspected_files = store.artifact_files(run_id, artifact_data.get("inspection", {}))
                 payload_paths = ["/" + row["path"].lstrip("./") for row in inspected_files if row.get("path") and not row["path"].endswith("/")]
@@ -242,6 +256,8 @@ def validate_artifact(run_id: str, *, store: BuildStore, previous_artifact: str 
                     _execute(backend, ["test", "!", "-e", path], checks, f"configuration_absent_after_purge:{path}")
                 if not upstream_mode and service["configured"]:
                     _execute(backend, ["test", "!", "-e", f"/usr/lib/systemd/system/{service['name']}"], checks, "systemd_unit_absent_after_purge")
+                for directory in recipe["install"].get("directories") or []:
+                    _execute(backend, ["test", "-f", f"{directory['path']}/.debbuilder-validation-marker"], checks, f"persistent_directory_preserved_after_purge:{directory['path']}")
                 absent = backend.exec(["dpkg-query", "--show", package], accepted_exit_codes={1})
                 _check(checks, "package_absent_after_purge", bool(absent.get("accepted")), details={"exit_code": absent.get("exit_code")})
         result["status"] = "success" if checks and all(row["status"] == "success" for row in checks) else "failed"

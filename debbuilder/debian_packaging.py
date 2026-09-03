@@ -87,7 +87,10 @@ def generate_control(recipe: dict, version: str) -> str:
         f"Section: {package.get('section') or 'misc'}", f"Priority: {package.get('priority') or 'optional'}",
         f"Architecture: {package['architecture']}", f"Maintainer: {package['maintainer']}",
     ]
-    dependencies = package.get("runtime_dependencies") or []
+    dependencies = list(package.get("runtime_dependencies") or [])
+    account = recipe["install"].get("account") or recipe["install"]["owner"]
+    if (account.get("create_user") or account.get("create_group")) and "adduser" not in dependencies:
+        dependencies.append("adduser")
     if dependencies:
         lines.append(f"Depends: {', '.join(dependencies)}")
     lines.append(f"Description: {description[0]}")
@@ -157,11 +160,12 @@ def prepare_staging(recipe: dict, build_result: dict, workspace: str | Path, *, 
 
     generated: dict[str, list[str]] = {}
     owner = install["owner"]
+    account = install.get("account") or owner
     postinst = generated.setdefault("postinst", [])
-    if owner.get("create_group") and owner["group"] != "root":
-        postinst.append(f"getent group {owner['group']} >/dev/null 2>&1 || addgroup --system {owner['group']}")
-    if owner.get("create_user") and owner["user"] != "root":
-        postinst.append(f"id -u {owner['user']} >/dev/null 2>&1 || adduser --system --ingroup {owner['group']} --no-create-home {owner['user']}")
+    if account.get("create_group") and account["group"] != "root":
+        postinst.append(f"getent group {account['group']} >/dev/null 2>&1 || addgroup --system {account['group']}")
+    if account.get("create_user") and account["user"] != "root":
+        postinst.append(f"id -u {account['user']} >/dev/null 2>&1 || adduser --system --ingroup {account['group']} --no-create-home {account['user']}")
     if include_output and (owner.get("user") or owner.get("group")):
         postinst.append(f"chown -R {owner['user']}:{owner['group']} {install['destination']}")
 
@@ -179,13 +183,16 @@ def prepare_staging(recipe: dict, build_result: dict, workspace: str | Path, *, 
                 raise PackagingError("configuration_source_missing", f"Configuration source file is missing: {source_name}")
             preview_warnings.append(f"Configuration source is unavailable during preview: {source_name}")
         policy = configured.get("policy", install.get("config_policy", "dpkg_conffile"))
+        mapping_mode = configured.get("mode") or install["file_mode"]
+        mapping_owner = configured.get("owner") or owner["user"]
+        mapping_group = configured.get("group") or owner["group"]
         if policy == "create_if_missing":
             template = staging / "usr" / "share" / recipe["package"]["name"] / "config-templates" / destination_path.lstrip("/")
             template.parent.mkdir(parents=True, exist_ok=True)
             if source_file.is_file():
                 shutil.copyfile(source_file, template)
-                template.chmod(int(install["file_mode"], 8))
-            postinst.append(f"if [ ! -e {destination_path} ]; then install -D -m {install['file_mode']} {('/' + template.relative_to(staging).as_posix())} {destination_path}; fi")
+                template.chmod(int(mapping_mode, 8))
+            postinst.append(f"if [ ! -e {destination_path} ]; then install -D -m {mapping_mode} {('/' + template.relative_to(staging).as_posix())} {destination_path}; fi")
             generated.setdefault("postrm", []).append(f"if [ \"$1\" = purge ]; then rm -f {destination_path}; fi")
             staged_path = template
         else:
@@ -193,12 +200,20 @@ def prepare_staging(recipe: dict, build_result: dict, workspace: str | Path, *, 
             staged_path.parent.mkdir(parents=True, exist_ok=True)
             if source_file.is_file():
                 shutil.copyfile(source_file, staged_path)
-                staged_path.chmod(int(install["file_mode"], 8))
+                staged_path.chmod(int(mapping_mode, 8))
             if policy == "dpkg_conffile":
                 conffiles.append(destination_path)
-        configurations.append({"source": source_name, "destination": destination_path, "staged_path": "/" + staged_path.relative_to(staging).as_posix(), "policy": policy})
-        if (owner.get("user"), owner.get("group")) != ("root", "root"):
-            postinst.append(f"chown {owner['user']}:{owner['group']} {destination_path}")
+        configurations.append({"source": source_name, "destination": destination_path, "staged_path": "/" + staged_path.relative_to(staging).as_posix(), "policy": policy, "mode": mapping_mode, "owner": mapping_owner, "group": mapping_group})
+        if (mapping_owner, mapping_group) != ("root", "root"):
+            postinst.append(f"chown {mapping_owner}:{mapping_group} {destination_path}")
+
+    directories = []
+    for configured in install.get("directories") or []:
+        target = _stage_path(staging, configured["path"])
+        target.mkdir(parents=True, exist_ok=True)
+        target.chmod(int(configured["mode"], 8))
+        postinst.append(f"install -d -m {configured['mode']} -o {configured['owner']} -g {configured['group']} {configured['path']}")
+        directories.append({**configured, "staged_path": "/" + target.relative_to(staging).as_posix()})
 
     service = recipe["service"]
     unit_text, unit_path = "", ""
@@ -238,9 +253,9 @@ def prepare_staging(recipe: dict, build_result: dict, workspace: str | Path, *, 
     return {
         "staging_directory": str(staging), "install_destination": install["destination"], "include_output": include_output,
         "content_source": str(content_source), "content_sources": [str(path) for path in content_sources], "content_available": content_available, "content_files": copied, "preview": preview, "warnings": preview_warnings,
-        "version": build_result["version"], "control": control, "conffiles": conffiles, "configurations": configurations,
+        "version": build_result["version"], "control": control, "conffiles": conffiles, "configurations": configurations, "directories": directories,
         "maintainer_scripts": scripts, "systemd": {"configured": service["configured"], "enabled": service["enabled"], "path": unit_path, "content": unit_text},
-        "ownership": {"user": owner["user"], "group": owner["group"], "applied_by": "postinst"},
+        "ownership": {"user": owner["user"], "group": owner["group"], "applied_by": "postinst"}, "account": account,
         "permissions": {"directories": install["directory_mode"], "files": install["file_mode"]},
     }
 

@@ -170,6 +170,16 @@ class ProjectDetectionTests(unittest.TestCase):
             result = detect_project(root)
         self.assertEqual(result["project_type"], "rust")
 
+    def test_rust_workspace_with_auxiliary_package_manifest_remains_rust(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "Cargo.toml").write_text('[workspace]\nmembers=["server"]\n')
+            (root / "package.json").write_text(json.dumps({"private": True, "scripts": {"lint": "eslint ."}}))
+            (root / "server").mkdir()
+            (root / "server/Cargo.toml").write_text('[package]\nname="server"\nversion="1"\n')
+            result = detect_project(root)
+        self.assertEqual(result["project_type"], "rust")
+
     def test_strong_python_and_rust_markers_are_ambiguous(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -199,6 +209,62 @@ class ProjectDetectionTests(unittest.TestCase):
         self.assertEqual(result["build_dependencies"], ["cargo", "rustc"])
         self.assertEqual(result["proposed_commands"], ["cargo build --release"])
 
+    def test_rust_application_lockfile_enables_locked_build(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "Cargo.toml").write_text('[package]\nname="demo"\nversion="1.2.3"\nrust-version="1.85"\ndefault-run="demo"\n[features]\ndefault=["sqlite"]\n[[bin]]\nname="demo"\npath="src/server.rs"\n')
+            (root / "Cargo.lock").write_text("version = 4\n")
+            result = detect_project(root)
+        self.assertEqual(result["proposed_commands"], ["cargo build --release --locked"])
+        self.assertEqual(result["package_name"], "demo")
+        self.assertEqual(result["package_version"], "1.2.3")
+        self.assertEqual(result["rust_version"], "1.85")
+        self.assertEqual(result["default_run"], "demo")
+        self.assertEqual(result["default_features"], ["sqlite"])
+        self.assertEqual(result["binary_targets"], [{"name": "demo", "path": "src/server.rs"}])
+        self.assertEqual(result["suggested_output_paths"], ["target/release/demo"])
+
+    def test_rust_workspace_selects_its_only_binary_package(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "Cargo.toml").write_text('[workspace]\nmembers=["crates/*"]\ndefault-members=["crates/server"]\n')
+            (root / "Cargo.lock").write_text("version = 4\n")
+            for member, manifest in (
+                ("lib", '[package]\nname="support"\nversion="1.0.0"\n'),
+                ("server", '[package]\nname="mail-server"\nversion="1.0.0"\n[[bin]]\nname="maild"\npath="src/main.rs"\n'),
+            ):
+                path = root / "crates" / member
+                path.mkdir(parents=True)
+                (path / "Cargo.toml").write_text(manifest)
+            result = detect_project(root)
+        self.assertEqual(result["workspace_members"], ["crates/*"])
+        self.assertEqual(result["workspace_default_members"], ["crates/server"])
+        self.assertEqual(result["selected_package"], "mail-server")
+        self.assertEqual(result["proposed_commands"], ["cargo build --release --locked --package mail-server"])
+        self.assertEqual(result["suggested_output_paths"], ["target/release/maild"])
+
+    def test_rust_toolchain_and_cargo_config_are_parsed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "Cargo.toml").write_text("[package]\nname='demo'\nversion='1'\n")
+            (root / "rust-toolchain.toml").write_text('[toolchain]\nchannel="1.85.1"\nprofile="minimal"\ncomponents=["rustfmt"]\ntargets=["x86_64-unknown-linux-gnu"]\n')
+            (root / ".cargo").mkdir()
+            (root / ".cargo/config.toml").write_text('[build]\ntarget="x86_64-unknown-linux-gnu"\ntarget-dir="out"\n')
+            result = detect_project(root)
+        self.assertEqual(result["toolchain"], {"channel": "1.85.1", "profile": "minimal", "components": ["rustfmt"], "targets": ["x86_64-unknown-linux-gnu"], "source": "rust-toolchain.toml"})
+        self.assertEqual(result["cargo_config"]["build"]["target-dir"], "out")
+        self.assertIn("toolchain 1.85.1", result["display_name"])
+        self.assertEqual(result["detected_files"], ["Cargo.toml", "rust-toolchain.toml", ".cargo/config.toml"])
+
+    def test_rust_lockfile_does_not_force_locked_build_for_library(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "Cargo.toml").write_text('[package]\nname="library"\nversion="1"\n')
+            (root / "Cargo.lock").write_text("version = 4\n")
+            result = detect_project(root)
+        self.assertEqual(result["proposed_commands"], ["cargo build --release"])
+        self.assertFalse(result["locked"])
+
     def test_static_detection_has_no_commands_or_dependencies(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -227,7 +293,7 @@ class ProjectDetectionTests(unittest.TestCase):
             self.assertEqual(missing.exception.code, "project_not_detected")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            (root / "package.json").write_text("{}")
+            (root / "package.json").write_text(json.dumps({"scripts": {"build": "vite build"}}))
             (root / "Cargo.toml").write_text("[package]\n")
             with self.assertRaises(DetectionError) as ambiguous:
                 detect_project(root)

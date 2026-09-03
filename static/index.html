@@ -71,8 +71,10 @@
                 <input id="recipeMetaName" type="hidden">
                 <input id="recipeMetaPackage" type="hidden">
                 <label><span>GitHub project</span><input id="recipeMetaGithub" placeholder="owner/repository" pattern="[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"></label>
-                <label><span>Artifact workflow</span><select id="recipeArtifactMode"><option value="source_build">Build from source</option><option value="upstream_deb">Use upstream Debian package</option></select></label>
+                <label><span>Artifact workflow</span><select id="recipeArtifactMode"><option value="source_build">Build from source</option><option value="upstream_deb">Use upstream Debian package</option><option value="upstream_archive">Use upstream release archive</option></select></label>
                 <label id="recipeArtifactPatternField" hidden><span>Release asset pattern</span><input id="recipeArtifactPattern" placeholder="*-linux-x64.deb"></label>
+                <label id="recipeArtifactNameField" hidden><span>Exact release asset</span><input id="recipeArtifactName" placeholder="project-x86_64-linux.tar.gz"></label>
+                <label id="recipeArtifactFilesField" hidden><span>Selected archive files</span><textarea id="recipeArtifactFiles" rows="2" placeholder="bin/project"></textarea></label>
                 <label><span>Tracking</span><select id="recipeMetaTracking"><option value="latest_release">Latest release</option><option value="tag">Explicit tag</option><option value="manual">Manual ref</option></select></label>
                 <label id="recipeSourceRefField" hidden><span>GitHub ref</span><input id="recipeMetaSourceRef" placeholder="v1.2.3, main, or commit SHA"></label>
                 <label><span>Debian version</span><select id="recipeMetaVersionSource"><option value="tag">From GitHub tag</option><option value="release_name">From release name</option><option value="regex">Custom expression</option><option value="build">Provided by build</option></select></label>
@@ -123,9 +125,12 @@
                     <label class="span-4"><span>Installed content</span><select id="installContentSource"><option value="build_output">Selected build output</option><option value="source" hidden>Selected build output (legacy)</option><option value="configured_files">Custom mappings</option></select></label>
                     <label class="span-2"><span>Dirs</span><select id="installDirectoryMode"><option>0755</option><option>0750</option><option>0700</option></select></label>
                     <label class="span-2"><span>Files</span><select id="installFileMode"><option>0644</option><option>0640</option><option>0600</option></select></label>
-                    <label class="span-6"><span>User</span><input id="installOwnerUser"></label>
-                    <label class="span-6"><span>Group</span><input id="installOwnerGroup"></label>
+                    <label class="span-3"><span>Payload user</span><input id="installOwnerUser"></label>
+                    <label class="span-3"><span>Payload group</span><input id="installOwnerGroup"></label>
+                    <label class="span-3"><span>Service account</span><input id="installAccountUser"></label>
+                    <label class="span-3"><span>Service group</span><input id="installAccountGroup"></label>
                     <label class="span-12"><span>Account provisioning</span><select id="installAccountProvisioning"><option value="ensure">Ensure account exists</option><option value="existing">Use existing account</option><option value="custom" hidden>Custom (legacy)</option></select></label>
+                    <label class="span-12"><span>Persistent directories</span><textarea id="installDirectories" rows="3" placeholder="/var/lib/example | example | example | 0750"></textarea></label>
                   </div>
                   <details class="account-provisioning-advanced" id="installAccountProvisioningAdvanced" hidden><summary>Legacy account overrides</summary><div class="recipe-step-fields"><label class="span-6"><span>Create user</span><input id="installCreateUser" type="checkbox"></label><label class="span-6"><span>Create group</span><input id="installCreateGroup" type="checkbox"></label></div></details>
                 </div>
@@ -135,7 +140,7 @@
                 </div>
                 <div class="recipe-form-group install-config-group">
                   <div class="install-mapping-head"><div><span class="recipe-group-title" id="installMappingTitle">Additional mappings</span><p id="installMappingHelp">Optionally install extra files from the selected build output at specific absolute paths.</p></div><button type="button" class="ghost compact-button" id="btnAddInstallMapping">+ Add mapping</button></div>
-                  <div class="install-mapping-table"><div class="install-mapping-columns"><span>Source</span><span>Destination</span><span>Policy</span><span></span></div><div id="installMappingList" class="install-mapping-list"></div><p id="installMappingEmpty" class="build-output-empty">No mappings configured.</p></div>
+                  <div class="install-mapping-table"><div class="install-mapping-columns"><span>Source</span><span>Destination</span><span>Policy</span><span>Owner</span><span>Group</span><span>Mode</span><span></span></div><div id="installMappingList" class="install-mapping-list"></div><p id="installMappingEmpty" class="build-output-empty">No mappings configured.</p></div>
                 </div>
                 <div class="recipe-form-group install-scripts-group">
                   <span class="recipe-group-title">Maintainer scripts</span>
@@ -189,6 +194,7 @@
                       <label class="span-4"><span>After</span><input id="serviceAfter"></label>
                       <label class="span-4"><span>Wants</span><input id="serviceWants"></label>
                       <label class="span-4"><span>Requires</span><input id="serviceRequires" value=""></label>
+                      <label class="span-4"><span>Conflicts</span><input id="serviceConflicts" value=""></label>
                     </div>
                   </div>
                   <div class="recipe-form-group">
@@ -198,6 +204,10 @@
                       <label class="span-3"><span>TimeoutStartSec</span><input id="serviceTimeoutStartSec"></label>
                       <label class="span-3"><span>TimeoutStopSec</span><input id="serviceTimeoutStopSec"></label>
                       <label class="span-3"><span>KillSignal</span><select id="serviceKillSignal"><option value="">Not set</option><option>SIGTERM</option><option>SIGINT</option><option>SIGKILL</option><option>SIGHUP</option></select></label>
+                      <label class="span-3"><span>KillMode</span><select id="serviceKillMode"><option value="">Not set</option><option>control-group</option><option>mixed</option><option>process</option><option>none</option></select></label>
+                      <label class="span-3"><span>LimitNOFILE</span><input id="serviceLimitNOFILE"></label>
+                      <label class="span-3"><span>SyslogIdentifier</span><input id="serviceSyslogIdentifier"></label>
+                      <label class="span-3"><span>AmbientCapabilities</span><input id="serviceAmbientCapabilities" placeholder="CAP_NET_BIND_SERVICE"></label>
                     </div>
                   </div>
                   <div class="recipe-form-group">

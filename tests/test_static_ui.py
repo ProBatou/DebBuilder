@@ -177,7 +177,9 @@ class StaticUiTests(unittest.TestCase):
         self.assertNotIn("Create application user", html)
         self.assertNotIn("Create application group", html)
         self.assertIn("user === 'root' && group === 'root'", app)
-        self.assertIn("accountProvisioning === 'ensure' ? ownerUser !== 'root'", serialization)
+        self.assertIn("accountProvisioning === 'ensure' ? accountUser !== 'root'", serialization)
+        self.assertIn('id="installAccountUser"', html)
+        self.assertIn('id="installOwnerUser"', html)
 
     def test_service_configuration_is_derived_and_empty_state_is_compact(self):
         html = self.read("static/index.html")

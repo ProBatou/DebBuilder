@@ -19,9 +19,13 @@ function toggleNewVersionExpression() {
 }
 
 function refreshRecipeApplicability() {
-  const upstreamArtifact = $('recipeArtifactMode')?.value === 'upstream_deb';
-  ['.recipe-build-card','.recipe-install-card','.recipe-service-card'].forEach(selector => document.querySelector(selector)?.classList.toggle('not-applicable', upstreamArtifact));
-  if ($('recipeArtifactPatternField')) $('recipeArtifactPatternField').hidden = !upstreamArtifact;
+  const mode = $('recipeArtifactMode')?.value || 'source_build';
+  const upstreamDeb = mode === 'upstream_deb';
+  const upstreamArchive = mode === 'upstream_archive';
+  ['.recipe-build-card','.recipe-install-card','.recipe-service-card'].forEach(selector => document.querySelector(selector)?.classList.toggle('not-applicable', upstreamDeb || (upstreamArchive && selector === '.recipe-build-card')));
+  if ($('recipeArtifactPatternField')) $('recipeArtifactPatternField').hidden = !(upstreamDeb || upstreamArchive);
+  if ($('recipeArtifactNameField')) $('recipeArtifactNameField').hidden = !upstreamArchive;
+  if ($('recipeArtifactFilesField')) $('recipeArtifactFilesField').hidden = !upstreamArchive;
   const configuredFiles = $('installContentSource')?.value === 'configured_files';
   if ($('installDestination')) { $('installDestination').disabled = configuredFiles; $('installDestination').closest('label').hidden = configuredFiles; }
   if ($('installAutomaticGroup')) $('installAutomaticGroup').hidden = configuredFiles;
@@ -37,8 +41,8 @@ function refreshRecipeApplicability() {
 }
 
 function renderAccountProvisioning(owner = {}) {
-  const user = value('installOwnerUser');
-  const group = value('installOwnerGroup');
+  const user = value('installAccountUser');
+  const group = value('installAccountGroup');
   const createUser = owner.create_user === true;
   const createGroup = owner.create_group === true;
   let mode = 'existing';
@@ -51,8 +55,8 @@ function renderAccountProvisioning(owner = {}) {
 }
 
 function refreshAccountProvisioning() {
-  const user = value('installOwnerUser');
-  const group = value('installOwnerGroup');
+  const user = value('installAccountUser');
+  const group = value('installAccountGroup');
   let mode = $('installAccountProvisioning')?.value || 'existing';
   if (user === 'root' && group === 'root') { mode = 'existing'; setValue('installAccountProvisioning', mode); }
   if (mode === 'ensure') { $('installCreateUser').checked = user !== 'root'; $('installCreateGroup').checked = group !== 'root'; }
@@ -62,7 +66,7 @@ function refreshAccountProvisioning() {
   if ($('installAccountProvisioningAdvanced')) $('installAccountProvisioningAdvanced').hidden = mode !== 'custom';
 }
 
-const SERVICE_FIELD_IDS = ['serviceName','serviceUser','serviceGroup','serviceCommand','serviceEnvironmentFiles','serviceEnvironment','serviceAfter','serviceWants','serviceRequires','serviceRestartSec','serviceTimeoutStartSec','serviceTimeoutStopSec','serviceKillSignal','serviceExecStartPre','serviceExecStartPost','serviceExecStop','serviceStandardOutput','serviceStandardError'];
+const SERVICE_FIELD_IDS = ['serviceName','serviceUser','serviceGroup','serviceCommand','serviceEnvironmentFiles','serviceEnvironment','serviceAfter','serviceWants','serviceRequires','serviceConflicts','serviceRestartSec','serviceTimeoutStartSec','serviceTimeoutStopSec','serviceKillSignal','serviceKillMode','serviceLimitNOFILE','serviceSyslogIdentifier','serviceAmbientCapabilities','serviceExecStartPre','serviceExecStartPost','serviceExecStop','serviceStandardOutput','serviceStandardError'];
 
 function configureService() {
   window.recipeServiceVisible = true;
@@ -85,7 +89,7 @@ function removeService() {
 }
 
 function projectDisplayName(projectType) {
-  return ({nodejs:'Node.js', python:'Python', rust:'Rust · Cargo', static:'Static files · no build'})[projectType] || projectType || 'Not detected';
+  return ({nodejs:'Node.js', python:'Python', rust:'Rust · Cargo', static:'Static files · no build', upstream_archive:'Upstream release artifact · no source build'})[projectType] || projectType || 'Not detected';
 }
 
 function buildEnvironmentState(detection) {
@@ -311,14 +315,14 @@ $('recipeMetaVersionSource')?.addEventListener('change',toggleVersionExpression)
 $('installContentSource')?.addEventListener('change',refreshRecipeApplicability);
 $('installDestination')?.addEventListener('input',renderInstallContentSummary);
 $('installAccountProvisioning')?.addEventListener('change',refreshAccountProvisioning);
-['installOwnerUser','installOwnerGroup'].forEach(id => $(id)?.addEventListener('input',refreshAccountProvisioning));
+['installAccountUser','installAccountGroup'].forEach(id => $(id)?.addEventListener('input',refreshAccountProvisioning));
 $('btnConfigureService')?.addEventListener('click',configureService);
 $('btnRemoveService')?.addEventListener('click',removeService);
 $('newRecipeVersionSource')?.addEventListener('change',toggleNewVersionExpression);
 $('newRecipeTracking')?.addEventListener('change',toggleNewVersionExpression);
 ['recipeMetaName','recipeMetaPackage','recipeMetaGithub','recipeMetaSourceRef','recipeMetaVersionExpression'].forEach(id => $(id)?.addEventListener('input',scheduleRecipeAutosave));
 ['recipeMetaTracking','recipeMetaVersionSource','recipeMetaActive','recipeArtifactMode'].forEach(id => $(id)?.addEventListener('change',event=>{toggleVersionExpression();refreshRecipeApplicability();scheduleRecipeAutosave(event);}));
-$('recipeArtifactPattern')?.addEventListener('input',scheduleRecipeAutosave);
+['recipeArtifactPattern','recipeArtifactName','recipeArtifactFiles'].forEach(id => $(id)?.addEventListener('input',scheduleRecipeAutosave));
 document.querySelectorAll('.recipe-build-card input, .recipe-build-card textarea, .recipe-build-card select, .recipe-install-card input, .recipe-install-card textarea, .recipe-install-card select, .recipe-service-card input, .recipe-service-card textarea, .recipe-service-card select').forEach(element => {
   element.addEventListener(element.tagName === 'SELECT' ? 'change' : 'input', () => {
     if (element.closest('.build-output-section')) return;

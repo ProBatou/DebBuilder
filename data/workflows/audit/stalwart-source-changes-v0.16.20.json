@@ -1,0 +1,12 @@
+{
+  "recipe": "stalwart",
+  "audited_release": "v0.16.20",
+  "source_file": "crates/common/src/enterprise/license.rs",
+  "status": "removed_from_official_build_recipe",
+  "reason": "Historical Source changes affected Enterprise licensing and signature verification and must not be applied to the official package.",
+  "source_changes": [
+    {"operation":"replace","path":"crates/common/src/enterprise/license.rs","search":"//const LICENSING_API: &str = \"https://localhost:444/api/license/\";","content":"const LICENSING_API: &str = \"https://localhost:444/api/license/\";"},
+    {"operation":"replace","path":"crates/common/src/enterprise/license.rs","search":"const LICENSING_API: &str = \"https://license.stalw.art/api/license/\";","content":"//const LICENSING_API: &str = \"https://license.stalw.art/api/license/\";"},
+    {"operation":"replace","path":"crates/common/src/enterprise/license.rs","search":"        // Validate signature\n        self.public_key\n            .verify(\n                &key[..(U64_LEN * 2) + (U32_LEN * 2) + domain_len],\n                signature,\n            )\n            .map_err(|_| LicenseError::Validation)?;","content":"        // Validate signature\n        let _ = signature;"}
+  ]
+}

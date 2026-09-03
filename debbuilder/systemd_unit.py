@@ -17,6 +17,7 @@ def generate_unit(service: dict) -> str:
     unit = ["[Unit]"]
     if service.get("description"):
         unit.append(f"Description={_safe(service['description'])}")
+    unit += _lines("Conflicts", service.get("conflicts") or [])
     unit += _lines("After", service.get("after") or [])
     unit += _lines("Wants", service.get("wants") or [])
     unit += _lines("Requires", service.get("requires") or [])
@@ -39,6 +40,7 @@ def generate_unit(service: dict) -> str:
     body += _lines("ExecStartPost", service.get("exec_start_post") or [])
     body += _lines("ExecStop", service.get("exec_stop") or [])
     optional = (
+        ("LimitNOFILE", "limit_nofile"), ("KillMode", "kill_mode"),
         ("Restart", "restart"), ("RestartSec", "restart_sec"),
         ("TimeoutStartSec", "timeout_start_sec"), ("TimeoutStopSec", "timeout_stop_sec"),
         ("KillSignal", "kill_signal"), ("StandardOutput", "standard_output"),
@@ -47,4 +49,9 @@ def generate_unit(service: dict) -> str:
     for directive, key in optional:
         if service.get(key):
             body.append(f"{directive}={_safe(service[key])}")
+    if service.get("syslog_identifier"):
+        body.append(f"SyslogIdentifier={_safe(service['syslog_identifier'])}")
+    capabilities = service.get("ambient_capabilities") or []
+    if capabilities:
+        body.append(f"AmbientCapabilities={' '.join(_safe(value) for value in capabilities)}")
     return "\n".join(unit + body + ["", "[Install]", "WantedBy=multi-user.target", ""]) + "\n"

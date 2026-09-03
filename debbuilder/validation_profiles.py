@@ -5,10 +5,10 @@ import re
 
 
 PROFILES = {
-    "bookworm": {"image": "debbuilder-validation:bookworm", "capabilities": {}},
+    "bookworm": {"image": "debbuilder-validation:bookworm", "capabilities": {"python": "3.11"}},
     "bookworm-node22": {
         "image": "debbuilder-validation:bookworm-node22",
-        "capabilities": {"node": "22.22.1"},
+        "capabilities": {"node": "22.22.1", "python": "3.11"},
     },
 }
 
@@ -33,3 +33,55 @@ def node_satisfies(version: str, requirement: str) -> bool:
     if operator == ">=":
         return actual >= minimum
     return actual == minimum
+
+
+def python_satisfies(version: str, requirement: str) -> bool:
+    """Evaluate common requires-python and Poetry constraint forms."""
+    match = re.search(r"(?:Python\s+)?(\d+)\.(\d+)(?:\.(\d+))?", version.strip())
+    if not match:
+        return False
+    actual = tuple(int(value or 0) for value in match.groups())
+
+    def parsed(value: str) -> tuple[int, int, int] | None:
+        found = re.fullmatch(r"\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?\s*", value)
+        return tuple(int(item or 0) for item in found.groups()) if found else None
+
+    for raw in requirement.split(","):
+        clause = raw.strip()
+        if not clause:
+            continue
+        found = re.fullmatch(r"(\^|~=|==|>=|<=|>|<)?\s*(\d+(?:\.\d+){0,2})", clause)
+        if not found:
+            return False
+        operator, raw_version = found.groups()
+        expected = parsed(raw_version)
+        if expected is None:
+            return False
+        if operator == ">=" and not actual >= expected:
+            return False
+        if operator == ">" and not actual > expected:
+            return False
+        if operator == "<=" and not actual <= expected:
+            return False
+        if operator == "<" and not actual < expected:
+            return False
+        if operator in {None, "=="}:
+            precision = len(raw_version.split("."))
+            if actual[:precision] != expected[:precision]:
+                return False
+        if operator in {"^", "~="}:
+            if actual < expected:
+                return False
+            parts = raw_version.split(".")
+            if operator == "^":
+                nonzero = next((index for index, value in enumerate(expected) if value), 2)
+                upper = list(expected)
+                upper[nonzero] += 1
+                upper[nonzero + 1:] = [0] * (2 - nonzero)
+            elif len(parts) <= 2:
+                upper = [expected[0] + 1, 0, 0]
+            else:
+                upper = [expected[0], expected[1] + 1, 0]
+            if actual >= tuple(upper):
+                return False
+    return True

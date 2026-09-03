@@ -6,6 +6,7 @@ from pathlib import Path
 from debbuilder import artifact_validation
 from debbuilder.build_store import BuildStore
 from debbuilder.validation_backend import BackendError, OciSystemdBackend
+from debbuilder.validation_profiles import python_satisfies
 
 
 def recipe(*, service=False, configs=None):
@@ -66,6 +67,18 @@ class NodeBackend(FakeBackend):
     def exec(self, arguments, **kwargs):
         result = super().exec(arguments, **kwargs)
         if arguments == ["node", "--version"]:
+            result["stdout"] = self.version
+            result["exit_code"] = 0 if self.version else 127
+            result["accepted"] = bool(self.version)
+        return result
+
+
+class PythonBackend(FakeBackend):
+    version = "Python 3.11.2\n"
+
+    def exec(self, arguments, **kwargs):
+        result = super().exec(arguments, **kwargs)
+        if arguments == ["python3", "--version"]:
             result["stdout"] = self.version
             result["exit_code"] = 0 if self.version else 127
             result["accepted"] = bool(self.version)
@@ -136,6 +149,26 @@ class ArtifactValidationTests(unittest.TestCase):
             missing = artifact_validation.validate_artifact(run["id"], store=store, backend_factory=MissingNode, profile="bookworm-node22")
             self.assertEqual(missing["error"]["code"], "validation_toolchain_incompatible")
 
+    def test_python_toolchain_requirement_and_common_specifiers(self):
+        self.assertTrue(python_satisfies("Python 3.11.2", ">=3.10,<4"))
+        self.assertTrue(python_satisfies("Python 3.11.2", "^3.11"))
+        self.assertTrue(python_satisfies("Python 3.11.2", "3.11"))
+        self.assertTrue(python_satisfies("Python 3.11.2", "==3.11"))
+        self.assertFalse(python_satisfies("Python 3.12.0", "==3.11"))
+        self.assertFalse(python_satisfies("Python 3.10.9", ">=3.11"))
+        with tempfile.TemporaryDirectory() as temporary:
+            store, run = self.successful_run(temporary)
+            persisted = store.load(run["id"])
+            next(step for step in persisted["steps"] if step["name"] == "detection")["details"] = {"project_type": "python", "python_requirement": ">=3.10"}
+            store.save(persisted)
+            good = artifact_validation.validate_artifact(run["id"], store=store, backend_factory=PythonBackend)
+            self.assertEqual(good["status"], "success")
+            self.assertEqual(next(check for check in good["checks"] if check["name"] == "toolchain_python")["details"]["actual"], "Python 3.11.2")
+            class OldPython(PythonBackend):
+                version = "Python 3.9.18\n"
+            old = artifact_validation.validate_artifact(run["id"], store=store, backend_factory=OldPython)
+            self.assertEqual(old["error"]["code"], "validation_toolchain_incompatible")
+
     def test_upstream_artifact_uses_opaque_payload_and_detected_systemd_checks(self):
         with tempfile.TemporaryDirectory() as temporary:
             configured = recipe()
@@ -183,6 +216,8 @@ class ArtifactValidationTests(unittest.TestCase):
             calls = created[0].arguments
             self.assertIn(["dpkg", "--force-confnew", "--install", "/validation/validation/" + result["id"] + "/previous.deb"], calls)
             self.assertTrue(any(call[:3] == ["systemctl", "is-active", "--quiet"] for call in calls))
+            self.assertEqual(sum(call[:3] == ["systemctl", "is-active", "--quiet"] for call in calls), 3)
+            self.assertTrue(any(check["name"] == "systemd_active_after_grace" for check in result["checks"]))
             self.assertTrue(any(check["name"] == "configuration_preserved:/etc/demo/demo.conf" for check in result["checks"]))
 
     def test_requires_successful_run_and_confines_previous_artifact(self):

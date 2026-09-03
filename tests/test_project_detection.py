@@ -17,16 +17,144 @@ class ProjectDetectionTests(unittest.TestCase):
         self.assertEqual(result["build_dependencies"], ["nodejs", "npm"])
         self.assertEqual(result["proposed_commands"], ["npm ci", "npm run build"])
 
-    def test_python_detection_reports_markers_and_deterministic_proposals(self):
+    def test_modern_pyproject_metadata_and_backend_are_parsed(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            (root / "pyproject.toml").write_text("[build-system]\n")
-            (root / "requirements.txt").write_text("requests\n")
+            (root / "pyproject.toml").write_text(
+                '[build-system]\nrequires = ["hatchling>=1.20"]\nbuild-backend = "hatchling.build"\n'
+                '[project]\nrequires-python = ">=3.11"\ndependencies = ["httpx>=0.27", "rich"]\n'
+                '[project.scripts]\ndemo = "demo.cli:main"\n'
+            )
             result = detect_project(root)
         self.assertEqual(result["project_type"], "python")
-        self.assertEqual(result["detected_files"], ["pyproject.toml", "requirements.txt"])
-        self.assertEqual(result["build_dependencies"], ["python3", "python3-pip", "python3-build"])
-        self.assertEqual(result["proposed_commands"], ["python3 -m pip install -r requirements.txt", "python3 -m build"])
+        self.assertEqual(result["build_backend"], "hatchling")
+        self.assertEqual(result["build_backend_module"], "hatchling.build")
+        self.assertEqual(result["build_backend_requires"], ["hatchling>=1.20"])
+        self.assertEqual(result["python_requirement"], ">=3.11")
+        self.assertEqual(result["declared_dependencies"], ["httpx", "rich"])
+        self.assertEqual(result["entry_point_hints"], ["demo = demo.cli:main"])
+        self.assertEqual(result["dependency_sources"], ["pyproject.toml"])
+        self.assertEqual(result["build_dependencies"], ["python3", "python3-build"])
+        self.assertEqual(result["proposed_commands"], ["python3 -m build"])
+
+    def test_legacy_setup_py_is_parsed_without_execution(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "setup.py").write_text(
+                "from setuptools import setup\n"
+                "setup(python_requires='>=3.9', install_requires=['requests>=2'], "
+                "entry_points={'console_scripts':['demo=demo:main']})\n"
+            )
+            result = detect_project(root)
+        self.assertEqual(result["build_backend"], "setuptools")
+        self.assertEqual(result["python_requirement"], ">=3.9")
+        self.assertEqual(result["declared_dependencies"], ["requests"])
+        self.assertEqual(result["entry_point_hints"], ["demo=demo:main"])
+        self.assertEqual(result["proposed_commands"], ["python3 -m build"])
+
+    def test_setup_cfg_metadata_is_parsed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "setup.cfg").write_text(
+                "[metadata]\nname = demo\n[options]\npython_requires = >=3.10\n"
+                "install_requires =\n  click>=8\n  rich\n"
+                "[options.entry_points]\nconsole_scripts =\n  demo = demo.cli:main\n"
+            )
+            result = detect_project(root)
+        self.assertEqual(result["build_backend"], "setuptools")
+        self.assertEqual(result["python_requirement"], ">=3.10")
+        self.assertEqual(result["declared_dependencies"], ["click", "rich"])
+        self.assertEqual(result["entry_point_hints"], ["demo = demo.cli:main"])
+
+    def test_requirements_variants_use_workspace_venv_not_global_pip(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "requirements.txt").write_text("requests\n")
+            (root / "requirements-dev.txt").write_text("pytest\n")
+            (root / "requirements").mkdir()
+            (root / "requirements/base.txt").write_text("urllib3\n")
+            result = detect_project(root)
+        self.assertEqual(result["build_mode"], "environment")
+        self.assertEqual(result["dependency_sources"], ["requirements-dev.txt", "requirements.txt", "requirements/base.txt"])
+        self.assertEqual(result["build_dependencies"], ["python3", "python3-venv"])
+        self.assertEqual(result["proposed_commands"][0], "python3 -m venv .debbuilder-venv")
+        self.assertTrue(all(".debbuilder-venv/bin/python -m pip" in command for command in result["proposed_commands"][1:]))
+        self.assertNotIn("python3 -m pip install", result["proposed_commands"])
+
+    def test_poetry_and_uv_metadata_and_locks_are_reported(self):
+        cases = [
+            (
+                '[build-system]\nrequires=["poetry-core"]\nbuild-backend="poetry.core.masonry.api"\n'
+                '[tool.poetry]\nname="demo"\n[tool.poetry.dependencies]\npython="^3.11"\nhttpx="*"\n'
+                '[tool.poetry.scripts]\ndemo="demo:main"\n',
+                "poetry.lock", "poetry-core", "^3.11", ["httpx"],
+            ),
+            (
+                '[build-system]\nrequires=["uv_build"]\nbuild-backend="uv_build"\n'
+                '[project]\nname="demo"\nrequires-python=">=3.12"\ndependencies=["anyio"]\n[tool.uv]\npackage=true\n',
+                "uv.lock", "uv", ">=3.12", ["anyio"],
+            ),
+        ]
+        for manifest, lock, backend, requirement, dependencies in cases:
+            with self.subTest(lock=lock), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / "pyproject.toml").write_text(manifest)
+                (root / lock).write_text("")
+                result = detect_project(root)
+                self.assertEqual(result["build_backend"], backend)
+                self.assertEqual(result["python_requirement"], requirement)
+                self.assertEqual(result["declared_dependencies"], dependencies)
+                self.assertEqual(result["lockfile"], lock)
+                self.assertIn(lock, result["dependency_sources"])
+
+    def test_pipfile_metadata_is_reported(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "Pipfile").write_text('[requires]\npython_version="3.11"\n[packages]\nflask="*"\n[scripts]\nserve="python app.py"\n')
+            result = detect_project(root)
+        self.assertEqual(result["python_requirement"], "==3.11")
+        self.assertEqual(result["declared_dependencies"], ["flask"])
+        self.assertEqual(result["entry_point_hints"], ["serve = python app.py"])
+        self.assertEqual(result["dependency_sources"], ["Pipfile"])
+
+    def test_source_application_requires_package_and_entrypoint(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "demo").mkdir()
+            (root / "demo/__init__.py").write_text("")
+            (root / "server.py").write_text('if __name__ == "__main__":\n    print("ok")\n')
+            result = detect_project(root)
+        self.assertEqual(result["project_type"], "python")
+        self.assertEqual(result["build_mode"], "source")
+        self.assertEqual(result["detected_files"], ["server.py", "demo/__init__.py"])
+        self.assertEqual(result["entry_point_hints"], ["server.py (__main__)"])
+        self.assertEqual(result["proposed_commands"], [])
+
+    def test_isolated_python_script_is_not_a_strong_marker(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "helper.py").write_text('if __name__ == "__main__":\n    print("helper")\n')
+            with self.assertRaises(DetectionError) as raised:
+                detect_project(root)
+        self.assertEqual(raised.exception.code, "project_not_detected")
+
+    def test_rust_with_auxiliary_python_script_remains_rust(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "Cargo.toml").write_text("[package]\n")
+            (root / "helper.py").write_text('if __name__ == "__main__":\n    print("helper")\n')
+            result = detect_project(root)
+        self.assertEqual(result["project_type"], "rust")
+
+    def test_strong_python_and_rust_markers_are_ambiguous(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "Cargo.toml").write_text("[package]\n")
+            (root / "pyproject.toml").write_text('[project]\nname="demo"\n')
+            with self.assertRaises(DetectionError) as raised:
+                detect_project(root)
+        self.assertEqual(raised.exception.code, "ambiguous_project")
+        self.assertEqual([row["project_type"] for row in raised.exception.details["candidates"]], ["python", "rust"])
 
     def test_pnpm_detection_respects_upstream_toolchain(self):
         with tempfile.TemporaryDirectory() as temporary:

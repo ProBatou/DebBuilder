@@ -25,6 +25,14 @@ class RecipeSchemaTests(unittest.TestCase):
         loaded = normalize_recipe(stored)
         self.assertEqual(loaded["package_name"], "demo")
 
+    def test_storage_preserves_each_build_output_mode_without_hidden_fields(self):
+        paths = ["package.json", "node_modules", ".next", "dist"]
+        stored_paths = recipe_for_storage({"name": "demo", "build": {"output": {"mode": "paths", "paths": paths}}})
+        self.assertEqual(stored_paths["build"]["output"], {"mode": "paths", "paths": paths})
+        self.assertEqual(recipe_for_storage(stored_paths)["build"]["output"], {"mode": "paths", "paths": paths})
+        self.assertEqual(recipe_for_storage({"name": "demo", "build": {"output": {"mode": "source"}}})["build"]["output"], {"mode": "source"})
+        self.assertEqual(recipe_for_storage({"name": "demo", "build": {"output": {"mode": "path", "path": "dist"}}})["build"]["output"], {"mode": "path", "path": "dist"})
+
     def test_complete_recipe_preserves_independent_install_and_service_owners(self):
         recipe = validate_recipe_metadata({
             "schema_version": 1, "name": "demo", "active": True,
@@ -66,6 +74,19 @@ class RecipeSchemaTests(unittest.TestCase):
         self.assertEqual(recipe["install"]["destination"], "")
         self.assertFalse(recipe["install"]["owner"]["create_user"])
         self.assertFalse(recipe["install"]["owner"]["create_group"])
+
+    def test_custom_mapping_round_trip_reuses_install_config_files(self):
+        mappings = [
+            {"source": "dist/foo", "destination": "/usr/bin/foo"},
+            {"source": "config/foo.conf", "destination": "/etc/foo/foo.conf"},
+        ]
+        stored = recipe_for_storage({
+            "name": "mapped", "package_name": "mapped",
+            "install": {"content": {"source": "configured_files"}, "config_files": mappings, "config_policy": "replace"},
+        })
+        self.assertEqual(stored["install"]["content"]["source"], "configured_files")
+        self.assertEqual(stored["install"]["config_files"], mappings)
+        self.assertEqual(recipe_for_storage(stored)["install"]["config_files"], mappings)
 
     def test_unconfigured_service_has_no_fictitious_defaults(self):
         recipe = validate_recipe_metadata({"name": "demo", "package_name": "demo", "github_repository": "owner/demo", "service": {"enabled": False}})

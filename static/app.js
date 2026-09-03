@@ -24,9 +24,57 @@ function refreshRecipeApplicability() {
   if ($('recipeArtifactPatternField')) $('recipeArtifactPatternField').hidden = !upstreamArtifact;
   const configuredFiles = $('installContentSource')?.value === 'configured_files';
   if ($('installDestination')) { $('installDestination').disabled = configuredFiles; $('installDestination').closest('label').hidden = configuredFiles; }
+  if ($('installMappingTitle')) $('installMappingTitle').textContent = configuredFiles ? 'Custom mappings' : 'Additional configuration mappings';
+  if ($('installMappingHelp')) $('installMappingHelp').textContent = configuredFiles ? 'Only these files from the primary resolved build output are installed at their absolute destinations.' : 'Optionally map files from the primary resolved build output to additional absolute paths.';
+  renderInstallContentSummary();
   const configured = !!$('serviceConfigured')?.checked;
   document.querySelectorAll('.recipe-service-card input, .recipe-service-card select, .recipe-service-card textarea').forEach(field => { if (field.id !== 'serviceConfigured') field.disabled = !configured; });
   if (!configured && $('serviceEnabled')) $('serviceEnabled').checked = false;
+}
+
+function projectDisplayName(projectType) {
+  return ({nodejs:'Node.js', python:'Python', rust:'Rust · Cargo', static:'Static files · no build'})[projectType] || projectType || 'Not detected';
+}
+
+function buildEnvironmentState(detection) {
+  if (!detection?.project_type) return {key:'not-detected', label:'Not detected'};
+  if (detection.project_type === 'nodejs' && !detection.node_version) return {key:'partially-detected', label:'Partially detected'};
+  if (detection.project_type === 'python' && (!detection.python_requirement || !detection.build_backend || detection.build_backend === 'unspecified')) return {key:'partially-detected', label:'Partially detected'};
+  return {key:'detected', label:'Detected'};
+}
+
+function renderBuildEnvironment(detection = {}) {
+  const projectType = detection.project_type || '';
+  const state = buildEnvironmentState(detection);
+  const badge = $('buildDetectionBadge');
+  if (badge) { badge.className = `detection-badge ${state.key}`; badge.querySelector('strong').textContent = state.label; }
+  if ($('buildDetectedProject')) { $('buildDetectedProject').textContent = detection.display_name || projectDisplayName(projectType); $('buildDetectedProject').dataset.value = projectType; }
+  const detectedFiles = detection.detected_files || [];
+  const buildDependencies = detection.build_dependencies || [];
+  if ($('buildDetectedFiles')) { $('buildDetectedFiles').textContent = detectedFiles.join(' · ') || 'No source inspected yet'; $('buildDetectedFiles').dataset.value = detectedFiles.join('\n'); }
+  if ($('buildDetectedDependencies')) { $('buildDetectedDependencies').textContent = buildDependencies.join(', ') || 'None'; $('buildDetectedDependencies').dataset.value = buildDependencies.join('\n'); }
+  const runtimeApplicable = projectType === 'nodejs' || projectType === 'python';
+  if ($('buildRuntimeFact')) $('buildRuntimeFact').hidden = !runtimeApplicable;
+  if ($('buildDetectedRuntime')) $('buildDetectedRuntime').textContent = (projectType === 'nodejs' ? detection.node_version : detection.python_requirement) || 'Not declared';
+  if ($('buildPackagingFact')) $('buildPackagingFact').hidden = projectType !== 'python';
+  if ($('buildDetectedPackaging')) $('buildDetectedPackaging').textContent = detection.build_backend && detection.build_backend !== 'unspecified' ? detection.build_backend : 'Not detected';
+}
+
+function renderInstallContentSummary() {
+  const summary = $('installContentSummary');
+  if (!summary) return;
+  const mode = $('installContentSource')?.value || 'build_output';
+  if (mode === 'configured_files') {
+    summary.innerHTML = '<strong>Custom mappings</strong><span>Each selected source is installed only at its configured absolute destination.</span>';
+    return;
+  }
+  const destination = value('installDestination') || `/opt/${value('recipeMetaPackage') || value('recipeMetaName') || 'package'}`;
+  const output = collectBuildOutput();
+  let rows = [];
+  if (output.mode === 'paths') rows = output.paths.map(path => `${path} → ${destination}/${path}`);
+  else if (output.mode === 'path') rows = [`Contents of ${output.path || 'selected path'} → ${destination}/…`];
+  else rows = [`Entire source tree → ${destination}/…`];
+  summary.innerHTML = `<strong>${mode === 'source' ? 'Prepared source' : 'Full build output'}</strong><span>Relative paths are preserved below the install directory.</span><code>${rows.map(esc).join('<br>')}</code>`;
 }
 
 function formatBuildAudit(build) {
@@ -41,14 +89,11 @@ function formatBuildAudit(build) {
 
 async function dryRun() {
   const wf = collectWorkflow();
+  if (!buildOutputIsComplete(wf.build.output)) throw new Error('Build output requires at least one relative path.');
   const data = await postJson('/api/run', {workflow:wf, dry_run:true});
   if (data.detection) {
-    $('buildDetectedProject').textContent = data.detection.display_name;
-    $('buildDetectedProject').dataset.value = data.detection.project_type;
-    $('buildDetectedFiles').textContent = data.detection.detected_files.join(', ');
-    $('buildDetectedFiles').dataset.value = data.detection.detected_files.join('\n');
-    $('buildDetectedDependencies').textContent = data.detection.build_dependencies.join(', ');
-    $('buildDetectedDependencies').dataset.value = data.detection.build_dependencies.join('\n');
+    renderBuildEnvironment(data.detection);
+    if (typeof setBuildOutputSuggestions === 'function') setBuildOutputSuggestions(data.detection.suggested_output_paths || []);
     if (!(wf.build?.commands || []).length) renderBuildCommands(data.detection.proposed_commands);
   }
   if (data.dependencies) {
@@ -61,6 +106,7 @@ async function dryRun() {
 
 async function buildReal() {
   const wf = collectWorkflow();
+  if (!buildOutputIsComplete(wf.build.output)) throw new Error('Build output requires at least one relative path.');
   if (!confirm(`Build ${wf.package?.name || wf.package_name || wf.name} with the real pipeline?`)) return;
   const data = await postJson('/api/run', {workflow:wf, dry_run:false});
   await loadExecutions();
@@ -117,6 +163,7 @@ async function saveRecipeNow() {
   if (!$('recipeMetaName')?.checkValidity() || !$('recipeMetaPackage')?.checkValidity() || !$('recipeMetaGithub')?.checkValidity()) {
     return;
   }
+  if (!buildOutputIsComplete(wf.build.output)) return;
   const revision = autosaveRevision;
   autosaveDirty = false;
   autosaveInFlight = true;
@@ -210,6 +257,7 @@ $('newRecipeTracking')?.addEventListener('change',toggleNewVersionExpression);
 $('recipeArtifactPattern')?.addEventListener('input',scheduleRecipeAutosave);
 document.querySelectorAll('.recipe-build-card input, .recipe-build-card textarea, .recipe-build-card select, .recipe-install-card input, .recipe-install-card textarea, .recipe-install-card select, .recipe-service-card input, .recipe-service-card textarea, .recipe-service-card select').forEach(element => {
   element.addEventListener(element.tagName === 'SELECT' ? 'change' : 'input', () => {
+    if (element.closest('.build-output-section')) return;
     if (element.id === 'buildCommands') renderBuildCommands(lines(element.value));
     scheduleRecipeAutosave();
   });

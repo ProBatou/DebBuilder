@@ -103,9 +103,14 @@ def _configured_scripts(recipe: dict, generated: dict[str, list[str]]) -> dict[s
         custom = explicit.get(name, "")
         if not parts and not custom.strip():
             continue
-        body = ["#!/bin/sh", "set -e", *parts]
-        if custom:
-            body += ["", "# Recipe-provided actions", custom]
+        body = ["#!/bin/sh", "set -e"]
+        service_start = next((index for index, line in enumerate(parts) if line.startswith("systemctl daemon-reload")), len(parts))
+        if name == "postinst" and custom and service_start < len(parts):
+            body += [*parts[:service_start], "", "# Recipe-provided actions", custom, "", *parts[service_start:]]
+        else:
+            body += parts
+            if custom:
+                body += ["", "# Recipe-provided actions", custom]
         scripts[name] = "\n".join(body).rstrip() + "\n"
     return scripts
 
@@ -142,7 +147,11 @@ def prepare_staging(recipe: dict, build_result: dict, workspace: str | Path, *, 
         for candidate in content_sources:
             relative = candidate.relative_to(workspace / "source")
             target = destination / relative if output.get("mode") == "paths" and candidate.is_dir() else destination
-            copied.extend((relative / row).as_posix() for row in _copy_regular_tree(candidate, target, allowed_root=workspace / "source"))
+            copied_rows = _copy_regular_tree(candidate, target, allowed_root=workspace / "source")
+            if output.get("mode") == "paths" and candidate.is_dir():
+                copied.extend((relative / row).as_posix() for row in copied_rows)
+            else:
+                copied.extend(copied_rows)
     preview_warnings = [] if content_available else ["Build output is unavailable because build commands are not executed during dry-run"]
 
     generated: dict[str, list[str]] = {}

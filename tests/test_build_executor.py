@@ -23,6 +23,16 @@ class BuildExecutorTests(unittest.TestCase):
             result = execute_build(configured, {"project_type": "static", "proposed_commands": []}, source, dry_run=False)
         self.assertTrue(result["executed"])
         self.assertEqual(result["reason"], "static_noop")
+
+    def test_detected_python_source_application_is_a_real_noop(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            (source / "server.py").write_text("print('hello')\n")
+            configured = recipe([], output={"mode": "paths", "paths": ["server.py"]})
+            detection = {"project_type": "python", "build_mode": "source", "proposed_commands": []}
+            result = execute_build(configured, detection, source, dry_run=False)
+        self.assertTrue(result["executed"])
+        self.assertEqual(result["reason"], "source_noop")
         self.assertEqual(result["commands"], [])
 
     def test_static_project_rejects_commands_and_path_output(self):

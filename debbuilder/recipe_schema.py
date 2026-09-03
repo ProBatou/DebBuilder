@@ -325,6 +325,8 @@ def recipe_for_storage(workflow: dict) -> dict:
     recipe = validate_recipe_metadata(workflow)
     for key in ("package_name", "github_repository", "version_tracking", "version_source", "version_expression"):
         recipe.pop(key, None)
+    if recipe["build"]["output"]["mode"] != "path":
+        recipe["build"]["output"].pop("path", None)
     return recipe
 
 

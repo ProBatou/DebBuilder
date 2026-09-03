@@ -72,11 +72,12 @@ def _safe_path_output(source: Path, relative: str, *, require_exists: bool) -> d
 def validate_build_plan(recipe: dict, detection: dict, source_directory: str | Path, *, dry_run: bool) -> dict:
     build = recipe["build"]
     is_static = detection.get("project_type") == "static"
+    is_source_noop = detection.get("build_mode") == "source" and not build["commands"] and not detection.get("proposed_commands")
     if is_static and build["commands"]:
         raise BuildError("static_build_commands_not_allowed", "Static projects must not configure build commands")
     if is_static and build["output"]["mode"] != "source":
         raise BuildError("invalid_static_output", "Static projects require output.mode = source")
-    selection = {"source": "static", "commands": [], "confirmed": True} if is_static else select_commands(build["commands"], detection.get("proposed_commands") or [], dry_run=dry_run)
+    selection = {"source": "static", "commands": [], "confirmed": True} if is_static else {"source": "detected_source", "commands": [], "confirmed": True} if is_source_noop else select_commands(build["commands"], detection.get("proposed_commands") or [], dry_run=dry_run)
     try:
         cwd = resolve_working_directory(source_directory, build["working_directory"])
         environment = controlled_environment(source_directory, build["environment"])
@@ -102,7 +103,8 @@ def execute_build(recipe: dict, detection: dict, source_directory: str | Path, *
     plan = validate_build_plan(recipe, detection, source_directory, dry_run=dry_run)
     if dry_run:
         return {"executed": False, "reason": "dry_run", "plan": plan, "commands": [], "output": plan["output"]}
-    actual_commands = [] if detection.get("project_type") == "static" else select_commands(recipe["build"]["commands"], detection.get("proposed_commands") or [], dry_run=False)["commands"]
+    source_noop = detection.get("build_mode") == "source" and not recipe["build"]["commands"] and not detection.get("proposed_commands")
+    actual_commands = [] if detection.get("project_type") == "static" or source_noop else select_commands(recipe["build"]["commands"], detection.get("proposed_commands") or [], dry_run=False)["commands"]
     timeout = timeout if timeout is not None else recipe["build"].get("timeout", 120)
     results = []
     for index, command in enumerate(actual_commands, 1):
@@ -126,4 +128,5 @@ def execute_build(recipe: dict, detection: dict, source_directory: str | Path, *
     except BuildError as exc:
         exc.details = {"plan": plan, "commands": results, **exc.details}
         raise
-    return {"executed": True, "reason": "static_noop" if detection.get("project_type") == "static" else "build", "plan": plan, "commands": results, "output": output}
+    reason = "static_noop" if detection.get("project_type") == "static" else "source_noop" if source_noop else "build"
+    return {"executed": True, "reason": reason, "plan": plan, "commands": results, "output": output}

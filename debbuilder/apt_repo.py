@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import os
 import re
 import shlex
 import shutil
@@ -12,6 +13,32 @@ from pathlib import Path
 from urllib.parse import urljoin
 
 from .command_runner import run_command
+
+
+DEBIAN_VERSION_PATTERN = re.compile(
+    r"(?:(?P<epoch>[0-9]+):)?"
+    r"(?P<upstream>[0-9][A-Za-z0-9.+:~\-]*?)"
+    r"(?:-(?P<revision>[A-Za-z0-9.+~]+))?"
+)
+
+
+def debian_upstream_version(version: str) -> str:
+    """Extract epoch and upstream version according to Debian's version grammar."""
+    value = str(version or "").strip()
+    match = DEBIAN_VERSION_PATTERN.fullmatch(value)
+    if not match:
+        raise ValueError(f"invalid Debian version: {version}")
+    epoch = match.group("epoch")
+    upstream = match.group("upstream")
+    return f"{epoch}:{upstream}" if epoch is not None else upstream
+
+
+def reprepro_environment(environ: dict[str, str] | None = None) -> dict[str, str]:
+    """Keep repository signing bound to the invoking account's GnuPG home."""
+    environment = os.environ if environ is None else environ
+    configured = str(environment.get("GNUPGHOME") or "").strip()
+    home = Path(str(environment.get("HOME") or Path.home())).expanduser()
+    return {"LC_ALL": "C", "GNUPGHOME": configured or str(home / ".gnupg")}
 
 
 def parse_packages_index(text: str) -> list[dict]:
@@ -74,6 +101,13 @@ def debian_version_relation(candidate: str, published: str, *, workspace: Path, 
         if result.get("exit_code") not in {1}:
             raise RuntimeError(result.get("stderr") or "dpkg version comparison failed")
     raise RuntimeError("dpkg could not order Debian versions")
+
+
+def upstream_version_relation(available_upstream: str, published_debian: str, *, workspace: Path, runner=run_command) -> dict:
+    """Compare an available upstream version with a published Debian package version."""
+    published_upstream = debian_upstream_version(published_debian)
+    result = debian_version_relation(available_upstream, published_upstream, workspace=workspace, runner=runner)
+    return {**result, "available_upstream": available_upstream, "published_upstream": published_upstream, "published_debian": published_debian}
 
 
 def published_versions(rows: list[dict], package: str, architecture: str | None = None) -> list[dict]:
@@ -143,7 +177,7 @@ def reprepro_list(repo_root: Path, distribution: str, *, runner=run_command) -> 
     root = Path(repo_root).resolve()
     result = runner(
         f"reprepro --basedir {shlex.quote(str(root))} list {shlex.quote(distribution)}",
-        workspace=root, working_directory=".", environment={"LC_ALL": "C"}, timeout=60,
+        workspace=root, working_directory=".", environment=reprepro_environment(), timeout=60,
     )
     rows = []
     for line in result.get("stdout", "").splitlines():
@@ -170,7 +204,7 @@ def reprepro_include_deb(repo_root: Path, distribution: str, deb_path: Path, com
     """Publish a verified .deb through the repository's native reprepro database."""
     root = Path(repo_root).resolve()
     command = " ".join(shlex.quote(value) for value in ("reprepro", "--basedir", str(root), "--component", component, "includedeb", distribution, str(Path(deb_path).resolve())))
-    result = runner(command, workspace=root, working_directory=".", environment={"LC_ALL": "C"}, timeout=120)
+    result = runner(command, workspace=root, working_directory=".", environment=reprepro_environment(), timeout=120)
     return {"backend": "reprepro", "command": result}
 
 

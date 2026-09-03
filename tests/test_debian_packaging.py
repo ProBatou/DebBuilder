@@ -63,6 +63,8 @@ class DebianPackagingTests(unittest.TestCase):
             self.assertIn("addgroup --system demo-app", result["maintainer_scripts"]["postinst"])
             self.assertIn("echo configured", result["maintainer_scripts"]["postinst"])
             self.assertIn("systemctl restart demo.service", result["maintainer_scripts"]["postinst"])
+            self.assertLess(result["maintainer_scripts"]["postinst"].index("adduser --system"), result["maintainer_scripts"]["postinst"].index("echo configured"))
+            self.assertLess(result["maintainer_scripts"]["postinst"].index("echo configured"), result["maintainer_scripts"]["postinst"].index("systemctl restart demo.service"))
             self.assertIn("User=demo-service", result["systemd"]["content"])
             self.assertNotIn("User=demo-app", result["systemd"]["content"])
             self.assertEqual((staging / "opt/demo").stat().st_mode & 0o777, 0o750)
@@ -95,6 +97,33 @@ class DebianPackagingTests(unittest.TestCase):
             self.assertFalse(result["include_output"])
             self.assertFalse((workspace / "staging/opt/demo").exists())
             self.assertEqual((workspace / "staging/etc/demo/demo.conf").read_text(), "port=8080\n")
+
+    def test_multiple_build_outputs_keep_relative_paths_below_install_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = self.make_workspace(temporary)
+            (workspace / "source/dist").mkdir()
+            (workspace / "source/dist/app.js").write_text("built\n")
+            (workspace / "source/public").mkdir()
+            (workspace / "source/public/index.html").write_text("public\n")
+            (workspace / "source/package.json").write_text("{}\n")
+            recipe = packaging_recipe(service=False)
+            recipe["install"]["config_files"] = []
+            result = debian_packaging.prepare_staging(
+                recipe,
+                {"output": {"mode": "paths", "paths": [
+                    {"path": str(workspace / "source/dist")},
+                    {"path": str(workspace / "source/public")},
+                    {"path": str(workspace / "source/package.json")},
+                ]}, "version": "1.0-1"},
+                workspace,
+            )
+            staging = workspace / "staging/opt/demo"
+            self.assertTrue((staging / "dist/app.js").is_file())
+            self.assertTrue((staging / "public/index.html").is_file())
+            self.assertTrue((staging / "package.json").is_file())
+            self.assertIn("dist/app.js", result["content_files"])
+            self.assertIn("public/index.html", result["content_files"])
+            self.assertIn("package.json", result["content_files"])
 
     def test_preserves_safe_relative_symlinked_payload(self):
         with tempfile.TemporaryDirectory() as temporary:

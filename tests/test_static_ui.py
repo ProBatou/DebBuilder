@@ -8,9 +8,29 @@ ROOT = Path(__file__).resolve().parents[1]
 class StaticUiTests(unittest.TestCase):
     def test_recipe_serialization_preserves_advanced_pipeline_fields(self):
         script = (ROOT / "static/recipe_serialization.js").read_text()
-        self.assertIn("advanced.output?.mode === 'paths'", script)
+        self.assertIn("output: collectBuildOutput()", script)
         self.assertIn("advanced.timeout || 120", script)
         self.assertIn("advanced.service_working_directory", script)
+
+    def test_multiple_build_output_paths_are_fully_editable(self):
+        html = self.read("static/index.html")
+        serialization = self.read("static/recipe_serialization.js")
+        admin = self.read("static/admin.js")
+        self.assertIn('<option value="paths">Multiple paths</option>', html)
+        self.assertIn('id="buildOutputPathList"', html)
+        self.assertIn('id="btnAddBuildOutputPath"', html)
+        self.assertNotIn('id="buildExpectedOutput"', html)
+        self.assertIn('data-remove-output-path', serialization)
+        self.assertNotIn('data-move-output-path', serialization)
+        self.assertNotIn('function moveBuildOutputPath', serialization)
+        self.assertIn('configured-origin', serialization)
+        self.assertIn('suggested-origin', serialization)
+        self.assertIn('buildOutputIsComplete', serialization)
+        self.assertIn("return {mode:'paths', paths:", serialization)
+        self.assertIn("return {mode:'source'}", serialization)
+        self.assertIn("paths:[...(configuredOutput.paths || [])]", serialization)
+        self.assertIn('setBuildOutputMode', admin)
+        self.assertIn('addBuildOutputPath', admin)
 
     def read(self, relative_path):
         return (ROOT / relative_path).read_text()
@@ -61,14 +81,29 @@ class StaticUiTests(unittest.TestCase):
     def test_dry_run_displays_detection_proposals_without_executing_them(self):
         app = (ROOT / "static" / "app.js").read_text()
         self.assertIn("data.detection.proposed_commands", app)
-        self.assertIn("data.detection.build_dependencies", app)
+        self.assertIn("detection.build_dependencies", app)
         self.assertIn("if (!(wf.build?.commands || []).length)", app)
+        self.assertIn("renderBuildEnvironment(data.detection)", app)
+
+    def test_build_environment_is_ecosystem_specific_and_has_three_global_states(self):
+        html = self.read("static/index.html")
+        app = self.read("static/app.js")
+        css = self.read("static/style.css")
+        self.assertIn('id="buildRuntimeFact" hidden', html)
+        self.assertIn('id="buildPackagingFact" hidden', html)
+        self.assertNotIn('id="buildPythonDetails"', html)
+        self.assertIn("projectType === 'python'", app)
+        self.assertIn("projectType === 'nodejs'", app)
+        for marker in ("Detected", "Partially detected", "Not detected"):
+            self.assertIn(marker, html + app)
+        for marker in (".detection-badge.detected", ".detection-badge.partially-detected", ".detection-badge.not-detected"):
+            self.assertIn(marker, css)
 
     def test_dependency_ui_distinguishes_all_four_states(self):
         html = (ROOT / "static" / "index.html").read_text()
         app = (ROOT / "static" / "app.js").read_text()
         serialization = (ROOT / "static" / "recipe_serialization.js").read_text()
-        self.assertIn("Detected dependencies", html)
+        self.assertIn("Build dependencies", html)
         self.assertIn("Manually added", html)
         self.assertIn('id="buildAvailableDependencies"', html)
         self.assertIn('id="buildMissingDependencies"', html)
@@ -79,8 +114,44 @@ class StaticUiTests(unittest.TestCase):
     def test_static_configured_files_mode_is_available(self):
         html = (ROOT / "static" / "index.html").read_text()
         serialization = (ROOT / "static" / "recipe_serialization.js").read_text()
-        self.assertIn('value="configured_files"', html)
-        self.assertIn("configFilesText", serialization)
+        admin = self.read("static/admin.js")
+        self.assertIn('<option value="configured_files">Custom mappings</option>', html)
+        self.assertIn('id="btnAddInstallMapping"', html)
+        self.assertIn('data-install-mapping-source', serialization)
+        self.assertIn('data-install-mapping-destination', serialization)
+        self.assertIn('data-remove-install-mapping', serialization + admin)
+        self.assertIn("config_files: collectInstallMappings()", serialization)
+
+    def test_installation_explains_relative_path_preservation(self):
+        html = self.read("static/index.html")
+        app = self.read("static/app.js")
+        self.assertIn("Which files and directories constitute the result of the build?", html)
+        self.assertIn("Where should the build result be installed in the Debian package?", html)
+        self.assertIn('id="installContentSummary"', html)
+        self.assertIn("Relative paths are preserved below the install directory.", app)
+        self.assertIn("`${path} → ${destination}/${path}`", app)
+
+    def test_lifecycle_labels_and_colors_are_shared(self):
+        labels = self.read("static/ui_core.js")
+        admin = self.read("static/admin.js")
+        css = self.read("static/style.css")
+        expected = {
+            "up_to_date": "Up to date",
+            "update_available": "Update available",
+            "build_required": "Build needed",
+            "build_success": "Validation needed",
+            "publication_available": "Ready to publish",
+            "published": "Published",
+            "build_failed": "Build failed",
+            "validation_failed": "Validation failed",
+            "publication_failed": "Publication failed",
+        }
+        for state, label in expected.items():
+            self.assertRegex(labels, rf"{state}: '{re.escape(label)}'")
+            self.assertIn(f".badge.{state}", css)
+        self.assertIn("STATUS_LABELS[value]", admin)
+        self.assertIn("function dashboardLifecycleState(p){\n  return lifecycleState(p);\n}", admin)
+        self.assertNotIn("Success / Published", labels)
 
     def test_build_audit_displays_effective_command_and_working_directory(self):
         app = (ROOT / "static" / "app.js").read_text()

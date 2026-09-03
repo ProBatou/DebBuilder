@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import shutil
 import time
@@ -11,7 +12,7 @@ from .build_models import utc_now
 from .build_store import BuildStore
 from .recipe_schema import recipe_for_storage
 from .validation_backend import BackendError, OciSystemdBackend
-from .validation_profiles import node_satisfies, resolve_profile
+from .validation_profiles import node_satisfies, python_satisfies, resolve_profile
 
 
 class ValidationError(RuntimeError):
@@ -160,6 +161,14 @@ def validate_artifact(run_id: str, *, store: BuildStore, previous_artifact: str 
         result["backend"] = backend.start(validation_id)
         result["backend"]["profile"] = selected_profile["name"]
         detection = next((step.get("details") or {} for step in run.get("steps", []) if step.get("name") == "detection"), {})
+        if detection.get("project_type") == "python":
+            python_requirement = str(detection.get("python_requirement") or "")
+            python = backend.exec(["python3", "--version"], accepted_exit_codes={0})
+            actual_python = (python.get("stdout") or python.get("stderr") or "").strip()
+            compatible = bool(python.get("accepted")) and bool(re.search(r"\d+\.\d+", actual_python)) and (not python_requirement or python_satisfies(actual_python, python_requirement))
+            _check(checks, "toolchain_python", compatible, details={"required": python_requirement or "declared project requirement unavailable", "actual": actual_python, "profile": selected_profile["name"]}, error=python.get("stderr") or "Python is missing or incompatible")
+            if not compatible:
+                raise ValidationError("validation_toolchain_incompatible", f"Python {actual_python or 'missing'} does not satisfy {python_requirement or 'the detected Python project'}", details={"required": python_requirement, "actual": actual_python})
         node_requirement = str(detection.get("node_version") or "")
         if node_requirement:
             node = backend.exec(["node", "--version"], accepted_exit_codes={0})
@@ -210,6 +219,8 @@ def validate_artifact(run_id: str, *, store: BuildStore, previous_artifact: str 
                 _execute(backend, ["systemctl", "daemon-reload"], checks, "systemd_daemon_reload")
                 _execute(backend, ["systemctl", "is-enabled", "--quiet", service["name"]], checks, "systemd_enabled")
                 _execute(backend, ["systemctl", "is-active", "--quiet", service["name"]], checks, "systemd_active")
+                _execute(backend, ["sleep", "2"], checks, "systemd_startup_grace", timeout=10)
+                _execute(backend, ["systemctl", "is-active", "--quiet", service["name"]], checks, "systemd_active_after_grace")
             remove = _execute(backend, ["dpkg", "--remove", package], checks, "package_remove", timeout=300)
             if remove.get("accepted"):
                 if not upstream_mode and recipe["install"]["content"]["source"] != "configured_files":

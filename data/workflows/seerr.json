@@ -4,7 +4,7 @@
   "active": true,
   "package": {
     "name": "seerr",
-    "version_revision": "1",
+    "version_revision": "2",
     "architecture": "amd64",
     "section": "web",
     "priority": "optional",
@@ -54,7 +54,18 @@
       "CYPRESS_INSTALL_BINARY": "0"
     },
     "working_directory": ".",
-    "output": {"mode":"paths","paths":["package.json","node_modules",".next","dist","public"]}
+    "output": {
+      "mode": "paths",
+      "paths": [
+        "package.json",
+        "next.config.ts",
+        "node_modules",
+        ".next",
+        "dist",
+        "public",
+        "seerr-api.yml"
+      ]
+    }
   },
   "install": {
     "destination": "/opt/seerr",
@@ -74,7 +85,7 @@
     "config_policy": "dpkg_conffile",
     "maintainer_scripts": {
       "preinst": "",
-      "postinst": "install -d -m 0750 -o seerr -g seerr /var/lib/seerr",
+      "postinst": "install -d -m 0750 -o seerr -g seerr /var/lib/seerr\ninstall -d -m 0750 -o seerr -g seerr /var/lib/seerr/db",
       "prerm": "",
       "postrm": ""
     }

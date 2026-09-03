@@ -47,6 +47,23 @@ Filename: pool/main/t/tool/tool_2_all.deb
         self.assertEqual(package_store.compute_package_state(source_version="", built_version="1.0-1", published_version="1.0-1", has_verified_build=True), "unknown")
         self.assertEqual(package_store.compute_package_state(source_version="1.0-1", built_version="1.0-1", published_version="1.0-1", has_verified_build=True), "up_to_date")
 
+    def test_debian_revisions_do_not_look_like_upstream_updates(self):
+        for published, upstream in (
+            ("1.0.0-1", "1.0.0"),
+            ("4.16.1-0", "4.16.1"),
+            ("6.0.0-1", "6.0.0"),
+            ("3.4.1-2", "3.4.1"),
+        ):
+            with self.subTest(published=published, upstream=upstream):
+                self.assertEqual(
+                    package_store.compute_package_state(source_version=upstream, published_version=published),
+                    "up_to_date",
+                )
+        self.assertEqual(
+            package_store.compute_package_state(source_version="3.4.2", published_version="3.4.1-2"),
+            "update_available",
+        )
+
     def test_reprepro_distribution_parser_detects_codename_and_signing(self):
         text = """Origin: Example\nSuite: stable\nCodename: bookworm\nArchitectures: amd64\nComponents: main\nSignWith: yes\n"""
         parsed = apt_repo.parse_reprepro_distributions(text)
@@ -68,6 +85,22 @@ Filename: pool/main/t/tool/tool_2_all.deb
             self.assertEqual(apt_repo.debian_version_relation("1.10-1", "1.9-1", workspace=Path(td))["relation"], "newer")
             self.assertEqual(apt_repo.debian_version_relation("1.9-1", "1.10-1", workspace=Path(td))["relation"], "older")
             self.assertEqual(apt_repo.debian_version_relation("1.0-1", "1.0-1", workspace=Path(td))["relation"], "equal")
+
+    def test_published_debian_version_is_split_by_debian_grammar(self):
+        self.assertEqual(apt_repo.debian_upstream_version("3.4.1-2"), "3.4.1")
+        self.assertEqual(apt_repo.debian_upstream_version("1:3.4.1~rc1-2+b1"), "1:3.4.1~rc1")
+        self.assertEqual(apt_repo.debian_upstream_version("1.0-rc1-2"), "1.0-rc1")
+        self.assertEqual(apt_repo.debian_upstream_version("3.4.1"), "3.4.1")
+        with self.assertRaises(ValueError):
+            apt_repo.debian_upstream_version("not-a-version")
+
+    def test_upstream_relation_uses_dpkg_after_removing_only_debian_revision(self):
+        with tempfile.TemporaryDirectory() as td:
+            equal = apt_repo.upstream_version_relation("3.4.1", "3.4.1-2", workspace=Path(td))
+            newer = apt_repo.upstream_version_relation("3.4.2", "3.4.1-2", workspace=Path(td))
+        self.assertEqual(equal["relation"], "equal")
+        self.assertEqual(equal["published_upstream"], "3.4.1")
+        self.assertEqual(newer["relation"], "newer")
 
 
 class DebInspectorTests(unittest.TestCase):

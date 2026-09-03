@@ -38,6 +38,25 @@ class StaticRecipeTests(unittest.TestCase):
         )
         self.assertFalse(recipe["service"]["enabled"])
 
+    def test_seerr_recipe_contains_the_audited_runtime_payload_and_sqlite_directory(self):
+        recipe = self.load("seerr")
+        self.assertEqual(recipe["package"]["version_revision"], "2")
+        self.assertEqual(
+            recipe["build"]["output"],
+            {
+                "mode": "paths",
+                "path": "",
+                "paths": ["package.json", "next.config.ts", "node_modules", ".next", "dist", "public", "seerr-api.yml"],
+            },
+        )
+        self.assertEqual(
+            recipe["install"]["maintainer_scripts"]["postinst"].splitlines(),
+            [
+                "install -d -m 0750 -o seerr -g seerr /var/lib/seerr",
+                "install -d -m 0750 -o seerr -g seerr /var/lib/seerr/db",
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

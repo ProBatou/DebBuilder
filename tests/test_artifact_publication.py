@@ -13,9 +13,11 @@ class RepreproRunner:
     def __init__(self):
         self.published = False
         self.commands = []
+        self.calls = []
 
     def __call__(self, command, **kwargs):
         self.commands.append(command)
+        self.calls.append((command, kwargs))
         if "dpkg --compare-versions 2.0-1 gt 10.0-1" in command:
             return {"command": command, "arguments": [], "working_directory": str(kwargs.get("workspace")), "status": "failed", "exit_code": 1, "stdout": "", "stderr": "", "duration": 0.01, "timed_out": False}
         if "dpkg --compare-versions 2.0-1 lt 10.0-1" in command:
@@ -77,6 +79,8 @@ class ArtifactPublicationTests(unittest.TestCase):
             self.assertIn("all accepted", result["preflight"]["architecture_policy"])
             self.assertEqual((repo / "conf/distributions").read_text(), config)
             self.assertTrue(any(" includedeb " in command for command in runner.commands))
+            signing_call = next(kwargs for command, kwargs in runner.calls if " includedeb " in command)
+            self.assertEqual(signing_call["environment"]["GNUPGHOME"], str(Path.home() / ".gnupg"))
 
     def test_unvalidated_artifact_is_not_published(self):
         with tempfile.TemporaryDirectory() as temporary:

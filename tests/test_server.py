@@ -76,6 +76,14 @@ class RecipePreviewTests(unittest.TestCase):
 
 
 class WorkflowStorageTests(unittest.TestCase):
+    def test_data_directory_can_be_separated_from_application_code(self):
+        self.assertEqual(server.application_data_dir(Path("/opt/demo"), {}), Path("/opt/demo/data"))
+        self.assertEqual(
+            server.application_data_dir(Path("/opt/demo"), {"DEBBUILDER_DATA_DIR": "/var/lib/demo"}),
+            Path("/var/lib/demo"),
+        )
+        self.assertEqual(server.REPOSITORY_ROOT, Path(server.os.environ.get("DEBBUILDER_REPO_ROOT", "/var/www/html")))
+
     def test_workflow_dirs_are_separated(self):
         self.assertTrue(hasattr(server, "EXAMPLES"))
         self.assertTrue(hasattr(server, "USER_WORKFLOWS"))

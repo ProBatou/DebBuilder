@@ -44,7 +44,17 @@ from .settings_store import cookie_secret, github_token, oidc_client_secret
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "static"
 EXAMPLES = ROOT / "examples"
-DATA = ROOT / "data"
+
+
+def application_data_dir(root: Path, environ: dict[str, str] | None = None) -> Path:
+    """Resolve mutable application data independently from the code directory."""
+    environment = os.environ if environ is None else environ
+    configured = str(environment.get("DEBBUILDER_DATA_DIR") or "").strip()
+    return Path(configured).expanduser() if configured else root / "data"
+
+
+DATA = application_data_dir(ROOT)
+REPOSITORY_ROOT = Path(os.environ.get("DEBBUILDER_REPO_ROOT", "/var/www/html"))
 USER_WORKFLOWS = DATA / "workflows"
 RUNS = DATA / "runs"
 
@@ -225,7 +235,7 @@ def validate_build_artifact(run_id: str, payload: dict | None = None) -> dict:
         store=BuildStore(DATA / "builds"),
         previous_artifact=str(payload.get("previous_artifact") or ""),
         profile=str(payload.get("profile") or "bookworm"),
-        allowed_previous_roots=(Path("/var/www/html/pool"),),
+        allowed_previous_roots=(REPOSITORY_ROOT / "pool",),
     )
 
 
@@ -233,7 +243,7 @@ def publish_build_artifact(run_id: str, payload: dict | None = None) -> dict:
     payload = payload or {}
     apt = repo_settings()
     return artifact_publication.publish_artifact(
-        run_id, store=BuildStore(DATA / "builds"), repo_root=Path("/var/www/html"),
+        run_id, store=BuildStore(DATA / "builds"), repo_root=REPOSITORY_ROOT,
         distribution=apt["distribution"], component=apt["component"],
         confirm=str(payload.get("confirm") or ""),
     )
@@ -242,7 +252,7 @@ def publish_build_artifact(run_id: str, payload: dict | None = None) -> dict:
 def reconcile_build_publication(run_id: str, payload: dict | None = None) -> dict:
     apt = repo_settings()
     return artifact_publication.reconcile_publication(
-        run_id, store=BuildStore(DATA / "builds"), repo_root=Path("/var/www/html"),
+        run_id, store=BuildStore(DATA / "builds"), repo_root=REPOSITORY_ROOT,
         distribution=apt["distribution"], component=apt["component"],
     )
 

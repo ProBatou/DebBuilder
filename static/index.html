@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>DebBuilder</title>
-  <link rel="stylesheet" href="/style.css?v=20260902-16" />
+  <link rel="stylesheet" href="/style.css?v=20260903-2" />
 </head>
 <body>
   <header class="mobile-topbar" aria-label="Mobile navigation">
@@ -43,7 +43,7 @@
 
       <section class="view" id="view-packages">
         <div class="page-head split"><div><h2>Packages</h2><p>Managed Debian package entities, separate from automated recipes.</p></div><button id="btnNewPackage">+ New package</button></div>
-        <div class="filters package-filters"><input id="packageSearch" placeholder="Search packages…" /><select id="packageFilter"><option value="all">All</option><option value="ready">Up to date / OK</option><option value="update_available">Update available</option><option value="failed">Error</option><option value="recipe_missing">Recipe needed</option></select></div>
+        <div class="filters package-filters"><input id="packageSearch" placeholder="Search packages…" /><select id="packageFilter"><option value="all">All</option><option value="ready">Up to date</option><option value="update_available">Update available</option><option value="failed">Error</option><option value="recipe_missing">Recipe needed</option></select></div>
         <section class="card package-board"><div class="section-title"><h3>Known packages</h3><span class="muted" id="packageCount"></span></div><div id="packageList" class="package-list">Loading…</div></section>
         <aside id="packageDrawer" class="drawer" aria-hidden="true"><div class="drawer-backdrop" id="packageDrawerBackdrop"></div><div class="drawer-panel"><div class="drawer-head"><div><span class="eyebrow">Package detail</span><h2 id="packageDrawerTitle">Package</h2></div><button id="btnClosePackageDrawer">Close</button></div><div id="packageDetail" class="detail muted">Select a package.</div></div></aside>
       </section>
@@ -94,10 +94,11 @@
                 <span class="step-note">Recipe v1</span>
               </div>
               <div class="build-layout">
-                <section class="build-section"><div class="build-section-head"><div><h3>Build environment</h3><p>Automatically detected from the project files.</p></div><span class="detection-badge"><span></span> Detected</span></div><div class="build-detection-grid"><div class="build-detection-item"><span class="build-item-icon">⬡</span><div><small>Detected project</small><strong id="buildDetectedProject">Not detected</strong><span id="buildDetectedFiles">No source inspected yet</span></div></div><div class="build-detection-item"><span class="build-item-icon">⌘</span><div><small>Detected dependencies</small><strong id="buildDetectedDependencies">None</strong><span>Availability will be checked before build</span></div></div></div><div class="dependency-row"><div><small>Manually added</small><div class="dependency-chips" id="buildDependencyChips"></div></div><button type="button" class="ghost compact-button" id="btnAddBuildDependency">+ Add dependency</button></div><div class="build-dependency-state" id="buildDependencyState"><span><small>Available</small><strong id="buildAvailableDependencies">Not checked</strong></span><span><small>Missing</small><strong id="buildMissingDependencies">Not checked</strong></span></div></section>
+                <section class="build-section"><div class="build-section-head"><div><h3>Build environment</h3><p>Only facts for the detected project ecosystem are shown.</p></div><span class="detection-badge not-detected" id="buildDetectionBadge"><span></span><strong>Not detected</strong></span></div><div class="build-environment-facts"><div class="build-environment-fact"><small>Project</small><strong id="buildDetectedProject">Not detected</strong></div><div class="build-environment-fact" id="buildRuntimeFact" hidden><small>Runtime</small><strong id="buildDetectedRuntime">Not declared</strong></div><div class="build-environment-fact" id="buildPackagingFact" hidden><small>Packaging</small><strong id="buildDetectedPackaging">Not detected</strong></div><div class="build-environment-fact"><small>Build dependencies</small><strong id="buildDetectedDependencies">None</strong><span>Availability is checked before build</span></div><div class="build-environment-fact"><small>Detected from</small><strong id="buildDetectedFiles">No source inspected yet</strong></div></div><div class="dependency-row"><div><small>Manually added</small><div class="dependency-chips" id="buildDependencyChips"></div></div><button type="button" class="ghost compact-button" id="btnAddBuildDependency">+ Add dependency</button></div><div class="build-dependency-state" id="buildDependencyState"><span><small>Available</small><strong id="buildAvailableDependencies">Not checked</strong></span><span><small>Missing</small><strong id="buildMissingDependencies">Not checked</strong></span></div></section>
                 <section class="build-section"><div class="build-section-head"><div><h3>Source changes</h3><p>Based on searched text content, never on line numbers.</p></div><button type="button" id="btnAddSourceChange">+ Add source change</button></div><div class="source-change-list" id="sourceChangeList"></div></section>
                 <section class="build-section"><div class="build-section-head"><div><h3>Build commands</h3><p>Commands suggested from the detected project.</p></div><button type="button" class="ghost compact-button" id="btnEditBuildCommands">Edit commands</button></div><pre class="build-command-preview" id="buildCommandPreview"><code>No build commands configured.</code></pre><label class="build-command-editor hidden" id="buildCommandEditor"><span>One command per line</span><textarea id="buildCommands" rows="3"></textarea><small>Commands are executed directly; shell operators are not supported.</small></label></section>
-                <details class="build-advanced"><summary>Advanced options</summary><div class="build-advanced-grid"><label><span>Working directory</span><input id="buildWorkingDirectory" value="."></label><label><span>Environment variables</span><textarea id="buildEnvironment" rows="2"></textarea></label><label><span>Expected output</span><input id="buildExpectedOutput"></label></div></details>
+                <section class="build-section build-output-section"><div class="build-section-head"><div><h3>Build output</h3><p>Which files and directories constitute the result of the build?</p></div><span class="value-origin configured-origin">Configured</span></div><div class="build-output-controls"><label><span>Mode</span><select id="buildOutputMode"><option value="source">Entire source tree</option><option value="path">Single path</option><option value="paths">Multiple paths</option></select></label><label id="buildOutputPathField" hidden><span>Included path</span><input id="buildOutputPath" placeholder="Relative file or directory path"></label></div><div id="buildOutputPathsEditor" class="build-output-paths" hidden><div class="build-output-list-head"><span>Included paths</span><button type="button" class="ghost compact-button" id="btnAddBuildOutputPath">+ Add path</button></div><div id="buildOutputPathList" class="build-output-path-list"></div><p id="buildOutputPathEmpty" class="build-output-empty" hidden>Add at least one file or directory path.</p></div><div id="buildOutputSuggestions" class="build-output-suggestions" hidden><div class="build-output-list-head"><span>Detected suggestions</span><small>Suggestions are not included until you add them.</small></div><div id="buildOutputSuggestionList" class="build-output-suggestion-list"></div></div></section>
+                <details class="build-advanced"><summary>Advanced options</summary><div class="build-advanced-grid"><label><span>Working directory</span><input id="buildWorkingDirectory" value="."></label><label><span>Environment variables</span><textarea id="buildEnvironment" rows="2"></textarea></label></div></details>
               </div>
             </section>
 
@@ -106,6 +107,7 @@
                 <div>
                   <span class="eyebrow">Step 3</span>
                   <h2>Debian installation</h2>
+                  <p>Where should the build result be installed in the Debian package?</p>
                 </div>
                 <span class="step-note">Recipe v1</span>
               </div>
@@ -120,7 +122,7 @@
                     <label class="span-12"><span>Runtime Depends</span><input id="packageRuntimeDependencies"></label>
                     <label class="span-12"><span>Description</span><textarea id="packageDescription" rows="2"></textarea></label>
                     <label class="span-4"><span>Install directory</span><input id="installDestination"></label>
-                    <label class="span-4"><span>Installed content</span><select id="installContentSource"><option value="build_output">Full build output</option><option value="source">Prepared source</option><option value="configured_files">Configured files only</option></select></label>
+                    <label class="span-4"><span>Installed content</span><select id="installContentSource"><option value="build_output">Full build output</option><option value="source">Prepared source</option><option value="configured_files">Custom mappings</option></select></label>
                     <label class="span-2"><span>Dirs</span><select id="installDirectoryMode"><option>0755</option><option>0750</option><option>0700</option></select></label>
                     <label class="span-2"><span>Files</span><select id="installFileMode"><option>0644</option><option>0640</option><option>0600</option></select></label>
                     <label class="span-6"><span>User</span><input id="installOwnerUser"></label>
@@ -128,13 +130,12 @@
                     <label class="span-6"><span>Create application user</span><input id="installCreateUser" type="checkbox"></label>
                     <label class="span-6"><span>Create application group</span><input id="installCreateGroup" type="checkbox"></label>
                   </div>
+                  <div class="install-content-summary" id="installContentSummary"></div>
                 </div>
                 <div class="recipe-form-group install-config-group">
-                  <span class="recipe-group-title">Configuration</span>
-                  <div class="recipe-step-fields recipe-step-fields-wide">
-                    <label class="span-8"><span>Configuration files</span><textarea id="installConfigFiles" rows="3"></textarea></label>
-                    <label class="span-4"><span>Configuration rule</span><select id="installConfigPolicy"><option value="dpkg_conffile">Preserve if existing</option><option value="replace">Replace on every install</option><option value="create_if_missing">Create only if missing</option></select></label>
-                  </div>
+                  <div class="install-mapping-head"><div><span class="recipe-group-title" id="installMappingTitle">Additional configuration mappings</span><p id="installMappingHelp">Optionally map files from the primary resolved build output to absolute paths.</p></div><button type="button" class="ghost compact-button" id="btnAddInstallMapping">+ Add mapping</button></div>
+                  <div class="install-mapping-table"><div class="install-mapping-columns"><span>Source</span><span>Destination</span><span></span></div><div id="installMappingList" class="install-mapping-list"></div><p id="installMappingEmpty" class="build-output-empty">No mappings configured.</p></div>
+                  <label class="install-policy-field"><span>Mapping rule</span><select id="installConfigPolicy"><option value="dpkg_conffile">Preserve if existing</option><option value="replace">Replace on every install</option><option value="create_if_missing">Create only if missing</option></select></label>
                 </div>
                 <div class="recipe-form-group install-scripts-group">
                   <span class="recipe-group-title">Maintainer scripts</span>
@@ -258,10 +259,10 @@
   </dialog>
 
 
-  <script src="/ui_core.js?v=20260902-1"></script>
+  <script src="/ui_core.js?v=20260903-2"></script>
   <script src="/settings.js?v=20260901-10"></script>
-  <script src="/recipe_serialization.js?v=20260902-2"></script>
-  <script src="/app.js?v=20260902-1"></script>
-  <script src="/admin.js?v=20260902-5"></script>
+  <script src="/recipe_serialization.js?v=20260903-2"></script>
+  <script src="/app.js?v=20260903-2"></script>
+  <script src="/admin.js?v=20260903-2"></script>
 </body>
 </html>

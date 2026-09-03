@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 from datetime import datetime
+from pathlib import Path
+
+from . import apt_repo
 
 
 def _event_epoch(value, fallback):
@@ -65,10 +68,18 @@ def compute_package_state(source_version: str = "", built_version: str = "", pub
         return "up_to_date"
     if source_version and not published_version:
         return "build_required"
-    if source_version and published_version and source_version != published_version:
-        return "update_available"
-    if source_version and published_version and source_version == published_version:
-        return "up_to_date"
+    if source_version and published_version:
+        if source_version == published_version:
+            return "up_to_date"
+        try:
+            relation = apt_repo.upstream_version_relation(source_version, published_version, workspace=Path.cwd())["relation"]
+        except (OSError, RuntimeError, ValueError):
+            relation = "equal" if source_version == published_version else "unknown"
+        if relation == "newer":
+            return "update_available"
+        if relation in {"equal", "older"}:
+            return "up_to_date"
+        return "unknown"
     if not published_version:
         return "build_required"
     return "unknown"

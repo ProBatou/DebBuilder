@@ -80,13 +80,24 @@ class AdminApiTests(unittest.TestCase):
     def test_dashboard_counts_lifecycle_states_from_same_package_rows(self):
         server.save_json_file(server.packages_file(), [
             {"name":"github-demo","apt_version":"1.0","upstream_version":"2.0","recipe":"webapp-recipe","source":{"type":"github","repository":"o/r"}},
-            {"name":"local-demo","apt_version":"1.0","upstream_version":"1.0","recipe":"webapp-recipe","source":{"type":"local"}},
+            {"name":"local-demo","apt_version":"1.0-1","upstream_version":"1.0","recipe":"webapp-recipe","source":{"type":"local"}},
         ])
         summary = server.dashboard_summary()
         self.assertEqual(summary["packages"], 4)
         self.assertEqual(summary["updates"], 1)
         self.assertEqual(summary["state_counts"]["update_available"], 1)
         self.assertEqual(summary["packages_by_state"]["update_available"][0]["name"], "github-demo")
+        self.assertIn("local-demo", [row["name"] for row in summary["packages_by_state"]["up_to_date"]])
+
+    def test_dashboard_reuses_package_lifecycle_state_without_recomparing_versions(self):
+        packages = [
+            {"name": "same", "lifecycle_state": "up_to_date", "version": {"source": "3.4.1", "published": "3.4.1-2"}},
+            {"name": "new", "lifecycle_state": "update_available", "version": {"source": "3.4.2", "published": "3.4.1-2"}},
+        ]
+        with mock.patch("debbuilder.app.list_packages", return_value=packages), mock.patch("debbuilder.app.list_executions", return_value=[]):
+            summary = server.dashboard_summary()
+        self.assertEqual(summary["state_counts"], {"up_to_date": 1, "update_available": 1})
+        self.assertEqual(summary["packages_by_state"]["up_to_date"][0]["name"], "same")
 
     def test_package_list_prefers_live_apt_repository_versions_when_available(self):
         (server.DATA / "settings.json").write_text(json.dumps({"apt": {"repository": "https://repo.example.test", "distribution": "testing", "component": "main", "architecture": "amd64"}}))

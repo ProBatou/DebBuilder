@@ -230,9 +230,12 @@ def run_pipeline(recipe: dict, *, store: BuildStore, dry_run: bool, recipe_id: s
                     build_step.setdefault("details", {}).setdefault("commands", []).append(result)
                     store.save_command_result(run["id"], result)
                     store.append_event(run, f"Build command {result['index']}: {result['status']} (exit {result.get('exit_code')}, {result['duration']}s)")
+                def command_output(index, item):
+                    for line in str(item.get("text") or "").splitlines():
+                        store.append_log_line(run["id"], f"Build command {index} {item.get('stream', 'output')}: {line}")
                 build = build_executor.execute_build(
                     canonical, detection, source["source_directory"], dry_run=dry_run,
-                    on_result=command_completed,
+                    on_result=command_completed, on_output=command_output,
                 )
                 if dry_run:
                     _finish_step(run, store, build_step, build_started, status="skipped", summary=f"Dry-run validated {len(build['plan']['commands'])} commands; none executed", details=build)

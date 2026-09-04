@@ -70,7 +70,7 @@ class CommandRunnerTests(unittest.TestCase):
             root = Path(temporary)
             (root / "source").mkdir()
             command = f"{shlex.quote(sys.executable)} -c 'import os; print(os.path.basename(os.getcwd()))'"
-            with mock.patch("debbuilder.command_runner.subprocess.run", wraps=__import__("subprocess").run) as invoked:
+            with mock.patch("debbuilder.command_runner.subprocess.Popen", wraps=__import__("subprocess").Popen) as invoked:
                 result = run_command(command, workspace=root, working_directory="source")
             self.assertEqual(result["status"], "success")
             self.assertEqual(result["exit_code"], 0)
@@ -78,6 +78,18 @@ class CommandRunnerTests(unittest.TestCase):
             self.assertEqual(result["configured_working_directory"], "source")
             self.assertEqual(result["stdout"].strip(), "source")
             self.assertIs(invoked.call_args.kwargs["shell"], False)
+
+    def test_streams_stdout_and_stderr_while_preserving_final_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            chunks = []
+            command = f"{shlex.quote(sys.executable)} -c 'import sys,time; print(\"out-one\", flush=True); print(\"err-one\", file=sys.stderr, flush=True); time.sleep(.05); print(\"out-two\", flush=True)'"
+            result = run_command(command, workspace=temporary, on_output=chunks.append)
+        self.assertEqual(result["status"], "success")
+        self.assertIn("out-one", result["stdout"])
+        self.assertIn("out-two", result["stdout"])
+        self.assertIn("err-one", result["stderr"])
+        self.assertTrue(any(row["stream"] == "stdout" and "out-one" in row["text"] for row in chunks))
+        self.assertTrue(any(row["stream"] == "stderr" and "err-one" in row["text"] for row in chunks))
 
     def test_redacts_secret_environment_values_from_output(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -87,6 +99,15 @@ class CommandRunnerTests(unittest.TestCase):
             self.assertNotIn("super-private-value", result["stdout"])
             self.assertIn("[REDACTED]", result["stdout"])
             self.assertNotIn("super-private-value", json.dumps(result))
+
+    def test_redacts_secret_values_from_streamed_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            chunks = []
+            command = f"{shlex.quote(sys.executable)} -c 'import os; print(os.environ[\"API_TOKEN\"], flush=True)'"
+            result = run_command(command, workspace=temporary, environment={"API_TOKEN": "super-private-value"}, on_output=chunks.append)
+        self.assertEqual(result["status"], "success")
+        self.assertNotIn("super-private-value", json.dumps(chunks + [result]))
+        self.assertIn("[REDACTED]", json.dumps(chunks))
 
     def test_redacts_secret_command_options_from_audit_fields(self):
         with tempfile.TemporaryDirectory() as temporary:

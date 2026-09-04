@@ -1,5 +1,5 @@
 // --- Admin console layer: Package / Recipe / Execution navigation ---
-const adminState = {packages: [], executions: [], selectedPackage: null, selectedExecution: null, executionAction: null};
+const adminState = {packages: [], executions: [], selectedPackage: null, selectedExecution: null, executionAction: null, selectedExecutionIds: new Set(), logPollTimer: null, logOffset: 0, logVerbosity: 'normal'};
 function badge(status){ const value=status||'unknown'; return `<span class="badge ${esc(value)}">${esc(STATUS_LABELS[value]||value)}</span>`; }
 function packageLabelForExecution(e){ if(e.package) return e.package; const match = adminState.packages.find(p => e.id && e.id.includes(p.name)); return match ? match.name : (e.action || 'Operation'); }
 function switchView(name){ closeMobileNav(); closeLogDetail(); document.querySelectorAll('.nav-link').forEach(b=>b.classList.toggle('active', b.dataset.view===name)); document.querySelectorAll('.view').forEach(v=>v.classList.toggle('active', v.id==='view-'+name)); if(name==='packages') loadPackages(); if(name==='logs') loadExecutions(); if(name==='settings') loadSettings(); if(name==='dashboard') loadDashboard(); }
@@ -145,7 +145,62 @@ async function createRecipeFromDialog(){
   currentRecipeId=recipeIdFromPackageName(packageName); renderWorkflow(workflow); $('recipeTitle').textContent=workflow.name; $('newRecipeDialog').close(); switchView('recipes'); autosaveRevision += 1; await saveRecipeNow(); await Promise.all([refreshWorkflows(),loadPackages()]); $('workflowSelect').value=currentRecipeId;
 }
 async function loadExecutions(){ const data=await getJson('/api/executions'); adminState.executions=data.executions||[]; renderExecutions(); }
-function renderExecutions(){ const q=($('logSearch')?.value||'').toLowerCase(); const st=$('logStatus')?.value||'all'; const rows=adminState.executions.filter(e=>(st==='all'||e.status===st||e.lifecycle_status===st)&&(!q||JSON.stringify(e).toLowerCase().includes(q))); $('executionList').innerHTML=rows.map(e=>`<div class="item" onclick="openExecution('${esc(e.id)}')"><div class="item-title"><span>${esc(packageLabelForExecution(e))} · ${esc(e.action)}</span>${badge(e.lifecycle_status||e.status)}</div><div class="item-meta">Build ${esc(e.build_status||e.status)} · Validation ${esc(e.validation_status||'not_run')} · Publication ${esc(e.publication_status||'not_run')} · ${esc(e.id)} · ${fmtTime(e.updated)}</div></div>`).join('') || '<p class="muted logs-empty-message">No logs available.</p>'; document.querySelector('.logs-layout')?.classList.toggle('logs-empty', adminState.executions.length===0); }
+function executionIsSelected(id){ return adminState.selectedExecution?.id===id; }
+function shortExecutionId(id){ const value=String(id||''); return value.length>18?`${value.slice(0,13)}...${value.slice(-4)}`:value; }
+function renderExecutions(){ const q=($('logSearch')?.value||'').toLowerCase(); const st=$('logStatus')?.value||'all'; const rows=adminState.executions.filter(e=>(st==='all'||e.status===st||e.lifecycle_status===st)&&(!q||JSON.stringify(e).toLowerCase().includes(q))); $('executionList').innerHTML=rows.map(e=>`<div class="item execution-item ${executionIsSelected(e.id)?'active':''}" role="option" tabindex="0" aria-selected="${executionIsSelected(e.id)?'true':'false'}" data-execution-id="${esc(e.id)}" onclick="openExecution('${esc(e.id)}')"><label class="execution-select" onclick="event.stopPropagation()"><input type="checkbox" data-select-execution="${esc(e.id)}" ${adminState.selectedExecutionIds.has(e.id)?'checked':''} aria-label="Select execution ${esc(e.id)}"></label><div class="execution-item-body"><div class="item-title"><span>${esc(packageLabelForExecution(e))} · ${esc(e.action||'run')}</span>${badge(e.lifecycle_status||e.status)}</div><div class="item-meta">${fmtTime(e.updated)} · ${esc(shortExecutionId(e.id))}</div></div></div>`).join('') || '<p class="muted logs-empty-message">No logs available.</p>'; document.querySelector('.logs-layout')?.classList.toggle('logs-empty', adminState.executions.length===0); }
+
+function executionIsLive(e){ return ['pending','running'].includes(e?.status) || ['running'].includes((e?.validations||[]).slice(-1)[0]?.status) || ['running'].includes((e?.publications||[]).slice(-1)[0]?.status); }
+function stopLogPolling(){ if(adminState.logPollTimer) clearTimeout(adminState.logPollTimer); adminState.logPollTimer=null; }
+async function loadExecutionLog(id,{reset=false}={}){
+  if(reset){ adminState.logOffset=0; if($('executionDetail')) $('executionDetail').textContent=''; }
+  const response=await fetch(`/api/executions/${encodeURIComponent(id)}/logs?verbosity=${encodeURIComponent(adminState.logVerbosity)}&after=${adminState.logOffset}`);
+  const payload=await response.json();
+  if(!response.ok) throw new Error(payload.error||response.statusText);
+  const log=payload.log||{};
+  if(log.text){ $('executionDetail').textContent += log.text; $('executionDetail').scrollTop=$('executionDetail').scrollHeight; }
+  adminState.logOffset=log.offset||0;
+  return log;
+}
+async function pollOpenExecution(){
+  const selected=adminState.selectedExecution;
+  if(!selected) return;
+  try{
+    const detail=(await getJson('/api/executions/'+encodeURIComponent(selected.id))).execution;
+    adminState.selectedExecution=detail;
+    renderExecutions();
+    renderOpenExecution(detail,{preserveLog:true});
+    const log=await loadExecutionLog(detail.id);
+    if(executionIsLive(detail)&&!log.complete) adminState.logPollTimer=setTimeout(pollOpenExecution,1500);
+    else stopLogPolling();
+  }catch(_error){ stopLogPolling(); }
+}
+function toggleExecutionSelection(id,checked){ if(checked) adminState.selectedExecutionIds.add(id); else adminState.selectedExecutionIds.delete(id); }
+function selectedExecutionRows(){ return adminState.executions.filter(row=>adminState.selectedExecutionIds.has(row.id)); }
+function deletionSummary(rows){ return rows.map(row=>`${packageLabelForExecution(row)} · ${row.id} · ${fmtTime(row.updated)}`).join('\n'); }
+async function deleteExecutionLog(id){
+  const row=adminState.executions.find(item=>item.id===id)||adminState.selectedExecution||{id};
+  if(!confirm(`Delete log/history for this execution?\n\nPackage: ${packageLabelForExecution(row)}\nRun ID: ${row.id}\nDate: ${fmtTime(row.updated||row.created_at_epoch)}\n\nThis does not delete any Recipe, package, published APT entry, or build artifact.`)) return;
+  const response=await fetch(`/api/executions/${encodeURIComponent(id)}/logs`,{method:'DELETE'});
+  const payload=await response.json();
+  if(!response.ok) throw new Error(payload.error||response.statusText);
+  stopLogPolling();
+  await loadExecutions();
+  if(adminState.selectedExecution?.id===id) await openExecution(id);
+}
+async function deleteSelectedLogs(){
+  const rows=selectedExecutionRows();
+  if(!rows.length) return alert('Select at least one execution log to delete.');
+  if(!confirm(`Delete log/history for ${rows.length} selected executions?\n\n${deletionSummary(rows)}\n\nThis does not delete Recipes, packages, published APT entries, or build artifacts.`)) return;
+  const result=await postJson('/api/executions/delete-logs',{ids:rows.map(row=>row.id)});
+  adminState.selectedExecutionIds.clear();
+  if(result.errors?.length) alert(`Some logs could not be deleted:\n${result.errors.map(row=>`${row.id}: ${row.error}`).join('\n')}`);
+  await loadExecutions();
+  if(adminState.selectedExecution) await openExecution(adminState.selectedExecution.id);
+}
+function changeLogVerbosity(value){
+  adminState.logVerbosity=['compact','normal','verbose','raw'].includes(value)?value:'normal';
+  if(adminState.selectedExecution) loadExecutionLog(adminState.selectedExecution.id,{reset:true}).catch(error=>alert(error.message));
+}
 
 function lifecycleStatusText(status) {
   return ({not_run:'Not run',running:'Running',success:'Success',failed:'Failed',prepared:'Prepared'})[status]||status||'Not run';
@@ -211,8 +266,7 @@ async function publishExecution(id) {
   finally { adminState.executionAction=null; await refreshExecutionLifecycle(id); }
 }
 
-async function openExecution(id){
-  const e=(await getJson('/api/executions/'+encodeURIComponent(id))).execution; adminState.selectedExecution=e;
+function renderOpenExecution(e,{preserveLog=false}={}){
   const artifact=e.artifact||{}; const validation=(e.validations||[]).slice(-1)[0]||{}; const publication=(e.publications||[]).slice(-1)[0]||{};
   const source=(e.steps||[]).find(step=>step.name==='source')?.details||{}; const staging=(e.steps||[]).find(step=>step.name==='staging')?.details||{};
   const version=typeof e.version==='object'?e.version:{debian:e.version};
@@ -222,10 +276,15 @@ async function openExecution(id){
   if(validation.profile&&$('executionMeta')){const node=(validation.checks||[]).find(check=>check.name==='toolchain_node');$('executionMeta').insertAdjacentHTML('beforeend',`<div class="meta-cell"><span>Validation backend</span>${esc(validation.backend?.runtime||'—')}</div><div class="meta-cell"><span>Profile</span>${esc(validation.profile.name||'—')}</div><div class="meta-cell"><span>Node</span>${esc(node?.details?.actual||'Not required')}</div><div class="meta-cell"><span>Network</span>${esc(validation.backend?.network||'disabled')}</div>`);}
   renderExecutionLifecycle(e);
   if($('executionSteps')) $('executionSteps').innerHTML=(e.steps||[]).map(s=>`<span class="step-chip ${esc(s.status||'pending')}">${symbols[s.status]||'○'} ${esc(s.name)} · ${esc(s.status||'pending')}</span>`).join('');
-  const lifecycleErrors=[validation.status==='failed'?`Validation failed\n${JSON.stringify(validation.error||{},null,2)}`:'',publication.status==='failed'?`Publication failed\n${JSON.stringify(publication.error||{},null,2)}`:''].filter(Boolean).join('\n\n');
-  const structuredError=[e.error?`Structured error\n${JSON.stringify(e.error,null,2)}`:'',lifecycleErrors].filter(Boolean).join('\n\n');
-  const stagingCount=Number(staging.content_file_count); const displayLog=Number.isFinite(stagingCount)?(e.log||'No log.').replace(/Staging prepared with [\d, ]+ application files/g,`Staging prepared with ${stagingCount.toLocaleString('en-US')} application files`):(e.log||'No log.');
-  $('executionDetail').textContent=displayLog+'\n\n'+formatBuildAudit(buildStep?.details)+(structuredError?'\n\n'+structuredError:'');
+  if(!preserveLog&&$('executionDetail')) $('executionDetail').textContent='Loading log…';
+}
+async function openExecution(id){
+  stopLogPolling();
+  const e=(await getJson('/api/executions/'+encodeURIComponent(id))).execution; adminState.selectedExecution=e; adminState.logOffset=0;
+  renderExecutions();
+  renderOpenExecution(e);
+  await loadExecutionLog(id,{reset:true});
+  if(executionIsLive(e)) adminState.logPollTimer=setTimeout(pollOpenExecution,1500);
   if(isMobileViewport()) document.body.classList.add('mobile-log-open');
 }
 function isMobileViewport(){ return window.matchMedia('(max-width: 899px)').matches; }
@@ -292,6 +351,11 @@ function wireAdmin() {
   $('packageFilter')?.addEventListener('change', renderPackages);
   $('logSearch')?.addEventListener('input', renderExecutions);
   $('logStatus')?.addEventListener('change', renderExecutions);
+  $('logVerbosity')?.addEventListener('change', event => changeLogVerbosity(event.target.value));
+  $('btnDeleteExecutionLog')?.addEventListener('click', () => { if(adminState.selectedExecution) deleteExecutionLog(adminState.selectedExecution.id).catch(error=>alert(error.message)); });
+  $('btnDeleteSelectedLogs')?.addEventListener('click', () => deleteSelectedLogs().catch(error=>alert(error.message)));
+  $('executionList')?.addEventListener('change', event => { const checkbox=event.target.closest('[data-select-execution]'); if(checkbox) toggleExecutionSelection(checkbox.dataset.selectExecution, checkbox.checked); });
+  $('executionList')?.addEventListener('keydown', event => { const item=event.target.closest('[data-execution-id]'); if(item&&(event.key==='Enter'||event.key===' ')){ event.preventDefault(); openExecution(item.dataset.executionId).catch(error=>alert(error.message)); } });
   $('btnNewPackage')?.addEventListener('click', () => createPackageUi().catch(error => alert(error.message)));
   $('btnNewRecipe')?.addEventListener('click', newRecipeUi);
   $('recipeMetaName')?.addEventListener('input', event => {$('recipeTitle').textContent = event.target.value || 'Recipe';});

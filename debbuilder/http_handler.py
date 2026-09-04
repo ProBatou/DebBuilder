@@ -114,6 +114,9 @@ def create_handler(api):
             elif path == "/api/executions":
                 api.json_response(self, {"executions": api.list_executions()})
             elif path.startswith("/api/executions/"):
+                if path.endswith("/logs"):
+                    self._get_execution_log(parsed)
+                    return True
                 self._get_execution(path)
             elif path == "/api/settings":
                 api.json_response(self, {"settings": api.settings_view()})
@@ -144,6 +147,18 @@ def create_handler(api):
                 api.json_response(self, {"error": str(exc)}, 400)
                 return
             api.json_response(self, {"execution": execution} if execution else {"error": "not found"}, 200 if execution else 404)
+
+        def _get_execution_log(self, parsed):
+            run_id = urllib.parse.unquote(parsed.path[len("/api/executions/"):-len("/logs")].strip("/"))
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                after = int((query.get("after") or ["0"])[0] or 0)
+                verbosity = (query.get("verbosity") or ["normal"])[0]
+                log = api.get_execution_log(run_id, verbosity=verbosity, after=after)
+            except ValueError as exc:
+                api.json_response(self, {"error": str(exc)}, 400)
+                return
+            api.json_response(self, {"log": log} if log else {"error": "not found"}, 200 if log else 404)
 
         def _get_workflow(self, path: str):
             workflow_id = path.rsplit("/", 1)[-1]
@@ -221,6 +236,9 @@ def create_handler(api):
             if self.path == "/api/settings":
                 api.json_response(self, {"ok": True, "settings": api.update_settings(data)})
                 return
+            if self.path == "/api/executions/delete-logs":
+                api.json_response(self, api.delete_execution_logs(data.get("ids") or []))
+                return
             if self.path == "/api/packages":
                 api.json_response(self, {"ok": True, "package": api.create_or_update_package(data)})
                 return
@@ -280,6 +298,9 @@ def create_handler(api):
                 if parsed.path.startswith("/api/workflows/"):
                     self._delete_workflow(parsed.path)
                     return
+                if parsed.path.startswith("/api/executions/") and parsed.path.endswith("/logs"):
+                    self._delete_execution_log(parsed.path)
+                    return
                 if parsed.path.startswith("/api/packages/"):
                     self._delete_package(parsed)
                     return
@@ -310,5 +331,12 @@ def create_handler(api):
                 api.json_response(self, {"error": str(exc)}, 403)
                 return
             api.json_response(self, {"ok": True, "id": name, "deleted_from_repo": False})
+
+        def _delete_execution_log(self, path: str):
+            run_id = urllib.parse.unquote(path[len("/api/executions/"):-len("/logs")].strip("/"))
+            try:
+                api.json_response(self, {"ok": True, "deletion": api.delete_execution_log(run_id)})
+            except FileNotFoundError:
+                api.json_response(self, {"error": "execution not found"}, 404)
 
     return Handler

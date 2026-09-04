@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import re
+import selectors
 import shlex
 import subprocess
 import time
@@ -133,7 +134,46 @@ def redact_command(command: str, arguments: list[str], environment: dict[str, st
     return redacted
 
 
-def run_command(command: str, *, workspace: str | Path, working_directory: str = ".", environment: dict[str, str] | None = None, timeout: float = 120) -> dict:
+def _stream_process(arguments: list[str], *, cwd: Path, env: dict[str, str], timeout: float, redaction_environment: dict[str, str], on_output=None) -> dict:
+    process = subprocess.Popen(arguments, cwd=cwd, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False, bufsize=1)
+    selector = selectors.DefaultSelector()
+    if process.stdout:
+        selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+    if process.stderr:
+        selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+    output = {"stdout": [], "stderr": []}
+    deadline = time.monotonic() + timeout
+    timed_out = False
+    while selector.get_map():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            timed_out = True
+            process.kill()
+            break
+        for key, _mask in selector.select(min(0.1, remaining)):
+            chunk = key.fileobj.readline()
+            if chunk:
+                redacted = redact_text(chunk, redaction_environment)
+                output[key.data].append(redacted)
+                if callable(on_output):
+                    on_output({"stream": key.data, "text": redacted})
+            else:
+                selector.unregister(key.fileobj)
+                key.fileobj.close()
+    if timed_out:
+        for key in list(selector.get_map().values()):
+            selector.unregister(key.fileobj)
+        stdout, stderr = process.communicate()
+        if stdout:
+            output["stdout"].append(redact_text(stdout, redaction_environment))
+        if stderr:
+            output["stderr"].append(redact_text(stderr, redaction_environment))
+        return {"exit_code": None, "stdout": "".join(output["stdout"]), "stderr": f"command timed out after {timeout} seconds", "timed_out": True}
+    exit_code = process.wait()
+    return {"exit_code": exit_code, "stdout": "".join(output["stdout"]), "stderr": "".join(output["stderr"]), "timed_out": False}
+
+
+def run_command(command: str, *, workspace: str | Path, working_directory: str = ".", environment: dict[str, str] | None = None, timeout: float = 120, on_output=None) -> dict:
     started = time.monotonic()
     display_cwd = str(working_directory or ".")
     safe_for_redaction = {key: value for key, value in (environment or {}).items() if isinstance(key, str) and isinstance(value, str)}
@@ -146,10 +186,8 @@ def run_command(command: str, *, workspace: str | Path, working_directory: str =
         cwd = resolve_working_directory(workspace, display_cwd)
         result["working_directory"] = str(cwd)
         result["arguments"] = redact_arguments(arguments, redaction_environment)
-        completed = subprocess.run(arguments, cwd=cwd, env=env, text=True, capture_output=True, timeout=timeout, check=False, shell=False)
-        result.update({"exit_code": completed.returncode, "stdout": redact_text(completed.stdout, redaction_environment), "stderr": redact_text(completed.stderr, redaction_environment), "status": "success" if completed.returncode == 0 else "failed"})
-    except subprocess.TimeoutExpired as exc:
-        result.update({"timed_out": True, "stderr": f"command timed out after {timeout} seconds", "stdout": redact_text(exc.stdout or "", redaction_environment)})
+        completed = _stream_process(arguments, cwd=cwd, env=env, timeout=timeout, redaction_environment=redaction_environment, on_output=on_output)
+        result.update({"exit_code": completed["exit_code"], "stdout": completed["stdout"], "stderr": completed["stderr"], "timed_out": completed["timed_out"], "status": "failed" if completed["timed_out"] else "success" if completed["exit_code"] == 0 else "failed"})
     except (CommandValidationError, OSError) as exc:
         result["stderr"] = str(exc)
     result["duration"] = round(time.monotonic() - started, 6)

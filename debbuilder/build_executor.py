@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import inspect
 
 from .command_runner import (
     CommandValidationError,
@@ -99,7 +100,7 @@ def validate_build_plan(recipe: dict, detection: dict, source_directory: str | P
     }
 
 
-def execute_build(recipe: dict, detection: dict, source_directory: str | Path, *, dry_run: bool, runner=run_command, timeout: float | None = None, on_result=None) -> dict:
+def execute_build(recipe: dict, detection: dict, source_directory: str | Path, *, dry_run: bool, runner=run_command, timeout: float | None = None, on_result=None, on_output=None) -> dict:
     plan = validate_build_plan(recipe, detection, source_directory, dry_run=dry_run)
     if dry_run:
         return {"executed": False, "reason": "dry_run", "plan": plan, "commands": [], "output": plan["output"]}
@@ -108,13 +109,17 @@ def execute_build(recipe: dict, detection: dict, source_directory: str | Path, *
     timeout = timeout if timeout is not None else recipe["build"].get("timeout", 120)
     results = []
     for index, command in enumerate(actual_commands, 1):
-        result = runner(
-            command,
-            workspace=source_directory,
-            working_directory=recipe["build"]["working_directory"],
-            environment=recipe["build"]["environment"],
-            timeout=timeout,
-        )
+        kwargs = {
+            "workspace": source_directory,
+            "working_directory": recipe["build"]["working_directory"],
+            "environment": recipe["build"]["environment"],
+            "timeout": timeout,
+        }
+        parameters = inspect.signature(runner).parameters
+        accepts_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+        if callable(on_output) and ("on_output" in parameters or accepts_kwargs):
+            kwargs["on_output"] = lambda item, command_index=index: on_output(command_index, item)
+        result = runner(command, **kwargs)
         result = {"index": index, **result}
         results.append(result)
         if callable(on_result):

@@ -45,6 +45,30 @@ class StaticUiTests(unittest.TestCase):
         self.assertIn("confirmation=`publish:${packageName}:${packageVersion}`", admin)
         self.assertIn("model.validationStatus==='failed'?lifecycleFailureDetails", admin)
 
+    def test_logs_page_has_active_selection_deletion_live_refresh_and_verbosity(self):
+        html = self.read("static/index.html")
+        admin = self.read("static/admin.js")
+        css = self.read("static/style.css")
+        self.assertIn('role="listbox"', html)
+        self.assertIn('id="btnDeleteSelectedLogs"', html)
+        self.assertIn('id="btnDeleteExecutionLog"', html)
+        self.assertIn('id="logVerbosity"', html)
+        for value in ("compact", "normal", "verbose", "raw"):
+            self.assertIn(f'<option value="{value}"', html)
+        self.assertIn('aria-selected="${executionIsSelected(e.id)?', admin)
+        self.assertIn('data-select-execution', admin)
+        self.assertIn('/logs?verbosity=', admin)
+        self.assertIn('after=${adminState.logOffset}', admin)
+        self.assertIn('setTimeout(pollOpenExecution,1500)', admin)
+        self.assertIn('else stopLogPolling();', admin)
+        self.assertIn('Delete log/history for this execution?', admin)
+        self.assertIn('Package:', admin)
+        self.assertIn('Run ID:', admin)
+        self.assertIn('Date:', admin)
+        self.assertIn('/api/executions/delete-logs', admin)
+        self.assertIn('.execution-item.active', css)
+        self.assertIn('[aria-selected="true"]', css)
+
     def test_recipe_serialization_preserves_advanced_pipeline_fields(self):
         script = (ROOT / "static/recipe_serialization.js").read_text()
         self.assertIn("output: collectBuildOutput()", script)
@@ -346,7 +370,8 @@ class StaticUiTests(unittest.TestCase):
         self.assertIn("function formatBuildAudit", app)
         self.assertIn("row.command", app)
         self.assertIn("row.working_directory", app)
-        self.assertIn("formatBuildAudit(buildStep?.details)", admin)
+        self.assertIn("logVerbosity", admin)
+        self.assertIn("verbosity=verbose", self.read("tests/test_admin_api.py"))
 
     def test_sidebar_can_collapse_and_copy_install_command(self):
         html = self.read("static/index.html")

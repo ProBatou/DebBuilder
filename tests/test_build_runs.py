@@ -142,6 +142,31 @@ class BuildStoreTests(unittest.TestCase):
             self.assertTrue(all(step["status"] == "pending" for step in persisted["steps"]))
             self.assertIn("Phase 3", store.log_text(result["run_id"]))
 
+    def test_log_slice_and_clear_history_preserve_lifecycle_data(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = BuildStore(Path(temporary) / "builds")
+            run = store.create(recipe(), mode="build", run_id="log-run")
+            artifact = Path(run["workspace"]) / "artifacts/demo.deb"
+            artifact.write_bytes(b"deb")
+            run.update({"status": "success", "artifact": {"path": str(artifact), "sha256": "abc"}, "validations": [{"status": "success"}], "publications": [{"status": "success"}]})
+            run["steps"][4]["details"] = {"commands": [{"index": 1, "stdout": "hello", "stderr": "warn"}]}
+            store.save(run)
+            store.append_log_line("log-run", "first")
+            store.append_log_line("log-run", "second")
+            first = store.log_slice("log-run", 0)
+            second = store.log_slice("log-run", first["text"].index("second"))
+            self.assertIn("first", first["text"])
+            self.assertIn("second", second["text"])
+            deleted = store.clear_log_history("log-run")
+            cleaned = store.load("log-run")
+            self.assertEqual(deleted["deleted"], "log_history")
+            self.assertEqual(cleaned["status"], "success")
+            self.assertEqual(cleaned["artifact"]["path"], str(artifact))
+            self.assertEqual(cleaned["validations"][0]["status"], "success")
+            self.assertEqual(cleaned["publications"][0]["status"], "success")
+            self.assertEqual(cleaned["steps"][4]["details"]["commands"][0]["stdout"], "")
+            self.assertTrue(cleaned["log_deleted"])
+
     def test_real_build_fails_explicitly_until_source_stage_exists(self):
         with tempfile.TemporaryDirectory() as temporary:
             store = BuildStore(Path(temporary) / "builds")

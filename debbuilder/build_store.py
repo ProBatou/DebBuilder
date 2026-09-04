@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import secrets
 import time
 from copy import deepcopy
@@ -83,9 +84,26 @@ class BuildStore:
             handle.write(f"{event['at']} {level.upper()} {event['message']}\n")
         self.save(run)
 
+    def append_log_line(self, run_id: str, message: str, *, level: str = "info") -> None:
+        log = self.run_dir(run_id) / "logs" / "pipeline.log"
+        log.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with log.open("a") as handle:
+            handle.write(f"{utc_now()} {level.upper()} {message.rstrip()}\n")
+
     def log_text(self, run_id: str) -> str:
         path = self.run_dir(run_id) / "logs" / "pipeline.log"
         return path.read_text(errors="replace") if path.exists() else ""
+
+    def log_slice(self, run_id: str, offset: int = 0) -> dict:
+        path = self.run_dir(run_id) / "logs" / "pipeline.log"
+        if not path.exists():
+            return {"text": "", "offset": 0, "size": 0}
+        size = path.stat().st_size
+        start = max(0, min(int(offset or 0), size))
+        with path.open("rb") as handle:
+            handle.seek(start)
+            data = handle.read()
+        return {"text": data.decode("utf-8", errors="replace"), "offset": size, "size": size}
 
     def save_command_result(self, run_id: str, result: dict) -> Path:
         index = int(result.get("index") or 0)
@@ -95,6 +113,37 @@ class BuildStore:
         storage.save_json(path, result)
         path.chmod(0o600)
         return path
+
+    def clear_log_history(self, run_id: str) -> dict:
+        run = self.load(run_id)
+        if not run:
+            raise FileNotFoundError("build run not found")
+        workspace = self.run_dir(run_id)
+        logs = workspace / "logs"
+        removed = []
+        if logs.exists():
+            shutil.rmtree(logs)
+            removed.append("logs")
+        logs.mkdir(mode=0o700, exist_ok=True)
+        (logs / "commands").mkdir(mode=0o700, exist_ok=True)
+        for step in run.get("steps", []):
+            details = step.get("details") if isinstance(step, dict) else None
+            if isinstance(details, dict):
+                for command in details.get("commands") or []:
+                    if isinstance(command, dict):
+                        command["stdout"] = ""
+                        command["stderr"] = ""
+                        command["log_deleted"] = True
+        for validation in run.get("validations") or []:
+            for command in validation.get("commands") or []:
+                if isinstance(command, dict):
+                    command["stdout"] = ""
+                    command["stderr"] = ""
+                    command["log_deleted"] = True
+        run["events"] = []
+        run["log_deleted"] = True
+        self.save(run)
+        return {"id": run_id, "deleted": "log_history", "removed": removed}
 
     def _manifest_path(self, run_id: str, relative_path: str) -> Path:
         """Resolve a manifest reference without allowing it outside its Run."""

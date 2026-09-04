@@ -107,6 +107,17 @@ class BuildExecutorTests(unittest.TestCase):
                     self.assertIn(field, row)
             self.assertEqual(result["output"]["path"], str(source / "dist"))
 
+    def test_real_build_forwards_streaming_output_with_command_index(self):
+        streamed = []
+        def runner(command, **kwargs):
+            kwargs["on_output"]({"stream": "stdout", "text": "working\n"})
+            return {"command":command,"arguments":[command],"working_directory":"/source","configured_working_directory":".","status":"success","exit_code":0,"stdout":"working\n","stderr":"","duration":0.1,"timed_out":False}
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            (source / "dist").mkdir()
+            execute_build(recipe(["build"], output={"mode":"path","path":"dist"}), {}, source, dry_run=False, runner=runner, on_output=lambda index, item: streamed.append((index, item)))
+        self.assertEqual(streamed, [(1, {"stream": "stdout", "text": "working\n"})])
+
     def test_stops_at_first_failed_command_with_real_error(self):
         calls = []
         def runner(command, **_kwargs):

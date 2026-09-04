@@ -274,6 +274,69 @@ class AdminApiTests(unittest.TestCase):
         self.assertNotIn("staging-files.json", encoded)
         self.assertLess(len(encoded), 10_000)
 
+    def test_execution_logs_are_separate_incremental_and_verbose_selectable(self):
+        store = BuildStore(server.DATA / "builds")
+        run = store.create({
+            "name": "logs", "package_name": "logs", "github_repository": "example/logs", "active": True,
+            "package": {"name": "logs", "maintainer": "Test <test@example.test>", "description": "Logs"},
+        }, mode="build", run_id="live-run")
+        run["status"] = "running"
+        run["steps"][0].update({"status": "success", "summary": "source ok"})
+        run["steps"][4].update({"status": "running", "summary": "command running", "details": {"commands": [{"index": 1, "status": "running", "working_directory": "/tmp/source", "duration": 1, "stdout": "Compiling one", "stderr": ""}]}})
+        store.save(run)
+        store.append_log_line("live-run", "Build command 1 stdout: Compiling one")
+        status, compact = self.request("GET", "/api/executions/live-run/logs?verbosity=compact")
+        self.assertEqual(status, 200)
+        self.assertIn("source: success", compact["log"]["text"])
+        self.assertIn("build: running", compact["log"]["text"])
+        self.assertNotIn("Compiling one", compact["log"]["text"])
+        status, verbose = self.request("GET", "/api/executions/live-run/logs?verbosity=verbose")
+        self.assertIn("Compiling one", verbose["log"]["text"])
+        status, raw = self.request("GET", "/api/executions/live-run/logs?verbosity=raw&after=0")
+        offset = raw["log"]["offset"]
+        store.append_log_line("live-run", "Build command 1 stdout: Compiling two")
+        status, tail = self.request("GET", f"/api/executions/live-run/logs?verbosity=raw&after={offset}")
+        self.assertEqual(status, 200)
+        self.assertIn("Compiling two", tail["log"]["text"])
+        self.assertNotIn("Compiling one", tail["log"]["text"])
+
+    def test_delete_execution_log_preserves_package_lifecycle_and_artifact(self):
+        store = BuildStore(server.DATA / "builds")
+        run = store.create({
+            "name": "cleanup", "package_name": "cleanup", "github_repository": "example/cleanup", "active": True,
+            "package": {"name": "cleanup", "maintainer": "Test <test@example.test>", "description": "Cleanup"},
+        }, mode="build", run_id="cleanup-run")
+        artifact = Path(run["workspace"]) / "artifacts/cleanup.deb"
+        artifact.write_bytes(b"deb")
+        run.update({"status": "success", "artifact": {"path": str(artifact), "sha256": "abc", "inspection": {"package": "cleanup", "version": "1.0-1", "architecture": "all"}}, "validations": [{"status": "success", "artifact": str(artifact)}]})
+        run["steps"][4]["details"] = {"commands": [{"index": 1, "stdout": "long output", "stderr": ""}]}
+        store.save(run)
+        store.append_log_line("cleanup-run", "long output")
+        status, deletion = self.request("DELETE", "/api/executions/cleanup-run/logs")
+        self.assertEqual(status, 200)
+        self.assertEqual(deletion["deletion"]["deleted"], "log_history")
+        cleaned = store.load("cleanup-run")
+        self.assertTrue(artifact.exists())
+        self.assertEqual(cleaned["status"], "success")
+        self.assertEqual(cleaned["artifact"]["path"], str(artifact))
+        self.assertEqual(cleaned["steps"][4]["details"]["commands"][0]["stdout"], "")
+        package = server.get_package("cleanup")
+        self.assertEqual(package["build"]["latest_run_id"], "cleanup-run")
+        self.assertEqual(package["lifecycle_display_status"], "ready_to_publish")
+
+    def test_delete_selected_execution_logs_endpoint_handles_multiple_runs(self):
+        store = BuildStore(server.DATA / "builds")
+        for run_id in ("batch-one", "batch-two"):
+            run = store.create({"name": run_id, "package_name": run_id, "github_repository": f"example/{run_id}", "active": True}, mode="dry_run", run_id=run_id)
+            run["status"] = "prepared"
+            store.save(run)
+            store.append_log_line(run_id, "temporary detail")
+        status, result = self.request("POST", "/api/executions/delete-logs", {"ids": ["batch-one", "batch-two"]})
+        self.assertEqual(status, 200)
+        self.assertEqual(len(result["deleted"]), 2)
+        self.assertEqual(result["errors"], [])
+        self.assertTrue(store.load("batch-one")["log_deleted"])
+
     def test_repo_settings_can_be_updated_and_are_persisted(self):
         body = {
             "apt": {

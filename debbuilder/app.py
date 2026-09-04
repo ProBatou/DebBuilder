@@ -768,6 +768,100 @@ def get_execution(run_id: str) -> dict | None:
     return storage.execution_detail(run_id, list_executions(limit=1000), (RUNS,))
 
 
+def _execution_error_lines(run: dict) -> list[str]:
+    lines = []
+    if run.get("error"):
+        error = run["error"]
+        lines.append(error.get("message", str(error)) if isinstance(error, dict) else str(error))
+    for step in run.get("steps", []):
+        if step.get("error"):
+            error = step["error"]
+            lines.append(f"{step.get('name')}: {error.get('message', str(error)) if isinstance(error, dict) else str(error)}")
+    return lines
+
+
+def format_execution_log(run: dict, *, verbosity: str = "normal") -> str:
+    verbosity = verbosity if verbosity in {"compact", "normal", "verbose", "raw"} else "normal"
+    if verbosity == "compact":
+        rows = [f"{step['name']}: {step['status']}" for step in run.get("steps", []) if step.get("status") != "pending"]
+        rows.extend(f"error: {line}" for line in _execution_error_lines(run))
+        return "\n".join(rows) + ("\n" if rows else "")
+    if verbosity == "normal":
+        rows = [f"{step['name']}: {step['status']}{(' - ' + step.get('summary', '')) if step.get('summary') else ''}" for step in run.get("steps", []) if step.get("status") != "pending"]
+        events = [str(event.get("message") or "") for event in run.get("events", []) if any(marker in str(event.get("message") or "") for marker in ("Build tools", "Dependencies", "Build command", "validation", "publication"))]
+        rows.extend(events)
+        rows.extend(f"error: {line}" for line in _execution_error_lines(run))
+        return "\n".join(row for row in rows if row) + ("\n" if rows else "")
+    rows = []
+    for step in run.get("steps", []):
+        if step.get("status") == "pending":
+            continue
+        rows.append(f"{step['name']}: {step['status']}{(' - ' + step.get('summary', '')) if step.get('summary') else ''}")
+        details = step.get("details") or {}
+        for command in details.get("commands") or []:
+            rows.append(f"Build command {command.get('index')}: {command.get('status')} cwd={command.get('working_directory', '')} duration={command.get('duration', '')}s")
+            if command.get("stdout"):
+                rows.append("stdout:\n" + command["stdout"].rstrip())
+            if command.get("stderr"):
+                rows.append("stderr:\n" + command["stderr"].rstrip())
+    for validation in run.get("validations") or []:
+        rows.append(f"validation {validation.get('id', '')}: {validation.get('status', '')}")
+        if validation.get("error"):
+            rows.append(json.dumps(validation["error"], indent=2, ensure_ascii=False))
+    for publication in run.get("publications") or []:
+        rows.append(f"publication {publication.get('id', '')}: {publication.get('status', '')}")
+    rows.extend(f"error: {line}" for line in _execution_error_lines(run))
+    return "\n".join(row for row in rows if row) + ("\n" if rows else "")
+
+
+def get_execution_log(run_id: str, *, verbosity: str = "normal", after: int = 0) -> dict | None:
+    require_safe_name(run_id, "execution")
+    store = BuildStore(DATA / "builds")
+    run = store.load(run_id)
+    verbosity = verbosity if verbosity in {"compact", "normal", "verbose", "raw"} else "normal"
+    if run:
+        if verbosity == "raw":
+            chunk = store.log_slice(run_id, after)
+            return {**chunk, "complete": run.get("status") not in {"pending", "running"}, "verbosity": verbosity}
+        text = format_execution_log(run, verbosity=verbosity)
+        start = max(0, min(int(after or 0), len(text)))
+        return {"text": text[start:], "offset": len(text), "size": len(text), "complete": run.get("status") not in {"pending", "running"}, "verbosity": verbosity}
+    legacy = storage.execution_detail(run_id, list_executions(limit=1000), (RUNS,))
+    if not legacy:
+        return None
+    text = legacy.get("log", "")
+    start = max(0, min(int(after or 0), len(text)))
+    return {"text": text[start:], "offset": len(text), "size": len(text), "complete": True, "verbosity": "raw" if verbosity == "raw" else verbosity}
+
+
+def delete_execution_log(run_id: str) -> dict:
+    require_safe_name(run_id, "execution")
+    store = BuildStore(DATA / "builds")
+    if store.load(run_id):
+        return store.clear_log_history(run_id)
+    metadata = [row for row in load_json_file(executions_file(), []) if row.get("id") != run_id]
+    save_json_file(executions_file(), metadata)
+    removed = []
+    for suffix in (".out", ".sh"):
+        path = RUNS / f"{run_id}{suffix}"
+        if path.exists():
+            path.unlink()
+            removed.append(path.name)
+    if not removed:
+        raise FileNotFoundError("execution not found")
+    return {"id": run_id, "deleted": "legacy_log_history", "removed": removed}
+
+
+def delete_execution_logs(run_ids: list[str]) -> dict:
+    deleted, errors = [], []
+    for run_id in run_ids:
+        try:
+            deleted.append(delete_execution_log(str(run_id)))
+        except Exception as exc:
+            errors.append({"id": str(run_id), "error": str(exc)})
+    return {"deleted": deleted, "errors": errors}
+
+
 def execution_steps(log: str) -> list[dict]:
     return storage.execution_steps(log)
 

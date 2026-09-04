@@ -86,7 +86,26 @@ def _skip_step(run: dict, store: BuildStore, name: str, reason: str = "upstream_
     _finish_step(run, store, step, started, status="skipped", summary=f"Not applicable: {reason}", details={"reason": reason})
 
 
-def _run_upstream_artifact(canonical: dict, run: dict, *, store: BuildStore, dry_run: bool, github_token: str, acquirer=None) -> dict:
+def _notify_lifecycle(callback, event: str, **payload) -> None:
+    if not callable(callback):
+        return
+    try:
+        callback(event, **payload)
+    except Exception:
+        pass
+
+
+def _finish_run(run: dict, store: BuildStore, started: float, lifecycle_callback=None, recipe: dict | None = None) -> dict:
+    run.update({"finished_at": utc_now(), "duration": round(time.monotonic() - started, 6)})
+    store.save(run)
+    if run.get("mode") == "build":
+        event = "build_failed" if run.get("status") == "failed" else "build_succeeded" if run.get("status") == "success" else ""
+        if event:
+            _notify_lifecycle(lifecycle_callback, event, run=run, recipe=recipe or {})
+    return _response(run, store)
+
+
+def _run_upstream_artifact(canonical: dict, run: dict, *, store: BuildStore, dry_run: bool, github_token: str, acquirer=None, lifecycle_callback=None) -> dict:
     started = time.monotonic()
     source_step, source_started = _start_step(run, store, "source")
     try:
@@ -119,12 +138,10 @@ def _run_upstream_artifact(canonical: dict, run: dict, *, store: BuildStore, dry
         error = {"stage": active["name"], "code": exc.code, "message": str(exc), "details": exc.details}
         _finish_step(run, store, active, source_started if active is source_step else time.monotonic(), status="failed", summary=str(exc), details=exc.details, error=error)
         run.update({"status": "failed", "error": error})
-    run.update({"finished_at": utc_now(), "duration": round(time.monotonic() - started, 6)})
-    store.save(run)
-    return _response(run, store)
+    return _finish_run(run, store, started, lifecycle_callback, canonical)
 
 
-def run_pipeline(recipe: dict, *, store: BuildStore, dry_run: bool, recipe_id: str = "", github_token: str = "", acquire=None, detector=None, dependency_check=None, change_applier=None, upstream_acquirer=None) -> dict:
+def run_pipeline(recipe: dict, *, store: BuildStore, dry_run: bool, recipe_id: str = "", github_token: str = "", acquire=None, detector=None, dependency_check=None, change_applier=None, upstream_acquirer=None, lifecycle_callback=None) -> dict:
     """Execute the connected pipeline through Dependencies and Source changes."""
     canonical = validate_recipe_metadata(recipe)
     run = store.create(canonical, recipe_id=recipe_id or canonical["name"], mode="dry_run" if dry_run else "build")
@@ -132,8 +149,10 @@ def run_pipeline(recipe: dict, *, store: BuildStore, dry_run: bool, recipe_id: s
     run.update({"status": "running", "started_at": utc_now()})
     store.save(run)
     store.append_event(run, "Recipe snapshot created and isolated workspace prepared.")
+    if run.get("mode") == "build":
+        _notify_lifecycle(lifecycle_callback, "build_started", run=run, recipe=canonical)
     if canonical["artifact"]["mode"] == "upstream_deb":
-        return _run_upstream_artifact(canonical, run, store=store, dry_run=dry_run, github_token=github_token, acquirer=upstream_acquirer)
+        return _run_upstream_artifact(canonical, run, store=store, dry_run=dry_run, github_token=github_token, acquirer=upstream_acquirer, lifecycle_callback=lifecycle_callback)
     archive_mode = canonical["artifact"]["mode"] == "upstream_archive"
     acquire = acquire or (upstream_archive.acquire if archive_mode else source_acquisition.acquire_source)
     detector = detector or project_detection.detect_project
@@ -302,9 +321,7 @@ def run_pipeline(recipe: dict, *, store: BuildStore, dry_run: bool, recipe_id: s
                 else:
                     _finish_step(run, store, package_step, package_started, status="failed", summary=str(exc), details=exc.details, error=error)
                 run.update({"status":"failed","error":error})
-    run.update({"finished_at": utc_now(), "duration": round(time.monotonic() - run_started, 6)})
-    store.save(run)
-    return _response(run, store)
+    return _finish_run(run, store, run_started, lifecycle_callback, canonical)
 
 
 # Compatibility name retained for Phase 3 callers and tests.

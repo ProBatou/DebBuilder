@@ -2,7 +2,7 @@
 const adminState = {packages: [], executions: [], selectedPackage: null, selectedExecution: null, executionAction: null, logPollTimer: null, logOffset: 0, logVerbosity: 'normal', logAutoScroll: true, logFollowing: false};
 function badge(status){ const value=status||'unknown'; return `<span class="badge ${esc(value)}">${esc(STATUS_LABELS[value]||value)}</span>`; }
 function packageLabelForExecution(e){ if(e.package) return e.package; const match = adminState.packages.find(p => e.id && e.id.includes(p.name)); return match ? match.name : (e.action || 'Operation'); }
-function switchView(name){ closeMobileNav(); closeLogDetail(); if(name!=='logs') stopLogPolling(); document.querySelectorAll('.nav-link').forEach(b=>b.classList.toggle('active', b.dataset.view===name)); document.querySelectorAll('.view').forEach(v=>v.classList.toggle('active', v.id==='view-'+name)); if(name==='packages') loadPackages(); if(name==='logs') loadExecutions(); if(name==='settings') loadSettings(); if(name==='dashboard') loadDashboard(); }
+function switchView(name){ closeMobileNav(); closeLogDetail(); if(name!=='settings'&&typeof flushSettingsAutosave==='function') flushSettingsAutosave().catch(()=>{}); if(name!=='logs') stopLogPolling(); document.querySelectorAll('.nav-link').forEach(b=>b.classList.toggle('active', b.dataset.view===name)); document.querySelectorAll('.view').forEach(v=>v.classList.toggle('active', v.id==='view-'+name)); if(name==='packages') loadPackages(); if(name==='logs') loadExecutions(); if(name==='settings') loadSettings(); if(name==='dashboard') loadDashboard(); }
 function dashboardLifecycleState(p){
   return lifecycleState(p);
 }
@@ -315,10 +315,9 @@ function setSidebarCompact(compact) {
   document.body.classList.toggle('sidebar-collapsed', !!compact);
   const button = $('btnSidebarCompact');
   if (!button) return;
-  button.textContent = compact ? '›' : '‹';
   button.setAttribute('aria-pressed', compact ? 'true' : 'false');
-  button.setAttribute('aria-label', compact ? 'Expand menu' : 'Collapse menu');
-  button.title = compact ? 'Expand menu' : 'Collapse menu';
+  button.setAttribute('aria-label', compact ? 'Expand sidebar' : 'Collapse sidebar');
+  button.title = compact ? 'Expand sidebar' : 'Collapse sidebar';
 }
 
 function toggleSidebarCompact() {

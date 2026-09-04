@@ -75,6 +75,7 @@ PUBLIC_REPO_PREFIXES = ("/dists/", "/pool/")
 PUBLIC_REPO_FILES = {"/repository.gpg", "/install.sh"}
 
 PIPELINE_NOTIFIER = None
+LIFECYCLE_NOTIFIER = None
 GITHUB_RELEASE_CACHE: dict[str, tuple[float, dict]] = {}
 GITHUB_RELEASE_CACHE_LOADED = False
 GITHUB_RELEASE_REFRESHING: set[str] = set()
@@ -211,11 +212,17 @@ def notify_pipeline(status: str, package: str, version: str, detail: str = "") -
         PIPELINE_NOTIFIER(status=status, package=package, version=version, detail=detail)
 
 
+def notify_lifecycle(event: str, **payload) -> None:
+    if callable(LIFECYCLE_NOTIFIER):
+        LIFECYCLE_NOTIFIER(event, **payload)
+
+
 def run_recipe_pipeline(workflow: dict, *, dry_run: bool = True) -> dict:
     """Delegate the connected pipeline stages to the build engine."""
     return build_pipeline.run_pipeline(
         workflow, store=BuildStore(DATA / "builds"), dry_run=dry_run,
         recipe_id=str(workflow.get("name") or "recipe"), github_token=github_token(DATA),
+        lifecycle_callback=notify_lifecycle,
     )
 
 

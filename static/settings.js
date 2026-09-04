@@ -1,6 +1,8 @@
 let currentSettings = null;
 let settingsDirty = false;
 let settingsSaving = false;
+let settingsSaveTimer = null;
+let settingsRevision = 0;
 
 function fieldInput(id, label, value, attrs=''){
   return `<label class="settings-field" for="${id}">
@@ -25,19 +27,25 @@ function secretInput(id, label, configured, noun='secret'){
   </label>`;
 }
 
-function markSettingsDirty(){
+function markSettingsDirty(delay = 500){
   settingsDirty = true;
-  const status = $('settingsSaveStatus');
-  if (status) { status.textContent = 'Unsaved changes'; status.dataset.state = 'pending'; }
+  settingsRevision += 1;
+  const status = $('settingsAutosaveStatus');
+  if (status) { status.textContent = ''; status.dataset.state = 'pending'; }
+  if (settingsSaveTimer) clearTimeout(settingsSaveTimer);
+  settingsSaveTimer = setTimeout(() => { saveAllSettings().catch(()=>{}); }, delay);
 }
 
 async function loadSettings(){
+  if (settingsSaveTimer) { clearTimeout(settingsSaveTimer); settingsSaveTimer = null; }
   currentSettings = (await getJson('/api/settings')).settings;
   settingsDirty = false;
+  settingsRevision = 0;
   renderSettingsPage();
 }
 
 function settingsPayload(){
+  normalizeAutomationControls();
   const ntfyServer = $('settingNtfyServer')?.value.trim() || '';
   const ntfyTopic = $('settingNtfyTopic')?.value.trim() || '';
   const notificationType = ntfyServer && ntfyTopic ? 'ntfy' : 'none';
@@ -79,6 +87,21 @@ function settingsPayload(){
   return body;
 }
 
+function normalizeAutomationControls(changed){
+  const autoValidate = $('settingAutoValidateAfterBuild');
+  const autoPublish = $('settingAutoPublishAfterValidation');
+  if (!autoValidate || !autoPublish) return;
+  if (changed === autoPublish && autoPublish.checked) autoValidate.checked = true;
+  if (changed === autoValidate && !autoValidate.checked) autoPublish.checked = false;
+  if (autoPublish.checked) autoValidate.checked = true;
+}
+
+function handleSettingsInput(event){
+  normalizeAutomationControls(event.target);
+  const isAutomation = event.target?.id === 'settingAutoValidateAfterBuild' || event.target?.id === 'settingAutoPublishAfterValidation';
+  markSettingsDirty(isAutomation ? 0 : 500);
+}
+
 function renderSettingsPage(){
   const s = currentSettings || {};
   const general = s.general || {}, apt = s.apt || {}, github = s.github || {};
@@ -89,6 +112,7 @@ function renderSettingsPage(){
   const ntfyTokenConfigured = !!notifications.token_configured;
 
   $('settingsPanel').innerHTML = `<form id="settingsForm" class="settings-admin-form">
+    <div class="settings-autosave-line"><span id="settingsAutosaveStatus" data-state="saved" aria-live="polite"></span></div>
     <div class="settings-editable-area">
       <section class="settings-section settings-card editable-settings-card general-settings-card">
         <header class="settings-section-head"><div><h3>General</h3><p class="muted">Console identity and public URL.</p></div></header>
@@ -156,12 +180,11 @@ function renderSettingsPage(){
         </div>
       </section>
     </div>
-    <div class="settings-save-bar"><span id="settingsSaveStatus" data-state="saved" aria-live="polite">All changes saved</span><button id="btnSaveSettings" class="btn-primary" type="submit">Save settings</button></div>
   </form>`;
 
-  $('settingsForm')?.addEventListener('input', markSettingsDirty);
-  $('settingsForm')?.addEventListener('change', markSettingsDirty);
-  $('settingsForm')?.addEventListener('submit', ev=>{ ev.preventDefault(); saveAllSettings().catch(()=>{}); });
+  $('settingsForm')?.addEventListener('input', handleSettingsInput);
+  $('settingsForm')?.addEventListener('change', handleSettingsInput);
+  $('settingsForm')?.addEventListener('submit', ev=>{ ev.preventDefault(); });
   $('testNtfyButton')?.addEventListener('click', ()=>testNtfyNotification().catch(()=>{}));
   $('btnClearLogs')?.addEventListener('click', ()=>clearAllExecutionLogs().catch(err=>{ const status=$('clearLogsStatus'); if(status) status.textContent=`Clear failed: ${err.message || err}`; }));
 }
@@ -187,7 +210,7 @@ async function testNtfyNotification(){
   const status = $('ntfyTestStatus');
   if (settingsDirty || settingsSaving) {
     if (status) status.textContent = 'Saving settings…';
-    await saveAllSettings();
+    await flushSettingsAutosave();
   }
   if (status) status.textContent = 'Sending…';
   try {
@@ -199,21 +222,23 @@ async function testNtfyNotification(){
 }
 
 async function saveAllSettings(){
+  if (settingsSaveTimer) { clearTimeout(settingsSaveTimer); settingsSaveTimer = null; }
   if (!settingsDirty || settingsSaving) return;
   const form = $('settingsForm');
   if (form && !form.reportValidity()) {
     console.warn('Settings autosave skipped: invalid field');
+    const invalidStatus = $('settingsAutosaveStatus');
+    if (invalidStatus) { invalidStatus.textContent = 'Fix invalid fields to save'; invalidStatus.dataset.state = 'error'; }
     return;
   }
   settingsSaving = true;
-  const status = $('settingsSaveStatus');
-  const button = $('btnSaveSettings');
-  if (status) { status.textContent = 'Saving…'; status.dataset.state = 'saving'; }
-  if (button) button.disabled = true;
+  const savedRevision = settingsRevision;
+  const status = $('settingsAutosaveStatus');
+  if (status) { status.textContent = ''; status.dataset.state = 'saving'; }
   try {
     const r = await postJson('/api/settings', settingsPayload());
     currentSettings = r.settings;
-    settingsDirty = false;
+    settingsDirty = settingsRevision !== savedRevision;
     const githubToken = $('settingGithubToken');
     const ntfyToken = $('settingNtfyToken');
     const oidcSecret = $('settingOidcSecret');
@@ -224,7 +249,7 @@ async function saveAllSettings(){
       const repo = currentSettings.apt.repository || '';
       document.getElementById('status').textContent = repo ? `curl -fsSL ${repo.replace(/\/$/, '')}/install.sh | sudo bash` : 'APT repository not configured';
     }
-    if (status) { status.textContent = 'All changes saved'; status.dataset.state = 'saved'; }
+    if (status) { status.textContent = ''; status.dataset.state = settingsDirty ? 'pending' : 'saved'; }
   } catch (err) {
     settingsDirty = true;
     if (status) { status.textContent = `Save failed: ${err.message || err}`; status.dataset.state = 'error'; }
@@ -232,6 +257,14 @@ async function saveAllSettings(){
     throw err;
   } finally {
     settingsSaving = false;
-    if (button) button.disabled = false;
+    if (settingsDirty && !settingsSaveTimer) settingsSaveTimer = setTimeout(() => { saveAllSettings().catch(()=>{}); }, 100);
   }
+}
+
+async function flushSettingsAutosave(){
+  if (settingsSaveTimer) {
+    clearTimeout(settingsSaveTimer);
+    settingsSaveTimer = null;
+  }
+  await saveAllSettings();
 }

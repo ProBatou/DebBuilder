@@ -420,6 +420,26 @@ class AdminApiTests(unittest.TestCase):
         self.assertTrue(settings["automation"]["auto_validate_after_successful_build"])
         self.assertTrue(settings["automation"]["auto_publish_after_successful_validation"])
 
+    def test_auto_publish_setting_enables_auto_validate_backend_constraint(self):
+        status, updated = self.request("POST", "/api/settings", {
+            "automation": {"auto_validate_after_successful_build": False, "auto_publish_after_successful_validation": True}
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(updated["settings"]["automation"]["auto_validate_after_successful_build"])
+        self.assertTrue(updated["settings"]["automation"]["auto_publish_after_successful_validation"])
+        saved = json.loads((server.DATA / "settings.json").read_text())
+        self.assertTrue(saved["automation"]["auto_validate_after_successful_build"])
+        self.assertTrue(saved["automation"]["auto_publish_after_successful_validation"])
+
+    def test_disabling_auto_validate_also_disables_auto_publish_backend_constraint(self):
+        server.update_settings({"automation": {"auto_validate_after_successful_build": True, "auto_publish_after_successful_validation": True}})
+        status, updated = self.request("POST", "/api/settings", {
+            "automation": {"auto_validate_after_successful_build": False}
+        })
+        self.assertEqual(status, 200)
+        self.assertFalse(updated["settings"]["automation"]["auto_validate_after_successful_build"])
+        self.assertFalse(updated["settings"]["automation"]["auto_publish_after_successful_validation"])
+
     def test_github_token_update_stays_server_side(self):
         body = {"github": {"api_url": "https://api.github.com", "token": "ghlocalvalue12345678901234567890"}}
         status, updated = self.request("POST", "/api/settings", body)

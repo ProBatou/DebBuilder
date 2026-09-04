@@ -259,8 +259,14 @@ def validate_settings(payload: dict, current: dict) -> dict:
         if not isinstance(automation, dict):
             raise ValueError("automation settings must be an object")
         result.setdefault("automation", {})
-        result["automation"]["auto_validate_after_successful_build"] = bool(automation.get("auto_validate_after_successful_build", result["automation"].get("auto_validate_after_successful_build", False)))
-        result["automation"]["auto_publish_after_successful_validation"] = bool(automation.get("auto_publish_after_successful_validation", result["automation"].get("auto_publish_after_successful_validation", False)))
+        auto_validate = bool(automation.get("auto_validate_after_successful_build", result["automation"].get("auto_validate_after_successful_build", False)))
+        auto_publish = bool(automation.get("auto_publish_after_successful_validation", result["automation"].get("auto_publish_after_successful_validation", False)))
+        if automation.get("auto_validate_after_successful_build") is False and automation.get("auto_publish_after_successful_validation") is not True:
+            auto_publish = False
+        if auto_publish:
+            auto_validate = True
+        result["automation"]["auto_validate_after_successful_build"] = auto_validate
+        result["automation"]["auto_publish_after_successful_validation"] = auto_publish
 
     if "security" in payload:
         security = payload.get("security")

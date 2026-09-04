@@ -122,8 +122,12 @@ input[type="checkbox"],input[type="radio"]{width:18px;height:18px;min-width:18px
 .log-live-badge[hidden]{display:none}
 .log-context-panel{display:grid;gap:8px;min-height:0;overflow:auto;padding-right:2px}
 .logs-detail-card .execution-meta{grid-template-columns:repeat(5,minmax(0,1fr));gap:7px;padding:8px 10px}
-.logs-detail-card .meta-cell{min-width:0;overflow-wrap:anywhere;font-size:13px;line-height:1.22}
+.logs-detail-card .meta-cell{min-width:0;font-size:13px;line-height:1.22}
 .logs-detail-card .meta-cell span{margin-bottom:1px;font-size:10px}
+.logs-detail-card .meta-value{display:block;width:100%;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);font:inherit;font-weight:760;text-align:left}
+.logs-detail-card .meta-copy-value{appearance:none;height:auto;min-height:0;border:0;border-radius:0;background:transparent;padding:0;cursor:copy}
+.logs-detail-card .meta-copy-value:hover,.logs-detail-card .meta-copy-value:focus-visible{background:transparent;color:var(--blue);outline:none;text-decoration:underline;text-underline-offset:2px}
+.logs-detail-card .meta-copy-value.copied{color:var(--accent)}
 .logs-detail-card .lifecycle-row{padding:7px 10px}
 .logs-detail-card .steps{align-content:start;max-height:70px;overflow-x:hidden;overflow-y:auto;padding-right:2px}
 .logs-detail-card .step-chip{padding:5px 9px;font-size:12px;line-height:1.25}

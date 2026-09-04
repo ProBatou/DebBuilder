@@ -348,6 +348,17 @@ class StaticUiTests(unittest.TestCase):
         self.assertIn("setTimeout(() => { saveAllSettings().catch(()=>{}); }, delay)", settings)
         self.assertIn("flushSettingsAutosave", settings)
 
+    def test_logs_metadata_long_values_are_single_line_and_copyable(self):
+        admin = self.read("static/admin.js")
+        css = self.read("static/style.css")
+        self.assertIn("function metaValueHtml", admin)
+        self.assertIn("middleTruncate(text,key==='SHA-256'?22:30)", admin)
+        self.assertIn('data-copy-value="${esc(text)}"', admin)
+        self.assertIn("copyTextValue(button.dataset.copyValue || '')", admin)
+        self.assertIn("text-overflow:ellipsis;white-space:nowrap", css)
+        self.assertIn(".logs-detail-card .meta-copy-value", css)
+        self.assertNotIn(".logs-detail-card .meta-cell{min-width:0;overflow-wrap:anywhere", css)
+
     def test_installation_preview_is_derived_from_build_output_for_all_modes(self):
         html = self.read("static/index.html")
         app = self.read("static/app.js")
@@ -437,8 +448,8 @@ class StaticUiTests(unittest.TestCase):
         self.assertIn('title="Collapse sidebar"', html)
         self.assertIn('aria-label="Collapse sidebar"', html)
         self.assertIn('<svg viewBox="0 0 24 24" aria-hidden="true">', html)
-        self.assertIn('/style.css?v=20260904-2', html)
-        self.assertIn('/admin.js?v=20260904-2', html)
+        self.assertIn('/style.css?v=20260904-3', html)
+        self.assertIn('/admin.js?v=20260904-3', html)
         self.assertIn('/settings.js?v=20260904-2', html)
         self.assertIn("debBuilderSidebarCompact", admin_js)
         self.assertIn("Expand sidebar", admin_js)

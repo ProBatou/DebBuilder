@@ -153,6 +153,26 @@ function renderExecutions(){ const q=($('logSearch')?.value||'').toLowerCase(); 
 function executionIsLive(e){ return ['pending','running'].includes(e?.status) || ['running'].includes((e?.validations||[]).slice(-1)[0]?.status) || ['running'].includes((e?.publications||[]).slice(-1)[0]?.status); }
 function stopLogPolling(){ if(adminState.logPollTimer) clearTimeout(adminState.logPollTimer); adminState.logPollTimer=null; adminState.logFollowing=false; updateLogLiveBadge(); }
 function logIsNearBottom(){ const node=$('executionDetail'); return !node || node.scrollHeight-node.scrollTop-node.clientHeight<24; }
+function middleTruncate(value, limit=28){
+  const text=String(value ?? '');
+  if(text.length<=limit) return text;
+  const head=Math.max(8, Math.ceil((limit-1)/2));
+  const tail=Math.max(6, limit-1-head);
+  return `${text.slice(0,head)}…${text.slice(-tail)}`;
+}
+function metaValueHtml(key,value){
+  const text=String(value ?? '—');
+  const longKeys=new Set(['Run ID','Source','Resolved ref','Artifact','SHA-256']);
+  const isLong=longKeys.has(key)||text.length>32;
+  if(!isLong) return `<strong class="meta-value">${esc(text)}</strong>`;
+  return `<button type="button" class="meta-value meta-copy-value" title="${esc(text)}" data-copy-value="${esc(text)}">${esc(middleTruncate(text,key==='SHA-256'?22:30))}</button>`;
+}
+async function copyTextValue(value){
+  if(navigator.clipboard?.writeText){ await navigator.clipboard.writeText(value); return; }
+  const input=document.createElement('textarea');
+  input.value=value; input.style.position='fixed'; input.style.opacity='0';
+  document.body.appendChild(input); input.select(); document.execCommand('copy'); input.remove();
+}
 function updateLogLiveBadge(){
   const node=$('btnLogLiveBadge'); if(!node) return;
   const active=adminState.selectedExecution && adminState.logFollowing && executionIsLive(adminState.selectedExecution);
@@ -286,8 +306,8 @@ function renderOpenExecution(e,{preserveLog=false}={}){
   const version=typeof e.version==='object'?e.version:{debian:e.version};
   const meta=[['Run ID','#'+e.id],['Package',e.package||e.recipe_id||'—'],['Recipe',e.recipe_id||'—'],['Mode',e.mode||e.action||'—'],['Source',source.repository||'—'],['Resolved ref',source.ref||source.tag||'—'],['Upstream',version.upstream||'—'],['Debian version',version.debian||'—'],['Build status',e.status],['Date',fmtTime(e.updated||e.created_at_epoch)],['Artifact',(artifact.path||'').split('/').pop()||'—'],['Size',artifact.size||'—'],['SHA-256',artifact.sha256||'—'],['Validation',validation.status||'Not run'],['Publication',publication.status||'Not run']];
   const symbols={pending:'○',running:'◌',success:'✓',failed:'✕',skipped:'–'}; const buildStep=(e.steps||[]).find(step=>step.name==='build');
-  if($('executionMeta')) $('executionMeta').innerHTML=meta.map(([k,v])=>`<div class="meta-cell"><span>${esc(k)}</span>${esc(v)}</div>`).join('');
-  if(validation.profile&&$('executionMeta')){const node=(validation.checks||[]).find(check=>check.name==='toolchain_node');$('executionMeta').insertAdjacentHTML('beforeend',`<div class="meta-cell"><span>Validation backend</span>${esc(validation.backend?.runtime||'—')}</div><div class="meta-cell"><span>Profile</span>${esc(validation.profile.name||'—')}</div><div class="meta-cell"><span>Node</span>${esc(node?.details?.actual||'Not required')}</div><div class="meta-cell"><span>Network</span>${esc(validation.backend?.network||'disabled')}</div>`);}
+  if($('executionMeta')) $('executionMeta').innerHTML=meta.map(([k,v])=>`<div class="meta-cell"><span>${esc(k)}</span>${metaValueHtml(k,v)}</div>`).join('');
+  if(validation.profile&&$('executionMeta')){const node=(validation.checks||[]).find(check=>check.name==='toolchain_node');$('executionMeta').insertAdjacentHTML('beforeend',`<div class="meta-cell"><span>Validation backend</span>${metaValueHtml('Validation backend',validation.backend?.runtime||'—')}</div><div class="meta-cell"><span>Profile</span>${metaValueHtml('Profile',validation.profile.name||'—')}</div><div class="meta-cell"><span>Node</span>${metaValueHtml('Node',node?.details?.actual||'Not required')}</div><div class="meta-cell"><span>Network</span>${metaValueHtml('Network',validation.backend?.network||'disabled')}</div>`);}
   if($('executionSteps')) $('executionSteps').innerHTML=(e.steps||[]).map(s=>`<span class="step-chip ${esc(s.status||'pending')}">${symbols[s.status]||'○'} ${esc(s.name)} · ${esc(s.status||'pending')}</span>`).join('');
   updateExecutionValidationButton(e);
   if(!preserveLog&&$('executionDetail')) $('executionDetail').textContent='Loading log…';
@@ -371,6 +391,14 @@ function wireAdmin() {
   $('btnRevalidateExecution')?.addEventListener('click', () => { if(adminState.selectedExecution) validateExecution(adminState.selectedExecution.id).catch(error=>alert(error.message)); });
   $('btnLogLiveBadge')?.addEventListener('click', resumeLiveLog);
   $('executionDetail')?.addEventListener('scroll', handleLogScroll);
+  $('executionMeta')?.addEventListener('click', event => {
+    const button=event.target.closest('[data-copy-value]');
+    if(!button) return;
+    copyTextValue(button.dataset.copyValue || '').then(() => {
+      button.classList.add('copied');
+      setTimeout(() => button.classList.remove('copied'), 900);
+    }).catch(() => {});
+  });
   $('executionList')?.addEventListener('keydown', event => { const item=event.target.closest('[data-execution-id]'); if(item&&(event.key==='Enter'||event.key===' ')){ event.preventDefault(); openExecution(item.dataset.executionId).catch(error=>alert(error.message)); } });
   $('btnNewPackage')?.addEventListener('click', () => createPackageUi().catch(error => alert(error.message)));
   $('btnNewRecipe')?.addEventListener('click', newRecipeUi);

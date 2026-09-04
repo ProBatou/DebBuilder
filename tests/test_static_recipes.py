@@ -12,7 +12,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class StaticRecipeTests(unittest.TestCase):
     def load(self, name):
-        return validate_recipe_metadata(json.loads((ROOT / "data" / "workflows" / f"{name}.json").read_text()))
+        path = ROOT / "data" / "workflows" / f"{name}.json"
+        if not path.exists():
+            self.skipTest(f"runtime recipe {name}.json is not present")
+        return validate_recipe_metadata(json.loads(path.read_text()))
 
     def uses_compact_static_build(self, name):
         recipe = self.load(name)

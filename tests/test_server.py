@@ -62,8 +62,8 @@ class RecipePreviewTests(unittest.TestCase):
         script = server.generate_script(workflow)
         self.assertIn("Ignored stored step payload", script)
 
-    def test_saved_local_recipes_remain_readable(self):
-        for path in (ROOT / "data" / "workflows").glob("*.json"):
+    def test_checked_in_sample_recipes_remain_readable(self):
+        for path in (ROOT / "examples" / "recipes").glob("*.json"):
             workflow = json.loads(path.read_text())
             server.normalize_steps(workflow)
 

@@ -26,7 +26,7 @@ class AdminApiTests(unittest.TestCase):
         self.old = {name: getattr(server, name) for name in ["DATA", "USER_WORKFLOWS", "EXAMPLES", "RUNS", "AUTH_MODE"]}
         server.DATA = base / "data"
         server.USER_WORKFLOWS = server.DATA / "workflows"
-        server.EXAMPLES = base / "examples"
+        server.EXAMPLES = base / "examples" / "recipes"
         server.RUNS = server.DATA / "runs"
         for d in (server.DATA, server.USER_WORKFLOWS, server.EXAMPLES, server.RUNS):
             d.mkdir(parents=True, exist_ok=True)

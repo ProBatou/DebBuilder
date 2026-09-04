@@ -13,11 +13,12 @@ node_modules/
 secrets/
 credentials/
 
-# Runtime state. Recipes are project data and remain versioned.
+# Runtime state. User Recipes are mutable application data and are not versioned.
 data/*
 !data/.gitkeep
 !data/workflows/
-!data/workflows/**
+data/workflows/**
+!data/workflows/.gitkeep
 
 # Legacy/runtime work directories
 /runs/

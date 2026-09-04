@@ -43,7 +43,7 @@ from .settings_store import cookie_secret, github_token, oidc_client_secret
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "static"
-EXAMPLES = ROOT / "examples"
+EXAMPLES = ROOT / "examples" / "recipes"
 
 
 def application_data_dir(root: Path, environ: dict[str, str] | None = None) -> Path:

@@ -13,7 +13,7 @@ DebBuilder is a self-hosted console for building, validating, and publishing Deb
 - Podman-based validation profiles and toolchains;
 - `reprepro` publication and reconciliation;
 - package lifecycle and Build Run tracking;
-- versioned JSON Recipes;
+- runtime/user JSON Recipes;
 - OIDC/header/disabled authentication modes and notifications.
 
 ## Project layout
@@ -23,8 +23,9 @@ debbuilder/          Python backend package
 static/              Browser UI
 tests/               Unit and static UI tests
 examples/            Public examples
-data/workflows/      Versioned Recipes
-data/                Other local runtime data (ignored by Git)
+examples/recipes/    Source-controlled sample Recipes
+data/workflows/      Runtime/user Recipes (ignored by Git)
+data/                Local runtime data (ignored by Git except structural .gitkeep files)
 server.py            Entrypoint
 ```
 

@@ -50,7 +50,7 @@ function executionLifecycleModel(execution, pendingAction = '') {
   const published = publicationStatus === 'success';
   return {
     buildStatus, validationStatus, publicationStatus, validation, publication,
-    canValidate: buildReady && !published && validationStatus !== 'success',
+    canValidate: buildReady && validationStatus !== 'running',
     validationDisabled: validationStatus === 'running',
     canPublish: buildReady && validationStatus === 'success' && !published,
     publicationDisabled: publicationStatus === 'running',

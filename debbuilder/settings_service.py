@@ -67,6 +67,7 @@ def public_settings_view(*, data_dir: Path, root: Path, settings: dict, port: in
             **settings["notifications"],
             "token_configured": ntfy_token_configured(data_dir),
         },
+        "automation": settings.get("automation", {}),
     }
 
 

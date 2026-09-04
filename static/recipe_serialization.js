@@ -207,7 +207,8 @@ function collectWorkflow() {
       commands: lines(value('buildCommands')),
       environment: environment(value('buildEnvironment')),
       working_directory: value('buildWorkingDirectory') || '.',
-      timeout: advanced.timeout || 120,
+      inactivity_timeout: Number(value('buildInactivityTimeout') || advanced.inactivity_timeout || 300),
+      maximum_runtime: value('buildMaximumRuntime') ? Number(value('buildMaximumRuntime')) : null,
       output: collectBuildOutput()
     },
     install: {
@@ -276,7 +277,7 @@ function renderWorkflow(wf) {
     const account = install.account || owner;
     const scripts = install.maintainer_scripts || {};
     const service = wf.service || {};
-    window.recipeAdvancedFields = {version_revision: packageData.version_revision || '1', timeout: build.timeout || 120, service_description: service.description || '', service_working_directory: service.working_directory || ''};
+    window.recipeAdvancedFields = {version_revision: packageData.version_revision || '1', inactivity_timeout: build.inactivity_timeout || build.timeout || 300, maximum_runtime: build.maximum_runtime || '', service_description: service.description || '', service_working_directory: service.working_directory || ''};
     const configuredOutput = build.output || {};
     const outputMode = ['source','path','paths'].includes(configuredOutput.mode) ? configuredOutput.mode : (configuredOutput.path ? 'path' : 'source');
     window.recipeBuildOutput = {mode:outputMode, path:configuredOutput.path || '', paths:[...(configuredOutput.paths || [])]};
@@ -289,7 +290,7 @@ function renderWorkflow(wf) {
     window.recipeExtraDependencies = [...(build.extra_dependencies || [])]; window.recipeSourceChanges = (build.source_changes || []).map(change => ({...change}));
     renderDependencyChips(); renderSourceChanges(); renderBuildCommands(build.commands || []);
     if (typeof renderDependencyCheck === 'function') renderDependencyCheck();
-    setValue('buildWorkingDirectory', build.working_directory || '.'); setValue('buildEnvironment', environmentText(build.environment)); renderBuildOutput();
+    setValue('buildWorkingDirectory', build.working_directory || '.'); setValue('buildInactivityTimeout', window.recipeAdvancedFields.inactivity_timeout); setValue('buildMaximumRuntime', window.recipeAdvancedFields.maximum_runtime); setValue('buildEnvironment', environmentText(build.environment)); renderBuildOutput();
     setValue('installDestination', install.destination || ''); setValue('installContentSource', install.content?.source || 'build_output'); setValue('installDirectoryMode', install.directory_mode || '0755'); setValue('installFileMode', install.file_mode || '0644');
     setValue('packageArchitecture', packageData.architecture || 'amd64'); setValue('packageSection', packageData.section || 'misc'); setValue('packagePriority', packageData.priority || 'optional'); setValue('packageMaintainer', packageData.maintainer || ''); setValue('packageDescription', packageData.description || packageData.name); setValue('packageRuntimeDependencies', (packageData.runtime_dependencies || []).join(', '));
     setValue('installOwnerUser', owner.user || packageData.name); setValue('installOwnerGroup', owner.group || packageData.name); setValue('installAccountUser', account.user || owner.user || packageData.name); setValue('installAccountGroup', account.group || owner.group || packageData.name); setValue('installDirectories', installDirectoriesText(install.directories)); if ($('installCreateUser')) $('installCreateUser').checked = account.create_user === true; if ($('installCreateGroup')) $('installCreateGroup').checked = account.create_group === true; if (typeof renderAccountProvisioning === 'function') renderAccountProvisioning(account); window.recipeInstallMappings = (install.config_files || []).map(row => normalizeInstallMapping(typeof row === 'string' ? row : {...row, policy:row.policy || install.config_policy || 'dpkg_conffile'})); renderInstallMappings();

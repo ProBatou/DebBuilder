@@ -57,6 +57,30 @@ def _environment(value, what: str) -> dict[str, str]:
     return rows
 
 
+def _positive_int_or_default(value, default: int, what: str) -> int:
+    if value in (None, ""):
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{what} must be a positive integer") from exc
+    if parsed < 1:
+        raise ValueError(f"{what} must be a positive integer")
+    return parsed
+
+
+def _optional_positive_int(value, what: str) -> int | None:
+    if value in (None, "", 0, "0", False):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{what} must be a positive integer or empty") from exc
+    if parsed < 1:
+        raise ValueError(f"{what} must be a positive integer or empty")
+    return parsed
+
+
 def _config_files(value, default_policy: str) -> list[dict]:
     rows = _list(value, "install.config_files")
     normalized = []
@@ -193,7 +217,8 @@ def normalize_recipe(workflow: dict, *, compatibility_aliases: bool = True) -> d
             "extra_dependencies": _string_list(build_in.get("extra_dependencies"), "build.extra_dependencies"),
             "source_changes": _list(build_in.get("source_changes"), "build.source_changes"),
             "commands": _string_list(build_in.get("commands"), "build.commands"),
-            "timeout": int(build_in.get("timeout") or 120),
+            "inactivity_timeout": _positive_int_or_default(build_in.get("inactivity_timeout", build_in.get("timeout")), 300, "build.inactivity_timeout"),
+            "maximum_runtime": _optional_positive_int(build_in.get("maximum_runtime"), "build.maximum_runtime"),
             "environment": _environment(build_in.get("environment"), "build.environment"),
             "working_directory": str(build_in.get("working_directory") or "."),
             "output": {"mode": output_mode, "path": output_path, **({"paths": output_paths} if output_mode == "paths" else {})},
@@ -300,8 +325,10 @@ def validate_recipe_metadata(workflow: dict) -> dict:
         re.compile(expression)
     build = recipe["build"]
     artifact = recipe["artifact"]
-    if not 1 <= build["timeout"] <= 3600:
-        raise ValueError("build.timeout must be between 1 and 3600 seconds")
+    if not 1 <= build["inactivity_timeout"] <= 86400:
+        raise ValueError("build.inactivity_timeout must be between 1 and 86400 seconds")
+    if build["maximum_runtime"] is not None and not 1 <= build["maximum_runtime"] <= 604800:
+        raise ValueError("build.maximum_runtime must be empty or between 1 and 604800 seconds")
     if artifact["mode"] not in ARTIFACT_MODES:
         raise ValueError("unsupported artifact mode")
     if artifact["mode"] in {"source_build", "upstream_deb"} and artifact["type"] != "deb":

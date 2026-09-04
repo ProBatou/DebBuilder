@@ -34,6 +34,10 @@ def default_settings(repo_url: str, suite: str, component: str, architecture: st
             "server_url": "https://ntfy.sh",
             "topic": "debbuilder",
         },
+        "automation": {
+            "auto_validate_after_successful_build": False,
+            "auto_publish_after_successful_validation": False,
+        },
         "security": security or {"auth_mode": "none", "oidc_issuer": "", "oidc_client_id": "", "oidc_redirect_uri": ""},
     }
 
@@ -249,6 +253,14 @@ def validate_settings(payload: dict, current: dict) -> dict:
         if notif_type == "ntfy":
             result["notifications"]["server_url"] = _validate_url(str(result["notifications"].get("server_url") or ""), "ntfy server URL")
             result["notifications"]["topic"] = _validate_name(str(result["notifications"].get("topic") or ""), "ntfy topic")
+
+    if "automation" in payload:
+        automation = payload.get("automation")
+        if not isinstance(automation, dict):
+            raise ValueError("automation settings must be an object")
+        result.setdefault("automation", {})
+        result["automation"]["auto_validate_after_successful_build"] = bool(automation.get("auto_validate_after_successful_build", result["automation"].get("auto_validate_after_successful_build", False)))
+        result["automation"]["auto_publish_after_successful_validation"] = bool(automation.get("auto_publish_after_successful_validation", result["automation"].get("auto_publish_after_successful_validation", False)))
 
     if "security" in payload:
         security = payload.get("security")

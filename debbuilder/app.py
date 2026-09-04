@@ -219,6 +219,52 @@ def run_recipe_pipeline(workflow: dict, *, dry_run: bool = True) -> dict:
     )
 
 
+def _publication_confirmation_for_run(run: dict) -> str:
+    artifact = run.get("artifact") or {}
+    inspection = artifact.get("inspection") or {}
+    package = inspection.get("package") or run.get("package") or run.get("recipe_id") or ""
+    run_version = run.get("version") or {}
+    version = inspection.get("version") or (run_version.get("debian") if isinstance(run_version, dict) else run_version)
+    return f"publish:{package}:{version}"
+
+
+def run_post_build_automation(run_id: str, *, dry_run: bool, settings: dict | None = None) -> dict:
+    """Run optional post-build actions for the exact Build Run that just completed."""
+    automation = (settings or app_settings()).get("automation") or {}
+    summary = {
+        "auto_validate_after_successful_build": bool(automation.get("auto_validate_after_successful_build", False)),
+        "auto_publish_after_successful_validation": bool(automation.get("auto_publish_after_successful_validation", False)),
+        "validation": None,
+        "publication": None,
+    }
+    if dry_run or not summary["auto_validate_after_successful_build"]:
+        return summary
+    store = BuildStore(DATA / "builds")
+    run = store.load(run_id)
+    if not run or run.get("mode") != "build" or run.get("status") != "success" or not (run.get("artifact") or {}).get("path"):
+        return summary
+    validation = validate_build_artifact(run_id, {})
+    summary["validation"] = validation
+    if validation.get("status") != "success" or not summary["auto_publish_after_successful_validation"]:
+        return summary
+    current = store.load(run_id) or run
+    summary["publication"] = publish_build_artifact(run_id, {"confirm": _publication_confirmation_for_run(current)})
+    return summary
+
+
+def run_recipe_pipeline_with_automation(workflow: dict, *, dry_run: bool = True) -> dict:
+    result = run_recipe_pipeline(workflow, dry_run=dry_run)
+    run_id = str(result.get("run_id") or "")
+    if run_id and result.get("status") == "success":
+        automation = run_post_build_automation(run_id, dry_run=dry_run)
+        if automation.get("validation"):
+            result["validation"] = automation["validation"]
+        if automation.get("publication"):
+            result["publication"] = automation["publication"]
+        result["automation"] = automation
+    return result
+
+
 def validate_build_artifact(run_id: str, payload: dict | None = None) -> dict:
     payload = payload or {}
     return artifact_validation.validate_artifact(
@@ -839,9 +885,12 @@ def delete_execution_log(run_id: str) -> dict:
     store = BuildStore(DATA / "builds")
     if store.load(run_id):
         return store.clear_log_history(run_id)
-    metadata = [row for row in load_json_file(executions_file(), []) if row.get("id") != run_id]
+    original_metadata = load_json_file(executions_file(), [])
+    metadata = [row for row in original_metadata if row.get("id") != run_id]
     save_json_file(executions_file(), metadata)
     removed = []
+    if len(metadata) != len(original_metadata):
+        removed.append("executions.json")
     for suffix in (".out", ".sh"):
         path = RUNS / f"{run_id}{suffix}"
         if path.exists():
@@ -852,7 +901,27 @@ def delete_execution_log(run_id: str) -> dict:
     return {"id": run_id, "deleted": "legacy_log_history", "removed": removed}
 
 
-def delete_execution_logs(run_ids: list[str]) -> dict:
+def execution_log_cleanup_candidates() -> list[str]:
+    store = BuildStore(DATA / "builds")
+    structured = [str(run["id"]) for run in store.list(limit=1_000_000)]
+    legacy_rows = storage.list_runs((RUNS,), limit=1_000_000)
+    metadata = load_json_file(executions_file(), [])
+    legacy = storage.list_executions(legacy_rows, metadata, limit=1_000_000)
+    seen = set()
+    ids = []
+    for run_id in structured + [str(row.get("id")) for row in legacy if row.get("id")]:
+        if run_id not in seen:
+            ids.append(run_id)
+            seen.add(run_id)
+    return ids
+
+
+def delete_execution_logs(run_ids: list[str] | None = None, *, all_runs: bool = False, dry_run: bool = False) -> dict:
+    if all_runs:
+        run_ids = execution_log_cleanup_candidates()
+    run_ids = list(run_ids or [])
+    if dry_run:
+        return {"count": len(run_ids), "ids": run_ids}
     deleted, errors = [], []
     for run_id in run_ids:
         try:

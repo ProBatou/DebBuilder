@@ -95,25 +95,28 @@ def validate_build_plan(recipe: dict, detection: dict, source_directory: str | P
         "working_directory": str(cwd),
         "configured_working_directory": build["working_directory"],
         "environment_keys": sorted(build["environment"]),
-        "timeout": build.get("timeout", 120),
+        "inactivity_timeout": build.get("inactivity_timeout", 300),
+        "maximum_runtime": build.get("maximum_runtime"),
         "output": output,
     }
 
 
-def execute_build(recipe: dict, detection: dict, source_directory: str | Path, *, dry_run: bool, runner=run_command, timeout: float | None = None, on_result=None, on_output=None) -> dict:
+def execute_build(recipe: dict, detection: dict, source_directory: str | Path, *, dry_run: bool, runner=run_command, inactivity_timeout: float | None = None, maximum_runtime: float | None = None, on_result=None, on_output=None) -> dict:
     plan = validate_build_plan(recipe, detection, source_directory, dry_run=dry_run)
     if dry_run:
         return {"executed": False, "reason": "dry_run", "plan": plan, "commands": [], "output": plan["output"]}
     source_noop = detection.get("build_mode") == "source" and not recipe["build"]["commands"] and not detection.get("proposed_commands")
     actual_commands = [] if detection.get("project_type") == "static" or source_noop else select_commands(recipe["build"]["commands"], detection.get("proposed_commands") or [], dry_run=False)["commands"]
-    timeout = timeout if timeout is not None else recipe["build"].get("timeout", 120)
+    inactivity_timeout = inactivity_timeout if inactivity_timeout is not None else recipe["build"].get("inactivity_timeout", recipe["build"].get("timeout", 300))
+    maximum_runtime = maximum_runtime if maximum_runtime is not None else recipe["build"].get("maximum_runtime")
     results = []
     for index, command in enumerate(actual_commands, 1):
         kwargs = {
             "workspace": source_directory,
             "working_directory": recipe["build"]["working_directory"],
             "environment": recipe["build"]["environment"],
-            "timeout": timeout,
+            "inactivity_timeout": inactivity_timeout,
+            "maximum_runtime": maximum_runtime,
         }
         parameters = inspect.signature(runner).parameters
         accepts_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
@@ -126,7 +129,8 @@ def execute_build(recipe: dict, detection: dict, source_directory: str | Path, *
             on_result(result)
         if result["status"] != "success":
             code = "build_command_timeout" if result.get("timed_out") else "build_command_failed"
-            message = f"Build command {index} timed out" if result.get("timed_out") else f"Build command {index} failed with exit code {result.get('exit_code')}"
+            timeout_reason = result.get("timeout_reason")
+            message = f"Build command {index} timed out ({timeout_reason})" if result.get("timed_out") and timeout_reason else f"Build command {index} timed out" if result.get("timed_out") else f"Build command {index} failed with exit code {result.get('exit_code')}"
             raise BuildError(code, message, details={"plan": plan, "commands": results, "failed_command": result})
     try:
         output = _safe_output(source_directory, recipe["build"]["output"], require_exists=True)

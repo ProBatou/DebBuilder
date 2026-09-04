@@ -115,13 +115,51 @@ class CommandRunnerTests(unittest.TestCase):
         self.assertNotIn("super-secret", json.dumps(result))
         self.assertIn("[REDACTED]", result["command"])
 
-    def test_timeout_is_recorded(self):
+    def test_silent_command_hits_inactivity_timeout(self):
         with tempfile.TemporaryDirectory() as temporary:
             command = f"{shlex.quote(sys.executable)} -c 'import time; time.sleep(1)'"
-            result = run_command(command, workspace=temporary, timeout=0.01)
+            result = run_command(command, workspace=temporary, inactivity_timeout=0.05)
             self.assertEqual(result["status"], "failed")
             self.assertTrue(result["timed_out"])
+            self.assertEqual(result["timeout_reason"], "inactivity")
             self.assertIsNone(result["exit_code"])
+            self.assertIn("without stdout/stderr activity", result["stderr"])
+
+    def test_stdout_activity_resets_inactivity_timeout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            command = f"{shlex.quote(sys.executable)} -c 'import time; [print(i, flush=True) or time.sleep(.03) for i in range(4)]'"
+            result = run_command(command, workspace=temporary, inactivity_timeout=0.08)
+        self.assertEqual(result["status"], "success")
+        self.assertFalse(result["timed_out"])
+        self.assertIn("3", result["stdout"])
+
+    def test_stderr_activity_resets_inactivity_timeout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            command = f"{shlex.quote(sys.executable)} -c 'import sys,time; [print(i, file=sys.stderr, flush=True) or time.sleep(.03) for i in range(4)]'"
+            result = run_command(command, workspace=temporary, inactivity_timeout=0.08)
+        self.assertEqual(result["status"], "success")
+        self.assertFalse(result["timed_out"])
+        self.assertIn("3", result["stderr"])
+
+    def test_maximum_runtime_is_optional_and_absolute(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            noisy = f"{shlex.quote(sys.executable)} -c 'import time; [print(i, flush=True) or time.sleep(.03) for i in range(20)]'"
+            limited = run_command(noisy, workspace=temporary, inactivity_timeout=0.2, maximum_runtime=0.08)
+            unlimited = run_command(f"{shlex.quote(sys.executable)} -c 'print(\"ok\")'", workspace=temporary, inactivity_timeout=0.2, maximum_runtime=None)
+        self.assertEqual(limited["status"], "failed")
+        self.assertTrue(limited["timed_out"])
+        self.assertEqual(limited["timeout_reason"], "maximum_runtime")
+        self.assertIn("maximum runtime", limited["stderr"])
+        self.assertEqual(unlimited["status"], "success")
+        self.assertFalse(unlimited["timed_out"])
+
+    def test_timeout_cleans_up_process_that_ignores_terminate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            command = f"{shlex.quote(sys.executable)} -c 'import signal,time; signal.signal(signal.SIGTERM, lambda *_: None); time.sleep(5)'"
+            result = run_command(command, workspace=temporary, inactivity_timeout=0.05)
+        self.assertEqual(result["status"], "failed")
+        self.assertTrue(result["timed_out"])
+        self.assertEqual(result["timeout_reason"], "inactivity")
 
 
 if __name__ == "__main__":

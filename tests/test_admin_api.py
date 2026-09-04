@@ -62,6 +62,25 @@ class AdminApiTests(unittest.TestCase):
         with urllib.request.urlopen(req, timeout=5) as resp:
             return resp.status, json.loads(resp.read().decode())
 
+    def successful_build_run(self, run_id="auto-run", package="auto-package", version="1.0-1"):
+        recipe = {
+            "schema_version": 1, "name": f"{package}-recipe", "active": True,
+            "package": {"name": package, "architecture": "all", "maintainer": "Demo <demo@example.test>", "description": "Demo"},
+            "source": {"provider": "github", "repository": f"owner/{package}", "tracking": "latest_release", "version": {"source": "tag"}},
+        }
+        (server.USER_WORKFLOWS / f"{package}-recipe.json").write_text(json.dumps(recipe))
+        store = BuildStore(server.DATA / "builds")
+        run = store.create(recipe, recipe_id=f"{package}-recipe", mode="build", run_id=run_id)
+        artifact = Path(run["workspace"]) / f"artifacts/{package}_{version}_all.deb"
+        artifact.write_bytes(b"deb")
+        run.update({
+            "status": "success",
+            "version": {"upstream": version.split("-")[0], "debian": version},
+            "artifact": {"path": str(artifact), "size": 3, "sha256": run_id, "inspection": {"package": package, "version": version, "architecture": "all"}},
+        })
+        store.save(run)
+        return store, run, artifact
+
     def test_get_package_list_seeded_from_inventory_and_recipe_association(self):
         status, data = self.request("GET", "/api/packages")
         self.assertEqual(status, 200)
@@ -324,18 +343,38 @@ class AdminApiTests(unittest.TestCase):
         self.assertEqual(package["build"]["latest_run_id"], "cleanup-run")
         self.assertEqual(package["lifecycle_display_status"], "ready_to_publish")
 
-    def test_delete_selected_execution_logs_endpoint_handles_multiple_runs(self):
+    def test_clear_all_execution_logs_preserves_lifecycle_and_artifacts(self):
         store = BuildStore(server.DATA / "builds")
         for run_id in ("batch-one", "batch-two"):
             run = store.create({"name": run_id, "package_name": run_id, "github_repository": f"example/{run_id}", "active": True}, mode="dry_run", run_id=run_id)
             run["status"] = "prepared"
             store.save(run)
             store.append_log_line(run_id, "temporary detail")
-        status, result = self.request("POST", "/api/executions/delete-logs", {"ids": ["batch-one", "batch-two"]})
+        run = store.create({
+            "name": "global-cleanup", "package_name": "global-cleanup", "github_repository": "example/global-cleanup", "active": True,
+            "package": {"name": "global-cleanup", "maintainer": "Test <test@example.test>", "description": "Cleanup"},
+        }, mode="build", run_id="global-cleanup-run")
+        artifact = Path(run["workspace"]) / "artifacts/global-cleanup.deb"
+        artifact.write_bytes(b"deb")
+        run.update({"status": "success", "artifact": {"path": str(artifact), "sha256": "abc", "inspection": {"package": "global-cleanup", "version": "1.0-1", "architecture": "all"}}, "validations": [{"status": "success", "artifact": str(artifact)}]})
+        run["steps"][4]["details"] = {"commands": [{"index": 1, "stdout": "long output", "stderr": ""}]}
+        store.save(run)
+        store.append_log_line("global-cleanup-run", "temporary detail")
+        status, preview = self.request("POST", "/api/executions/delete-logs", {"all": True, "dry_run": True})
         self.assertEqual(status, 200)
-        self.assertEqual(len(result["deleted"]), 2)
+        self.assertGreaterEqual(preview["count"], 3)
+        self.assertIn("global-cleanup-run", preview["ids"])
+        status, result = self.request("POST", "/api/executions/delete-logs", {"all": True})
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(len(result["deleted"]), 3)
         self.assertEqual(result["errors"], [])
         self.assertTrue(store.load("batch-one")["log_deleted"])
+        cleaned = store.load("global-cleanup-run")
+        self.assertTrue(cleaned["log_deleted"])
+        self.assertTrue(artifact.exists())
+        self.assertEqual(cleaned["artifact"]["path"], str(artifact))
+        self.assertEqual(cleaned["validations"][0]["status"], "success")
+        self.assertEqual(server.get_package("global-cleanup")["lifecycle_display_status"], "ready_to_publish")
 
     def test_repo_settings_can_be_updated_and_are_persisted(self):
         body = {
@@ -366,6 +405,7 @@ class AdminApiTests(unittest.TestCase):
             "apt": {"repository": "https://repo.example.test", "distribution": "testing", "component": "main", "architecture": "amd64"},
             "github": {"api_url": "https://api.github.com"},
             "notifications": {"type": "ntfy", "server_url": "https://ntfy.example.test", "topic": "debbuilder"},
+            "automation": {"auto_validate_after_successful_build": True, "auto_publish_after_successful_validation": True},
         }
         status, updated = self.request("POST", "/api/settings", body)
         self.assertEqual(status, 200)
@@ -377,6 +417,8 @@ class AdminApiTests(unittest.TestCase):
         self.assertFalse(settings["github"]["token_configured"])
         self.assertTrue(settings["notifications"]["configured"])
         self.assertEqual(settings["notifications"]["type"], "ntfy")
+        self.assertTrue(settings["automation"]["auto_validate_after_successful_build"])
+        self.assertTrue(settings["automation"]["auto_publish_after_successful_validation"])
 
     def test_github_token_update_stays_server_side(self):
         body = {"github": {"api_url": "https://api.github.com", "token": "ghlocalvalue12345678901234567890"}}
@@ -565,6 +607,105 @@ class AdminApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(response["run_id"], "real-run")
         run.assert_called_once_with(workflow, dry_run=False)
+
+    def test_auto_validation_does_not_run_after_dry_run(self):
+        server.update_settings({"automation": {"auto_validate_after_successful_build": True, "auto_publish_after_successful_validation": True}})
+        workflow = {"name": "dry-auto", "active": True, "steps": []}
+        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": "dry-run", "status": "success"}) as run, mock.patch("debbuilder.app.validate_build_artifact") as validate:
+            status, response = self.request("POST", "/api/run", {"workflow": workflow, "dry_run": True})
+        self.assertEqual(status, 200)
+        self.assertEqual(response["run_id"], "dry-run")
+        run.assert_called_once_with(workflow, dry_run=True)
+        validate.assert_not_called()
+
+    def test_successful_real_build_auto_validates_latest_artifact_when_enabled(self):
+        store, run, artifact = self.successful_build_run(run_id="latest-auto-run", package="latest-auto", version="2.0-1")
+        server.update_settings({"automation": {"auto_validate_after_successful_build": True, "auto_publish_after_successful_validation": False}})
+
+        def validate(run_id, payload):
+            self.assertEqual(payload, {})
+            current = store.load(run_id)
+            validation = {"id": "auto-validation", "build_run_id": run_id, "artifact": current["artifact"]["path"], "status": "success"}
+            current.setdefault("validations", []).append(validation)
+            store.save(current)
+            return validation
+
+        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": run["id"], "status": "success"}), mock.patch("debbuilder.app.validate_build_artifact", side_effect=validate) as validate_mock, mock.patch("debbuilder.app.publish_build_artifact") as publish:
+            status, response = self.request("POST", "/api/run", {"workflow": {"name": "latest-auto-recipe", "active": True}, "dry_run": False})
+        self.assertEqual(status, 200)
+        validate_mock.assert_called_once_with("latest-auto-run", {})
+        publish.assert_not_called()
+        self.assertEqual(response["validation"]["status"], "success")
+        self.assertEqual(store.load("latest-auto-run")["validations"][0]["artifact"], str(artifact))
+        self.assertEqual(server.get_package("latest-auto")["lifecycle_display_status"], "ready_to_publish")
+
+    def test_auto_validation_uses_returned_build_run_not_previous_artifact(self):
+        store, old, old_artifact = self.successful_build_run(run_id="old-auto-run", package="same-auto", version="1.0-1")
+        old["created_at"] = "2026-01-01T00:00:00+00:00"
+        old["validations"] = [{"id": "old-validation", "artifact": str(old_artifact), "status": "success"}]
+        store.save(old)
+        _, current, current_artifact = self.successful_build_run(run_id="current-auto-run", package="same-auto", version="2.0-1")
+        current["created_at"] = "2026-01-02T00:00:00+00:00"
+        store.save(current)
+        server.update_settings({"automation": {"auto_validate_after_successful_build": True}})
+
+        def validate(run_id, _payload):
+            self.assertEqual(run_id, "current-auto-run")
+            run = store.load(run_id)
+            validation = {"id": "current-validation", "build_run_id": run_id, "artifact": str(current_artifact), "status": "success"}
+            run.setdefault("validations", []).append(validation)
+            store.save(run)
+            return validation
+
+        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": "current-auto-run", "status": "success"}), mock.patch("debbuilder.app.validate_build_artifact", side_effect=validate) as validate_mock:
+            status, _response = self.request("POST", "/api/run", {"workflow": {"name": "same-auto-recipe", "active": True}, "dry_run": False})
+        self.assertEqual(status, 200)
+        validate_mock.assert_called_once()
+        self.assertEqual(len(store.load("old-auto-run")["validations"]), 1)
+        self.assertEqual(store.load("current-auto-run")["validations"][0]["artifact"], str(current_artifact))
+
+    def test_auto_validation_failure_records_validation_failed_lifecycle(self):
+        store, run, artifact = self.successful_build_run(run_id="failed-auto-run", package="failed-auto", version="3.0-1")
+        server.update_settings({"automation": {"auto_validate_after_successful_build": True}})
+
+        def validate(run_id, _payload):
+            current = store.load(run_id)
+            validation = {"id": "failed-validation", "build_run_id": run_id, "artifact": str(artifact), "status": "failed", "error": {"message": "install failed"}}
+            current.setdefault("validations", []).append(validation)
+            store.save(current)
+            return validation
+
+        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": run["id"], "status": "success"}), mock.patch("debbuilder.app.validate_build_artifact", side_effect=validate):
+            status, response = self.request("POST", "/api/run", {"workflow": {"name": "failed-auto-recipe", "active": True}, "dry_run": False})
+        self.assertEqual(status, 200)
+        self.assertEqual(response["validation"]["status"], "failed")
+        self.assertEqual(server.get_package("failed-auto")["lifecycle_display_status"], "validation_failed")
+
+    def test_auto_publish_runs_after_successful_auto_validation_when_enabled(self):
+        store, run, artifact = self.successful_build_run(run_id="publish-auto-run", package="publish-auto", version="4.0-1")
+        server.update_settings({"automation": {"auto_validate_after_successful_build": True, "auto_publish_after_successful_validation": True}})
+
+        def validate(run_id, _payload):
+            current = store.load(run_id)
+            validation = {"id": "publish-validation", "build_run_id": run_id, "artifact": str(artifact), "status": "success"}
+            current.setdefault("validations", []).append(validation)
+            store.save(current)
+            return validation
+
+        def publish(run_id, payload):
+            self.assertEqual(payload["confirm"], "publish:publish-auto:4.0-1")
+            current = store.load(run_id)
+            publication = {"id": "auto-publication", "build_run_id": run_id, "artifact": str(artifact), "status": "success", "published_version": "4.0-1"}
+            current.setdefault("publications", []).append(publication)
+            store.save(current)
+            return publication
+
+        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": run["id"], "status": "success"}), mock.patch("debbuilder.app.validate_build_artifact", side_effect=validate), mock.patch("debbuilder.app.publish_build_artifact", side_effect=publish) as publish_mock:
+            status, response = self.request("POST", "/api/run", {"workflow": {"name": "publish-auto-recipe", "active": True}, "dry_run": False})
+        self.assertEqual(status, 200)
+        publish_mock.assert_called_once()
+        self.assertEqual(response["publication"]["status"], "success")
+        self.assertEqual(server.get_package("publish-auto")["lifecycle_display_status"], "published")
 
     def test_dry_run_creates_structured_workspace_and_is_visible_in_logs(self):
         workflow = {

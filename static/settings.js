@@ -60,6 +60,10 @@ function settingsPayload(){
       server_url: ntfyServer,
       topic: ntfyTopic
     },
+    automation: {
+      auto_validate_after_successful_build: !!$('settingAutoValidateAfterBuild')?.checked,
+      auto_publish_after_successful_validation: !!$('settingAutoPublishAfterValidation')?.checked
+    },
     security: {
       auth_mode: oidcConfigured ? 'oidc' : 'none',
       oidc_issuer: oidcIssuer,
@@ -79,6 +83,7 @@ function renderSettingsPage(){
   const s = currentSettings || {};
   const general = s.general || {}, apt = s.apt || {}, github = s.github || {};
   const notifications = s.notifications || {}, security = s.security || {};
+  const automation = s.automation || {};
   const notificationType = notifications.type === 'ntfy' ? 'ntfy' : 'none';
   const tokenConfigured = !!github.token_configured;
   const ntfyTokenConfigured = !!notifications.token_configured;
@@ -134,6 +139,22 @@ function renderSettingsPage(){
         </div>
       </div>
       </section>
+
+      <section class="settings-section settings-card editable-settings-card automation-settings-card">
+        <header class="settings-section-head"><div><h3>Automation</h3><p class="muted">Optional lifecycle actions after successful build stages.</p></div></header>
+        <div class="settings-form-grid settings-grid-one">
+          <label class="settings-check"><input type="checkbox" id="settingAutoValidateAfterBuild" ${automation.auto_validate_after_successful_build?'checked':''}> Auto validate after successful build</label>
+          <label class="settings-check"><input type="checkbox" id="settingAutoPublishAfterValidation" ${automation.auto_publish_after_successful_validation?'checked':''}> Publish automatically after successful validation</label>
+        </div>
+      </section>
+
+      <section class="settings-section settings-card maintenance-settings-card">
+        <header class="settings-section-head"><div><h3>Maintenance</h3><p class="muted">Clean detailed execution logs without changing recipes, packages, APT publications, artifacts, manifests, validations, or publications.</p></div></header>
+        <div class="maintenance-actions">
+          <button type="button" class="danger" id="btnClearLogs">Clear logs</button>
+          <small id="clearLogsStatus" class="settings-inline-status" aria-live="polite"></small>
+        </div>
+      </section>
     </div>
     <div class="settings-save-bar"><span id="settingsSaveStatus" data-state="saved" aria-live="polite">All changes saved</span><button id="btnSaveSettings" class="btn-primary" type="submit">Save settings</button></div>
   </form>`;
@@ -142,6 +163,24 @@ function renderSettingsPage(){
   $('settingsForm')?.addEventListener('change', markSettingsDirty);
   $('settingsForm')?.addEventListener('submit', ev=>{ ev.preventDefault(); saveAllSettings().catch(()=>{}); });
   $('testNtfyButton')?.addEventListener('click', ()=>testNtfyNotification().catch(()=>{}));
+  $('btnClearLogs')?.addEventListener('click', ()=>clearAllExecutionLogs().catch(err=>{ const status=$('clearLogsStatus'); if(status) status.textContent=`Clear failed: ${err.message || err}`; }));
+}
+
+async function clearAllExecutionLogs(){
+  const status=$('clearLogsStatus');
+  if(status) status.textContent='Counting logs…';
+  const preview=await postJson('/api/executions/delete-logs',{all:true,dry_run:true});
+  const count=preview.count||0;
+  if(!count){ if(status) status.textContent='No execution logs to clear.'; return; }
+  if(!confirm(`Clear detailed logs/history for ${count} executions?\n\nThis removes only execution log/history details.\nIt does not delete any Recipe, package, published APT entry, build artifact, manifest, validation, or publication state.\n\nThis cannot be undone.`)){
+    if(status) status.textContent='Clear cancelled.';
+    return;
+  }
+  if(status) status.textContent='Clearing logs…';
+  const result=await postJson('/api/executions/delete-logs',{all:true});
+  const deleted=(result.deleted||[]).length;
+  const errors=result.errors||[];
+  if(status) status.textContent=errors.length ? `Cleared ${deleted}; ${errors.length} failed.` : `Cleared logs for ${deleted} executions.`;
 }
 
 async function testNtfyNotification(){

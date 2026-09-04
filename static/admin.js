@@ -1,8 +1,8 @@
 // --- Admin console layer: Package / Recipe / Execution navigation ---
-const adminState = {packages: [], executions: [], selectedPackage: null, selectedExecution: null, executionAction: null, selectedExecutionIds: new Set(), logPollTimer: null, logOffset: 0, logVerbosity: 'normal'};
+const adminState = {packages: [], executions: [], selectedPackage: null, selectedExecution: null, executionAction: null, logPollTimer: null, logOffset: 0, logVerbosity: 'normal', logAutoScroll: true, logFollowing: false};
 function badge(status){ const value=status||'unknown'; return `<span class="badge ${esc(value)}">${esc(STATUS_LABELS[value]||value)}</span>`; }
 function packageLabelForExecution(e){ if(e.package) return e.package; const match = adminState.packages.find(p => e.id && e.id.includes(p.name)); return match ? match.name : (e.action || 'Operation'); }
-function switchView(name){ closeMobileNav(); closeLogDetail(); document.querySelectorAll('.nav-link').forEach(b=>b.classList.toggle('active', b.dataset.view===name)); document.querySelectorAll('.view').forEach(v=>v.classList.toggle('active', v.id==='view-'+name)); if(name==='packages') loadPackages(); if(name==='logs') loadExecutions(); if(name==='settings') loadSettings(); if(name==='dashboard') loadDashboard(); }
+function switchView(name){ closeMobileNav(); closeLogDetail(); if(name!=='logs') stopLogPolling(); document.querySelectorAll('.nav-link').forEach(b=>b.classList.toggle('active', b.dataset.view===name)); document.querySelectorAll('.view').forEach(v=>v.classList.toggle('active', v.id==='view-'+name)); if(name==='packages') loadPackages(); if(name==='logs') loadExecutions(); if(name==='settings') loadSettings(); if(name==='dashboard') loadDashboard(); }
 function dashboardLifecycleState(p){
   return lifecycleState(p);
 }
@@ -65,7 +65,8 @@ function actionButtons(p){
   if(p.recipe) buttons.push(`<button class="btn-warning" onclick="buildPackage('${name}',true)">Test</button>`);
   if(p.recipe && BUILDABLE_PACKAGE_STATES.has(state)) buttons.push(`<button class="btn-success" onclick="buildPackage('${name}',false)">Build</button>`);
   if((p.build||{}).last_artifact) buttons.push(`<button class="btn-primary" onclick="verifyPackageDeb('${name}')">Verify</button>`);
-  if((state==='validation_needed'||state==='validation_failed')&&(p.build||{}).latest_run_id) buttons.push(`<button class="btn-primary" onclick="validatePackage('${name}')">Validate</button>`);
+  if((state==='validation_needed'||state==='validation_failed')&&(p.build||{}).latest_run_id) buttons.push(`<button class="btn-primary" onclick="validatePackage('${name}')">${state==='validation_failed'?'Revalidate':'Validate'}</button>`);
+  else if((p.build||{}).latest_run_id&&(p.build||{}).last_artifact) buttons.push(`<button class="btn-primary" onclick="validatePackage('${name}')">Revalidate</button>`);
   if(state==='ready_to_publish'||state==='publication_failed'||state==='publication_available') buttons.push(`<button class="btn-danger" onclick="publishPackage('${name}')">Publish</button>`);
   return buttons.join('');
 }
@@ -147,17 +148,39 @@ async function createRecipeFromDialog(){
 async function loadExecutions(){ const data=await getJson('/api/executions'); adminState.executions=data.executions||[]; renderExecutions(); }
 function executionIsSelected(id){ return adminState.selectedExecution?.id===id; }
 function shortExecutionId(id){ const value=String(id||''); return value.length>18?`${value.slice(0,13)}...${value.slice(-4)}`:value; }
-function renderExecutions(){ const q=($('logSearch')?.value||'').toLowerCase(); const st=$('logStatus')?.value||'all'; const rows=adminState.executions.filter(e=>(st==='all'||e.status===st||e.lifecycle_status===st)&&(!q||JSON.stringify(e).toLowerCase().includes(q))); $('executionList').innerHTML=rows.map(e=>`<div class="item execution-item ${executionIsSelected(e.id)?'active':''}" role="option" tabindex="0" aria-selected="${executionIsSelected(e.id)?'true':'false'}" data-execution-id="${esc(e.id)}" onclick="openExecution('${esc(e.id)}')"><label class="execution-select" onclick="event.stopPropagation()"><input type="checkbox" data-select-execution="${esc(e.id)}" ${adminState.selectedExecutionIds.has(e.id)?'checked':''} aria-label="Select execution ${esc(e.id)}"></label><div class="execution-item-body"><div class="item-title"><span>${esc(packageLabelForExecution(e))} · ${esc(e.action||'run')}</span>${badge(e.lifecycle_status||e.status)}</div><div class="item-meta">${fmtTime(e.updated)} · ${esc(shortExecutionId(e.id))}</div></div></div>`).join('') || '<p class="muted logs-empty-message">No logs available.</p>'; document.querySelector('.logs-layout')?.classList.toggle('logs-empty', adminState.executions.length===0); }
+function renderExecutions(){ const q=($('logSearch')?.value||'').toLowerCase(); const st=$('logStatus')?.value||'all'; const rows=adminState.executions.filter(e=>(st==='all'||e.status===st||e.lifecycle_status===st)&&(!q||JSON.stringify(e).toLowerCase().includes(q))); $('executionList').innerHTML=rows.map(e=>`<div class="item execution-item ${executionIsSelected(e.id)?'active':''}" role="option" tabindex="0" aria-selected="${executionIsSelected(e.id)?'true':'false'}" data-execution-id="${esc(e.id)}" onclick="openExecution('${esc(e.id)}')"><div class="execution-item-body"><div class="item-title"><span>${esc(packageLabelForExecution(e))} · ${esc(e.action||'run')}</span>${badge(e.lifecycle_status||e.status)}</div><div class="item-meta">${fmtTime(e.updated)} · ${esc(shortExecutionId(e.id))}</div></div></div>`).join('') || '<p class="muted logs-empty-message">No logs available.</p>'; document.querySelector('.logs-layout')?.classList.toggle('logs-empty', adminState.executions.length===0); }
 
 function executionIsLive(e){ return ['pending','running'].includes(e?.status) || ['running'].includes((e?.validations||[]).slice(-1)[0]?.status) || ['running'].includes((e?.publications||[]).slice(-1)[0]?.status); }
-function stopLogPolling(){ if(adminState.logPollTimer) clearTimeout(adminState.logPollTimer); adminState.logPollTimer=null; }
+function stopLogPolling(){ if(adminState.logPollTimer) clearTimeout(adminState.logPollTimer); adminState.logPollTimer=null; adminState.logFollowing=false; updateLogLiveBadge(); }
+function logIsNearBottom(){ const node=$('executionDetail'); return !node || node.scrollHeight-node.scrollTop-node.clientHeight<24; }
+function updateLogLiveBadge(){
+  const node=$('btnLogLiveBadge'); if(!node) return;
+  const active=adminState.selectedExecution && adminState.logFollowing && executionIsLive(adminState.selectedExecution);
+  node.hidden=!active;
+  if(!active) return;
+  node.textContent=adminState.logAutoScroll?'● Live':'↓ Jump to latest';
+  node.classList.toggle('paused', !adminState.logAutoScroll);
+}
+function setLogAutoScroll(enabled){ adminState.logAutoScroll=!!enabled; updateLogLiveBadge(); }
+function executionCanValidateAgain(execution){
+  return execution?.mode==='build' && execution.status==='success' && !!execution.artifact?.path;
+}
+function updateExecutionValidationButton(execution){
+  const button=$('btnRevalidateExecution'); if(!button) return;
+  const pending=adminState.executionAction?.id===execution?.id&&adminState.executionAction.type==='validation';
+  const validation=(execution?.validations||[]).slice(-1)[0]||{};
+  button.hidden=!executionCanValidateAgain(execution);
+  button.disabled=!!pending;
+  button.textContent=pending?'Validating…':(validation.status?'Revalidate':'Validate');
+}
 async function loadExecutionLog(id,{reset=false}={}){
+  const shouldStick=adminState.logAutoScroll || logIsNearBottom();
   if(reset){ adminState.logOffset=0; if($('executionDetail')) $('executionDetail').textContent=''; }
   const response=await fetch(`/api/executions/${encodeURIComponent(id)}/logs?verbosity=${encodeURIComponent(adminState.logVerbosity)}&after=${adminState.logOffset}`);
   const payload=await response.json();
   if(!response.ok) throw new Error(payload.error||response.statusText);
   const log=payload.log||{};
-  if(log.text){ $('executionDetail').textContent += log.text; $('executionDetail').scrollTop=$('executionDetail').scrollHeight; }
+  if(log.text){ $('executionDetail').textContent += log.text; if(shouldStick){ setLogAutoScroll(true); $('executionDetail').scrollTop=$('executionDetail').scrollHeight; } else setLogAutoScroll(false); }
   adminState.logOffset=log.offset||0;
   return log;
 }
@@ -170,13 +193,10 @@ async function pollOpenExecution(){
     renderExecutions();
     renderOpenExecution(detail,{preserveLog:true});
     const log=await loadExecutionLog(detail.id);
-    if(executionIsLive(detail)&&!log.complete) adminState.logPollTimer=setTimeout(pollOpenExecution,1500);
+    if(executionIsLive(detail)&&!log.complete){ adminState.logFollowing=true; updateLogLiveBadge(); adminState.logPollTimer=setTimeout(pollOpenExecution,1500); }
     else stopLogPolling();
   }catch(_error){ stopLogPolling(); }
 }
-function toggleExecutionSelection(id,checked){ if(checked) adminState.selectedExecutionIds.add(id); else adminState.selectedExecutionIds.delete(id); }
-function selectedExecutionRows(){ return adminState.executions.filter(row=>adminState.selectedExecutionIds.has(row.id)); }
-function deletionSummary(rows){ return rows.map(row=>`${packageLabelForExecution(row)} · ${row.id} · ${fmtTime(row.updated)}`).join('\n'); }
 async function deleteExecutionLog(id){
   const row=adminState.executions.find(item=>item.id===id)||adminState.selectedExecution||{id};
   if(!confirm(`Delete log/history for this execution?\n\nPackage: ${packageLabelForExecution(row)}\nRun ID: ${row.id}\nDate: ${fmtTime(row.updated||row.created_at_epoch)}\n\nThis does not delete any Recipe, package, published APT entry, or build artifact.`)) return;
@@ -187,20 +207,14 @@ async function deleteExecutionLog(id){
   await loadExecutions();
   if(adminState.selectedExecution?.id===id) await openExecution(id);
 }
-async function deleteSelectedLogs(){
-  const rows=selectedExecutionRows();
-  if(!rows.length) return alert('Select at least one execution log to delete.');
-  if(!confirm(`Delete log/history for ${rows.length} selected executions?\n\n${deletionSummary(rows)}\n\nThis does not delete Recipes, packages, published APT entries, or build artifacts.`)) return;
-  const result=await postJson('/api/executions/delete-logs',{ids:rows.map(row=>row.id)});
-  adminState.selectedExecutionIds.clear();
-  if(result.errors?.length) alert(`Some logs could not be deleted:\n${result.errors.map(row=>`${row.id}: ${row.error}`).join('\n')}`);
-  await loadExecutions();
-  if(adminState.selectedExecution) await openExecution(adminState.selectedExecution.id);
-}
 function changeLogVerbosity(value){
+  const shouldStick=adminState.logAutoScroll || logIsNearBottom();
   adminState.logVerbosity=['compact','normal','verbose','raw'].includes(value)?value:'normal';
+  setLogAutoScroll(shouldStick);
   if(adminState.selectedExecution) loadExecutionLog(adminState.selectedExecution.id,{reset:true}).catch(error=>alert(error.message));
 }
+function handleLogScroll(){ if(!adminState.selectedExecution || !executionIsLive(adminState.selectedExecution)) return; setLogAutoScroll(logIsNearBottom()); }
+function resumeLiveLog(){ setLogAutoScroll(true); const node=$('executionDetail'); if(node) node.scrollTop=node.scrollHeight; }
 
 function lifecycleStatusText(status) {
   return ({not_run:'Not run',running:'Running',success:'Success',failed:'Failed',prepared:'Prepared'})[status]||status||'Not run';
@@ -220,7 +234,7 @@ function renderExecutionLifecycle(execution) {
   const node=$('executionLifecycle'); if(!node) return;
   const pending=adminState.executionAction?.id===execution.id?adminState.executionAction.type:'';
   const model=executionLifecycleModel(execution,pending);
-  const validateButton=model.canValidate?`<button type="button" class="btn-primary" data-execution-action="validate" onclick="validateExecution('${esc(execution.id)}')" ${model.validationDisabled?'disabled':''}>${model.validationDisabled?'Validating…':'Validate'}</button>`:'';
+  const validateButton=model.canValidate?`<button type="button" class="btn-primary" data-execution-action="validate" onclick="validateExecution('${esc(execution.id)}')" ${model.validationDisabled?'disabled':''}>${model.validationDisabled?'Validating…':(model.validation.status?'Revalidate':'Validate')}</button>`:'';
   const publishButton=model.canPublish?`<button type="button" class="btn-danger" data-execution-action="publish" onclick="publishExecution('${esc(execution.id)}')" ${model.publicationDisabled?'disabled':''}>${model.publicationDisabled?'Publishing…':'Publish'}</button>`:'';
   const validationFailure=model.validationStatus==='failed'?lifecycleFailureDetails(model.validation,'Validation'):'';
   const publicationFailure=model.publicationStatus==='failed'?lifecycleFailureDetails(model.publication,'Publication'):'';
@@ -244,7 +258,7 @@ async function refreshExecutionLifecycle(id) {
 async function validateExecution(id) {
   if(adminState.executionAction) return;
   adminState.executionAction={id,type:'validation'};
-  if(adminState.selectedExecution?.id===id) renderExecutionLifecycle(adminState.selectedExecution);
+  if(adminState.selectedExecution?.id===id) updateExecutionValidationButton(adminState.selectedExecution);
   try { await postLifecycleJson(`/api/executions/${encodeURIComponent(id)}/validate`,{}); }
   catch(error) { alert(`Validation could not start: ${error.message}`); }
   finally { adminState.executionAction=null; await refreshExecutionLifecycle(id); }
@@ -274,17 +288,19 @@ function renderOpenExecution(e,{preserveLog=false}={}){
   const symbols={pending:'○',running:'◌',success:'✓',failed:'✕',skipped:'–'}; const buildStep=(e.steps||[]).find(step=>step.name==='build');
   if($('executionMeta')) $('executionMeta').innerHTML=meta.map(([k,v])=>`<div class="meta-cell"><span>${esc(k)}</span>${esc(v)}</div>`).join('');
   if(validation.profile&&$('executionMeta')){const node=(validation.checks||[]).find(check=>check.name==='toolchain_node');$('executionMeta').insertAdjacentHTML('beforeend',`<div class="meta-cell"><span>Validation backend</span>${esc(validation.backend?.runtime||'—')}</div><div class="meta-cell"><span>Profile</span>${esc(validation.profile.name||'—')}</div><div class="meta-cell"><span>Node</span>${esc(node?.details?.actual||'Not required')}</div><div class="meta-cell"><span>Network</span>${esc(validation.backend?.network||'disabled')}</div>`);}
-  renderExecutionLifecycle(e);
   if($('executionSteps')) $('executionSteps').innerHTML=(e.steps||[]).map(s=>`<span class="step-chip ${esc(s.status||'pending')}">${symbols[s.status]||'○'} ${esc(s.name)} · ${esc(s.status||'pending')}</span>`).join('');
+  updateExecutionValidationButton(e);
   if(!preserveLog&&$('executionDetail')) $('executionDetail').textContent='Loading log…';
 }
 async function openExecution(id){
   stopLogPolling();
+  setLogAutoScroll(true);
   const e=(await getJson('/api/executions/'+encodeURIComponent(id))).execution; adminState.selectedExecution=e; adminState.logOffset=0;
   renderExecutions();
   renderOpenExecution(e);
-  await loadExecutionLog(id,{reset:true});
-  if(executionIsLive(e)) adminState.logPollTimer=setTimeout(pollOpenExecution,1500);
+  const log=await loadExecutionLog(id,{reset:true});
+  if(executionIsLive(e)&&!log.complete){ adminState.logFollowing=true; updateLogLiveBadge(); adminState.logPollTimer=setTimeout(pollOpenExecution,1500); }
+  else stopLogPolling();
   if(isMobileViewport()) document.body.classList.add('mobile-log-open');
 }
 function isMobileViewport(){ return window.matchMedia('(max-width: 899px)').matches; }
@@ -353,8 +369,9 @@ function wireAdmin() {
   $('logStatus')?.addEventListener('change', renderExecutions);
   $('logVerbosity')?.addEventListener('change', event => changeLogVerbosity(event.target.value));
   $('btnDeleteExecutionLog')?.addEventListener('click', () => { if(adminState.selectedExecution) deleteExecutionLog(adminState.selectedExecution.id).catch(error=>alert(error.message)); });
-  $('btnDeleteSelectedLogs')?.addEventListener('click', () => deleteSelectedLogs().catch(error=>alert(error.message)));
-  $('executionList')?.addEventListener('change', event => { const checkbox=event.target.closest('[data-select-execution]'); if(checkbox) toggleExecutionSelection(checkbox.dataset.selectExecution, checkbox.checked); });
+  $('btnRevalidateExecution')?.addEventListener('click', () => { if(adminState.selectedExecution) validateExecution(adminState.selectedExecution.id).catch(error=>alert(error.message)); });
+  $('btnLogLiveBadge')?.addEventListener('click', resumeLiveLog);
+  $('executionDetail')?.addEventListener('scroll', handleLogScroll);
   $('executionList')?.addEventListener('keydown', event => { const item=event.target.closest('[data-execution-id]'); if(item&&(event.key==='Enter'||event.key===' ')){ event.preventDefault(); openExecution(item.dataset.executionId).catch(error=>alert(error.message)); } });
   $('btnNewPackage')?.addEventListener('click', () => createPackageUi().catch(error => alert(error.message)));
   $('btnNewRecipe')?.addEventListener('click', newRecipeUi);

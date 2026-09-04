@@ -201,7 +201,7 @@ def create_handler(api):
                     api.json_response(self, {"error": "recipe is disabled"}, 409)
                     return
                 dry_run = bool(data.get("dry_run", True))
-                api.json_response(self, api.run_recipe_pipeline(workflow, dry_run=dry_run))
+                api.json_response(self, api.run_recipe_pipeline_with_automation(workflow, dry_run=dry_run))
                 return
             if self.path == "/api/upstream-archive/inspect":
                 workflow = data.get("workflow", data)
@@ -237,7 +237,7 @@ def create_handler(api):
                 api.json_response(self, {"ok": True, "settings": api.update_settings(data)})
                 return
             if self.path == "/api/executions/delete-logs":
-                api.json_response(self, api.delete_execution_logs(data.get("ids") or []))
+                api.json_response(self, api.delete_execution_logs(data.get("ids") or [], all_runs=bool(data.get("all")), dry_run=bool(data.get("dry_run"))))
                 return
             if self.path == "/api/packages":
                 api.json_response(self, {"ok": True, "package": api.create_or_update_package(data)})

@@ -60,6 +60,22 @@ class RecipeSchemaTests(unittest.TestCase):
         self.assertEqual(recipe["build"]["output"], {"mode": "source", "path": ""})
         self.assertNotEqual(recipe["install"]["owner"], recipe["service"])
 
+    def test_legacy_build_timeout_migrates_to_inactivity_timeout(self):
+        recipe = validate_recipe_metadata({
+            "name": "legacy-timeout", "package_name": "legacy-timeout", "github_repository": "owner/demo",
+            "build": {"timeout": 120, "commands": ["make"], "output": {"mode": "source"}},
+        })
+        self.assertEqual(recipe["build"]["inactivity_timeout"], 120)
+        self.assertIsNone(recipe["build"]["maximum_runtime"])
+        stored = recipe_for_storage(recipe)
+        self.assertEqual(stored["build"]["inactivity_timeout"], 120)
+        self.assertNotIn("timeout", stored["build"])
+
+    def test_new_build_timeouts_have_generic_defaults(self):
+        recipe = validate_recipe_metadata({"name": "demo", "package_name": "demo", "github_repository": "owner/demo"})
+        self.assertEqual(recipe["build"]["inactivity_timeout"], 300)
+        self.assertIsNone(recipe["build"]["maximum_runtime"])
+
     def test_storage_shape_is_canonical_but_read_shape_has_compatibility_aliases(self):
         stored = recipe_for_storage({"name": "demo", "package_name": "demo", "github_repository": "owner/demo"})
         self.assertIn("package", stored)

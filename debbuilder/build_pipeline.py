@@ -230,6 +230,9 @@ def run_pipeline(recipe: dict, *, store: BuildStore, dry_run: bool, recipe_id: s
                     build_step.setdefault("details", {}).setdefault("commands", []).append(result)
                     store.save_command_result(run["id"], result)
                     store.append_event(run, f"Build command {result['index']}: {result['status']} (exit {result.get('exit_code')}, {result['duration']}s)")
+                    if result.get("timed_out") and result.get("stderr"):
+                        for line in str(result["stderr"]).splitlines():
+                            store.append_log_line(run["id"], f"Build command {result['index']} timeout: {line}", level="error")
                 def command_output(index, item):
                     for line in str(item.get("text") or "").splitlines():
                         store.append_log_line(run["id"], f"Build command {index} {item.get('stream', 'output')}: {line}")

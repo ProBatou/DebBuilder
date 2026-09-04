@@ -8,7 +8,7 @@ from debbuilder.build_executor import BuildError, execute_build, select_commands
 
 
 def recipe(commands=None, working_directory=".", environment=None, output=None):
-    return {"build": {"commands": commands or [], "working_directory": working_directory, "environment": environment or {}, "output": output or {"mode":"path","path":"dist"}}}
+    return {"build": {"commands": commands or [], "working_directory": working_directory, "environment": environment or {}, "inactivity_timeout": 300, "maximum_runtime": None, "output": output or {"mode":"path","path":"dist"}}}
 
 
 DETECTION = {"proposed_commands": ["npm ci", "npm run build"]}
@@ -117,6 +117,23 @@ class BuildExecutorTests(unittest.TestCase):
             (source / "dist").mkdir()
             execute_build(recipe(["build"], output={"mode":"path","path":"dist"}), {}, source, dry_run=False, runner=runner, on_output=lambda index, item: streamed.append((index, item)))
         self.assertEqual(streamed, [(1, {"stream": "stdout", "text": "working\n"})])
+
+    def test_build_forwards_inactivity_and_maximum_runtime_limits(self):
+        seen = {}
+        def runner(command, **kwargs):
+            seen.update(kwargs)
+            return {"command":command,"arguments":[command],"working_directory":"/source","configured_working_directory":".","status":"success","exit_code":0,"stdout":"","stderr":"","duration":0.1,"timed_out":False}
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            (source / "dist").mkdir()
+            configured = recipe(["build"], output={"mode":"path","path":"dist"})
+            configured["build"]["inactivity_timeout"] = 42
+            configured["build"]["maximum_runtime"] = 900
+            result = execute_build(configured, {}, source, dry_run=False, runner=runner)
+        self.assertEqual(result["plan"]["inactivity_timeout"], 42)
+        self.assertEqual(result["plan"]["maximum_runtime"], 900)
+        self.assertEqual(seen["inactivity_timeout"], 42)
+        self.assertEqual(seen["maximum_runtime"], 900)
 
     def test_stops_at_first_failed_command_with_real_error(self):
         calls = []

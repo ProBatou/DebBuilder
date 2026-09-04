@@ -92,7 +92,7 @@ body.sidebar-collapsed .app-shell{grid-template-columns:76px minmax(0,1fr)}body.
 .build-output-path-row{grid-template-columns:minmax(0,1fr) auto}.build-output-path-row>button{min-height:32px;padding:5px 8px;font-size:11px}
 .install-mapping-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.install-mapping-head p{font-size:11px}.install-mapping-table{display:grid;gap:7px}.install-mapping-columns,.install-mapping-row{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr) minmax(135px,.45fr) minmax(85px,.3fr) minmax(85px,.3fr) minmax(70px,.25fr) auto;align-items:center;gap:8px}.install-mapping-columns{margin-top:10px;color:var(--muted);font-size:11px;font-weight:800}.install-mapping-columns span:nth-child(2){grid-column:3}.install-mapping-row{padding:8px;border:1px solid rgba(49,65,95,.65);border-radius:10px;background:#0b1424}.install-mapping-row input,.install-mapping-row select{min-height:36px;padding:7px 9px}.install-mapping-row button{min-height:32px;padding:5px 8px}.mapping-arrow{color:var(--muted)}
 .install-mapping-row-automatic{border-style:dashed;background:rgba(11,20,36,.42);color:var(--muted)}.mapping-readonly-value{min-width:0;padding:8px 9px;overflow-wrap:anywhere}.install-mapping-row-automatic .mapping-arrow{opacity:.7}.install-mapping-table-automatic .install-mapping-columns{opacity:.72}
-.account-provisioning-advanced{grid-column:1/-1;margin-top:8px}.account-provisioning-advanced summary{width:max-content;color:var(--muted);font-size:11px}.account-provisioning-advanced .recipe-step-fields{margin-top:8px}.static-source-summary p{margin:0;color:var(--muted)}.static-source-summary p+p{margin-top:5px}.service-empty-state{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px;border:1px dashed rgba(116,185,255,.35);border-radius:12px;background:rgba(116,185,255,.04)}.service-empty-state p{margin:0;color:var(--muted)}.remove-service-button{margin-top:10px}
+.static-source-summary p{margin:0;color:var(--muted)}.static-source-summary p+p{margin-top:5px}.service-empty-state{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px;border:1px dashed rgba(116,185,255,.35);border-radius:12px;background:rgba(116,185,255,.04)}.service-empty-state p{margin:0;color:var(--muted)}.remove-service-button{margin-top:10px}
 @media(max-width:760px){.install-mapping-head{align-items:flex-start;flex-direction:column}.install-mapping-columns,.install-mapping-row{grid-template-columns:1fr}.install-mapping-columns{display:none}.mapping-arrow{transform:rotate(90deg)}.mapping-column-placeholder{display:none}}
 @media(max-width:560px){.lifecycle-row{grid-template-columns:1fr auto}.lifecycle-row>span{grid-column:1}.lifecycle-row button{grid-column:2;grid-row:1/3}.lifecycle-error{grid-column:1/-1}}
 
@@ -107,32 +107,4 @@ input[type="checkbox"],input[type="radio"]{width:18px;height:18px;min-width:18px
 .install-mapping-row input,.install-mapping-row select{height:var(--control-height);min-height:var(--control-height);padding:var(--control-padding-y) var(--control-padding-x);border-radius:var(--control-radius)}.mapping-readonly-value{min-height:var(--control-height);padding:9px 10px;border:1px solid rgba(49,65,95,.45);border-radius:var(--control-radius);background:rgba(11,18,32,.42);font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.install-mapping-row-automatic{opacity:.82}
 .service-general-group .recipe-step-fields{grid-template-areas:"service service service type type user user group group enabled enabled enabled" "restart restart restart . . . . . . . . ."}.service-general-group label:nth-child(1){grid-area:service}.service-general-group label:nth-child(2){grid-area:type}.service-general-group label:nth-child(3){grid-area:user}.service-general-group label:nth-child(4){grid-area:group}.service-general-group label:nth-child(5){grid-area:enabled}.service-general-group label:nth-child(6){grid-area:restart}.recipe-step-fields label.boolean-field{display:flex;min-height:var(--control-height);height:var(--control-height);flex-direction:row;align-items:center;justify-content:space-between;gap:10px;padding:8px 10px;border:1px solid var(--line);border-radius:var(--control-radius);background:#0b1220;color:var(--text)}.recipe-step-fields label.boolean-field>span:first-child{height:auto;min-height:0;overflow:visible}
 @media(max-width:760px){.dashboard-repo-summary{grid-template-columns:1fr auto}.dashboard-repo-summary h3{grid-column:1/-1}.dashboard-repo-summary>span:not(.settings-badge){white-space:normal}.service-general-group .recipe-step-fields{grid-template-areas:none}.service-general-group label:nth-child(n){grid-area:auto}}
-/* Logs workspace: keep the live log readable while preserving execution context. */
-.logs-layout{grid-template-columns:minmax(250px,26%) minmax(0,1fr)}
-.logs-detail-card{display:grid;grid-template-rows:auto auto minmax(340px,1fr);overflow:hidden}
-.logs-list-card .section-title{margin-bottom:10px}
-.logs-list-card .item{padding:9px 10px}
-.logs-list-card .item-title{gap:8px}
-.logs-list-card .item-title span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.logs-list-card .item-meta{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.execution-item{grid-template-columns:minmax(0,1fr);gap:7px}
-.log-terminal{position:relative;min-height:340px;height:100%;min-width:0}
-.log-live-badge{position:absolute;right:12px;bottom:12px;z-index:2;width:auto;min-height:30px;padding:5px 10px;border-radius:999px;border-color:rgba(102,255,153,.44);background:rgba(11,18,32,.92);box-shadow:0 8px 24px rgba(0,0,0,.28);color:var(--accent);font-size:11px;font-weight:850}
-.log-live-badge.paused{border-color:rgba(116,185,255,.48);color:#b9d9ff}
-.log-live-badge[hidden]{display:none}
-.log-context-panel{display:grid;gap:8px;min-height:0;overflow:auto;padding-right:2px}
-.logs-detail-card .execution-meta{grid-template-columns:repeat(5,minmax(0,1fr));gap:7px;padding:8px 10px}
-.logs-detail-card .meta-cell{min-width:0;font-size:13px;line-height:1.22}
-.logs-detail-card .meta-cell span{margin-bottom:1px;font-size:10px}
-.logs-detail-card .meta-value{display:block;width:100%;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);font:inherit;font-weight:760;text-align:left}
-.logs-detail-card .meta-copy-value{appearance:none;height:auto;min-height:0;border:0;border-radius:0;background:transparent;padding:0;cursor:copy}
-.logs-detail-card .meta-copy-value:hover,.logs-detail-card .meta-copy-value:focus-visible{background:transparent;color:var(--blue);outline:none;text-decoration:underline;text-underline-offset:2px}
-.logs-detail-card .meta-copy-value.copied{color:var(--accent)}
-.logs-detail-card .lifecycle-row{padding:7px 10px}
-.logs-detail-card .steps{align-content:start;max-height:70px;overflow-x:hidden;overflow-y:auto;padding-right:2px}
-.logs-detail-card .step-chip{padding:5px 9px;font-size:12px;line-height:1.25}
-.logs-detail-card .logbox{min-height:340px;height:100%;font-size:12px;line-height:1.4}
-@media(max-width:1200px){.logs-detail-card .execution-meta{grid-template-columns:repeat(3,minmax(0,1fr))}}
-@media(max-width:900px){.logs-layout{grid-template-columns:1fr}.logs-detail-card{display:grid;grid-template-rows:auto auto minmax(340px,56dvh);min-height:680px}.log-context-panel{max-height:none}.logs-detail-card .logbox{min-height:340px}.logs-detail-card .execution-meta{grid-template-columns:1fr 1fr}}
-@media(max-width:560px){.log-detail-head{align-items:flex-start;flex-direction:column}.log-detail-actions{width:100%}.log-detail-actions label{flex:1 1 150px}.logs-detail-card{min-height:640px;grid-template-rows:auto auto minmax(320px,54dvh)}.logs-detail-card .logbox{min-height:320px}}
 .maintenance-actions{display:grid;gap:8px;justify-items:start}.maintenance-actions .settings-inline-status{min-height:16px}

@@ -187,6 +187,7 @@ class ArtifactValidationTests(unittest.TestCase):
                 "files": [{"path": "./usr/bin/demo"}, {"path": "./etc/systemd/system/demo@.service"}],
                 "conffiles": [],
             })
+            run["artifact"] = store.artifact_details_for_storage(run, run["artifact"])
             store.save(run)
             created = []
             def factory(**kwargs):
@@ -201,7 +202,11 @@ class ArtifactValidationTests(unittest.TestCase):
 
     def test_upgrade_modifies_and_checks_configuration_and_systemd(self):
         with tempfile.TemporaryDirectory() as temporary:
-            configured = recipe(service=True, configs=["/etc/demo/demo.conf"])
+            configured = recipe(service=True, configs=[{
+                "source": "demo.conf",
+                "destination": "/etc/demo/demo.conf",
+                "policy": "dpkg_conffile",
+            }])
             store, run = self.successful_run(temporary, configured)
             run = store.load(run["id"])
             metadata = next(step for step in run["steps"] if step["name"] == "debian_metadata")

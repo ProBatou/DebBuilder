@@ -54,11 +54,7 @@ function renderAccountProvisioning(owner = {}) {
   const createGroup = owner.create_group === true;
   let mode = 'existing';
   if ((user !== 'root' || group !== 'root') && createUser === (user !== 'root') && createGroup === (group !== 'root')) mode = 'ensure';
-  else if (createUser || createGroup) mode = 'custom';
   setValue('installAccountProvisioning', mode);
-  const customOption = $('installAccountProvisioning')?.querySelector('option[value="custom"]');
-  if (customOption) customOption.hidden = mode !== 'custom';
-  if ($('installAccountProvisioningAdvanced')) $('installAccountProvisioningAdvanced').hidden = mode !== 'custom';
 }
 
 function refreshAccountProvisioning() {
@@ -66,11 +62,6 @@ function refreshAccountProvisioning() {
   const group = value('installAccountGroup');
   let mode = $('installAccountProvisioning')?.value || 'existing';
   if (user === 'root' && group === 'root') { mode = 'existing'; setValue('installAccountProvisioning', mode); }
-  if (mode === 'ensure') { $('installCreateUser').checked = user !== 'root'; $('installCreateGroup').checked = group !== 'root'; }
-  if (mode === 'existing') { $('installCreateUser').checked = false; $('installCreateGroup').checked = false; }
-  const customOption = $('installAccountProvisioning')?.querySelector('option[value="custom"]');
-  if (customOption) customOption.hidden = mode !== 'custom';
-  if ($('installAccountProvisioningAdvanced')) $('installAccountProvisioningAdvanced').hidden = mode !== 'custom';
 }
 
 const SERVICE_FIELD_IDS = ['serviceName','serviceUser','serviceGroup','serviceCommand','serviceEnvironmentFiles','serviceEnvironment','serviceAfter','serviceWants','serviceRequires','serviceConflicts','serviceRestartSec','serviceTimeoutStartSec','serviceTimeoutStopSec','serviceKillSignal','serviceKillMode','serviceLimitNOFILE','serviceSyslogIdentifier','serviceAmbientCapabilities','serviceExecStartPre','serviceExecStartPost','serviceExecStop','serviceStandardOutput','serviceStandardError'];
@@ -199,16 +190,6 @@ function renderInstallContentSummary() {
   summary.innerHTML = rows.map(row => installMappingRowHtml(row)).join('');
 }
 
-function formatBuildAudit(build) {
-  if (!build) return '';
-  const plan = build.plan || {};
-  const results = build.commands || [];
-  const lines = ['Build command audit', `Working directory: ${plan.working_directory || '—'}`];
-  if (results.length) results.forEach(row => lines.push(`[${row.index}] ${row.command}\n  cwd: ${row.working_directory}\n  status: ${row.status} · exit: ${row.exit_code ?? '—'} · duration: ${row.duration}s\n  stdout: ${row.stdout || ''}\n  stderr: ${row.stderr || ''}`));
-  else (plan.commands || []).forEach((row,index) => lines.push(`[${index+1}] ${row.command}\n  cwd: ${plan.working_directory}\n  status: validated, not executed`));
-  return lines.join('\n');
-}
-
 async function dryRun() {
   const wf = collectWorkflow();
   if (!buildOutputIsComplete(wf.build.output)) throw new Error('Build output requires at least one relative path.');
@@ -227,7 +208,7 @@ async function dryRun() {
 async function buildReal() {
   const wf = collectWorkflow();
   if (!buildOutputIsComplete(wf.build.output)) throw new Error('Build output requires at least one relative path.');
-  if (!confirm(`Build ${wf.package?.name || wf.package_name || wf.name} with the real pipeline?`)) return;
+  if (!confirm(`Build ${wf.package?.name || wf.name} with the real pipeline?`)) return;
   const data = await postJson('/api/run', {workflow:wf, dry_run:false});
   await loadExecutions();
   switchView('logs');
@@ -347,18 +328,10 @@ async function loadSelectedWorkflow() {
   refreshRecipeApplicability();
 }
 
-async function showRuns() {
-  const res = await fetch('/api/runs');
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || res.statusText);
-  switchView('logs');
-  await loadExecutions();
-}
-
-document.getElementById('btnDryRun').onclick = () => dryRun().catch(e => alert(e.message));
-if (document.getElementById('btnLoad')) document.getElementById('btnLoad').onclick = () => loadSelectedWorkflow().catch(e => alert(e.message));
-document.getElementById('btnRuns').onclick = () => showRuns().catch(e => alert(e.message));
-document.getElementById('workflowSelect').onchange = () => loadSelectedWorkflow().catch(e => alert(e.message));
+document.getElementById('btnDryRun').addEventListener('click', () => dryRun().catch(e => alert(e.message)));
+document.getElementById('btnLoad')?.addEventListener('click', () => loadSelectedWorkflow().catch(e => alert(e.message)));
+document.getElementById('btnRuns').addEventListener('click', () => switchView('logs'));
+document.getElementById('workflowSelect').addEventListener('change', () => loadSelectedWorkflow().catch(e => alert(e.message)));
 
 fetch('/api/status').then(r=>r.json()).then(j=>{
   const repo = j.repo_default || '';

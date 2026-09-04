@@ -1,10 +1,16 @@
-"""Package lifecycle model helpers."""
+"""Canonical package state projections derived from Build Runs."""
 
 from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
 from . import apt_repo
+
+
+BUILDABLE_PACKAGE_STATES = frozenset({
+    "update_available", "build_available", "build_required", "not_published",
+    "recipe_missing", "failed", "build_failed", "validation_failed",
+})
 
 
 def _event_epoch(value, fallback):
@@ -37,13 +43,26 @@ def derive_lifecycle_status(build_status: str, validation_status: str = "not_run
     return "ready_to_publish"
 
 
-def lifecycle_display_status(build_status: str, validation_status: str = "not_run", publication_status: str = "not_run") -> str:
-    """Compatibility entry point for callers predating the canonical name."""
-    return derive_lifecycle_status(build_status, validation_status, publication_status)
+def allowed_actions(package_state: str, recipe_id: str, run: dict | None) -> dict[str, bool]:
+    """Return the canonical actions allowed by package and latest Build Run facts."""
+    run = run or {}
+    artifact = run.get("artifact") or {}
+    validation = (run.get("validations") or [{}])[-1]
+    publication = (run.get("publications") or [{}])[-1]
+    build_ready = run.get("mode") == "build" and run.get("status") == "success" and bool(artifact.get("path"))
+    validation_status = validation.get("status", "not_run")
+    publication_status = publication.get("status", "not_run")
+    has_recipe = bool(recipe_id)
+    return {
+        "test": has_recipe,
+        "build": has_recipe and package_state in BUILDABLE_PACKAGE_STATES,
+        "validate": build_ready and validation_status != "running" and publication_status != "running",
+        "publish": build_ready and validation_status == "success" and publication_status not in {"running", "success"},
+    }
 
 
-def summarize_runs(runs: list[dict], summary) -> dict:
-    """Select structured Build Store facts without allowing legacy rows to override them."""
+def summarize_runs(runs: list[dict], summary, *, include_history: bool = True) -> dict:
+    """Select the Build Store facts used by package projections."""
     last_real = next((run for run in runs if run.get("mode") == "build"), None)
     last_dry = next((run for run in runs if run.get("mode") == "dry_run"), None)
     successful = next((run for run in runs if run.get("mode") == "build" and run.get("status") == "success" and (run.get("artifact") or {}).get("path")), None)
@@ -51,13 +70,14 @@ def summarize_runs(runs: list[dict], summary) -> dict:
     latest_validation = (last_real.get("validations") or [])[-1] if last_real and last_real.get("validations") else None
     latest_publication = (last_real.get("publications") or [])[-1] if last_real and last_real.get("publications") else None
     history = []
-    for run in runs:
-        build = summary(run)
-        history.append(build)
-        for validation in run.get("validations", []):
-            history.append({**build, "action": "validation", "status": validation.get("status", "unknown"), "updated": _event_epoch(validation.get("finished_at") or validation.get("started_at"), build.get("updated")), "event_id": validation.get("id", "")})
-        for publication in run.get("publications", []):
-            history.append({**build, "action": "publication", "status": publication.get("status", "unknown"), "version": publication.get("published_version") or build.get("version", ""), "updated": _event_epoch(publication.get("finished_at") or publication.get("requested_at"), build.get("updated")), "event_id": publication.get("id", "")})
+    if include_history:
+        for run in runs:
+            build = summary(run)
+            history.append(build)
+            for validation in run.get("validations", []):
+                history.append({**build, "action": "validation", "status": validation.get("status", "unknown"), "updated": _event_epoch(validation.get("finished_at") or validation.get("started_at"), build.get("updated")), "event_id": validation.get("id", "")})
+            for publication in run.get("publications", []):
+                history.append({**build, "action": "publication", "status": publication.get("status", "unknown"), "version": publication.get("published_version") or build.get("version", ""), "updated": _event_epoch(publication.get("finished_at") or publication.get("requested_at"), build.get("updated")), "event_id": publication.get("id", "")})
     return {
         "last_real": summary(last_real) if last_real else None,
         "last_dry_run": summary(last_dry) if last_dry else None,

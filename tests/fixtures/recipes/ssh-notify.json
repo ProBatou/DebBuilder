@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "name": "ssh-notify",
+  "active": true,
+  "package": {
+    "name": "ssh-notify",
+    "version_revision": "1",
+    "architecture": "all",
+    "maintainer": "Fixture <fixture@example.test>",
+    "description": "SSH notification fixture",
+    "runtime_dependencies": ["curl"]
+  },
+  "source": {
+    "provider": "github",
+    "repository": "example/ssh-notify",
+    "tracking": "latest_release",
+    "version": {"source": "tag"}
+  },
+  "build": {
+    "detected_project": "static",
+    "commands": [],
+    "output": {"mode": "source"}
+  },
+  "install": {
+    "content": {"source": "configured_files"},
+    "owner": {"user": "root", "group": "root"},
+    "config_files": [
+      {"source": "ssh-notify.sh", "destination": "/etc/profile.d/ssh-notify.sh", "policy": "replace"},
+      {"source": "ssh-notify.conf.template", "destination": "/etc/ssh-notify.conf", "policy": "dpkg_conffile"}
+    ]
+  },
+  "service": {"enabled": false}
+}

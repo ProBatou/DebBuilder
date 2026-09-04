@@ -8,6 +8,8 @@ import secrets
 from pathlib import Path
 from urllib.parse import parse_qsl, urlparse
 
+from . import storage
+
 _SECRET_WORDS = re.compile(r"(?i)(token|secret|password|passwd|apikey|api_key|client_secret)")
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 _ARCHES = {"all", "amd64", "arm64", "armhf", "i386"}
@@ -25,9 +27,7 @@ def default_settings(repo_url: str, suite: str, component: str, architecture: st
             "component": component,
             "architecture": architecture,
         },
-        "github": {
-            "api_url": "https://api.github.com",
-        },
+        "github": {},
         "notifications": {
             "configured": False,
             "type": "none",
@@ -88,15 +88,16 @@ def _save_secret(data_dir: Path, section: str, key: str, value: str) -> None:
     value = (value or "").strip()
     if not value:
         return
-    data = load_secrets(data_dir)
-    data.setdefault(section, {})[key] = value
     data_dir.mkdir(parents=True, exist_ok=True)
     path = secrets_path(data_dir)
-    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass
+    with storage.locked_path(path):
+        data = load_secrets(data_dir)
+        data.setdefault(section, {})[key] = value
+        storage.atomic_write_text(path, json.dumps(data, indent=2, sort_keys=True) + "\n")
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
 
 
 def github_token_configured(data_dir: Path) -> bool:
@@ -233,7 +234,6 @@ def validate_settings(payload: dict, current: dict) -> dict:
         github = payload.get("github")
         if not isinstance(github, dict):
             raise ValueError("github settings must be an object")
-        result["github"]["api_url"] = _validate_url(str(github.get("api_url", result["github"]["api_url"])), "GitHub API URL")
 
     if "notifications" in payload:
         notifications = payload.get("notifications")
@@ -283,11 +283,6 @@ def validate_settings(payload: dict, current: dict) -> dict:
     return result
 
 
-def validate_apt_settings(payload: dict, current: dict) -> dict:
-    """Compatibility wrapper for callers/tests that update all settings."""
-    return validate_settings(payload, current)
-
-
 def save_settings(data_dir: Path, settings: dict) -> None:
     data_dir.mkdir(parents=True, exist_ok=True)
-    settings_path(data_dir).write_text(json.dumps(settings, indent=2, sort_keys=True) + "\n")
+    storage.atomic_write_text(settings_path(data_dir), json.dumps(settings, indent=2, sort_keys=True) + "\n")

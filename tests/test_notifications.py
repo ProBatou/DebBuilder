@@ -11,10 +11,6 @@ from debbuilder import notifications
 
 
 def fake_app(data_dir: Path, sent: list[dict]):
-    class Handler:
-        def do_POST(self):
-            self.original_post_called = True
-
     def send(title, message, **kwargs):
         sent.append({"title": title, "message": message, **kwargs})
         return {"ok": True}
@@ -22,11 +18,8 @@ def fake_app(data_dir: Path, sent: list[dict]):
     module = types.SimpleNamespace()
     module.DATA = data_dir
     module.BuildStore = server.BuildStore
-    module.Handler = Handler
     module.settings_view = lambda: {"notifications": {}}
     module.update_settings = lambda payload: {"settings": payload}
-    module.record_execution = lambda *args, **kwargs: None
-    module.package_lifecycle_operation = lambda name, action, payload: {"publication": {"status": "success", "published_version": "1.0-1"}}
     module.validate_build_artifact = lambda run_id, payload=None: {
         "id": "validation-1",
         "build_run_id": run_id,
@@ -46,15 +39,24 @@ def fake_app(data_dir: Path, sent: list[dict]):
         "status": "success",
         "automation": {"publication": {"build_run_id": "run-auto", "package": "demo", "version": "1.0-1", "status": "success"}},
     }
-    module.recipe_package_name = lambda recipe: ((recipe.get("package") or {}).get("name") if isinstance(recipe.get("package"), dict) else recipe.get("package_name")) or recipe.get("name") or ""
+    module.recipe_package_name = lambda recipe: (recipe.get("package") or {}).get("name") or recipe.get("name") or ""
     module.build_run_package = lambda run: (((run.get("artifact") or {}).get("inspection") or {}).get("package")) or run.get("package") or run.get("recipe_id") or ""
     module.app_settings = lambda: {
         "general": {"url": "https://debbuilder.example.test"},
         "notifications": {"type": "ntfy", "server_url": "https://ntfy.example.test", "topic": "debbuilder"},
     }
-    module.json_response = lambda handler, data, status=200: setattr(handler, "json_payload", {"data": data, "status": status})
     module._fake_sender = send
     return module
+
+
+def notification_service(module, *, sender=None):
+    return notifications.NotificationService(
+        module.DATA,
+        module.app_settings,
+        run_loader=BuildStore(module.DATA / "builds").load,
+        package_resolver=lambda run, recipe: module.recipe_package_name(recipe) if recipe else module.build_run_package(run or {}),
+        sender=sender,
+    )
 
 
 class NotificationServiceTests(unittest.TestCase):
@@ -87,7 +89,7 @@ class NotificationServiceTests(unittest.TestCase):
     def test_failure_notifications_include_context_url_are_redacted_and_deduped(self):
         sent = []
         module = fake_app(self.data, sent)
-        service = notifications.NotificationService(module, sender=module._fake_sender)
+        service = notification_service(module, sender=module._fake_sender)
         run = {
             "id": "run-1",
             "recipe_id": "demo-recipe",
@@ -113,7 +115,7 @@ class NotificationServiceTests(unittest.TestCase):
     def test_recovery_notification_is_sent_once_for_previously_failed_stage(self):
         sent = []
         module = fake_app(self.data, sent)
-        service = notifications.NotificationService(module, sender=module._fake_sender)
+        service = notification_service(module, sender=module._fake_sender)
         run = {
             "id": "run-2",
             "recipe_id": "demo-recipe",
@@ -132,7 +134,7 @@ class NotificationServiceTests(unittest.TestCase):
     def test_automatic_completion_is_skipped_when_recovery_was_already_reported_for_run(self):
         sent = []
         module = fake_app(self.data, sent)
-        service = notifications.NotificationService(module, sender=module._fake_sender)
+        service = notification_service(module, sender=module._fake_sender)
         failed = {"id": "run-old", "recipe_id": "demo-recipe", "artifact": {"inspection": {"package": "demo", "version": "0.9-1"}}}
         recovered = self.create_run("run-new")
 
@@ -152,26 +154,26 @@ class NotificationServiceTests(unittest.TestCase):
         def failing_sender(*_args, **_kwargs):
             raise RuntimeError("ntfy failed with token=runtime-secret")
 
-        service = notifications.NotificationService(module, sender=failing_sender)
+        service = notification_service(module, sender=failing_sender)
         result = service.notify_failure("publication", run={"id": "run-3", "recipe_id": "demo"})
 
         self.assertFalse(result["ok"])
         self.assertIn("token=[redacted]", result["error"])
         self.assertNotIn("runtime-secret", result["error"])
 
-    def test_install_wraps_real_lifecycle_paths_not_only_test_endpoint(self):
+    def test_service_covers_all_canonical_lifecycle_paths(self):
         sent = []
         module = fake_app(self.data, sent)
         self.create_run("run-validation")
         self.create_run("run-publication")
         self.create_run("run-auto")
         with mock.patch("debbuilder.notifications.send_ntfy", side_effect=lambda data_dir, settings, title, message, **kwargs: module._fake_sender(title, message, **kwargs)):
-            notifications.install(module)
-            module.LIFECYCLE_NOTIFIER("build_started", run={"id": "run-build", "recipe_id": "demo-recipe"}, recipe={"package": {"name": "demo"}})
-            module.LIFECYCLE_NOTIFIER("build_failed", run={"id": "run-build", "recipe_id": "demo-recipe", "error": {"message": "source failed"}}, recipe={"package": {"name": "demo"}})
-            module.validate_build_artifact("run-validation", {})
-            module.publish_build_artifact("run-publication", {})
-            module.run_recipe_pipeline_with_automation({"name": "demo-recipe"}, dry_run=False)
+            service = notification_service(module)
+            service.notify_build_lifecycle("build_started", run={"id": "run-build", "recipe_id": "demo-recipe"}, recipe={"package": {"name": "demo"}})
+            service.notify_build_lifecycle("build_failed", run={"id": "run-build", "recipe_id": "demo-recipe", "error": {"message": "source failed"}}, recipe={"package": {"name": "demo"}})
+            service.notify_validation_result(module.validate_build_artifact("run-validation", {}))
+            service.notify_publication_result(module.publish_build_artifact("run-publication", {}))
+            service.notify_automatic_completion(module.run_recipe_pipeline_with_automation({"name": "demo-recipe"}, dry_run=False))
 
         titles = [row["title"] for row in sent]
         self.assertNotIn("Build started", titles)
@@ -191,13 +193,17 @@ class NotificationServiceTests(unittest.TestCase):
             callback("build_failed", run={"id": "run-callback", "recipe_id": "demo", "mode": "build"}, recipe={"package": {"name": "demo"}})
             return {"run_id": "run-callback", "status": "failed"}
 
-        old = server.LIFECYCLE_NOTIFIER
-        server.LIFECYCLE_NOTIFIER = lambda event, **payload: events.append((event, payload))
+        class Recorder:
+            def notify_build_lifecycle(self, event, **payload):
+                events.append((event, payload))
+
+        old = server.NOTIFICATION_SERVICE
+        server.NOTIFICATION_SERVICE = Recorder()
         try:
             with mock.patch("debbuilder.app.build_pipeline.run_pipeline", side_effect=fake_run_pipeline):
                 result = server.run_recipe_pipeline({"name": "demo", "package": {"name": "demo"}}, dry_run=False)
         finally:
-            server.LIFECYCLE_NOTIFIER = old
+            server.NOTIFICATION_SERVICE = old
 
         self.assertEqual(result["run_id"], "run-callback")
         self.assertEqual(events[0][0], "build_failed")
@@ -212,10 +218,9 @@ class NotificationServiceTests(unittest.TestCase):
         result = build_pipeline.run_pipeline(
             {
                 "name": "demo",
-                "package_name": "demo",
-                "github_repository": "owner/demo",
                 "active": True,
                 "package": {"name": "demo", "architecture": "all", "maintainer": "Demo <demo@example.test>", "description": "Demo package"},
+                "source": {"repository": "owner/demo"},
             },
             store=store,
             dry_run=False,

@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "name": "seerr",
+  "active": true,
+  "package": {"name": "seerr", "version_revision": "2", "architecture": "amd64"},
+  "source": {
+    "provider": "github",
+    "repository": "example/seerr",
+    "tracking": "latest_release",
+    "version": {"source": "tag"}
+  },
+  "build": {
+    "detected_project": "nodejs",
+    "commands": ["pnpm build"],
+    "output": {
+      "mode": "paths",
+      "path": "",
+      "paths": ["package.json", "next.config.ts", "node_modules", ".next", "dist", "public", "seerr-api.yml"]
+    }
+  },
+  "install": {
+    "destination": "/opt/seerr",
+    "content": {"source": "build_output"},
+    "owner": {"user": "seerr", "group": "seerr", "create_user": true, "create_group": true},
+    "maintainer_scripts": {
+      "postinst": "install -d -m 0750 -o seerr -g seerr /var/lib/seerr\ninstall -d -m 0750 -o seerr -g seerr /var/lib/seerr/db"
+    }
+  },
+  "service": {
+    "enabled": true,
+    "name": "seerr.service",
+    "type": "exec",
+    "user": "seerr",
+    "group": "seerr",
+    "command": "/usr/bin/node /opt/seerr/dist/index.js"
+  }
+}

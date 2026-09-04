@@ -25,7 +25,6 @@ function environmentText(value) {
 }
 
 function normalizeInstallMapping(row) {
-  if (typeof row === 'string') return {source:row.replace(/^\/+/, ''), destination:row, policy:'dpkg_conffile'};
   return {source:String(row?.source || ''), destination:String(row?.destination || ''), policy:String(row?.policy || 'dpkg_conffile'), owner:String(row?.owner || ''), group:String(row?.group || ''), mode:String(row?.mode || '')};
 }
 
@@ -148,8 +147,8 @@ function collectWorkflow() {
   const ownerGroup = value('installOwnerGroup') || packageName;
   const accountUser = value('installAccountUser') || ownerUser;
   const accountGroup = value('installAccountGroup') || ownerGroup;
-  const createUser = accountProvisioning === 'ensure' ? accountUser !== 'root' : accountProvisioning === 'custom' && !!$('installCreateUser')?.checked;
-  const createGroup = accountProvisioning === 'ensure' ? accountGroup !== 'root' : accountProvisioning === 'custom' && !!$('installCreateGroup')?.checked;
+  const createUser = accountProvisioning === 'ensure' && accountUser !== 'root';
+  const createGroup = accountProvisioning === 'ensure' && accountGroup !== 'root';
   const serviceVisible = !!window.recipeServiceVisible;
   const serviceComplete = !!value('serviceName') && !!value('serviceCommand');
   const advanced = window.recipeAdvancedFields || {};
@@ -241,7 +240,6 @@ function collectWorkflow() {
       standard_output: $('serviceStandardOutput')?.value || '', standard_error: $('serviceStandardError')?.value || '',
       working_directory: serviceVisible ? (advanced.service_working_directory || '') : ''
     },
-    steps: []
   };
 }
 
@@ -268,8 +266,8 @@ function renderBuildCommands(commands) {
 function renderWorkflow(wf) {
   renderingWorkflow = true;
   try {
-    const packageData = wf.package || {name:wf.package_name || wf.name || ''};
-    const source = wf.source || {repository:wf.github_repository || '', tracking:wf.version_tracking || 'latest_release', version:{source:wf.version_source || 'tag', expression:wf.version_expression || ''}};
+    const packageData = wf.package || {name:wf.name || ''};
+    const source = wf.source || {repository:'', tracking:'latest_release', version:{source:'tag', expression:''}};
     const artifact = wf.artifact || {mode:'source_build'};
     const build = wf.build || {};
     const install = wf.install || {};
@@ -277,14 +275,14 @@ function renderWorkflow(wf) {
     const account = install.account || owner;
     const scripts = install.maintainer_scripts || {};
     const service = wf.service || {};
-    window.recipeAdvancedFields = {version_revision: packageData.version_revision || '1', inactivity_timeout: build.inactivity_timeout || build.timeout || 300, maximum_runtime: build.maximum_runtime || '', service_description: service.description || '', service_working_directory: service.working_directory || ''};
+    window.recipeAdvancedFields = {version_revision: packageData.version_revision || '1', inactivity_timeout: build.inactivity_timeout || 300, maximum_runtime: build.maximum_runtime || '', service_description: service.description || '', service_working_directory: service.working_directory || ''};
     const configuredOutput = build.output || {};
     const outputMode = ['source','path','paths'].includes(configuredOutput.mode) ? configuredOutput.mode : (configuredOutput.path ? 'path' : 'source');
     window.recipeBuildOutput = {mode:outputMode, path:configuredOutput.path || '', paths:[...(configuredOutput.paths || [])]};
     window.recipeSuggestedOutputPaths = [];
     setValue('recipeMetaName', wf.name || ''); setValue('recipeMetaPackage', packageData.name || ''); setValue('recipeMetaGithub', source.repository || '');
     setValue('recipeMetaTracking', source.tracking || 'latest_release'); setValue('recipeMetaSourceRef', source.ref || ''); setValue('recipeMetaVersionSource', source.version?.source || 'tag'); setValue('recipeMetaVersionExpression', source.version?.expression || '');
-    setValue('recipeArtifactMode', artifact.mode || 'source_build'); setValue('recipeArchiveSource', artifact.archive_source || ((artifact.asset_name || artifact.name_pattern) ? 'release_asset' : 'auto')); setValue('recipeArchiveFormat', artifact.archive_format || 'tar.gz'); setValue('recipeAssetSelection', artifact.asset_selection || (artifact.asset_name ? 'exact' : 'pattern')); setValue('recipeArtifactPattern', artifact.name_pattern || ''); setValue('recipeArtifactName', artifact.asset_name || ''); setValue('recipeArtifactFiles', (artifact.selected_files || []).join('\n'));
+    setValue('recipeArtifactMode', artifact.mode || 'source_build'); setValue('recipeArchiveSource', artifact.archive_source || 'auto'); setValue('recipeArchiveFormat', artifact.archive_format || 'tar.gz'); setValue('recipeAssetSelection', artifact.asset_selection || 'pattern'); setValue('recipeArtifactPattern', artifact.name_pattern || ''); setValue('recipeArtifactName', artifact.asset_name || ''); setValue('recipeArtifactFiles', (artifact.selected_files || []).join('\n'));
     $('recipeMetaActive').checked = wf.active !== false;
     if (typeof renderBuildEnvironment === 'function') renderBuildEnvironment({project_type:build.detected_project || '', detected_files:build.detected_files || [], build_dependencies:build.detected_dependencies || [], system_build_dependencies:build.detected_dependencies || [], build_tools:build.detected_tools || []});
     window.recipeExtraDependencies = [...(build.extra_dependencies || [])]; window.recipeSourceChanges = (build.source_changes || []).map(change => ({...change}));
@@ -293,7 +291,7 @@ function renderWorkflow(wf) {
     setValue('buildWorkingDirectory', build.working_directory || '.'); setValue('buildInactivityTimeout', window.recipeAdvancedFields.inactivity_timeout); setValue('buildMaximumRuntime', window.recipeAdvancedFields.maximum_runtime); setValue('buildEnvironment', environmentText(build.environment)); renderBuildOutput();
     setValue('installDestination', install.destination || ''); setValue('installContentSource', install.content?.source || 'build_output'); setValue('installDirectoryMode', install.directory_mode || '0755'); setValue('installFileMode', install.file_mode || '0644');
     setValue('packageArchitecture', packageData.architecture || 'amd64'); setValue('packageSection', packageData.section || 'misc'); setValue('packagePriority', packageData.priority || 'optional'); setValue('packageMaintainer', packageData.maintainer || ''); setValue('packageDescription', packageData.description || packageData.name); setValue('packageRuntimeDependencies', (packageData.runtime_dependencies || []).join(', '));
-    setValue('installOwnerUser', owner.user || packageData.name); setValue('installOwnerGroup', owner.group || packageData.name); setValue('installAccountUser', account.user || owner.user || packageData.name); setValue('installAccountGroup', account.group || owner.group || packageData.name); setValue('installDirectories', installDirectoriesText(install.directories)); if ($('installCreateUser')) $('installCreateUser').checked = account.create_user === true; if ($('installCreateGroup')) $('installCreateGroup').checked = account.create_group === true; if (typeof renderAccountProvisioning === 'function') renderAccountProvisioning(account); window.recipeInstallMappings = (install.config_files || []).map(row => normalizeInstallMapping(typeof row === 'string' ? row : {...row, policy:row.policy || install.config_policy || 'dpkg_conffile'})); renderInstallMappings();
+    setValue('installOwnerUser', owner.user || packageData.name); setValue('installOwnerGroup', owner.group || packageData.name); setValue('installAccountUser', account.user || owner.user || packageData.name); setValue('installAccountGroup', account.group || owner.group || packageData.name); setValue('installDirectories', installDirectoriesText(install.directories)); if (typeof renderAccountProvisioning === 'function') renderAccountProvisioning(account); window.recipeInstallMappings = (install.config_files || []).map(row => normalizeInstallMapping(row)); renderInstallMappings();
     setValue('maintainerPreinst', scripts.preinst); setValue('maintainerPostinst', scripts.postinst); setValue('maintainerPrerm', scripts.prerm); setValue('maintainerPostrm', scripts.postrm);
     window.recipeServiceVisible = !!String(service.name || '').trim() && !!String(service.command || '').trim(); if ($('serviceEnabled')) $('serviceEnabled').checked = service.enabled === true; setValue('serviceType', service.type || ''); setValue('serviceName', service.name || ''); setValue('serviceUser', service.user || ''); setValue('serviceGroup', service.group || ''); setValue('serviceRestart', service.restart || ''); setValue('serviceCommand', service.command);
     setValue('serviceEnvironmentFiles', (service.environment_files || []).join('\n')); setValue('serviceEnvironment', environmentText(service.environment)); setValue('serviceAfter', (service.after || []).join(' ')); setValue('serviceWants', (service.wants || []).join(' ')); setValue('serviceRequires', (service.requires || []).join(' '));

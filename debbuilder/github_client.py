@@ -60,24 +60,6 @@ def repo_info(repository: str, token: str = "") -> dict:
     return {"repository": data.get("full_name", repo), "default_branch": data.get("default_branch", ""), "description": data.get("description", ""), "language": data.get("language", ""), "archived": bool(data.get("archived"))}
 
 
-def list_branches(repository: str, token: str = "", limit: int = 50) -> list[str]:
-    repo = parse_github_url(repository)
-    data = request_json(f"/repos/{repo}/branches?per_page={limit}", token=token)
-    return [row.get("name", "") for row in data if row.get("name")]
-
-
-def list_tags(repository: str, token: str = "", limit: int = 50) -> list[str]:
-    repo = parse_github_url(repository)
-    data = request_json(f"/repos/{repo}/tags?per_page={limit}", token=token)
-    return [row.get("name", "") for row in data if row.get("name")]
-
-
-def list_releases(repository: str, token: str = "", limit: int = 30) -> list[dict]:
-    repo = parse_github_url(repository)
-    data = request_json(f"/repos/{repo}/releases?per_page={limit}", token=token)
-    return [{"tag": row.get("tag_name", ""), "name": row.get("name", ""), "prerelease": bool(row.get("prerelease")), "assets": [a.get("name", "") for a in row.get("assets", [])]} for row in data]
-
-
 def latest_release(repository: str, token: str = "") -> dict:
     repo = parse_github_url(repository)
     try:

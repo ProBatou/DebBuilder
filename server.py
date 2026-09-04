@@ -1,18 +1,11 @@
 #!/usr/bin/env python3
 """Command-line entrypoint for DebBuilder."""
-import os
-from pathlib import Path
 from urllib.parse import urlparse
 
 from debbuilder import app
-from debbuilder.live_inventory import install as install_live_inventory
-from debbuilder.notifications import install as install_notifications
 from debbuilder.repo_files import content_type, resolve_public_repo_file
 
-install_live_inventory(app)
-install_notifications(app)
-
-REPO_ROOT = Path(os.environ.get("DEBBUILDER_REPO_ROOT", "/var/www/html"))
+REPO_ROOT = app.RUNTIME.repository_root
 
 
 class Handler(app.Handler):
@@ -49,10 +42,8 @@ class Handler(app.Handler):
 
 
 def main():
-    host = os.environ.get("DEBBUILDER_HOST", "0.0.0.0")
-    port = int(os.environ.get("DEBBUILDER_PORT", "8099"))
-    print(f"DebBuilder Repo UI listening on http://{host}:{port}")
-    app.ThreadingHTTPServer((host, port), Handler).serve_forever()
+    print(f"DebBuilder Repo UI listening on http://{app.RUNTIME.host}:{app.RUNTIME.port}")
+    app.ThreadingHTTPServer((app.RUNTIME.host, app.RUNTIME.port), Handler).serve_forever()
 
 
 if __name__ == "__main__":

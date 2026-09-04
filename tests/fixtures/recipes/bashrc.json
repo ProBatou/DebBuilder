@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "name": "bashrc",
+  "active": true,
+  "package": {
+    "name": "bashrc",
+    "version_revision": "1",
+    "architecture": "all",
+    "runtime_dependencies": []
+  },
+  "source": {
+    "provider": "github",
+    "repository": "example/bashrc",
+    "tracking": "latest_release",
+    "version": {"source": "tag"}
+  },
+  "build": {
+    "detected_project": "static",
+    "commands": [],
+    "output": {"mode": "source"}
+  },
+  "install": {
+    "content": {"source": "configured_files"},
+    "owner": {"user": "root", "group": "root"},
+    "config_files": [
+      {"source": ".bashrc", "destination": "/root/.bashrc", "policy": "replace"}
+    ]
+  },
+  "service": {"enabled": false}
+}

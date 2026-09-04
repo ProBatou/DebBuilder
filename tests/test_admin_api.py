@@ -1,85 +1,18 @@
 import json
 import os
-import sys
-import tempfile
-import threading
 import time
-import unittest
 import urllib.error
-import urllib.request
 import http.client
 from unittest import mock
-from http.server import ThreadingHTTPServer
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
 import debbuilder.app as server
+from debbuilder import storage
 from debbuilder.build_store import BuildStore
+from tests.admin_api_case import AdminApiCase
 
 
-class AdminApiTests(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        base = Path(self.tmp.name)
-        self.old = {name: getattr(server, name) for name in ["DATA", "USER_WORKFLOWS", "EXAMPLES", "RUNS", "AUTH_MODE"]}
-        server.DATA = base / "data"
-        server.USER_WORKFLOWS = server.DATA / "workflows"
-        server.EXAMPLES = base / "examples" / "recipes"
-        server.RUNS = server.DATA / "runs"
-        for d in (server.DATA, server.USER_WORKFLOWS, server.EXAMPLES, server.RUNS):
-            d.mkdir(parents=True, exist_ok=True)
-        (server.DATA / "repo-current-packages-inventory.json").write_text(json.dumps([
-            {"Package": "webapp", "Version": "3.4.1", "Architecture": "all", "Homepage": None, "Filename": "pool/main/o/webapp/webapp_3.4.1_all.deb", "Depends": "npm, sqlite3, jq", "Description": "Description"},
-            {"Package": "monitoring-app", "Version": "117", "Architecture": "all", "Homepage": None, "Filename": "pool/main/u/monitoring-app/monitoring-app_117_all.deb", "Depends": "npm, nodejs", "Description": "Description"},
-        ]))
-        (server.EXAMPLES / "webapp-recipe.json").write_text(json.dumps({
-            "name": "webapp-recipe",
-            "steps": [{"type": "init_deb_package", "package": "webapp", "version": "3.4.1", "architecture": "all"}]
-        }))
-        (server.RUNS / "20260822-031400.sh").write_text("#!/bin/bash\n")
-        (server.RUNS / "20260822-031400.out").write_text("ok\n")
-        (server.DATA / "executions.json").write_text(json.dumps([{"id":"20260822-031400","package":"webapp","action":"build","status":"success","updated":1}]))
-        server.AUTH_MODE = "none"
-        server.GITHUB_RELEASE_CACHE.clear()
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
-        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
-        self.thread.start()
-        self.base_url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
-
-    def tearDown(self):
-        self.httpd.shutdown()
-        self.thread.join(timeout=2)
-        self.httpd.server_close()
-        for name, value in self.old.items():
-            setattr(server, name, value)
-        self.tmp.cleanup()
-
-    def request(self, method, path, body=None, headers=None):
-        data = None if body is None else json.dumps(body).encode()
-        req = urllib.request.Request(self.base_url + path, data=data, method=method, headers={"Content-Type": "application/json", **(headers or {})})
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            return resp.status, json.loads(resp.read().decode())
-
-    def successful_build_run(self, run_id="auto-run", package="auto-package", version="1.0-1"):
-        recipe = {
-            "schema_version": 1, "name": f"{package}-recipe", "active": True,
-            "package": {"name": package, "architecture": "all", "maintainer": "Demo <demo@example.test>", "description": "Demo"},
-            "source": {"provider": "github", "repository": f"owner/{package}", "tracking": "latest_release", "version": {"source": "tag"}},
-        }
-        (server.USER_WORKFLOWS / f"{package}-recipe.json").write_text(json.dumps(recipe))
-        store = BuildStore(server.DATA / "builds")
-        run = store.create(recipe, recipe_id=f"{package}-recipe", mode="build", run_id=run_id)
-        artifact = Path(run["workspace"]) / f"artifacts/{package}_{version}_all.deb"
-        artifact.write_bytes(b"deb")
-        run.update({
-            "status": "success",
-            "version": {"upstream": version.split("-")[0], "debian": version},
-            "artifact": {"path": str(artifact), "size": 3, "sha256": run_id, "inspection": {"package": package, "version": version, "architecture": "all"}},
-        })
-        store.save(run)
-        return store, run, artifact
+class AdminApiTests(AdminApiCase):
 
     def test_get_package_list_seeded_from_inventory_and_recipe_association(self):
         status, data = self.request("GET", "/api/packages")
@@ -91,13 +24,13 @@ class AdminApiTests(unittest.TestCase):
         self.assertEqual(webapp["recipe"], "webapp-recipe")
         self.assertEqual(webapp["status"], "ready")
         self.assertEqual(webapp["version"]["published"], "3.4.1")
-        self.assertEqual(webapp["lifecycle_state"], "unknown")
+        self.assertEqual(webapp["lifecycle_state"], "up_to_date")
         self.assertIn("build", webapp)
         self.assertIn("repository", webapp)
         self.assertFalse(webapp["recipe_complete"] if "recipe_complete" in webapp else False)
 
     def test_dashboard_counts_lifecycle_states_from_same_package_rows(self):
-        server.save_json_file(server.packages_file(), [
+        storage.save_json(server.DATA / "packages.json", [
             {"name":"github-demo","apt_version":"1.0","upstream_version":"2.0","recipe":"webapp-recipe","source":{"type":"github","repository":"o/r"}},
             {"name":"local-demo","apt_version":"1.0-1","upstream_version":"1.0","recipe":"webapp-recipe","source":{"type":"local"}},
         ])
@@ -105,8 +38,9 @@ class AdminApiTests(unittest.TestCase):
         self.assertEqual(summary["packages"], 4)
         self.assertEqual(summary["updates"], 1)
         self.assertEqual(summary["state_counts"]["update_available"], 1)
-        self.assertEqual(summary["packages_by_state"]["update_available"][0]["name"], "github-demo")
-        self.assertIn("local-demo", [row["name"] for row in summary["packages_by_state"]["up_to_date"]])
+        self.assertIn("github-demo", [row["name"] for row in summary["package_rows"]])
+        self.assertIn("local-demo", [row["name"] for row in summary["package_rows"]])
+        self.assertTrue(all("history" not in row for row in summary["package_rows"]))
 
     def test_dashboard_reuses_package_lifecycle_state_without_recomparing_versions(self):
         packages = [
@@ -117,12 +51,13 @@ class AdminApiTests(unittest.TestCase):
         with mock.patch("debbuilder.app.list_packages", return_value=packages), mock.patch("debbuilder.app.list_executions", return_value=[]):
             summary = server.dashboard_summary()
         self.assertEqual(summary["state_counts"], {"up_to_date": 1, "update_available": 1, "validation_needed": 1})
-        self.assertEqual(summary["packages_by_state"]["up_to_date"][0]["name"], "same")
-        self.assertEqual(summary["packages_by_state"]["validation_needed"][0]["name"], "pending")
+        states = {row["name"]: row["lifecycle_display_status"] for row in summary["package_rows"]}
+        self.assertEqual(states["same"], "up_to_date")
+        self.assertEqual(states["pending"], "validation_needed")
 
     def test_package_list_prefers_live_apt_repository_versions_when_available(self):
         (server.DATA / "settings.json").write_text(json.dumps({"apt": {"repository": "https://repo.example.test", "distribution": "testing", "component": "main", "architecture": "amd64"}}))
-        with mock.patch("debbuilder.app.apt_repo.fetch_packages_index", return_value=[
+        with mock.patch("debbuilder.package_service.apt_repo.fetch_packages_index", return_value=[
             {"Package": "webapp", "Version": "3.4.2", "Architecture": "all", "Filename": "pool/main/o/webapp/webapp_3.4.2_all.deb"},
             {"Package": "monitoring-app", "Version": "117", "Architecture": "all", "Filename": "pool/main/u/monitoring-app/monitoring-app_117_all.deb"},
         ]):
@@ -152,7 +87,7 @@ class AdminApiTests(unittest.TestCase):
         published = [{"Package": "demo", "Version": "2.0-1", "Architecture": "all", "Filename": "pool/main/d/demo.deb"}]
         with mock.patch("debbuilder.app.live_published_index", return_value=published):
             first = server.get_package("demo")
-            server.GITHUB_RELEASE_CACHE.clear()
+            server.github_release_cache().entries.clear()
             second = server.get_package("demo")
         for package in (first, second):
             self.assertEqual(package["recipe"], "demo-recipe")
@@ -254,7 +189,7 @@ class AdminApiTests(unittest.TestCase):
             self.request("GET", "/api/packages/missing")
         self.assertEqual(ctx.exception.code, 404)
 
-    def test_create_update_delete_package_refuses_repo_delete_without_confirmation(self):
+    def test_create_update_delete_package_rejects_removed_repository_delete_options(self):
         status, created = self.request("POST", "/api/packages", {"name": "download-ui", "architecture": "amd64", "source": {"type": "github", "repository": "example/download-ui"}})
         self.assertEqual(status, 200)
         self.assertEqual(created["package"]["status"], "recipe_missing")
@@ -262,7 +197,7 @@ class AdminApiTests(unittest.TestCase):
         self.assertEqual(updated["package"]["description"], "Download UI package")
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             self.request("DELETE", "/api/packages/download-ui?delete_repo=1")
-        self.assertEqual(ctx.exception.code, 403)
+        self.assertEqual(ctx.exception.code, 400)
         status, deleted = self.request("DELETE", "/api/packages/download-ui")
         self.assertTrue(deleted["ok"])
 
@@ -272,7 +207,9 @@ class AdminApiTests(unittest.TestCase):
         status, executions = self.request("GET", "/api/executions")
         self.assertEqual(executions["executions"][0]["id"], "20260822-031400")
         status, detail = self.request("GET", "/api/executions/20260822-031400")
-        self.assertIn("ok", detail["execution"]["log"])
+        self.assertNotIn("log", detail["execution"])
+        _, log = self.request("GET", "/api/executions/20260822-031400/logs?verbosity=raw")
+        self.assertIn("ok", log["log"]["text"])
         status, settings = self.request("GET", "/api/settings")
         self.assertNotIn("build", settings["settings"])
         self.assertEqual(settings["settings"]["github"]["token"], "masked")
@@ -280,7 +217,7 @@ class AdminApiTests(unittest.TestCase):
     def test_execution_list_does_not_include_staging_inventory_or_manifest_contents(self):
         store = BuildStore(server.DATA / "builds")
         run = store.create({
-            "name": "large", "package_name": "large", "github_repository": "example/large", "active": True,
+            "name": "large", "active": True, "source": {"repository": "example/large"},
             "package": {"name": "large", "maintainer": "Test <test@example.test>", "description": "Large"},
         }, mode="build", run_id="large-run")
         files = [f"node_modules/{index}.js" for index in range(60_000)]
@@ -296,7 +233,7 @@ class AdminApiTests(unittest.TestCase):
     def test_execution_logs_are_separate_incremental_and_verbose_selectable(self):
         store = BuildStore(server.DATA / "builds")
         run = store.create({
-            "name": "logs", "package_name": "logs", "github_repository": "example/logs", "active": True,
+            "name": "logs", "active": True, "source": {"repository": "example/logs"},
             "package": {"name": "logs", "maintainer": "Test <test@example.test>", "description": "Logs"},
         }, mode="build", run_id="live-run")
         run["status"] = "running"
@@ -322,7 +259,7 @@ class AdminApiTests(unittest.TestCase):
     def test_delete_execution_log_preserves_package_lifecycle_and_artifact(self):
         store = BuildStore(server.DATA / "builds")
         run = store.create({
-            "name": "cleanup", "package_name": "cleanup", "github_repository": "example/cleanup", "active": True,
+            "name": "cleanup", "active": True, "source": {"repository": "example/cleanup"},
             "package": {"name": "cleanup", "maintainer": "Test <test@example.test>", "description": "Cleanup"},
         }, mode="build", run_id="cleanup-run")
         artifact = Path(run["workspace"]) / "artifacts/cleanup.deb"
@@ -346,12 +283,12 @@ class AdminApiTests(unittest.TestCase):
     def test_clear_all_execution_logs_preserves_lifecycle_and_artifacts(self):
         store = BuildStore(server.DATA / "builds")
         for run_id in ("batch-one", "batch-two"):
-            run = store.create({"name": run_id, "package_name": run_id, "github_repository": f"example/{run_id}", "active": True}, mode="dry_run", run_id=run_id)
+            run = store.create({"name": run_id, "package": {"name": run_id}, "source": {"repository": f"example/{run_id}"}, "active": True}, mode="dry_run", run_id=run_id)
             run["status"] = "prepared"
             store.save(run)
             store.append_log_line(run_id, "temporary detail")
         run = store.create({
-            "name": "global-cleanup", "package_name": "global-cleanup", "github_repository": "example/global-cleanup", "active": True,
+            "name": "global-cleanup", "active": True, "source": {"repository": "example/global-cleanup"},
             "package": {"name": "global-cleanup", "maintainer": "Test <test@example.test>", "description": "Cleanup"},
         }, mode="build", run_id="global-cleanup-run")
         artifact = Path(run["workspace"]) / "artifacts/global-cleanup.deb"
@@ -403,7 +340,7 @@ class AdminApiTests(unittest.TestCase):
         body = {
             "general": {"app_name": "Package Console", "url": "https://console.example.test"},
             "apt": {"repository": "https://repo.example.test", "distribution": "testing", "component": "main", "architecture": "amd64"},
-            "github": {"api_url": "https://api.github.com"},
+            "github": {},
             "notifications": {"type": "ntfy", "server_url": "https://ntfy.example.test", "topic": "debbuilder"},
             "automation": {"auto_validate_after_successful_build": True, "auto_publish_after_successful_validation": True},
         }
@@ -412,7 +349,6 @@ class AdminApiTests(unittest.TestCase):
         settings = updated["settings"]
         self.assertEqual(settings["general"]["app_name"], "Package Console")
         self.assertEqual(settings["general"]["url"], "https://console.example.test")
-        self.assertEqual(settings["github"]["api_url"], "https://api.github.com")
         self.assertEqual(settings["github"]["token"], "masked")
         self.assertFalse(settings["github"]["token_configured"])
         self.assertTrue(settings["notifications"]["configured"])
@@ -441,7 +377,7 @@ class AdminApiTests(unittest.TestCase):
         self.assertFalse(updated["settings"]["automation"]["auto_publish_after_successful_validation"])
 
     def test_github_token_update_stays_server_side(self):
-        body = {"github": {"api_url": "https://api.github.com", "token": "ghlocalvalue12345678901234567890"}}
+        body = {"github": {"token": "ghlocalvalue12345678901234567890"}}
         status, updated = self.request("POST", "/api/settings", body)
         self.assertEqual(status, 200)
         github = updated["settings"]["github"]
@@ -473,12 +409,12 @@ class AdminApiTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 400)
 
     def test_recipe_metadata_can_be_created_loaded_and_renamed(self):
-        workflow = {"name":"flood","package_name":"flood","github_repository":"jesec/flood","version_tracking":"latest_release","active":True,"steps":[{"type":"github_release_available"}]}
+        workflow = {"name":"flood","package":{"name":"flood"},"source":{"repository":"jesec/flood","tracking":"latest_release"},"active":True}
         status, _ = self.request("POST", "/api/workflows/flood", {"workflow": workflow})
         self.assertEqual(status, 200)
         status, loaded = self.request("GET", "/api/workflows/flood")
-        self.assertEqual(loaded["package_name"], "flood")
-        self.assertEqual(loaded["github_repository"], "jesec/flood")
+        self.assertEqual(loaded["package"]["name"], "flood")
+        self.assertEqual(loaded["source"]["repository"], "jesec/flood")
         loaded["name"] = "flood-release"
         status, _ = self.request("POST", "/api/workflows/flood-release", {"workflow": loaded, "previous_id":"flood"})
         self.assertEqual(status, 200)
@@ -486,7 +422,7 @@ class AdminApiTests(unittest.TestCase):
         self.assertTrue((server.USER_WORKFLOWS / "flood-release.json").exists())
 
     def test_user_recipe_can_be_deleted_without_repository_or_system_deletion(self):
-        workflow = {"name":"temporary","package_name":"temporary","github_repository":"example/temporary","version_tracking":"latest_release","active":True,"steps":[]}
+        workflow = {"name":"temporary","package":{"name":"temporary"},"source":{"repository":"example/temporary","tracking":"latest_release"},"active":True}
         status, _ = self.request("POST", "/api/workflows/temporary", {"workflow": workflow})
         self.assertEqual(status, 200)
         status, listed = self.request("GET", "/api/workflows")
@@ -503,19 +439,19 @@ class AdminApiTests(unittest.TestCase):
         status, listed = self.request("GET", "/api/workflows")
         self.assertEqual(status, 200)
         self.assertNotIn("temporary", [row["id"] for row in listed["workflows"]])
-        packages = server.load_package_overrides()
+        packages = server.package_projection_service().load_overrides()
         self.assertNotEqual(packages["temporary"].get("recipe"), "temporary")
 
     def test_recipe_package_can_select_inventory_item_or_create_new_item(self):
-        existing = {"name":"webapp-build","package_name":"webapp","github_repository":"example/webapp","version_tracking":"latest_release","active":True,"steps":[]}
+        existing = {"name":"webapp-build","package":{"name":"webapp"},"source":{"repository":"example/webapp","tracking":"latest_release"},"active":True}
         status, _ = self.request("POST", "/api/workflows/webapp-build", {"workflow": existing})
         self.assertEqual(status, 200)
-        with mock.patch("debbuilder.app.github_client.latest_release", return_value={"tag":"v3.5.0","name":"3.5.0","url":"https://github.example.test/release","archive_url":"https://github.example.test/archive","assets":[]}):
+        with mock.patch("debbuilder.release_cache.github_client.latest_release", return_value={"tag":"v3.5.0","name":"3.5.0","url":"https://github.example.test/release","archive_url":"https://github.example.test/archive","assets":[]}):
             package = server.get_package("webapp")
             self.assertEqual(package["recipe"], "")
             self.assertEqual(package["recipe_error"]["code"], "ambiguous_recipe")
             self.assertEqual(set(package["recipe_error"]["candidates"]), {"webapp-recipe", "webapp-build"})
-        new = {"name":"new-app","package_name":"new-app","github_repository":"example/new-app","version_tracking":"latest_release","active":True,"steps":[]}
+        new = {"name":"new-app","package":{"name":"new-app"},"source":{"repository":"example/new-app","tracking":"latest_release"},"active":True}
         status, _ = self.request("POST", "/api/workflows/new-app", {"workflow": new})
         self.assertEqual(status, 200)
         created = server.get_package("new-app")
@@ -546,23 +482,24 @@ class AdminApiTests(unittest.TestCase):
         self.assertNotIn("recipe_error", listed)
 
     def test_published_inventory_package_is_enriched_from_matching_recipe_metadata(self):
-        inventory = json.loads(server.inventory_file().read_text())
+        inventory_file = server.DATA / "repo-current-packages-inventory.json"
+        inventory = json.loads(inventory_file.read_text())
         inventory.append({
             "Package": "flood", "Version": "4.8.2-0", "Architecture": "amd64",
             "Homepage": None, "Filename": "pool/main/f/flood/flood_4.8.2-0_amd64.deb",
             "Description": "Flood",
         })
-        server.inventory_file().write_text(json.dumps(inventory))
-        server.save_json_file(server.packages_file(), [{
+        inventory_file.write_text(json.dumps(inventory))
+        storage.save_json(server.DATA / "packages.json", [{
             "name": "flood", "apt_version": "4.8.2-0", "upstream_version": "4.8.2-0",
             "source": {"type": "apt-repository", "repository": ""}, "recipe": "flood",
         }])
         (server.USER_WORKFLOWS / "flood.json").write_text(json.dumps({
-            "name": "flood", "package_name": "Flood", "github_repository": "jesec/flood",
-            "version_tracking": "latest_release", "version_source": "tag", "active": True, "steps": [],
+            "name": "flood", "package": {"name": "flood"},
+            "source": {"repository": "jesec/flood", "tracking": "latest_release", "version": {"source": "tag"}}, "active": True,
         }))
         release = {"tag":"v4.9.0","name":"Flood 4.9.0","url":"https://github.example.test/flood/4.9.0","archive_url":"https://github.example.test/flood/archive","assets":[]}
-        with mock.patch.dict(server.GITHUB_RELEASE_CACHE, {"jesec/flood": (time.time() + 300, release)}, clear=False):
+        with mock.patch.dict(server.github_release_cache().entries, {"jesec/flood": (time.time() + 300, release)}, clear=False):
             status, data = self.request("GET", "/api/packages")
         self.assertEqual(status, 200)
         flood = next(package for package in data["packages"] if package["name"] == "flood")
@@ -575,15 +512,15 @@ class AdminApiTests(unittest.TestCase):
         self.assertEqual(flood["lifecycle_state"], "update_available")
 
     def test_empty_recipe_create_load_duplicate_and_save_metadata(self):
-        workflow = {"name":"empty","package_name":"empty","github_repository":"example/empty","version_tracking":"latest_release","version_source":"tag","active":True,"steps":[]}
+        workflow = {"name":"empty","package":{"name":"empty"},"source":{"repository":"example/empty","tracking":"latest_release","version":{"source":"tag"}},"active":True}
         self.request("POST", "/api/workflows/empty", {"workflow": workflow})
         _, loaded = self.request("GET", "/api/workflows/empty")
-        self.assertEqual(loaded["steps"], [])
-        duplicate = {**loaded, "name":"empty-copy", "package_name":"empty-copy", "github_repository":"example/empty-copy"}
+        self.assertNotIn("steps", loaded)
+        duplicate = {**loaded, "name":"empty-copy", "package":{**loaded["package"], "name":"empty-copy"}, "source":{**loaded["source"], "repository":"example/empty-copy"}}
         self.request("POST", "/api/workflows/empty-copy", {"workflow": duplicate})
         _, copied = self.request("GET", "/api/workflows/empty-copy")
-        self.assertEqual(copied["steps"], [])
-        self.assertEqual(copied["version_source"], "tag")
+        self.assertNotIn("steps", copied)
+        self.assertEqual(copied["source"]["version"]["source"], "tag")
 
     def test_recipe_v1_is_stored_canonically_and_loaded_with_full_sections(self):
         recipe = {
@@ -729,7 +666,7 @@ class AdminApiTests(unittest.TestCase):
 
     def test_dry_run_creates_structured_workspace_and_is_visible_in_logs(self):
         workflow = {
-            "name": "structured", "package_name": "structured", "github_repository": "example/structured", "active": True,
+            "name": "structured", "source": {"repository": "example/structured"}, "active": True,
             "package": {"name": "structured", "maintainer": "Test <test@example.test>", "description": "Structured test package"},
         }
         def acquire(_recipe, workspace, token=""):
@@ -752,7 +689,9 @@ class AdminApiTests(unittest.TestCase):
         self.assertEqual(row["status"], "prepared")
         _, detail = self.request("GET", f"/api/executions/{result['run_id']}")
         self.assertEqual(detail["execution"]["recipe_sha256"], json.loads((workspace / "run.json").read_text())["recipe_sha256"])
-        self.assertIn("snapshot", detail["execution"]["log"])
+        self.assertNotIn("log", detail["execution"])
+        _, log = self.request("GET", f"/api/executions/{result['run_id']}/logs?verbosity=raw")
+        self.assertIn("snapshot", log["log"]["text"])
 
     def test_successful_build_artifact_can_be_validated_through_separate_endpoint(self):
         validation = {"id": "validation-one", "build_run_id": "run-one", "status": "success", "checks": [], "commands": []}
@@ -784,11 +723,6 @@ class AdminApiTests(unittest.TestCase):
         self.assertGreaterEqual(len(first), 40)
         self.assertEqual((server.DATA / "secrets.json").stat().st_mode & 0o777, 0o600)
 
-    def test_legacy_build_settings_are_ignored(self):
-        view = server.update_settings({"build": {"allow_real_run": False, "allow_unsafe_build_command": True, "temp_dir": "/tmp/apt-blockly-workflow"}})
-        self.assertNotIn("build", view)
-        self.assertNotIn("build", json.loads((server.DATA / "settings.json").read_text()))
-
     def test_oidc_protects_admin_but_public_repository_paths_are_exempt(self):
         server.update_settings({"security": {"auth_mode": "oidc", "oidc_issuer": "https://id.example.test", "oidc_client_id": "deb", "oidc_redirect_uri": "https://apt.example.test/auth/callback", "oidc_client_secret": "test-only-client-secret"}})
         conn = http.client.HTTPConnection("127.0.0.1", self.httpd.server_address[1], timeout=5)
@@ -801,7 +735,7 @@ class AdminApiTests(unittest.TestCase):
             self.assertEqual(conn.getresponse().status, 404)
             conn.close()
 
-    def test_package_lifecycle_endpoints_refresh_update_verify_and_protected_publish(self):
+    def test_removed_legacy_package_lifecycle_endpoints_return_not_found(self):
         status, created = self.request("POST", "/api/packages", {
             "name": "download-ui",
             "architecture": "amd64",
@@ -809,34 +743,21 @@ class AdminApiTests(unittest.TestCase):
             "source": {"type": "github", "repository": "example/download-ui"},
         })
         self.assertEqual(status, 200)
-        with mock.patch("debbuilder.app.github_client.repo_info", return_value={"repository": "example/download-ui", "default_branch": "main", "description": "Download UI", "language": "Python", "archived": False}), \
-             mock.patch("debbuilder.app.github_client.list_branches", return_value=["main", "develop"]), \
-             mock.patch("debbuilder.app.github_client.list_tags", return_value=["v1.1.0", "v1.0.0"]), \
-             mock.patch("debbuilder.app.github_client.list_releases", return_value=[{"tag": "v1.1.0", "assets": ["download-ui_1.1.0_amd64.deb"]}]):
-            status, source = self.request("POST", "/api/packages/download-ui/refresh-source")
-        self.assertEqual(status, 200)
-        self.assertEqual(source["source"]["default_branch"], "main")
-        self.assertEqual(source["source"]["branches"], ["main", "develop"])
-        self.assertEqual(source["source"]["latest_release"], "v1.1.0")
+        for action in ("refresh-source", "check-updates", "verify-deb", "publish"):
+            with self.subTest(action=action), self.assertRaises(urllib.error.HTTPError) as ctx:
+                self.request("POST", f"/api/packages/download-ui/{action}", {})
+            self.assertEqual(ctx.exception.code, 404)
 
-        status, update = self.request("POST", "/api/packages/download-ui/check-updates", {"source_version": "1.1.0"})
-        self.assertEqual(status, 200)
-        self.assertEqual(update["state"], "update_available")
-        self.assertEqual(update["published_version"], "1.0.0")
-
-        deb = Path(self.tmp.name) / "download-ui_1.1.0_amd64.deb"
-        deb.write_bytes(b"fake")
-        with mock.patch("debbuilder.app.deb_inspector.inspect_deb", return_value={"ok": True, "package": "download-ui", "version": "1.1.0", "architecture": "amd64", "size": 4, "files": [], "maintainer_scripts": []}):
-            status, verified = self.request("POST", "/api/packages/download-ui/verify-deb", {"deb": str(deb)})
-        self.assertEqual(status, 200)
-        self.assertTrue(verified["verification"]["ok"])
-        with self.assertRaises(urllib.error.HTTPError) as ctx:
-            self.request("POST", "/api/packages/download-ui/publish", {"deb": str(deb), "dry_run": False})
-        self.assertEqual(ctx.exception.code, 403)
-        with mock.patch("debbuilder.app.operations.publish_deb_operation", return_value={"status": "dry_run", "package": "download-ui"}):
-            status, published = self.request("POST", "/api/packages/download-ui/publish", {"deb": str(deb), "dry_run": True})
-        self.assertEqual(status, 200)
-        self.assertEqual(published["publication"]["status"], "dry_run")
+    def test_static_files_cannot_escape_into_a_prefix_collision_sibling(self):
+        sibling = server.STATIC.parent / f"{server.STATIC.name}_backup"
+        sibling.mkdir()
+        (sibling / "secret.txt").write_text("not public")
+        connection = http.client.HTTPConnection("127.0.0.1", self.httpd.server_address[1], timeout=5)
+        connection.request("GET", "/../static_backup/secret.txt")
+        response = connection.getresponse()
+        self.assertEqual(response.status, 404)
+        self.assertNotIn(b"not public", response.read())
+        connection.close()
 
     def test_admin_api_authentication_and_invalid_recipe_association(self):
         server.AUTH_MODE = "header"

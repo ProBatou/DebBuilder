@@ -1,6 +1,4 @@
-import json
 import re
-import subprocess
 import unittest
 from pathlib import Path
 
@@ -8,49 +6,45 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class StaticUiTests(unittest.TestCase):
-    def test_execution_lifecycle_actions_cover_all_run_states(self):
-        core = self.read("static/ui_core.js")
-        scenarios = [
-            {"name": "validation_needed", "run": {"mode": "build", "status": "success", "artifact": {"path": "demo.deb"}}},
-            {"name": "validation_running", "pending": "validation", "run": {"mode": "build", "status": "success", "artifact": {"path": "demo.deb"}}},
-            {"name": "ready_to_publish", "run": {"mode": "build", "status": "success", "artifact": {"path": "demo.deb"}, "validations": [{"status": "success"}]}},
-            {"name": "validation_failed", "run": {"mode": "build", "status": "success", "artifact": {"path": "demo.deb"}, "validations": [{"status": "failed"}]}},
-            {"name": "published", "run": {"mode": "build", "status": "success", "artifact": {"path": "demo.deb"}, "validations": [{"status": "success"}], "publications": [{"status": "success"}]}},
-            {"name": "build_failed", "run": {"mode": "build", "status": "failed", "artifact": {"path": "demo.deb"}}},
-            {"name": "dry_run", "run": {"mode": "dry_run", "status": "prepared", "artifact": {}}},
-        ]
-        script = "global.window={};\n" + core + "\nconst scenarios=" + json.dumps(scenarios) + "; process.stdout.write(JSON.stringify(Object.fromEntries(scenarios.map(row=>[row.name,executionLifecycleModel(row.run,row.pending||'')]))));"
-        models = json.loads(subprocess.run(["node", "-e", script], check=True, text=True, capture_output=True).stdout)
-        self.assertTrue(models["validation_needed"]["canValidate"])
-        self.assertFalse(models["validation_needed"]["canPublish"])
-        self.assertEqual(models["validation_running"]["validationStatus"], "running")
-        self.assertTrue(models["validation_running"]["validationDisabled"])
-        self.assertTrue(models["ready_to_publish"]["canValidate"])
-        self.assertTrue(models["ready_to_publish"]["canPublish"])
-        self.assertEqual(models["validation_failed"]["validationStatus"], "failed")
-        self.assertTrue(models["validation_failed"]["canValidate"])
-        self.assertTrue(models["published"]["canValidate"])
-        self.assertFalse(models["published"]["canPublish"])
-        self.assertFalse(models["build_failed"]["canValidate"])
-        self.assertFalse(models["dry_run"]["canValidate"])
-        self.assertFalse(models["dry_run"]["canPublish"])
+    ADMIN_SCRIPTS = (
+        "static/js/pages/dashboard.js",
+        "static/js/pages/packages.js",
+        "static/js/pages/logs.js",
+        "static/js/recipe/source_changes.js",
+        "static/js/admin.js",
+    )
+    STYLESHEETS = ("static/style.css", "static/css/logs.css")
 
-    def test_execution_detail_exposes_existing_validation_and_publication_endpoints(self):
-        admin = self.read("static/admin.js")
-        self.assertIn('data-execution-action="validate"', admin)
-        self.assertIn('data-execution-action="publish"', admin)
+    def admin_scripts(self):
+        return "\n".join(self.read(path) for path in self.ADMIN_SCRIPTS)
+
+    def styles(self):
+        return "\n".join(self.read(path) for path in self.STYLESHEETS)
+
+    def test_package_actions_expose_canonical_validation_and_publication_endpoints(self):
+        admin = self.admin_scripts()
+        self.assertIn('data-admin-action="validate-package"', admin)
+        self.assertIn('data-admin-action="publish-package"', admin)
         self.assertIn('id="btnRevalidateExecution"', self.read("static/index.html"))
         self.assertIn("function updateExecutionValidationButton", admin)
-        self.assertIn("validation.status?'Revalidate':'Validate'", admin)
-        self.assertIn("/validate`,{}", admin)
-        self.assertIn("/publish`,{confirm:confirmation}", admin)
-        self.assertIn("confirmation=`publish:${packageName}:${packageVersion}`", admin)
-        self.assertIn("model.validationStatus==='failed'?lifecycleFailureDetails", admin)
+        self.assertRegex(admin, r"validation\.status\s*\?\s*'Revalidate'\s*:\s*'Validate'")
+        self.assertIn("/validate`, {}", admin)
+        self.assertIn("/publish`, {confirm: confirmation}", admin)
+        self.assertIn("confirmation = `publish:${name}:${version}`", admin)
+        self.assertNotIn("function renderExecutionLifecycle", admin)
+
+    def test_generated_controls_do_not_use_inline_event_handlers(self):
+        html = self.read("static/index.html")
+        admin = self.admin_scripts()
+        self.assertNotIn("onclick=", html)
+        self.assertNotIn("onclick=", admin)
+        self.assertIn("function handleAdminAction", admin)
+        self.assertIn("[data-admin-action]", admin)
 
     def test_logs_page_has_active_selection_deletion_live_refresh_and_verbosity(self):
         html = self.read("static/index.html")
-        admin = self.read("static/admin.js")
-        css = self.read("static/style.css")
+        admin = self.admin_scripts()
+        css = self.styles()
         self.assertIn('role="listbox"', html)
         self.assertNotIn('id="btnDeleteSelectedLogs"', html)
         self.assertNotIn('data-select-execution', admin)
@@ -65,16 +59,16 @@ class StaticUiTests(unittest.TestCase):
         self.assertNotIn('id="executionLifecycle"', html)
         for value in ("compact", "normal", "verbose", "raw"):
             self.assertIn(f'<option value="{value}"', html)
-        self.assertIn('aria-selected="${executionIsSelected(e.id)?', admin)
+        self.assertIn('aria-selected="${executionIsSelected(execution.id) ?', admin)
         self.assertIn('/logs?verbosity=', admin)
         self.assertIn('after=${adminState.logOffset}', admin)
-        self.assertIn('setTimeout(pollOpenExecution,1500)', admin)
-        self.assertIn('else stopLogPolling();', admin)
-        self.assertIn("textContent=adminState.logAutoScroll?'● Live':'↓ Jump to latest'", admin)
+        self.assertIn('setTimeout(pollOpenExecution, 1500)', admin)
+        self.assertIn('stopLogPolling();', admin)
+        self.assertIn("adminState.logAutoScroll ? '● Live' : '↓ Jump to latest'", admin)
         self.assertNotIn("textContent='Done'", admin)
         self.assertIn("logAutoScroll: true", admin)
         self.assertIn("logFollowing: false", admin)
-        self.assertIn("adminState.logFollowing=true", admin)
+        self.assertIn("adminState.logFollowing = true", admin)
         self.assertIn("function handleLogScroll", admin)
         self.assertIn("function resumeLiveLog", admin)
         self.assertIn("btnLogLiveBadge", admin)
@@ -114,7 +108,8 @@ class StaticUiTests(unittest.TestCase):
         self.assertIn("output: collectBuildOutput()", script)
         self.assertIn("inactivity_timeout: Number(value('buildInactivityTimeout')", script)
         self.assertIn("maximum_runtime: value('buildMaximumRuntime')", script)
-        self.assertIn("build.inactivity_timeout || build.timeout || 300", script)
+        self.assertIn("build.inactivity_timeout || 300", script)
+        self.assertNotIn("build.timeout", script)
         self.assertIn('id="buildInactivityTimeout"', html)
         self.assertIn("Inactivity timeout", html)
         self.assertIn('id="buildMaximumRuntime"', html)
@@ -126,7 +121,7 @@ class StaticUiTests(unittest.TestCase):
     def test_multiple_build_output_paths_are_fully_editable(self):
         html = self.read("static/index.html")
         serialization = self.read("static/recipe_serialization.js")
-        admin = self.read("static/admin.js")
+        admin = self.admin_scripts()
         self.assertIn('<option value="paths">Multiple paths</option>', html)
         self.assertIn('id="buildOutputPathList"', html)
         self.assertIn('id="btnAddBuildOutputPath"', html)
@@ -184,10 +179,10 @@ class StaticUiTests(unittest.TestCase):
             self.assertNotIn(fake, html)
 
     def test_execution_steps_render_their_real_status(self):
-        admin = (ROOT / "static" / "admin.js").read_text()
-        self.assertIn("pending:'○'", admin)
-        self.assertIn("failed:'✕'", admin)
-        self.assertIn("s.status||'pending'", admin)
+        admin = self.admin_scripts()
+        self.assertIn("pending: '○'", admin)
+        self.assertIn("failed: '✕'", admin)
+        self.assertIn("step.status || 'pending'", admin)
         self.assertNotIn('`<span class="step-chip">✓ ${esc(s.name)}</span>`', admin)
 
     def test_dry_run_displays_detection_proposals_without_executing_them(self):
@@ -242,7 +237,7 @@ class StaticUiTests(unittest.TestCase):
     def test_static_configured_files_mode_is_available(self):
         html = (ROOT / "static" / "index.html").read_text()
         serialization = (ROOT / "static" / "recipe_serialization.js").read_text()
-        admin = self.read("static/admin.js")
+        admin = self.admin_scripts()
         self.assertIn('<option value="configured_files">Custom mappings</option>', html)
         self.assertIn("Additional mappings", html)
         self.assertIn("Optionally install extra files from the selected build output", html)
@@ -293,17 +288,18 @@ class StaticUiTests(unittest.TestCase):
         self.assertIn("artifact.asset_name = archiveSource === 'release_asset'", serialization)
         self.assertIn("artifactMode === 'upstream_deb' ? value('recipeArtifactPattern') : ''", serialization)
 
-    def test_account_provisioning_uses_explicit_intent_and_legacy_override(self):
+    def test_account_provisioning_uses_only_canonical_intent(self):
         html = self.read("static/index.html")
         app = self.read("static/app.js")
         serialization = self.read("static/recipe_serialization.js")
         self.assertIn("Ensure account exists", html)
         self.assertIn("Use existing account", html)
-        self.assertIn("Custom (legacy)", html)
+        self.assertNotIn("Custom (legacy)", html)
+        self.assertNotIn("Legacy account overrides", html)
         self.assertNotIn("Create application user", html)
         self.assertNotIn("Create application group", html)
         self.assertIn("user === 'root' && group === 'root'", app)
-        self.assertIn("accountProvisioning === 'ensure' ? accountUser !== 'root'", serialization)
+        self.assertIn("accountProvisioning === 'ensure' && accountUser !== 'root'", serialization)
         self.assertIn('id="installAccountUser"', html)
         self.assertIn('id="installOwnerUser"', html)
 
@@ -322,7 +318,7 @@ class StaticUiTests(unittest.TestCase):
 
     def test_final_ux_pass_uses_compact_shared_components(self):
         html = self.read("static/index.html")
-        admin = self.read("static/admin.js")
+        admin = self.admin_scripts()
         settings = self.read("static/settings.js")
         serialization = self.read("static/recipe_serialization.js")
         css = self.read("static/style.css")
@@ -349,10 +345,10 @@ class StaticUiTests(unittest.TestCase):
         self.assertIn("flushSettingsAutosave", settings)
 
     def test_logs_metadata_long_values_are_single_line_and_copyable(self):
-        admin = self.read("static/admin.js")
-        css = self.read("static/style.css")
+        admin = self.admin_scripts()
+        css = self.styles()
         self.assertIn("function metaValueHtml", admin)
-        self.assertIn("middleTruncate(text,key==='SHA-256'?22:30)", admin)
+        self.assertIn("middleTruncate(text, key === 'SHA-256' ? 22 : 30)", admin)
         self.assertIn('data-copy-value="${esc(text)}"', admin)
         self.assertIn("copyTextValue(button.dataset.copyValue || '')", admin)
         self.assertIn("text-overflow:ellipsis;white-space:nowrap", css)
@@ -362,7 +358,7 @@ class StaticUiTests(unittest.TestCase):
     def test_installation_preview_is_derived_from_build_output_for_all_modes(self):
         html = self.read("static/index.html")
         app = self.read("static/app.js")
-        admin = self.read("static/admin.js")
+        admin = self.admin_scripts()
         serialization = self.read("static/recipe_serialization.js")
         self.assertIn("Which files and directories constitute the result of the build?", html)
         self.assertIn("Where should the build result be installed in the Debian package?", html)
@@ -375,7 +371,8 @@ class StaticUiTests(unittest.TestCase):
         self.assertIn("source:'Entire source tree'", app)
         self.assertIn("destination:`${destination}/${path.replace(/^\\.\\/+/, '')}`", app)
         self.assertIn("installMappingRowHtml(row)", app)
-        self.assertIn("renderInstallContentSummary();if(event.target.value.trim())", admin)
+        self.assertIn("renderInstallContentSummary();", admin)
+        self.assertIn("if (event.target.value.trim()) scheduleRecipeAutosave();", admin)
         self.assertIn("output: collectBuildOutput()", serialization)
         self.assertNotIn("installOutputPath", html + app + serialization)
 
@@ -395,7 +392,7 @@ class StaticUiTests(unittest.TestCase):
 
     def test_lifecycle_labels_and_colors_are_shared(self):
         labels = self.read("static/ui_core.js")
-        admin = self.read("static/admin.js")
+        admin = self.admin_scripts()
         css = self.read("static/style.css")
         expected = {
             "up_to_date": "Up to date",
@@ -415,41 +412,43 @@ class StaticUiTests(unittest.TestCase):
             self.assertRegex(labels, rf"{state}: '{re.escape(label)}'")
             self.assertIn(f".badge.{state}", css)
         self.assertIn("STATUS_LABELS[value]", admin)
-        self.assertIn("function dashboardLifecycleState(p){\n  return lifecycleState(p);\n}", admin)
+        self.assertIn("function dashboardLifecycleState(packageRow)", admin)
+        self.assertIn("return lifecycleState(packageRow);", admin)
         self.assertNotIn("Success / Published", labels)
 
     def test_dashboard_packages_and_details_use_canonical_lifecycle_status(self):
-        admin = self.read("static/admin.js")
-        self.assertIn("badge(e.lifecycle_status||e.status)", admin)
-        self.assertIn("function lifecycleState(p){ return p.lifecycle_display_status", admin)
+        admin = self.admin_scripts()
+        self.assertIn("badge(execution.lifecycle_status || execution.status)", admin)
+        self.assertIn("function lifecycleState(packageRow)", admin)
         self.assertIn("Current lifecycle", admin)
         self.assertIn("Latest built version", admin)
         self.assertIn("Latest run status", admin)
         self.assertIn("remains published", admin)
-        self.assertIn("state==='validation_needed'||state==='validation_failed'", admin)
-        self.assertIn("state==='ready_to_publish'||state==='publication_failed'", admin)
+        self.assertIn("const actions = packageRow.allowed_actions || {};", admin)
+        self.assertIn("if (actions.validate)", admin)
+        self.assertIn("if (actions.publish)", admin)
         self.assertIn("async function validatePackage", admin)
 
-    def test_build_audit_displays_effective_command_and_working_directory(self):
+    def test_build_audit_is_available_through_verbose_logs(self):
         app = (ROOT / "static" / "app.js").read_text()
-        admin = (ROOT / "static" / "admin.js").read_text()
-        self.assertIn("function formatBuildAudit", app)
-        self.assertIn("row.command", app)
-        self.assertIn("row.working_directory", app)
+        admin = self.admin_scripts()
+        self.assertNotIn("function formatBuildAudit", app)
         self.assertIn("logVerbosity", admin)
         self.assertIn("verbosity=verbose", self.read("tests/test_admin_api.py"))
 
     def test_sidebar_can_collapse_and_copy_install_command(self):
         html = self.read("static/index.html")
-        admin_js = self.read("static/admin.js")
+        admin_js = self.admin_scripts()
         css = self.read("static/style.css")
         self.assertIn('id="btnSidebarCompact"', html)
         self.assertIn('class="sidebar-toggle"', html)
         self.assertIn('title="Collapse sidebar"', html)
         self.assertIn('aria-label="Collapse sidebar"', html)
         self.assertIn('<svg viewBox="0 0 24 24" aria-hidden="true">', html)
-        self.assertIn('/style.css?v=20260904-3', html)
-        self.assertIn('/admin.js?v=20260904-3', html)
+        self.assertIn('/style.css?v=20260904-4', html)
+        self.assertIn('/css/logs.css?v=20260904-1', html)
+        for script in ("/js/pages/dashboard.js", "/js/pages/packages.js", "/js/pages/logs.js", "/js/recipe/source_changes.js", "/js/admin.js"):
+            self.assertIn(script, html)
         self.assertIn('/settings.js?v=20260904-2', html)
         self.assertIn("debBuilderSidebarCompact", admin_js)
         self.assertIn("Expand sidebar", admin_js)
@@ -470,7 +469,7 @@ class StaticUiTests(unittest.TestCase):
         self.assertIn("ntfy token (optional)", settings_js)
 
     def test_javascript_files_do_not_reference_removed_visual_runtime(self):
-        for path in ["static/app.js", "static/admin.js", "static/recipe_serialization.js", "static/ui_core.js", "static/settings.js"]:
+        for path in ["static/app.js", "static/recipe_serialization.js", "static/ui_core.js", "static/settings.js", *self.ADMIN_SCRIPTS]:
             text = self.read(path)
             self.assertNotIn("Block" + "ly", text)
             self.assertNotIn("block" + "ly.", text.lower())
@@ -490,7 +489,7 @@ class StaticUiTests(unittest.TestCase):
 
     def test_recipe_mockup_is_english_and_has_consistent_visual_groups(self):
         html = self.read("static/index.html")
-        admin_js = self.read("static/admin.js")
+        admin_js = self.admin_scripts()
         css = self.read("static/style.css")
         for marker in [
             "Build environment",
@@ -511,7 +510,7 @@ class StaticUiTests(unittest.TestCase):
             "server.py",
             "static/index.html",
             "static/app.js",
-            "static/admin.js",
+            *self.ADMIN_SCRIPTS,
             "static/settings.js",
             "static/recipe_serialization.js",
         ])

@@ -48,10 +48,10 @@ class RecipeSchemaTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "artifact type"):
             validate_recipe_metadata({"name": "demo", "package": {"name": "demo"}, "artifact": {"mode": "source_build", "type": "zip"}})
 
-    def test_flat_recipe_is_migrated_to_recipe_v1(self):
+    def test_canonical_recipe_defaults_are_applied(self):
         recipe = normalize_recipe({
-            "name": "demo-recipe", "package_name": "demo", "github_repository": "owner/demo",
-            "version_tracking": "latest_release", "version_source": "tag", "steps": [],
+            "name": "demo-recipe", "package": {"name": "demo"},
+            "source": {"repository": "owner/demo", "tracking": "latest_release", "version": {"source": "tag"}},
         })
         self.assertEqual(recipe["schema_version"], 1)
         self.assertEqual(recipe["package"]["name"], "demo")
@@ -62,7 +62,7 @@ class RecipeSchemaTests(unittest.TestCase):
 
     def test_legacy_build_timeout_migrates_to_inactivity_timeout(self):
         recipe = validate_recipe_metadata({
-            "name": "legacy-timeout", "package_name": "legacy-timeout", "github_repository": "owner/demo",
+            "name": "legacy-timeout", "package": {"name": "legacy-timeout"}, "source": {"repository": "owner/demo"},
             "build": {"timeout": 120, "commands": ["make"], "output": {"mode": "source"}},
         })
         self.assertEqual(recipe["build"]["inactivity_timeout"], 120)
@@ -72,18 +72,19 @@ class RecipeSchemaTests(unittest.TestCase):
         self.assertNotIn("timeout", stored["build"])
 
     def test_new_build_timeouts_have_generic_defaults(self):
-        recipe = validate_recipe_metadata({"name": "demo", "package_name": "demo", "github_repository": "owner/demo"})
+        recipe = validate_recipe_metadata({"name": "demo", "package": {"name": "demo"}, "source": {"repository": "owner/demo"}})
         self.assertEqual(recipe["build"]["inactivity_timeout"], 300)
         self.assertIsNone(recipe["build"]["maximum_runtime"])
 
-    def test_storage_shape_is_canonical_but_read_shape_has_compatibility_aliases(self):
-        stored = recipe_for_storage({"name": "demo", "package_name": "demo", "github_repository": "owner/demo"})
+    def test_storage_and_read_shapes_are_canonical(self):
+        stored = recipe_for_storage({"name": "demo", "package": {"name": "demo"}, "source": {"repository": "owner/demo"}})
         self.assertIn("package", stored)
         self.assertIn("source", stored)
         self.assertNotIn("package_name", stored)
         self.assertNotIn("github_repository", stored)
         loaded = normalize_recipe(stored)
-        self.assertEqual(loaded["package_name"], "demo")
+        self.assertEqual(loaded["package"]["name"], "demo")
+        self.assertEqual(loaded["source"]["repository"], "owner/demo")
 
     def test_storage_preserves_each_build_output_mode_without_hidden_fields(self):
         paths = ["package.json", "node_modules", ".next", "dist"]
@@ -106,13 +107,8 @@ class RecipeSchemaTests(unittest.TestCase):
         self.assertEqual(recipe["service"]["user"], "demo")
         self.assertEqual(recipe["build"]["output"], {"mode": "source", "path": ""})
 
-    def test_legacy_step_package_is_preserved_during_migration(self):
-        recipe = normalize_recipe({"name": "old", "steps": [{"type": "init_deb_package", "package": "real-name"}]})
-        self.assertEqual(recipe["package"]["name"], "real-name")
-        self.assertEqual(recipe["steps"][0]["type"], "init_deb_package")
-
     def test_validation_rejects_unsafe_paths_and_unknown_source_changes(self):
-        base = {"name": "demo", "package_name": "demo", "github_repository": "owner/demo"}
+        base = {"name": "demo", "package": {"name": "demo"}, "source": {"repository": "owner/demo"}}
         with self.assertRaisesRegex(ValueError, "working_directory"):
             validate_recipe_metadata({**base, "build": {"working_directory": "../outside"}})
         with self.assertRaisesRegex(ValueError, "unsupported operation"):
@@ -120,11 +116,11 @@ class RecipeSchemaTests(unittest.TestCase):
 
     def test_validation_rejects_invalid_nested_types(self):
         with self.assertRaisesRegex(ValueError, "build.environment"):
-            validate_recipe_metadata({"name": "demo", "package_name": "demo", "build": {"environment": ["A=B"]}})
+            validate_recipe_metadata({"name": "demo", "package": {"name": "demo"}, "build": {"environment": ["A=B"]}})
 
     def test_static_and_configuration_source_mappings_are_preserved(self):
         recipe = validate_recipe_metadata({
-            "name": "static-demo", "package_name": "static-demo", "github_repository": "owner/demo",
+            "name": "static-demo", "package": {"name": "static-demo"}, "source": {"repository": "owner/demo"},
             "build": {"detected_project": "static", "output": {"mode": "source"}},
             "install": {"content": {"source": "configured_files"}, "config_files": [{"source": ".bashrc", "destination": "/root/.bashrc"}]},
         })
@@ -142,7 +138,7 @@ class RecipeSchemaTests(unittest.TestCase):
             {"source": "config/foo.conf", "destination": "/etc/foo/foo.conf"},
         ]
         stored = recipe_for_storage({
-            "name": "mapped", "package_name": "mapped",
+            "name": "mapped", "package": {"name": "mapped"},
             "install": {"content": {"source": "configured_files"}, "config_files": mappings, "config_policy": "replace"},
         })
         self.assertEqual(stored["install"]["content"]["source"], "configured_files")
@@ -153,7 +149,7 @@ class RecipeSchemaTests(unittest.TestCase):
 
     def test_mapping_policy_is_local_and_overrides_legacy_global_policy(self):
         stored = recipe_for_storage({
-            "name": "mapped", "package_name": "mapped",
+            "name": "mapped", "package": {"name": "mapped"},
             "install": {"config_policy": "replace", "config_files": [
                 "/etc/mapped/legacy.conf",
                 {"source": "owned.sh", "destination": "/etc/profile.d/owned.sh", "policy": "dpkg_conffile"},
@@ -173,7 +169,7 @@ class RecipeSchemaTests(unittest.TestCase):
         self.assertFalse(recipe["install"]["owner"]["create_group"])
 
     def test_unconfigured_service_has_no_fictitious_defaults(self):
-        recipe = validate_recipe_metadata({"name": "demo", "package_name": "demo", "github_repository": "owner/demo", "service": {"enabled": False}})
+        recipe = validate_recipe_metadata({"name": "demo", "package": {"name": "demo"}, "source": {"repository": "owner/demo"}, "service": {"enabled": False}})
         self.assertFalse(recipe["service"]["configured"])
         self.assertFalse(recipe["service"]["enabled"])
         for key in ("name", "user", "group", "type", "restart", "command"):

@@ -14,6 +14,7 @@ import urllib.request
 from pathlib import Path
 from typing import Callable
 
+from . import storage
 from .settings_store import ntfy_token, ntfy_token_configured, save_ntfy_token
 
 SECRET_REDACTIONS = [
@@ -103,7 +104,7 @@ def _load_state(data_dir: Path) -> dict:
 
 def _save_state(data_dir: Path, state: dict) -> None:
     data_dir.mkdir(parents=True, exist_ok=True)
-    _state_path(data_dir).write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
+    storage.atomic_write_text(_state_path(data_dir), json.dumps(state, indent=2, sort_keys=True) + "\n")
 
 
 def _run_id(run: dict | None, fallback: str = "") -> str:
@@ -124,7 +125,7 @@ def _version(run: dict | None, payload: dict | None = None) -> str:
     return str(version or "")
 
 
-def _package(app_module, run: dict | None = None, recipe: dict | None = None, payload: dict | None = None) -> str:
+def _package(resolver, run: dict | None = None, recipe: dict | None = None, payload: dict | None = None) -> str:
     payload = payload or {}
     for value in (payload.get("package"),):
         if value:
@@ -132,20 +133,16 @@ def _package(app_module, run: dict | None = None, recipe: dict | None = None, pa
     artifact = ((run or {}).get("artifact") or {}).get("inspection") or {}
     if artifact.get("package"):
         return str(artifact["package"])
-    if recipe:
+    if resolver:
         try:
-            value = app_module.recipe_package_name(recipe)
+            value = resolver(run, recipe)
             if value:
                 return str(value)
         except Exception:
             pass
-    if run:
-        try:
-            value = app_module.build_run_package(run)
-            if value:
-                return str(value)
-        except Exception:
-            pass
+    package = (recipe or {}).get("package") or {}
+    if isinstance(package, dict) and package.get("name"):
+        return str(package["name"])
     return str((run or {}).get("recipe_id") or "package")
 
 
@@ -164,11 +161,22 @@ def _error_message(payload: dict | None = None, run: dict | None = None) -> str:
 
 
 class NotificationService:
-    def __init__(self, app_module, sender: Callable[..., dict] | None = None):
-        self.app = app_module
+    def __init__(
+        self,
+        data_dir: Path,
+        settings_provider: Callable[[], dict],
+        *,
+        run_loader: Callable[[str], dict | None] | None = None,
+        package_resolver: Callable[[dict | None, dict | None], str] | None = None,
+        sender: Callable[..., dict] | None = None,
+    ):
+        self.data_dir = Path(data_dir)
+        self.settings_provider = settings_provider
+        self.run_loader = run_loader
+        self.package_resolver = package_resolver
         self.sender = sender or (lambda title, message, **kwargs: send_ntfy(
-            self.app.DATA,
-            self.app.app_settings(),
+            self.data_dir,
+            self._settings(),
             title,
             message,
             **kwargs,
@@ -176,17 +184,19 @@ class NotificationService:
 
     def _settings(self) -> dict:
         try:
-            return self.app.app_settings()
+            return self.settings_provider()
         except Exception:
             return {}
 
     def _emit(self, title: str, message: str, *, priority: str = "default", tags: str = "package", key: str) -> dict:
-        state = _load_state(self.app.DATA)
-        if key and key in state["sent"]:
-            return {"ok": False, "skipped": True, "reason": "duplicate"}
-        if key:
-            state["sent"][key] = {"at": time.time(), "title": title}
-            _save_state(self.app.DATA, state)
+        state_path = _state_path(self.data_dir)
+        with storage.locked_path(state_path):
+            state = _load_state(self.data_dir)
+            if key and key in state["sent"]:
+                return {"ok": False, "skipped": True, "reason": "duplicate"}
+            if key:
+                state["sent"][key] = {"at": time.time(), "title": title}
+                _save_state(self.data_dir, state)
         try:
             result = self.sender(title, redact(message), priority=priority, tags=tags)
         except Exception as exc:
@@ -198,27 +208,31 @@ class NotificationService:
         return f"{package}|{recipe_id}" if recipe_id else package
 
     def _set_failure(self, recipe_key: str, failure: dict) -> None:
-        state = _load_state(self.app.DATA)
-        state["recipes"].setdefault(recipe_key, {})["active_failure"] = failure
-        _save_state(self.app.DATA, state)
+        state_path = _state_path(self.data_dir)
+        with storage.locked_path(state_path):
+            state = _load_state(self.data_dir)
+            state["recipes"].setdefault(recipe_key, {})["active_failure"] = failure
+            _save_state(self.data_dir, state)
 
     def _recovery_failure(self, recipe_key: str, stage: str, recovered_run_id: str) -> dict | None:
-        state = _load_state(self.app.DATA)
-        row = state["recipes"].get(recipe_key) or {}
-        failure = row.get("active_failure")
-        if not failure or failure.get("stage") != stage:
-            return None
-        row.pop("active_failure", None)
-        row["last_recovered_at"] = time.time()
-        row["last_recovered_run_id"] = recovered_run_id
-        state["recipes"][recipe_key] = row
-        _save_state(self.app.DATA, state)
-        return failure
+        state_path = _state_path(self.data_dir)
+        with storage.locked_path(state_path):
+            state = _load_state(self.data_dir)
+            row = state["recipes"].get(recipe_key) or {}
+            failure = row.get("active_failure")
+            if not failure or failure.get("stage") != stage:
+                return None
+            row.pop("active_failure", None)
+            row["last_recovered_at"] = time.time()
+            row["last_recovered_run_id"] = recovered_run_id
+            state["recipes"][recipe_key] = row
+            _save_state(self.data_dir, state)
+            return failure
 
     def notify_failure(self, stage: str, *, run: dict | None = None, recipe: dict | None = None, payload: dict | None = None, run_id: str = "") -> dict:
         payload = payload or {}
         rid = _run_id(run, run_id or str(payload.get("build_run_id") or ""))
-        package = _package(self.app, run=run, recipe=recipe, payload=payload)
+        package = _package(self.package_resolver, run=run, recipe=recipe, payload=payload)
         version = _version(run, payload) or "unknown"
         message = _error_message(payload, run)
         settings = self._settings()
@@ -240,7 +254,7 @@ class NotificationService:
     def notify_recovery(self, stage: str, *, run: dict | None = None, recipe: dict | None = None, payload: dict | None = None, run_id: str = "") -> dict:
         payload = payload or {}
         rid = _run_id(run, run_id or str(payload.get("build_run_id") or ""))
-        package = _package(self.app, run=run, recipe=recipe, payload=payload)
+        package = _package(self.package_resolver, run=run, recipe=recipe, payload=payload)
         recipe_key = self._recipe_key(package, run)
         failure = self._recovery_failure(recipe_key, stage, rid)
         if not failure:
@@ -296,9 +310,9 @@ class NotificationService:
             return {"ok": False, "skipped": True, "reason": "automatic publication not completed"}
         rid = str(result.get("run_id") or publication.get("build_run_id") or "")
         run = self._load_run(rid)
-        package = _package(self.app, run=run, payload=publication)
+        package = _package(self.package_resolver, run=run, payload=publication)
         version = _version(run, publication) or "unknown"
-        state = _load_state(self.app.DATA)
+        state = _load_state(self.data_dir)
         recipe_key = self._recipe_key(package, run)
         if (state["recipes"].get(recipe_key) or {}).get("last_recovered_run_id") == rid:
             return {"ok": False, "skipped": True, "reason": "recovery already reported"}
@@ -318,106 +332,18 @@ class NotificationService:
             key=f"automatic-complete:{package}:{rid}",
         )
 
-    def _load_run(self, run_id: str) -> dict:
-        if not run_id:
-            return {}
-        try:
-            return self.app.BuildStore(self.app.DATA / "builds").load(run_id) or {}
-        except Exception:
-            return {}
-
-
-def install(app_module) -> None:
-    """Attach ntfy settings, test endpoint, and lifecycle notifications."""
-    original_settings_view = app_module.settings_view
-    original_update_settings = app_module.update_settings
-    original_record_execution = app_module.record_execution
-    original_lifecycle = app_module.package_lifecycle_operation
-    original_run_with_automation = app_module.run_recipe_pipeline_with_automation
-    original_validate_build_artifact = app_module.validate_build_artifact
-    original_publish_build_artifact = app_module.publish_build_artifact
-    original_do_post = app_module.Handler.do_POST
-    service = NotificationService(app_module)
-
-    def settings_view_with_ntfy() -> dict:
-        view = original_settings_view()
-        notifications = dict(view.get("notifications") or {})
-        notifications["token"] = "masked"
-        notifications["token_configured"] = ntfy_token_configured(app_module.DATA)
-        view["notifications"] = notifications
-        return view
-
-    def update_settings_with_ntfy(payload: dict) -> dict:
-        notifications = payload.get("notifications") if isinstance(payload, dict) else None
-        if isinstance(notifications, dict) and notifications.get("token"):
-            save_ntfy_token(app_module.DATA, str(notifications["token"]))
-        original_update_settings(payload)
-        return settings_view_with_ntfy()
-
-    def record_execution_with_ntfy(run_id, workflow, returncode, started, ended, **kwargs):
-        original_record_execution(run_id, workflow, returncode, started, ended, **kwargs)
-        if kwargs.get("notification", True) is False or returncode == 0:
-            return
-        package = app_module.recipe_package_name(workflow) or workflow.get("name") or "package"
-        service.notify_failure("build", run={"id": run_id, "recipe_id": workflow.get("name") or package, "version": kwargs.get("version") or ""}, recipe=workflow)
-
-    def lifecycle_with_ntfy(name: str, action: str, payload: dict) -> dict:
-        try:
-            result = original_lifecycle(name, action, payload)
-        except Exception as exc:
-            if action == "publish" and not bool(payload.get("dry_run", True)):
-                service.notify_failure("publication", run={"id": name, "recipe_id": name}, payload={"package": name, "error": {"message": str(exc)}})
-            raise
-        if action == "publish":
-            publication = result.get("publication") or {}
-            if publication.get("status") in {"failed", "error"}:
-                service.notify_failure("publication", run={"id": name, "recipe_id": name}, payload={"package": name, "error": publication.get("error") or result.get("error") or {}})
-            elif publication.get("status") in {"published", "success"}:
-                service.notify_recovery("publication", run={"id": name, "recipe_id": name}, payload={"package": name, "published_version": publication.get("version") or publication.get("published_version") or ""})
-        return result
-
-    def validate_build_artifact_with_ntfy(run_id: str, payload: dict | None = None) -> dict:
-        result = original_validate_build_artifact(run_id, payload)
-        service.notify_validation_result(result)
-        return result
-
-    def publish_build_artifact_with_ntfy(run_id: str, payload: dict | None = None) -> dict:
-        result = original_publish_build_artifact(run_id, payload)
-        service.notify_publication_result(result)
-        return result
-
-    def run_recipe_pipeline_with_ntfy(workflow: dict, *, dry_run: bool = True) -> dict:
-        result = original_run_with_automation(workflow, dry_run=dry_run)
-        if not dry_run:
-            service.notify_automatic_completion(result)
-        return result
-
-    def do_post_with_ntfy(self):
-        parsed = urllib.parse.urlparse(self.path)
-        if parsed.path == "/api/notifications/test":
-            if not self._authorized():
-                return
-            result = service._emit("DebBuilder", "Test ntfy notification sent from DebBuilder.", tags="test_tube,package", key=f"test:{time.time()}")
-            app_module.json_response(self, {"ok": bool(result.get("ok")), "notification": result}, 200 if result.get("ok") else 502)
-            return
-        return original_do_post(self)
-
-    app_module.settings_view = settings_view_with_ntfy
-    app_module.update_settings = update_settings_with_ntfy
-    app_module.record_execution = record_execution_with_ntfy
-    app_module.package_lifecycle_operation = lifecycle_with_ntfy
-    app_module.validate_build_artifact = validate_build_artifact_with_ntfy
-    app_module.publish_build_artifact = publish_build_artifact_with_ntfy
-    app_module.run_recipe_pipeline_with_automation = run_recipe_pipeline_with_ntfy
-    app_module.Handler.do_POST = do_post_with_ntfy
-    app_module.LIFECYCLE_NOTIFIER = service.notify_build_lifecycle
-    def pipeline_notifier(*, status, package, version, detail=""):
-        if status == "success":
-            return {"ok": False, "skipped": True, "reason": "legacy success notifications suppressed"}
-        return service.notify_failure(
-            "pipeline",
-            run={"id": package, "recipe_id": package, "version": version},
-            payload={"package": package, "error": {"message": detail or status}},
+    def send_test(self) -> dict:
+        return self._emit(
+            "DebBuilder",
+            "Test ntfy notification sent from DebBuilder.",
+            tags="test_tube,package",
+            key=f"test:{time.time()}",
         )
 
-    app_module.PIPELINE_NOTIFIER = pipeline_notifier
+    def _load_run(self, run_id: str) -> dict:
+        if not run_id or not self.run_loader:
+            return {}
+        try:
+            return self.run_loader(run_id) or {}
+        except Exception:
+            return {}

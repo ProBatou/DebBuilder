@@ -1,8 +1,7 @@
 """HTTP routing for the DebBuilder application.
 
-The handler is built from the application module so routes stay thin and all
-business operations remain independently testable.  Keeping the module as a
-dependency object also preserves the historical ``debbuilder.app`` facade.
+The handler is built from an injected application API so routes stay thin and
+business operations remain independently testable.
 """
 from __future__ import annotations
 
@@ -122,8 +121,6 @@ def create_handler(api):
                 api.json_response(self, {"settings": api.settings_view()})
             elif path == "/api/workflows":
                 api.json_response(self, {"workflows": api.list_workflows()})
-            elif path == "/api/runs":
-                api.json_response(self, {"runs": api.list_runs()})
             elif path.startswith("/api/workflows/"):
                 self._get_workflow(path)
             else:
@@ -174,8 +171,14 @@ def create_handler(api):
 
         def _serve_static(self, path: str):
             path = "/index.html" if path == "/" else path
-            static_file = (api.STATIC / path.lstrip("/")).resolve()
-            if not str(static_file).startswith(str(api.STATIC.resolve())) or not static_file.exists():
+            static_root = api.STATIC.resolve()
+            static_file = (static_root / path.lstrip("/")).resolve()
+            try:
+                static_file.relative_to(static_root)
+            except ValueError:
+                api.text_response(self, "not found", 404)
+                return
+            if not static_file.is_file():
                 api.text_response(self, "not found", 404)
                 return
             content_type = "text/html; charset=utf-8" if static_file.suffix == ".html" else "application/javascript; charset=utf-8" if static_file.suffix == ".js" else "text/css; charset=utf-8"
@@ -191,10 +194,6 @@ def create_handler(api):
                 api.json_response(self, {"error": str(exc)}, 400)
 
         def _post(self, data: dict):
-            if self.path == "/api/generate":
-                workflow = data.get("workflow", data)
-                api.json_response(self, {"script": api.generate_script(workflow, dry_run=True), "summary": api.summarize(workflow)})
-                return
             if self.path == "/api/run":
                 workflow = data.get("workflow", data)
                 if workflow.get("active") is False:
@@ -233,6 +232,10 @@ def create_handler(api):
                 result = api.reconcile_build_publication(run_id, data)
                 api.json_response(self, {"publication": result}, 200 if result["status"] == "success" else 422)
                 return
+            if self.path == "/api/notifications/test":
+                result = api.test_notification()
+                api.json_response(self, {"ok": bool(result.get("ok")), "notification": result}, 200 if result.get("ok") else 502)
+                return
             if self.path == "/api/settings":
                 api.json_response(self, {"ok": True, "settings": api.update_settings(data)})
                 return
@@ -242,13 +245,12 @@ def create_handler(api):
             if self.path == "/api/packages":
                 api.json_response(self, {"ok": True, "package": api.create_or_update_package(data)})
                 return
-            for suffix in ("refresh-source", "check-updates", "verify-deb", "publish"):
-                marker = f"/{suffix}"
-                if self.path.startswith("/api/packages/") and self.path.endswith(marker):
-                    self._post_package_lifecycle(suffix, marker, data)
-                    return
             if self.path.startswith("/api/packages/"):
-                name = urllib.parse.unquote(self.path.rsplit("/", 1)[-1])
+                package_path = self.path[len("/api/packages/"):].strip("/")
+                if not package_path or "/" in package_path:
+                    api.json_response(self, {"error": "not found"}, 404)
+                    return
+                name = urllib.parse.unquote(package_path)
                 try:
                     package = api.create_or_update_package(data, name=name)
                 except KeyError:
@@ -260,18 +262,6 @@ def create_handler(api):
                 self._save_workflow(data)
                 return
             api.json_response(self, {"error": "not found"}, 404)
-
-        def _post_package_lifecycle(self, suffix: str, marker: str, data: dict):
-            name = urllib.parse.unquote(self.path[len("/api/packages/"):-len(marker)].rstrip("/"))
-            try:
-                result = api.package_lifecycle_operation(name, suffix, data)
-            except KeyError:
-                api.json_response(self, {"error": "not found"}, 404)
-                return
-            except PermissionError as exc:
-                api.json_response(self, {"error": str(exc)}, 403)
-                return
-            api.json_response(self, result)
 
         def _save_workflow(self, data: dict):
             workflow_id = api.sanitize_id(self.path.rsplit("/", 1)[-1])
@@ -322,14 +312,10 @@ def create_handler(api):
 
         def _delete_package(self, parsed):
             name = urllib.parse.unquote(parsed.path.rsplit("/", 1)[-1])
-            query = urllib.parse.parse_qs(parsed.query)
-            delete_repo = (query.get("delete_repo") or [""])[0] in {"1", "true", "yes"}
-            confirm = (query.get("confirm") or [""])[0]
-            try:
-                api.delete_package(name, delete_repo=delete_repo, confirm=confirm)
-            except PermissionError as exc:
-                api.json_response(self, {"error": str(exc)}, 403)
+            if parsed.query:
+                api.json_response(self, {"error": "package deletion does not accept repository operations"}, 400)
                 return
+            api.delete_package(name)
             api.json_response(self, {"ok": True, "id": name, "deleted_from_repo": False})
 
         def _delete_execution_log(self, path: str):

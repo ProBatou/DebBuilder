@@ -10,13 +10,12 @@ from .command_runner import run_command
 CONTROL_KEYS = ["Package", "Version", "Architecture", "Depends", "Maintainer", "Description", "Homepage", "Section", "Priority"]
 
 
-def inspection_for_storage(inspection: dict, limit: int | None = None) -> dict:
-    """Add lifecycle metadata without discarding the complete package inventory.
+def inspection_for_storage(inspection: dict) -> dict:
+    """Add metadata without discarding the complete package inventory.
 
     The BuildStore owns representation compaction and moves ``files`` to a Run
     manifest.  Keeping the complete list here ensures that externalization never
-    turns an old preview limit into permanent data loss.  ``limit`` remains an
-    accepted compatibility argument but is intentionally ignored.
+    turns a display limit into permanent data loss.
     """
     stored = dict(inspection)
     files = list(stored.get("files") or [])

@@ -93,6 +93,18 @@ def _config_paths(run: dict) -> list[str]:
 
 
 def validate_artifact(run_id: str, *, store: BuildStore, previous_artifact: str = "", backend_factory=None, profile: str = "bookworm", allowed_previous_roots: tuple[str | Path, ...] = ()) -> dict:
+    with store.locked_run(run_id):
+        return _validate_artifact_locked(
+            run_id,
+            store=store,
+            previous_artifact=previous_artifact,
+            backend_factory=backend_factory,
+            profile=profile,
+            allowed_previous_roots=allowed_previous_roots,
+        )
+
+
+def _validate_artifact_locked(run_id: str, *, store: BuildStore, previous_artifact: str = "", backend_factory=None, profile: str = "bookworm", allowed_previous_roots: tuple[str | Path, ...] = ()) -> dict:
     """Validate install/upgrade/remove/purge without changing the Build status."""
     run = store.load(run_id)
     if not run:

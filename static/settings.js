@@ -62,7 +62,7 @@ function settingsPayload(){
       component: $('settingComponent').value.trim(),
       architecture: $('settingArch').value
     },
-    github: {api_url: $('settingGithubApiUrl').value.trim()},
+    github: {},
     notifications: {
       type: notificationType,
       server_url: ntfyServer,
@@ -133,9 +133,8 @@ function renderSettingsPage(){
       </section>
 
       <section class="settings-section settings-card editable-settings-card github-settings-card">
-        <header class="settings-section-head"><div><h3>GitHub integration</h3><p class="muted">Server API and token used to read releases.</p></div>${statusBadge(tokenConfigured ? 'CONFIGURED' : 'NOT CONFIGURED', tokenConfigured ? 'active' : 'warning')}</header>
+        <header class="settings-section-head"><div><h3>GitHub integration</h3><p class="muted">Optional token used to read releases from GitHub.</p></div>${statusBadge(tokenConfigured ? 'CONFIGURED' : 'NOT CONFIGURED', tokenConfigured ? 'active' : 'warning')}</header>
         <div class="settings-form-grid settings-grid-one">
-          ${fieldInput('settingGithubApiUrl','GitHub API URL',github.api_url,'type="url" required')}
           ${secretInput('settingGithubToken','GitHub token',tokenConfigured,'token')}
         </div>
       </section>

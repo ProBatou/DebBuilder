@@ -1,0 +1,28 @@
+/* Logs workspace: keep the live log readable while preserving execution context. */
+.logs-layout{grid-template-columns:minmax(250px,26%) minmax(0,1fr)}
+.logs-detail-card{display:grid;grid-template-rows:auto auto minmax(340px,1fr);overflow:hidden}
+.logs-list-card .section-title{margin-bottom:10px}
+.logs-list-card .item{padding:9px 10px}
+.logs-list-card .item-title{gap:8px}
+.logs-list-card .item-title span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.logs-list-card .item-meta{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.execution-item{grid-template-columns:minmax(0,1fr);gap:7px}
+.log-terminal{position:relative;min-height:340px;height:100%;min-width:0}
+.log-live-badge{position:absolute;right:12px;bottom:12px;z-index:2;width:auto;min-height:30px;padding:5px 10px;border-radius:999px;border-color:rgba(102,255,153,.44);background:rgba(11,18,32,.92);box-shadow:0 8px 24px rgba(0,0,0,.28);color:var(--accent);font-size:11px;font-weight:850}
+.log-live-badge.paused{border-color:rgba(116,185,255,.48);color:#b9d9ff}
+.log-live-badge[hidden]{display:none}
+.log-context-panel{display:grid;gap:8px;min-height:0;overflow:auto;padding-right:2px}
+.logs-detail-card .execution-meta{grid-template-columns:repeat(5,minmax(0,1fr));gap:7px;padding:8px 10px}
+.logs-detail-card .meta-cell{min-width:0;font-size:13px;line-height:1.22}
+.logs-detail-card .meta-cell span{margin-bottom:1px;font-size:10px}
+.logs-detail-card .meta-value{display:block;width:100%;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);font:inherit;font-weight:760;text-align:left}
+.logs-detail-card .meta-copy-value{appearance:none;height:auto;min-height:0;border:0;border-radius:0;background:transparent;padding:0;cursor:copy}
+.logs-detail-card .meta-copy-value:hover,.logs-detail-card .meta-copy-value:focus-visible{background:transparent;color:var(--blue);outline:none;text-decoration:underline;text-underline-offset:2px}
+.logs-detail-card .meta-copy-value.copied{color:var(--accent)}
+.logs-detail-card .lifecycle-row{padding:7px 10px}
+.logs-detail-card .steps{align-content:start;max-height:70px;overflow-x:hidden;overflow-y:auto;padding-right:2px}
+.logs-detail-card .step-chip{padding:5px 9px;font-size:12px;line-height:1.25}
+.logs-detail-card .logbox{min-height:340px;height:100%;font-size:12px;line-height:1.4}
+@media(max-width:1200px){.logs-detail-card .execution-meta{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:900px){.logs-layout{grid-template-columns:1fr}.logs-detail-card{display:grid;grid-template-rows:auto auto minmax(340px,56dvh);min-height:680px}.log-context-panel{max-height:none}.logs-detail-card .logbox{min-height:340px}.logs-detail-card .execution-meta{grid-template-columns:1fr 1fr}}
+@media(max-width:560px){.log-detail-head{align-items:flex-start;flex-direction:column}.log-detail-actions{width:100%}.log-detail-actions label{flex:1 1 150px}.logs-detail-card{min-height:640px;grid-template-rows:auto auto minmax(320px,54dvh)}.logs-detail-card .logbox{min-height:320px}}

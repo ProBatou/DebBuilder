@@ -1,4 +1,4 @@
-"""APT repository parsing and publication helpers for package lifecycle state."""
+"""APT repository parsing and reprepro publication helpers."""
 
 from __future__ import annotations
 
@@ -6,8 +6,6 @@ import gzip
 import os
 import re
 import shlex
-import shutil
-import subprocess
 import urllib.request
 from pathlib import Path
 from urllib.parse import urljoin
@@ -131,11 +129,6 @@ def published_versions(rows: list[dict], package: str, architecture: str | None 
     return out
 
 
-def latest_published_version(rows: list[dict], package: str, architecture: str | None = None) -> str:
-    versions = published_versions(rows, package, architecture)
-    return versions[0]["version"] if versions else ""
-
-
 def parse_reprepro_distributions(text: str) -> dict:
     data = {}
     for raw in (text or "").splitlines():
@@ -187,52 +180,9 @@ def reprepro_list(repo_root: Path, distribution: str, *, runner=run_command) -> 
     return {"command": result, "packages": rows}
 
 
-def _run_reprepro(repo_root: Path, *args: str) -> subprocess.CompletedProcess:
-    """Run reprepro without a shell so package names and paths cannot inject commands."""
-    executable = shutil.which("reprepro")
-    if not executable:
-        raise RuntimeError("reprepro is not installed")
-    return subprocess.run(
-        [executable, "--basedir", str(Path(repo_root)), *map(str, args)],
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-
-
 def reprepro_include_deb(repo_root: Path, distribution: str, deb_path: Path, component: str = "main", *, runner=run_command) -> dict:
     """Publish a verified .deb through the repository's native reprepro database."""
     root = Path(repo_root).resolve()
     command = " ".join(shlex.quote(value) for value in ("reprepro", "--basedir", str(root), "--component", component, "includedeb", distribution, str(Path(deb_path).resolve())))
     result = runner(command, workspace=root, working_directory=".", environment=reprepro_environment(), timeout=120)
     return {"backend": "reprepro", "command": result}
-
-
-def reprepro_remove_package(repo_root: Path, distribution: str, package: str) -> dict:
-    """Remove a package from a distribution and let reprepro update indices/signatures."""
-    result = _run_reprepro(repo_root, "remove", distribution, package)
-    return {"backend": "reprepro", "command": "remove", "stdout": result.stdout, "stderr": result.stderr}
-
-
-def reprepro_delete_unreferenced(repo_root: Path) -> dict:
-    """Delete pool files that are no longer referenced by reprepro."""
-    result = _run_reprepro(repo_root, "deleteunreferenced")
-    return {"backend": "reprepro", "command": "deleteunreferenced", "stdout": result.stdout, "stderr": result.stderr}
-
-
-def regenerate_metadata(repo_root: Path, distribution: str, component: str, architecture: str) -> dict:
-    repo_root = Path(repo_root)
-    binary_dir = repo_root / "dists" / distribution / component / f"binary-{architecture}"
-    binary_dir.mkdir(parents=True, exist_ok=True)
-    packages = binary_dir / "Packages"
-    release = repo_root / "dists" / distribution / "Release"
-    subprocess.run(f"apt-ftparchive packages {repo_root / 'pool'} > {packages}", shell=True, check=True)
-    with packages.open("rb") as src, gzip.open(str(packages) + ".gz", "wb") as dst:
-        shutil.copyfileobj(src, dst)
-    subprocess.run(f"apt-ftparchive release {repo_root / 'dists' / distribution} > {release}", shell=True, check=True)
-    return {"packages": str(packages), "release": str(release)}
-
-
-def target_pool_path(repo_root: Path, package: str, version: str, architecture: str) -> Path:
-    first = package[:1]
-    return Path(repo_root) / "pool" / "main" / first / package / f"{package}_{version}_{architecture}.deb"

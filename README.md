@@ -12,15 +12,28 @@ DebBuilder is a self-hosted console for building, validating, and publishing Deb
 - service-account, persistent-directory, and advanced systemd unit generation;
 - Podman-based validation profiles and toolchains;
 - `reprepro` publication and reconciliation;
-- package lifecycle and Build Run tracking;
+- Build Run-derived package state and history;
 - runtime/user JSON Recipes;
 - OIDC/header/disabled authentication modes and notifications.
+
+The canonical lifecycle is:
+
+```text
+Recipe → Build Run → OCI validation → APT publication
+```
+
+Validation and publication records belong to the Build Run that produced the
+artifact. There is no separate package-publication endpoint or parallel legacy
+execution model.
 
 ## Project layout
 
 ```text
 debbuilder/          Python backend package
 static/              Browser UI
+static/js/pages/     Vanilla JavaScript page controllers
+static/js/recipe/    Recipe-specific browser behavior
+static/css/          Page-specific styles loaded after the shared stylesheet
 tests/               Unit and static UI tests
 examples/            Public examples
 examples/recipes/    Source-controlled sample Recipes
@@ -28,6 +41,20 @@ data/workflows/      Runtime/user Recipes (ignored by Git)
 data/                Local runtime data (ignored by Git except structural .gitkeep files)
 server.py            Entrypoint
 ```
+
+Backend runtime paths and environment parsing live in `debbuilder/runtime.py`.
+HTTP routing stays in `debbuilder/http_handler.py`; package projections,
+executions, automation, validation, and publication are separate services. The
+application module wires those boundaries together for the stdlib HTTP server.
+
+Recipe input is normalized to the nested Recipe v1 schema. A narrow
+`recipe_migrations.py` module translates only `build.timeout`,
+`install.config_policy`, and persisted `service.configured`, which still occur
+in current Recipes or Build Run snapshots. It also completes the archive source
+and asset-selection fields for persisted upstream-archive Recipes that already
+select a release asset. New code and API clients must emit the canonical shape.
+Build Run inventories are stored in per-run manifests rather than inline in
+`run.json`.
 
 ## Configuration
 
@@ -82,7 +109,7 @@ http://127.0.0.1:8099
 ```bash
 python3 -m py_compile server.py debbuilder/*.py
 python3 -m unittest discover -s tests -v
-node --check static/*.js
+for file in $(find static -name '*.js' -type f); do node --check "$file"; done
 git diff --check
 ```
 
@@ -100,8 +127,10 @@ Clicking the command copies it to the clipboard.
 
 DebBuilder is meant to be self-hosted and operated by trusted administrators.
 
-- Real execution is disabled unless explicitly enabled.
-- Unsafe build commands are disabled unless explicitly enabled.
+- A real build requires an explicit Build action and confirmation; Test creates
+  a distinct dry-run Build Run.
+- Build commands execute only through the central runner with `shell=False` and
+  a confined Build Run workspace.
 - Administrative API routes can be protected with OIDC or a trusted reverse-proxy header.
 - Public APT files under `/dists/*`, `/pool/*`, `/repository.gpg` and `/install.sh` stay accessible without authentication.
 

@@ -6,6 +6,7 @@ import json
 import shutil
 import secrets
 import time
+from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
 
@@ -27,6 +28,13 @@ class BuildStore:
     def run_dir(self, run_id: str) -> Path:
         require_safe_name(run_id, "build run id")
         return self.root / run_id
+
+    @contextmanager
+    def locked_run(self, run_id: str):
+        """Serialize a complete lifecycle mutation for one Build Run."""
+        path = self.run_dir(run_id) / "run.json"
+        with storage.locked_path(path):
+            yield
 
     def create(self, recipe: dict, *, recipe_id: str = "", mode: str = "dry_run", run_id: str | None = None) -> dict:
         canonical = recipe_for_storage(recipe)
@@ -197,9 +205,7 @@ class BuildStore:
             return str(path)
 
     def staging_content_files(self, run_id: str, details: dict) -> list[str]:
-        """Read both legacy inline inventories and externalized inventories."""
-        if "content_files" in details:
-            return list(details.get("content_files") or [])
+        """Read an externalized staging inventory."""
         reference = details.get("content_manifest")
         if not reference:
             return []
@@ -220,8 +226,6 @@ class BuildStore:
         return stored
 
     def artifact_files(self, run_id: str, inspection: dict) -> list[dict]:
-        if "files" in inspection:
-            return list(inspection.get("files") or [])
         reference = inspection.get("files_manifest")
         if not reference:
             return []

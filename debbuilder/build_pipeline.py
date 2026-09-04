@@ -1,8 +1,4 @@
-"""Build Run orchestration boundary.
-
-Phase 2 establishes durable runs and workspaces. Pipeline stages are attached
-in later phases and remain pending until they are genuinely executed.
-"""
+"""Canonical Recipe-to-Build-Run pipeline orchestration."""
 from __future__ import annotations
 
 import time
@@ -11,39 +7,6 @@ from .build_models import utc_now
 from .build_store import BuildStore
 from . import build_executor, deb_inspector, debian_packaging, dependency_checker, project_detection, source_acquisition, source_changes, upstream_archive, upstream_artifact
 from .recipe_schema import validate_recipe_metadata
-
-
-def prepare_run(recipe: dict, *, store: BuildStore, dry_run: bool, recipe_id: str = "") -> dict:
-    canonical = validate_recipe_metadata(recipe)
-    run = store.create(canonical, recipe_id=recipe_id or canonical["name"], mode="dry_run" if dry_run else "build")
-    started = time.monotonic()
-    run["status"] = "running"
-    run["started_at"] = utc_now()
-    store.save(run)
-    store.append_event(run, "Recipe snapshot created and isolated workspace prepared.")
-    if dry_run:
-        run["status"] = "prepared"
-        store.append_event(run, "Pipeline stages are pending; source acquisition is connected in Phase 3.")
-    else:
-        run["status"] = "failed"
-        run["error"] = "Build execution is unavailable until the Source stage is connected."
-        store.append_event(run, run["error"], level="error")
-    run["finished_at"] = utc_now()
-    run["duration"] = round(time.monotonic() - started, 6)
-    store.save(run)
-    log = store.log_text(run["id"])
-    return {
-        "run_id": run["id"],
-        "status": run["status"],
-        "returncode": 0 if run["status"] == "prepared" else 1,
-        "version": "",
-        "stdout": log,
-        "stderr": run.get("error") or "",
-        "script": "",
-        "workspace": run["workspace"],
-        "steps": run["steps"],
-        "publication": None,
-    }
 
 
 def _step(run: dict, name: str) -> dict:
@@ -324,10 +287,6 @@ def run_pipeline(recipe: dict, *, store: BuildStore, dry_run: bool, recipe_id: s
     return _finish_run(run, store, run_started, lifecycle_callback, canonical)
 
 
-# Compatibility name retained for Phase 3 callers and tests.
-run_source_detection = run_pipeline
-
-
 def execution_summary(run: dict) -> dict:
     validations = run.get("validations") or []
     publications = run.get("publications") or []
@@ -345,8 +304,7 @@ def execution_summary(run: dict) -> dict:
     }
 
 
-def execution_detail(run: dict, store: BuildStore) -> dict:
+def execution_detail(run: dict) -> dict:
     detail = {**execution_summary(run), **run}
-    detail["log"] = store.log_text(run["id"])
     detail["script"] = ""
     return detail

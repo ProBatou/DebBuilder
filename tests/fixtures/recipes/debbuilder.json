@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "name": "debbuilder",
+  "active": true,
+  "package": {"name": "debbuilder", "version_revision": "2", "architecture": "all"},
+  "source": {
+    "provider": "github",
+    "repository": "example/debbuilder",
+    "tracking": "latest_release",
+    "version": {"source": "tag"}
+  },
+  "build": {"detected_project": "python", "commands": [], "output": {"mode": "paths", "paths": ["debbuilder", "server.py", "static"]}},
+  "install": {
+    "destination": "/opt/debbuilder",
+    "content": {"source": "build_output"},
+    "owner": {"user": "root", "group": "root"},
+    "config_files": [
+      {"source": "packaging/debbuilder.env", "destination": "/etc/debbuilder/debbuilder.env", "policy": "create_if_missing"}
+    ],
+    "maintainer_scripts": {
+      "preinst": "install -d -m 0751 -o root -g root /var/lib/debbuilder\ninstall -d -m 0750 -o root -g root /var/lib/debbuilder/workflows /var/lib/debbuilder/builds\ninstall -d -m 0751 -o root -g root /var/lib/debbuilder/repository\ninstall -d -m 0700 -o root -g root /var/lib/debbuilder/.gnupg"
+    }
+  },
+  "service": {
+    "enabled": true,
+    "name": "debbuilder.service",
+    "type": "simple",
+    "user": "root",
+    "group": "root",
+    "command": "/usr/bin/python3 /opt/debbuilder/server.py"
+  }
+}

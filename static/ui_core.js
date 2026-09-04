@@ -30,34 +30,6 @@ const STATUS_LABELS = {
 };
 window.STATUS_LABELS = STATUS_LABELS;
 
-const BUILDABLE_PACKAGE_STATES = new Set([
-  'update_available',
-  'build_available',
-  'build_required',
-  'not_published',
-  'recipe_missing',
-  'failed',
-]);
-window.BUILDABLE_PACKAGE_STATES = BUILDABLE_PACKAGE_STATES;
-
-function executionLifecycleModel(execution, pendingAction = '') {
-  const validation = (execution.validations || []).slice(-1)[0] || {};
-  const publication = (execution.publications || []).slice(-1)[0] || {};
-  const buildStatus = execution.status || 'pending';
-  const validationStatus = pendingAction === 'validation' ? 'running' : (validation.status || 'not_run');
-  const publicationStatus = pendingAction === 'publication' ? 'running' : (publication.status || 'not_run');
-  const buildReady = execution.mode === 'build' && buildStatus === 'success' && !!execution.artifact?.path;
-  const published = publicationStatus === 'success';
-  return {
-    buildStatus, validationStatus, publicationStatus, validation, publication,
-    canValidate: buildReady && validationStatus !== 'running',
-    validationDisabled: validationStatus === 'running',
-    canPublish: buildReady && validationStatus === 'success' && !published,
-    publicationDisabled: publicationStatus === 'running',
-  };
-}
-window.executionLifecycleModel = executionLifecycleModel;
-
 function esc(value) {
   return String(value ?? '').replace(/[&<>'"]/g, character => ({
     '&': '&amp;',

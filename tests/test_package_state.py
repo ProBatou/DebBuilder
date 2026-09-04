@@ -1,10 +1,12 @@
+"""APT repository parsing and canonical Build Run-derived package state tests."""
+
 import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from debbuilder import apt_repo, deb_inspector, package_store, operations
+from debbuilder import apt_repo, deb_inspector, package_store
 
 
 class AptRepoTests(unittest.TestCase):
@@ -120,6 +122,16 @@ class DebInspectorTests(unittest.TestCase):
 
 
 class PackageStoreTests(unittest.TestCase):
+    def test_allowed_actions_come_only_from_latest_build_run_facts(self):
+        run = {
+            "mode": "build", "status": "success", "artifact": {"path": "app.deb"},
+            "validations": [{"status": "success"}], "publications": [],
+        }
+        actions = package_store.allowed_actions("update_available", "app-recipe", run)
+        self.assertEqual(actions, {"test": True, "build": True, "validate": True, "publish": True})
+        failed = package_store.allowed_actions("build_failed", "app-recipe", {"mode": "build", "status": "failed"})
+        self.assertEqual(failed, {"test": True, "build": True, "validate": False, "publish": False})
+
     def test_lifecycle_display_statuses(self):
         status = package_store.derive_lifecycle_status
         self.assertEqual(status("success"), "validation_needed")
@@ -171,21 +183,6 @@ class PackageStoreTests(unittest.TestCase):
         self.assertIn("repository", enriched)
 
 
-class OperationsTests(unittest.TestCase):
-    def test_publish_requires_explicit_confirmation_even_when_deb_exists(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            fake = Path(tmp) / "app_1.0_all.deb"
-            fake.write_bytes(b"not a real deb")
-            with self.assertRaises(PermissionError):
-                operations.publish_deb_operation(fake, repo_root=Path(tmp), package_name="app", version="1.0", dry_run=False, confirm="")
-
-    def test_publish_dry_run_does_not_modify_repo(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            fake = Path(tmp) / "app_1.0_all.deb"
-            fake.write_bytes(b"not a real deb")
-            result = operations.publish_deb_operation(fake, repo_root=Path(tmp), package_name="app", version="1.0", dry_run=True)
-            self.assertEqual(result["status"], "dry_run")
-            self.assertFalse((Path(tmp) / "pool").exists())
 
 
 if __name__ == "__main__":

@@ -1,15 +1,15 @@
-"""Versioned Recipe model, compatibility migration, and validation."""
+"""Canonical versioned Recipe model and validation."""
 from __future__ import annotations
 
 import copy
 import re
 
+from .recipe_migrations import migrate_legacy_recipe
+
 SCHEMA_VERSION = 1
 SAFE_NAME = re.compile(r"^[a-zA-Z0-9_.+-]+$")
 SAFE_PACKAGE = re.compile(r"^[a-z0-9][a-z0-9+.-]*$")
 SAFE_ARCH = {"all", "amd64", "arm64", "armhf"}
-STANDARD_STEP_TYPES = frozenset()
-SUPPORTED_STEP_TYPES = STANDARD_STEP_TYPES
 SOURCE_CHANGE_TYPES = {"replace", "insert_before", "insert_after", "remove", "create_file", "remove_file"}
 OUTPUT_MODES = {"path", "paths", "source"}
 ARTIFACT_MODES = {"source_build", "upstream_deb", "upstream_archive"}
@@ -81,24 +81,21 @@ def _optional_positive_int(value, what: str) -> int | None:
     return parsed
 
 
-def _config_files(value, default_policy: str) -> list[dict]:
+def _config_files(value) -> list[dict]:
     rows = _list(value, "install.config_files")
     normalized = []
     for row in rows:
-        if isinstance(row, str) and row.strip():
-            destination = row.strip()
-            normalized.append({"source": destination.lstrip("/"), "destination": destination, "policy": default_policy})
-        elif isinstance(row, dict) and isinstance(row.get("source"), str) and isinstance(row.get("destination"), str):
+        if isinstance(row, dict) and isinstance(row.get("source"), str) and isinstance(row.get("destination"), str):
             item = {
                 "source": row["source"].strip(), "destination": row["destination"].strip(),
-                "policy": str(row.get("policy") or default_policy),
+                "policy": str(row.get("policy") or "dpkg_conffile"),
             }
             for key in ("owner", "group", "mode"):
                 if key in row and str(row.get(key) or "").strip():
                     item[key] = str(row[key]).strip()
             normalized.append(item)
         else:
-            raise ValueError("install.config_files must contain paths or source/destination mappings")
+            raise ValueError("install.config_files must contain source/destination mappings")
     return normalized
 
 
@@ -115,23 +112,11 @@ def _directories(value) -> list[dict]:
     return normalized
 
 
-def normalize_steps(workflow: dict) -> list[dict]:
-    """Preserve legacy step payloads without promoting them to executable steps."""
-    steps = workflow.get("steps") or []
-    if not isinstance(steps, list):
-        raise ValueError("workflow.steps must be a list")
-    normalized = []
-    for index, step in enumerate(steps, 1):
-        if not isinstance(step, dict):
-            raise ValueError(f"step {index} must be an object")
-        normalized.append(copy.deepcopy(step))
-    return normalized
-
-
-def normalize_recipe(workflow: dict, *, compatibility_aliases: bool = True) -> dict:
-    """Return a canonical Recipe v1, migrating the former flat metadata shape."""
+def normalize_recipe(workflow: dict) -> dict:
+    """Return a canonical Recipe v1 with defaults applied."""
     if not isinstance(workflow, dict):
         raise ValueError("workflow must be an object")
+    workflow = migrate_legacy_recipe(workflow)
     version = workflow.get("schema_version", SCHEMA_VERSION)
     if version != SCHEMA_VERSION:
         raise ValueError(f"unsupported recipe schema version: {version}")
@@ -148,18 +133,17 @@ def normalize_recipe(workflow: dict, *, compatibility_aliases: bool = True) -> d
     content_in = _dict(install_in.get("content"), "install.content")
     scripts_in = _dict(install_in.get("maintainer_scripts"), "install.maintainer_scripts")
     name = str(workflow.get("name") or "recipe")
-    legacy_step_package = next((str(step.get("package")) for step in normalize_steps(workflow) if step.get("package")), "")
-    package_name = str(package_in.get("name") or workflow.get("package_name") or legacy_step_package or name).lower()
-    repository = str(source_in.get("repository") or workflow.get("github_repository") or "").strip()
-    tracking = str(source_in.get("tracking") or workflow.get("version_tracking") or "latest_release")
-    version_source = str(version_in.get("source") or workflow.get("version_source") or "tag")
-    expression = str(version_in.get("expression") or workflow.get("version_expression") or "")
+    package_name = str(package_in.get("name") or name).lower()
+    repository = str(source_in.get("repository") or "").strip()
+    tracking = str(source_in.get("tracking") or "latest_release")
+    version_source = str(version_in.get("source") or "tag")
+    expression = str(version_in.get("expression") or "")
     output_mode = str(output_in.get("mode") or ("path" if "output" in build_in else "source"))
     output_path = str(output_in.get("path") if "path" in output_in else ("dist" if output_mode == "path" else ""))
     output_paths = _string_list(output_in.get("paths"), "build.output.paths")
     content_source = str(content_in.get("source") or "build_output")
     install_destination = "" if content_source == "configured_files" else str(install_in.get("destination") or f"/opt/{package_name}")
-    service_requested = bool(service_in.get("configured") or service_in.get("enabled") or any(
+    service_requested = bool(service_in.get("enabled") or any(
         service_in.get(key) for key in (
             "name", "description", "user", "group", "command", "environment_files", "environment", "after", "wants",
             "requires", "restart_sec", "timeout_start_sec", "timeout_stop_sec", "kill_signal", "exec_start_pre",
@@ -168,11 +152,9 @@ def normalize_recipe(workflow: dict, *, compatibility_aliases: bool = True) -> d
     ))
     service_configured = bool(str(service_in.get("name") or "").strip() and str(service_in.get("command") or "").strip())
     service_enabled = bool(service_in.get("enabled", False))
-    config_policy = str(install_in.get("config_policy") or "dpkg_conffile")
-    legacy_asset_selector = bool(artifact_in.get("asset_name") or artifact_in.get("name_pattern"))
-    archive_source = str(artifact_in.get("archive_source") or ("release_asset" if legacy_asset_selector else "auto"))
+    archive_source = str(artifact_in.get("archive_source") or "auto")
     asset_selection = str(artifact_in.get("asset_selection") or ("exact" if artifact_in.get("asset_name") else "pattern"))
-    source_archive_format = str(artifact_in.get("archive_format") or artifact_in.get("source_archive_format") or "tar.gz")
+    archive_format = str(artifact_in.get("archive_format") or "tar.gz")
     artifact_mode = str(artifact_in.get("mode") or "source_build")
     artifact_type = str(artifact_in.get("type") or ("archive" if artifact_mode == "upstream_archive" else "deb"))
     recipe = {
@@ -206,7 +188,7 @@ def normalize_recipe(workflow: dict, *, compatibility_aliases: bool = True) -> d
             "asset_name": str(artifact_in.get("asset_name") or ""),
             "archive_source": archive_source,
             "asset_selection": asset_selection,
-            "archive_format": source_archive_format,
+            "archive_format": archive_format,
             "selected_files": _string_list(artifact_in.get("selected_files"), "artifact.selected_files"),
         },
         "build": {
@@ -217,7 +199,7 @@ def normalize_recipe(workflow: dict, *, compatibility_aliases: bool = True) -> d
             "extra_dependencies": _string_list(build_in.get("extra_dependencies"), "build.extra_dependencies"),
             "source_changes": _list(build_in.get("source_changes"), "build.source_changes"),
             "commands": _string_list(build_in.get("commands"), "build.commands"),
-            "inactivity_timeout": _positive_int_or_default(build_in.get("inactivity_timeout", build_in.get("timeout")), 300, "build.inactivity_timeout"),
+            "inactivity_timeout": _positive_int_or_default(build_in.get("inactivity_timeout"), 300, "build.inactivity_timeout"),
             "maximum_runtime": _optional_positive_int(build_in.get("maximum_runtime"), "build.maximum_runtime"),
             "environment": _environment(build_in.get("environment"), "build.environment"),
             "working_directory": str(build_in.get("working_directory") or "."),
@@ -240,8 +222,7 @@ def normalize_recipe(workflow: dict, *, compatibility_aliases: bool = True) -> d
             "directories": _directories(install_in.get("directories")),
             "directory_mode": str(install_in.get("directory_mode") or "0755"),
             "file_mode": str(install_in.get("file_mode") or "0644"),
-            "config_files": _config_files(install_in.get("config_files"), config_policy),
-            "config_policy": config_policy,
+            "config_files": _config_files(install_in.get("config_files")),
             "maintainer_scripts": {key: str(scripts_in.get(key) or "") for key in ("preinst", "postinst", "prerm", "postrm")},
         },
         "service": {
@@ -269,12 +250,7 @@ def normalize_recipe(workflow: dict, *, compatibility_aliases: bool = True) -> d
             "syslog_identifier": str(service_in.get("syslog_identifier") or ""),
             "ambient_capabilities": _string_list(service_in.get("ambient_capabilities"), "service.ambient_capabilities"),
         },
-        "steps": normalize_steps(workflow),
     }
-    if compatibility_aliases:
-        recipe.update({"package_name": package_name, "github_repository": repository, "version_tracking": tracking, "version_source": version_source})
-        if expression:
-            recipe["version_expression"] = expression
     return recipe
 
 
@@ -391,9 +367,7 @@ def validate_recipe_metadata(workflow: dict) -> dict:
         raise ValueError("install.destination must be a supported FHS package path")
     if install["directory_mode"] not in {"0755", "0750", "0700"} or install["file_mode"] not in {"0644", "0640", "0600"}:
         raise ValueError("unsupported install permissions")
-    if install["config_policy"] not in CONFIG_POLICIES:
-        raise ValueError("unsupported configuration policy")
-    if install["content"]["source"] not in {"build_output", "source", "configured_files"}:
+    if install["content"]["source"] not in {"build_output", "configured_files"}:
         raise ValueError("unsupported install content source")
     for configured in install["config_files"]:
         path = configured["destination"]
@@ -453,20 +427,12 @@ def validate_recipe_metadata(workflow: dict) -> dict:
 
 
 def recipe_for_storage(workflow: dict) -> dict:
-    """Return canonical persisted data without deprecated flat aliases."""
+    """Return the compact canonical persisted Recipe."""
     recipe = validate_recipe_metadata(workflow)
-    for key in ("package_name", "github_repository", "version_tracking", "version_source", "version_expression"):
-        recipe.pop(key, None)
     if recipe["build"]["output"]["mode"] != "path":
         recipe["build"]["output"].pop("path", None)
-    recipe["install"].pop("config_policy", None)
     recipe["service"].pop("configured", None)
     return recipe
-
-
-def uses_automatic_pipeline(workflow: dict) -> bool:
-    recipe = normalize_recipe(workflow)
-    return bool(recipe["package"]["name"] and recipe["source"]["repository"])
 
 
 def normalize_github_version(value: str) -> str:

@@ -182,7 +182,7 @@ def prepare_staging(recipe: dict, build_result: dict, workspace: str | Path, *, 
             if not preview:
                 raise PackagingError("configuration_source_missing", f"Configuration source file is missing: {source_name}")
             preview_warnings.append(f"Configuration source is unavailable during preview: {source_name}")
-        policy = configured.get("policy", install.get("config_policy", "dpkg_conffile"))
+        policy = configured.get("policy", "dpkg_conffile")
         mapping_mode = configured.get("mode") or install["file_mode"]
         mapping_owner = configured.get("owner") or owner["user"]
         mapping_group = configured.get("group") or owner["group"]

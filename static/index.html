@@ -4,7 +4,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>DebBuilder</title>
-  <link rel="stylesheet" href="/style.css?v=20260904-3" />
+  <link rel="stylesheet" href="/style.css?v=20260904-4" />
+  <link rel="stylesheet" href="/css/logs.css?v=20260904-1" />
 </head>
 <body>
   <header class="mobile-topbar" aria-label="Mobile navigation">
@@ -33,8 +34,8 @@
         <div class="dashboard-shell">
           <div class="metrics dashboard-metrics" id="dashboardMetrics"></div>
           <section class="card dashboard-card dashboard-repo-card"><div id="dashboardRepoState">Loading repository…</div></section>
-          <section class="card dashboard-card"><div class="section-title"><h3>Package tracking</h3><button class="btn-primary" onclick="switchView('packages')">View packages</button></div><div id="dashboardPackageFlow" class="dashboard-package-flow">Loading…</div></section>
-          <section class="card dashboard-card"><div class="section-title"><h3>Latest operations</h3><button onclick="switchView('logs')">View logs</button></div><div id="latestOperations" class="list muted">Loading…</div></section>
+          <section class="card dashboard-card"><div class="section-title"><h3>Package tracking</h3><button class="btn-primary" data-view="packages">View packages</button></div><div id="dashboardPackageFlow" class="dashboard-package-flow">Loading…</div></section>
+          <section class="card dashboard-card"><div class="section-title"><h3>Latest operations</h3><button data-view="logs">View logs</button></div><div id="latestOperations" class="list muted">Loading…</div></section>
         </div>
       </section>
 
@@ -126,17 +127,16 @@
                     <label class="span-12"><span>Runtime Depends</span><input id="packageRuntimeDependencies"></label>
                     <label class="span-12"><span>Description</span><textarea id="packageDescription" rows="2"></textarea></label>
                     <label class="span-4"><span>Install directory</span><input id="installDestination"></label>
-                    <label class="span-4"><span>Installed content</span><select id="installContentSource"><option value="build_output">Selected build output</option><option value="source" hidden>Selected build output (legacy)</option><option value="configured_files">Custom mappings</option></select></label>
+                    <label class="span-4"><span>Installed content</span><select id="installContentSource"><option value="build_output">Selected build output</option><option value="configured_files">Custom mappings</option></select></label>
                     <label class="span-2"><span>Dirs</span><select id="installDirectoryMode"><option>0755</option><option>0750</option><option>0700</option></select></label>
                     <label class="span-2"><span>Files</span><select id="installFileMode"><option>0644</option><option>0640</option><option>0600</option></select></label>
                     <label class="span-3"><span>Payload user</span><input id="installOwnerUser"></label>
                     <label class="span-3"><span>Payload group</span><input id="installOwnerGroup"></label>
                     <label class="span-3"><span>Service account</span><input id="installAccountUser"></label>
                     <label class="span-3"><span>Service group</span><input id="installAccountGroup"></label>
-                    <label class="span-12"><span>Account provisioning</span><select id="installAccountProvisioning"><option value="ensure">Ensure account exists</option><option value="existing">Use existing account</option><option value="custom" hidden>Custom (legacy)</option></select></label>
+                    <label class="span-12"><span>Account provisioning</span><select id="installAccountProvisioning"><option value="ensure">Ensure account exists</option><option value="existing">Use existing account</option></select></label>
                     <label class="span-12"><span>Persistent directories</span><textarea id="installDirectories" rows="3" placeholder="/var/lib/example | example | example | 0750"></textarea></label>
                   </div>
-                  <details class="account-provisioning-advanced" id="installAccountProvisioningAdvanced" hidden><summary>Legacy account overrides</summary><div class="recipe-step-fields"><label class="span-6"><span>Create user</span><input id="installCreateUser" type="checkbox"></label><label class="span-6"><span>Create group</span><input id="installCreateGroup" type="checkbox"></label></div></details>
                 </div>
                 <div class="recipe-form-group install-automatic-group" id="installAutomaticGroup">
                   <div class="install-mapping-head"><div><span class="recipe-group-title">Selected build output</span><p>These files are installed automatically under the install directory.</p></div></div>
@@ -280,6 +280,10 @@
   <script src="/settings.js?v=20260904-2"></script>
   <script src="/recipe_serialization.js?v=20260903-2"></script>
   <script src="/app.js?v=20260903-2"></script>
-  <script src="/admin.js?v=20260904-3"></script>
+  <script src="/js/pages/dashboard.js?v=20260904-1"></script>
+  <script src="/js/pages/packages.js?v=20260904-1"></script>
+  <script src="/js/pages/logs.js?v=20260904-1"></script>
+  <script src="/js/recipe/source_changes.js?v=20260904-1"></script>
+  <script src="/js/admin.js?v=20260904-1"></script>
 </body>
 </html>

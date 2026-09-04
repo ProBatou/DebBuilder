@@ -32,6 +32,19 @@ def publication_readiness(run: dict) -> dict:
 
 
 def publish_artifact(run_id: str, *, store: BuildStore, repo_root: str | Path, distribution: str, component: str, confirm: str, runner=None) -> dict:
+    with store.locked_run(run_id):
+        return _publish_artifact_locked(
+            run_id,
+            store=store,
+            repo_root=repo_root,
+            distribution=distribution,
+            component=component,
+            confirm=confirm,
+            runner=runner,
+        )
+
+
+def _publish_artifact_locked(run_id: str, *, store: BuildStore, repo_root: str | Path, distribution: str, component: str, confirm: str, runner=None) -> dict:
     run = store.load(run_id)
     if not run:
         raise PublicationError("build_run_not_found", "Build Run was not found")
@@ -123,6 +136,18 @@ def publish_artifact(run_id: str, *, store: BuildStore, repo_root: str | Path, d
 
 
 def reconcile_publication(run_id: str, *, store: BuildStore, repo_root: str | Path, distribution: str, component: str, runner=None) -> dict:
+    with store.locked_run(run_id):
+        return _reconcile_publication_locked(
+            run_id,
+            store=store,
+            repo_root=repo_root,
+            distribution=distribution,
+            component=component,
+            runner=runner,
+        )
+
+
+def _reconcile_publication_locked(run_id: str, *, store: BuildStore, repo_root: str | Path, distribution: str, component: str, runner=None) -> dict:
     """Record external publication truth without importing or rewriting an old attempt."""
     run = store.load(run_id)
     if not run:

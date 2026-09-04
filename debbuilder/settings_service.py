@@ -1,7 +1,6 @@
 """Settings assembly and persistence helpers."""
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from .settings_store import (
@@ -14,7 +13,7 @@ from .settings_store import (
     save_github_token,
     save_oidc_client_secret,
     save_settings,
-    validate_apt_settings,
+    validate_settings,
 )
 
 
@@ -27,13 +26,14 @@ def defaults_from_environment(
     oidc_issuer: str,
     oidc_client_id: str,
     oidc_redirect_uri: str,
+    public_url: str = "",
 ) -> dict:
     return default_settings(
         repo_default,
         suite_default,
         component_default,
         "amd64",
-        os.environ.get("DEBBUILDER_PUBLIC_URL", ""),
+        public_url,
         security={
             "auth_mode": auth_mode,
             "oidc_issuer": "" if oidc_issuer.endswith("example.invalid") else oidc_issuer,
@@ -54,7 +54,6 @@ def public_settings_view(*, data_dir: Path, root: Path, settings: dict, port: in
         "general": general,
         "apt": settings["apt"],
         "github": {
-            "api_url": settings["github"]["api_url"],
             "token": "masked",
             "token_configured": github_token_configured(data_dir),
         },
@@ -72,7 +71,7 @@ def public_settings_view(*, data_dir: Path, root: Path, settings: dict, port: in
 
 
 def update_settings(data_dir: Path, payload: dict, current: dict, view_factory) -> dict:
-    new_settings = validate_apt_settings(payload, current)
+    new_settings = validate_settings(payload, current)
     github_payload = payload.get("github") if isinstance(payload, dict) else None
     if isinstance(github_payload, dict) and github_payload.get("token"):
         save_github_token(data_dir, str(github_payload["token"]))

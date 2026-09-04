@@ -397,6 +397,29 @@ class AdminApiTests(unittest.TestCase):
         self.assertEqual(created["recipe"], "new-app")
         self.assertEqual(created["source"]["repository"], "example/new-app")
 
+    def test_recipe_created_from_package_stays_linked_after_canonical_reload(self):
+        status, created = self.request("POST", "/api/packages", {"name": "nested-app", "architecture": "amd64", "source": {"type": "github", "repository": "example/nested-app"}})
+        self.assertEqual(status, 200)
+        workflow = {
+            "schema_version": 1, "name": "nested-app", "active": True,
+            "package": {"name": "nested-app", "architecture": "amd64"},
+            "source": {"provider": "github", "repository": "example/nested-app", "tracking": "latest_release", "version": {"source": "tag"}},
+            "build": {"commands": [], "output": {"mode": "source"}},
+        }
+        status, _ = self.request("POST", "/api/workflows/nested-app", {"workflow": workflow})
+        self.assertEqual(status, 200)
+        stored = json.loads((server.USER_WORKFLOWS / "nested-app.json").read_text())
+        self.assertNotIn("package_name", stored)
+        self.assertNotIn("github_repository", stored)
+        package = server.get_package("nested-app")
+        self.assertEqual(package["recipe"], "nested-app")
+        self.assertEqual(package["source"]["repository"], "example/nested-app")
+        status, data = self.request("GET", "/api/packages")
+        self.assertEqual(status, 200)
+        listed = next(row for row in data["packages"] if row["name"] == "nested-app")
+        self.assertEqual(listed["recipe"], "nested-app")
+        self.assertNotIn("recipe_error", listed)
+
     def test_published_inventory_package_is_enriched_from_matching_recipe_metadata(self):
         inventory = json.loads(server.inventory_file().read_text())
         inventory.append({

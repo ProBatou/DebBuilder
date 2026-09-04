@@ -13,6 +13,9 @@ SUPPORTED_STEP_TYPES = STANDARD_STEP_TYPES
 SOURCE_CHANGE_TYPES = {"replace", "insert_before", "insert_after", "remove", "create_file", "remove_file"}
 OUTPUT_MODES = {"path", "paths", "source"}
 ARTIFACT_MODES = {"source_build", "upstream_deb", "upstream_archive"}
+ARCHIVE_SOURCES = {"auto", "github_source", "release_asset"}
+ARCHIVE_ASSET_SELECTIONS = {"pattern", "exact"}
+SOURCE_ARCHIVE_FORMATS = {"tar.gz", "zip"}
 CONFIG_POLICIES = {"dpkg_conffile", "replace", "create_if_missing"}
 SERVICE_TYPES = {"simple", "exec", "forking", "oneshot", "notify", "dbus"}
 RESTART_POLICIES = {"", "no", "always", "on-success", "on-failure", "on-abnormal", "on-abort", "on-watchdog"}
@@ -142,6 +145,12 @@ def normalize_recipe(workflow: dict, *, compatibility_aliases: bool = True) -> d
     service_configured = bool(str(service_in.get("name") or "").strip() and str(service_in.get("command") or "").strip())
     service_enabled = bool(service_in.get("enabled", False))
     config_policy = str(install_in.get("config_policy") or "dpkg_conffile")
+    legacy_asset_selector = bool(artifact_in.get("asset_name") or artifact_in.get("name_pattern"))
+    archive_source = str(artifact_in.get("archive_source") or ("release_asset" if legacy_asset_selector else "auto"))
+    asset_selection = str(artifact_in.get("asset_selection") or ("exact" if artifact_in.get("asset_name") else "pattern"))
+    source_archive_format = str(artifact_in.get("archive_format") or artifact_in.get("source_archive_format") or "tar.gz")
+    artifact_mode = str(artifact_in.get("mode") or "source_build")
+    artifact_type = str(artifact_in.get("type") or ("archive" if artifact_mode == "upstream_archive" else "deb"))
     recipe = {
         "schema_version": SCHEMA_VERSION,
         "name": name,
@@ -164,13 +173,16 @@ def normalize_recipe(workflow: dict, *, compatibility_aliases: bool = True) -> d
             "version": {"source": version_source, "expression": expression},
         },
         "artifact": {
-            "mode": str(artifact_in.get("mode") or "source_build"),
-            "type": str(artifact_in.get("type") or "deb"),
+            "mode": artifact_mode,
+            "type": artifact_type,
             "architecture": str(artifact_in.get("architecture") or package_in.get("architecture") or "amd64"),
             "name_pattern": str(artifact_in.get("name_pattern") or ""),
             "match_package": artifact_in.get("match_package", True),
             "match_version": artifact_in.get("match_version", True),
             "asset_name": str(artifact_in.get("asset_name") or ""),
+            "archive_source": archive_source,
+            "asset_selection": asset_selection,
+            "archive_format": source_archive_format,
             "selected_files": _string_list(artifact_in.get("selected_files"), "artifact.selected_files"),
         },
         "build": {
@@ -296,6 +308,12 @@ def validate_recipe_metadata(workflow: dict) -> dict:
         raise ValueError("unsupported upstream artifact type")
     if artifact["mode"] == "upstream_archive" and artifact["type"] not in {"archive", "tar.gz", "tgz", "tar.xz", "zip"}:
         raise ValueError("unsupported upstream archive type")
+    if artifact["archive_source"] not in ARCHIVE_SOURCES:
+        raise ValueError("unsupported upstream archive source")
+    if artifact["asset_selection"] not in ARCHIVE_ASSET_SELECTIONS:
+        raise ValueError("unsupported release asset selection mode")
+    if artifact["archive_format"] not in SOURCE_ARCHIVE_FORMATS:
+        raise ValueError("unsupported GitHub source archive format")
     if artifact["architecture"] not in SAFE_ARCH:
         raise ValueError("unsupported artifact architecture")
     if len(artifact["name_pattern"]) > 200 or any(character in artifact["name_pattern"] for character in "\r\n"):
@@ -303,8 +321,15 @@ def validate_recipe_metadata(workflow: dict) -> dict:
     if len(artifact["asset_name"]) > 200 or any(character in artifact["asset_name"] for character in "/\\\r\n"):
         raise ValueError("artifact.asset_name is invalid")
     if artifact["mode"] == "upstream_archive":
-        if bool(artifact["asset_name"]) == bool(artifact["name_pattern"]):
-            raise ValueError("upstream_archive requires exactly one of asset_name or name_pattern")
+        if artifact["archive_source"] == "release_asset":
+            if artifact["asset_selection"] == "exact":
+                if not artifact["asset_name"] or artifact["name_pattern"]:
+                    raise ValueError("release asset archive requires exactly one exact asset_name")
+            if artifact["asset_selection"] == "pattern":
+                if not artifact["name_pattern"] or artifact["asset_name"]:
+                    raise ValueError("release asset archive requires exactly one name_pattern")
+        elif artifact["asset_name"] or artifact["name_pattern"]:
+            raise ValueError("release asset fields are only valid with release_asset archive source")
         if not artifact["selected_files"]:
             raise ValueError("upstream_archive requires selected_files")
         for selected in artifact["selected_files"]:

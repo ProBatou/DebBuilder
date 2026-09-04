@@ -22,10 +22,17 @@ function refreshRecipeApplicability() {
   const mode = $('recipeArtifactMode')?.value || 'source_build';
   const upstreamDeb = mode === 'upstream_deb';
   const upstreamArchive = mode === 'upstream_archive';
+  const archiveSource = $('recipeArchiveSource')?.value || 'auto';
+  const assetSelection = $('recipeAssetSelection')?.value || 'exact';
+  const releaseAsset = upstreamArchive && archiveSource === 'release_asset';
   ['.recipe-build-card','.recipe-install-card','.recipe-service-card'].forEach(selector => document.querySelector(selector)?.classList.toggle('not-applicable', upstreamDeb || (upstreamArchive && selector === '.recipe-build-card')));
-  if ($('recipeArtifactPatternField')) $('recipeArtifactPatternField').hidden = !(upstreamDeb || upstreamArchive);
-  if ($('recipeArtifactNameField')) $('recipeArtifactNameField').hidden = !upstreamArchive;
+  if ($('recipeArchiveSourceField')) $('recipeArchiveSourceField').hidden = !upstreamArchive;
+  if ($('recipeArchiveFormatField')) $('recipeArchiveFormatField').hidden = !(upstreamArchive && archiveSource === 'github_source');
+  if ($('recipeAssetSelectionField')) $('recipeAssetSelectionField').hidden = !releaseAsset;
+  if ($('recipeArtifactPatternField')) $('recipeArtifactPatternField').hidden = upstreamArchive ? !(releaseAsset && assetSelection === 'pattern') : !upstreamDeb;
+  if ($('recipeArtifactNameField')) $('recipeArtifactNameField').hidden = !(releaseAsset && assetSelection === 'exact');
   if ($('recipeArtifactFilesField')) $('recipeArtifactFilesField').hidden = !upstreamArchive;
+  if ($('recipeArchiveInspectionField')) $('recipeArchiveInspectionField').hidden = !upstreamArchive;
   const configuredFiles = $('installContentSource')?.value === 'configured_files';
   if ($('installDestination')) { $('installDestination').disabled = configuredFiles; $('installDestination').closest('label').hidden = configuredFiles; }
   if ($('installAutomaticGroup')) $('installAutomaticGroup').hidden = configuredFiles;
@@ -96,6 +103,47 @@ function buildEnvironmentState(detection) {
   if (!detection?.project_type) return {key:'not-detected', label:'Not detected'};
   if (detection.project_type === 'nodejs' && !detection.node_version) return {key:'partially-detected', label:'Partially detected'};
   return {key:'detected', label:'Detected'};
+}
+
+function addArchiveSelectedFile(path) {
+  const current = lines(value('recipeArtifactFiles'));
+  if (!current.includes(path)) current.push(path);
+  setValue('recipeArtifactFiles', current.join('\n'));
+  scheduleRecipeAutosave();
+}
+
+function renderArchiveInspection(inspection) {
+  const node = $('recipeArchiveInspection');
+  if (!node) return;
+  const files = inspection?.files || [];
+  const source = inspection?.source || {};
+  node.classList.remove('has-error');
+  node.innerHTML = `<div class="archive-inspection-head"><strong>${esc(source.source || 'archive')} · ${esc(source.name || '')}</strong><span>${files.length} files shown</span></div>` +
+    (files.length ? `<div class="archive-file-list">${files.slice(0, 80).map(row => `<div class="archive-file-row"><code>${esc(row.relative_path)}</code><span>${esc(String(row.size || 0))} bytes</span><button type="button" class="ghost compact-button" data-add-archive-file="${esc(row.relative_path)}">Add</button></div>`).join('')}</div>` : '<p>No regular file found in this archive.</p>');
+}
+
+function renderArchiveInspectionError(error) {
+  const node = $('recipeArchiveInspection');
+  if (!node) return;
+  const details = error?.details || {};
+  const sources = details.sources || [];
+  node.classList.add('has-error');
+  node.innerHTML = `<p>${esc(error?.message || 'Archive inspection failed')}</p>` +
+    (sources.length ? `<div class="archive-file-list">${sources.map(row => `<div class="archive-file-row"><code>${esc(row.name)}</code><span>${esc(row.source)} · ${esc(row.archive_format)}</span></div>`).join('')}</div>` : '');
+}
+
+async function inspectArchive() {
+  const wf = collectWorkflow();
+  wf.artifact.selected_files = wf.artifact.selected_files || [];
+  const node = $('recipeArchiveInspection');
+  if (node) { node.classList.remove('has-error'); node.textContent = 'Inspecting archive…'; }
+  const response = await fetch('/api/upstream-archive/inspect', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({workflow:wf})});
+  const payload = await response.json();
+  if (!response.ok) {
+    renderArchiveInspectionError(payload.error || {message:payload.error || response.statusText});
+    return;
+  }
+  renderArchiveInspection(payload.inspection);
 }
 
 function renderBuildEnvironment(detection = {}) {
@@ -329,8 +377,13 @@ $('btnRemoveService')?.addEventListener('click',removeService);
 $('newRecipeVersionSource')?.addEventListener('change',toggleNewVersionExpression);
 $('newRecipeTracking')?.addEventListener('change',toggleNewVersionExpression);
 ['recipeMetaName','recipeMetaPackage','recipeMetaGithub','recipeMetaSourceRef','recipeMetaVersionExpression'].forEach(id => $(id)?.addEventListener('input',scheduleRecipeAutosave));
-['recipeMetaTracking','recipeMetaVersionSource','recipeMetaActive','recipeArtifactMode'].forEach(id => $(id)?.addEventListener('change',event=>{toggleVersionExpression();refreshRecipeApplicability();scheduleRecipeAutosave(event);}));
+['recipeMetaTracking','recipeMetaVersionSource','recipeMetaActive','recipeArtifactMode','recipeArchiveSource','recipeArchiveFormat','recipeAssetSelection'].forEach(id => $(id)?.addEventListener('change',event=>{toggleVersionExpression();refreshRecipeApplicability();scheduleRecipeAutosave(event);}));
 ['recipeArtifactPattern','recipeArtifactName','recipeArtifactFiles'].forEach(id => $(id)?.addEventListener('input',scheduleRecipeAutosave));
+$('btnInspectArchive')?.addEventListener('click',()=>inspectArchive().catch(error=>renderArchiveInspectionError({message:error.message})));
+document.addEventListener('click', event => {
+  const path = event.target?.dataset?.addArchiveFile;
+  if (path) addArchiveSelectedFile(path);
+});
 document.querySelectorAll('.recipe-build-card input, .recipe-build-card textarea, .recipe-build-card select, .recipe-install-card input, .recipe-install-card textarea, .recipe-install-card select, .recipe-service-card input, .recipe-service-card textarea, .recipe-service-card select').forEach(element => {
   element.addEventListener(element.tagName === 'SELECT' ? 'change' : 'input', () => {
     if (element.closest('.build-output-section')) return;

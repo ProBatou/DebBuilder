@@ -206,6 +206,22 @@ class StaticUiTests(unittest.TestCase):
         self.assertIn("$('installAutomaticGroup').hidden = configuredFiles", app)
         self.assertIn("configuredFiles ? 'Custom mappings' : 'Additional mappings'", app)
 
+    def test_upstream_archive_ui_uses_conditional_source_controls(self):
+        html = self.read("static/index.html")
+        app = self.read("static/app.js")
+        serialization = self.read("static/recipe_serialization.js")
+        self.assertIn('id="recipeArchiveSource"', html)
+        self.assertIn('<option value="github_source">GitHub source archive</option>', html)
+        self.assertIn('<option value="release_asset">Release asset</option>', html)
+        self.assertIn('id="recipeAssetSelection"', html)
+        self.assertIn('id="btnInspectArchive"', html)
+        self.assertIn("archiveSource === 'release_asset'", app)
+        self.assertIn("assetSelection === 'pattern'", app)
+        self.assertIn("/api/upstream-archive/inspect", app)
+        self.assertIn("artifact.archive_source = archiveSource", serialization)
+        self.assertIn("artifact.asset_name = archiveSource === 'release_asset'", serialization)
+        self.assertIn("artifactMode === 'upstream_deb' ? value('recipeArtifactPattern') : ''", serialization)
+
     def test_account_provisioning_uses_explicit_intent_and_legacy_override(self):
         html = self.read("static/index.html")
         app = self.read("static/app.js")

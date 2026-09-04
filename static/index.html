@@ -72,9 +72,13 @@
                 <input id="recipeMetaPackage" type="hidden">
                 <label><span>GitHub project</span><input id="recipeMetaGithub" placeholder="owner/repository" pattern="[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"></label>
                 <label><span>Artifact workflow</span><select id="recipeArtifactMode"><option value="source_build">Build from source</option><option value="upstream_deb">Use upstream Debian package</option><option value="upstream_archive">Use upstream release archive</option></select></label>
+                <label id="recipeArchiveSourceField" hidden><span>Archive source</span><select id="recipeArchiveSource"><option value="auto">Auto</option><option value="github_source">GitHub source archive</option><option value="release_asset">Release asset</option></select></label>
+                <label id="recipeArchiveFormatField" hidden><span>Source archive format</span><select id="recipeArchiveFormat"><option value="tar.gz">tar.gz</option><option value="zip">zip</option></select></label>
+                <label id="recipeAssetSelectionField" hidden><span>Asset selection</span><select id="recipeAssetSelection"><option value="exact">Exact</option><option value="pattern">Pattern</option></select></label>
                 <label id="recipeArtifactPatternField" hidden><span>Release asset pattern</span><input id="recipeArtifactPattern" placeholder="*-linux-x64.deb"></label>
                 <label id="recipeArtifactNameField" hidden><span>Exact release asset</span><input id="recipeArtifactName" placeholder="project-x86_64-linux.tar.gz"></label>
-                <label id="recipeArtifactFilesField" hidden><span>Selected archive files</span><textarea id="recipeArtifactFiles" rows="2" placeholder="bin/project"></textarea></label>
+                <label id="recipeArtifactFilesField" hidden><span>Selected archive files</span><textarea id="recipeArtifactFiles" rows="2" placeholder="Select files after inspection"></textarea></label>
+                <div id="recipeArchiveInspectionField" class="span-12 archive-inspection" hidden><button type="button" class="ghost compact-button" id="btnInspectArchive">Inspect archive</button><div id="recipeArchiveInspection" class="archive-inspection-results muted">No archive inspected.</div></div>
                 <label><span>Tracking</span><select id="recipeMetaTracking"><option value="latest_release">Latest release</option><option value="tag">Explicit tag</option><option value="manual">Manual ref</option></select></label>
                 <label id="recipeSourceRefField" hidden><span>GitHub ref</span><input id="recipeMetaSourceRef" placeholder="v1.2.3, main, or commit SHA"></label>
                 <label><span>Debian version</span><select id="recipeMetaVersionSource"><option value="tag">From GitHub tag</option><option value="release_name">From release name</option><option value="regex">Custom expression</option><option value="build">Provided by build</option></select></label>

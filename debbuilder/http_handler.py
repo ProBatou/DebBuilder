@@ -188,6 +188,13 @@ def create_handler(api):
                 dry_run = bool(data.get("dry_run", True))
                 api.json_response(self, api.run_recipe_pipeline(workflow, dry_run=dry_run))
                 return
+            if self.path == "/api/upstream-archive/inspect":
+                workflow = data.get("workflow", data)
+                try:
+                    api.json_response(self, {"inspection": api.inspect_upstream_archive(workflow)})
+                except api.upstream_archive.UpstreamArchiveError as exc:
+                    api.json_response(self, {"error": {"code": exc.code, "message": str(exc), "details": exc.details}}, 422)
+                return
             if self.path.startswith("/api/executions/") and self.path.endswith("/validate"):
                 run_id = urllib.parse.unquote(self.path[len("/api/executions/"):-len("/validate")].strip("/"))
                 try:
@@ -260,7 +267,7 @@ def create_handler(api):
             previous_id = str(data.get("previous_id") or "")
             if previous_id and previous_id != workflow_id:
                 previous = api.workflow_path(previous_id)
-                if previous and previous.parent == api.USER_WORKFLOWS.resolve():
+                if previous and previous.parent.resolve() == api.USER_WORKFLOWS.resolve():
                     previous.unlink()
             api.associate_workflow_package(workflow_id, normalized, previous_id)
             api.json_response(self, {"ok": True, "id": workflow_id, "path": str(destination)})

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from debbuilder import build_pipeline, upstream_archive
 from debbuilder.build_store import BuildStore
-from debbuilder.recipe_schema import validate_recipe_metadata
+from debbuilder.recipe_schema import normalize_recipe, validate_recipe_metadata
 
 
 def recipe(**artifact):
@@ -23,7 +23,7 @@ def recipe(**artifact):
 
 
 def release(assets):
-    return {"repository": "example/demo", "tag": "v1.2.3", "ref": "v1.2.3", "name": "v1.2.3", "url": "https://github.com/example/demo/releases/tag/v1.2.3", "upstream_version": "1.2.3", "assets": assets}
+    return {"repository": "example/demo", "tag": "v1.2.3", "ref": "v1.2.3", "name": "v1.2.3", "url": "https://github.com/example/demo/releases/tag/v1.2.3", "upstream_version": "1.2.3", "archive_url": "https://api.github.com/repos/example/demo/tarball/v1.2.3", "tarball_url": "https://api.github.com/repos/example/demo/tarball/v1.2.3", "zipball_url": "https://api.github.com/repos/example/demo/zipball/v1.2.3", "assets": assets}
 
 
 def tar_bytes(entries):
@@ -51,6 +51,41 @@ class UpstreamArchiveTests(unittest.TestCase):
         with self.assertRaises(upstream_archive.UpstreamArchiveError) as caught:
             upstream_archive.select_asset(release(assets), recipe(asset_name="", name_pattern="demo-*.tar.gz")["artifact"])
         self.assertEqual(caught.exception.code, "ambiguous_release_asset")
+
+    def test_github_source_archive_tarball_is_usable_without_asset_fields(self):
+        payload = tar_bytes([("demo-1.2.3/demo", b"binary", "file")])
+        digest = hashlib.sha256(payload).hexdigest()
+        configured = recipe(asset_name="", archive_source="github_source", archive_format="tar.gz")
+        def downloader(url, destination, token=""):
+            self.assertEqual(url, "https://api.github.com/repos/example/demo/tarball/v1.2.3")
+            Path(destination).write_bytes(payload)
+            return {"path": str(destination), "size": len(payload), "sha256": digest}
+        with tempfile.TemporaryDirectory() as temporary:
+            result = upstream_archive.acquire(configured, temporary, release_resolver=lambda *_a, **_k: release([]), downloader=downloader)
+        self.assertEqual(result["asset"]["source"], "github_source")
+        self.assertEqual(result["asset"]["archive_format"], "tar.gz")
+        self.assertEqual(result["selected_files"][0]["relative_path"], "demo")
+
+    def test_auto_uses_github_source_when_release_has_no_assets_and_reports_ambiguous_assets(self):
+        configured = recipe(asset_name="", archive_source="auto")
+        self.assertEqual(upstream_archive.select_archive(release([]), configured["artifact"])["source"], "github_source")
+        with self.assertRaises(upstream_archive.UpstreamArchiveError) as caught:
+            upstream_archive.select_archive(release([{"name": "demo-linux.tar.gz", "url": "https://github.com/example/demo/releases/download/v1.2.3/demo-linux.tar.gz"}]), configured["artifact"])
+        self.assertEqual(caught.exception.code, "ambiguous_archive_source")
+
+    def test_inspection_lists_archive_content_without_selected_files(self):
+        payload = tar_bytes([("demo-1.2.3/bin/demo", b"binary", "file"), ("demo-1.2.3/README.md", b"readme", "file")])
+        configured = normalize_recipe({
+            "name": "demo", "package": {"name": "demo"},
+            "source": {"repository": "example/demo"},
+            "artifact": {"mode": "upstream_archive", "archive_source": "github_source", "archive_format": "tar.gz"},
+        })
+        def downloader(_url, destination, token=""):
+            Path(destination).write_bytes(payload)
+            return {"path": str(destination), "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
+        result = upstream_archive.inspect(configured, release_resolver=lambda *_a, **_k: release([]), downloader=downloader)
+        self.assertEqual([row["relative_path"] for row in result["files"]], ["README.md", "bin/demo"])
+        self.assertEqual(result["selected_files"], [])
 
     def test_valid_archive_checksum_selection_and_provenance(self):
         payload = tar_bytes([("demo", b"binary", "file")])

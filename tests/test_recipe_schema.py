@@ -17,6 +17,23 @@ class RecipeSchemaTests(unittest.TestCase):
         self.assertEqual(recipe["install"]["account"]["user"], "demo")
         self.assertEqual(recipe["service"]["ambient_capabilities"], ["CAP_NET_BIND_SERVICE"])
 
+    def test_upstream_archive_source_modes_do_not_require_release_asset_fields(self):
+        source_archive = validate_recipe_metadata({
+            "name": "demo", "package": {"name": "demo"},
+            "source": {"repository": "owner/demo"},
+            "artifact": {"mode": "upstream_archive", "archive_source": "github_source", "archive_format": "tar.gz", "selected_files": ["demo"]},
+        })
+        self.assertEqual(source_archive["artifact"]["archive_source"], "github_source")
+        self.assertEqual(source_archive["artifact"]["asset_name"], "")
+        self.assertEqual(source_archive["artifact"]["name_pattern"], "")
+        legacy_asset = validate_recipe_metadata({
+            "name": "legacy", "package": {"name": "legacy"},
+            "source": {"repository": "owner/legacy"},
+            "artifact": {"mode": "upstream_archive", "asset_name": "legacy.tar.gz", "selected_files": ["legacy"]},
+        })
+        self.assertEqual(legacy_asset["artifact"]["archive_source"], "release_asset")
+        self.assertEqual(legacy_asset["artifact"]["asset_selection"], "exact")
+
     def test_fhs_and_advanced_systemd_validation_rejects_unsafe_values(self):
         cases = [
             {"install": {"destination": "/usr/bin/../../tmp"}},

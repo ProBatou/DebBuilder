@@ -24,7 +24,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import apt_repo, artifact_publication, artifact_validation, auth_service, build_pipeline, deb_inspector, github_client, operations, package_lifecycle, package_store, repo_summary, script_generator, settings_service, storage
+from . import apt_repo, artifact_publication, artifact_validation, auth_service, build_pipeline, deb_inspector, github_client, operations, package_lifecycle, package_store, repo_summary, script_generator, settings_service, storage, upstream_archive
 from .build_store import BuildStore
 from .http_handler import create_handler
 from .recipe_schema import (
@@ -423,12 +423,14 @@ def cached_github_release(repository: str, ttl: int = 300) -> dict | None:
 
 
 def recipe_release_version(recipe: dict, release: dict) -> str:
-    mode = str(recipe.get("version_source") or "tag")
+    source = recipe.get("source") or {}
+    version = source.get("version") or {}
+    mode = str(version.get("source") or recipe.get("version_source") or "tag")
     if mode == "build":
         return ""
     raw = str(release.get("tag") if mode in {"tag", "regex"} else release.get("name") or "")
     if mode == "regex":
-        match = re.search(str(recipe.get("version_expression") or ""), raw or str(release.get("name") or ""))
+        match = re.search(str(version.get("expression") or recipe.get("version_expression") or ""), raw or str(release.get("name") or ""))
         raw = match.group(1) if match and match.groups() else match.group(0) if match else ""
     return normalize_github_version(raw) if raw else ""
 
@@ -446,7 +448,7 @@ def merge_recipe_metadata(package: dict, record: dict | None) -> dict:
         "architecture": package_data["architecture"], "depends": ", ".join(package_data["runtime_dependencies"]),
         "tracking": source_data["tracking"], "source_ref": source_data["ref"],
     }
-    repository = str(recipe.get("github_repository") or "").strip()
+    repository = str(source_data.get("repository") or recipe.get("github_repository") or "").strip()
     if not repository:
         return merged
     old_source = dict(merged.get("source") or {})
@@ -459,7 +461,7 @@ def merge_recipe_metadata(package: dict, record: dict | None) -> dict:
         "ref_type": "release",
     }
     upstream = str(merged.get("upstream_version") or "") if same_github_source else ""
-    if recipe.get("version_tracking", "latest_release") == "latest_release":
+    if source_data.get("tracking", "latest_release") == "latest_release":
         try:
             release = cached_github_release(repository)
             if release:
@@ -474,7 +476,7 @@ def merge_recipe_metadata(package: dict, record: dict | None) -> dict:
     merged.update({
         "source": source,
         "upstream_version": upstream,
-        "version_strategy": f"github_{recipe.get('version_source') or 'tag'}",
+        "version_strategy": f"github_{(source_data.get('version') or {}).get('source') or recipe.get('version_source') or 'tag'}",
     })
     return merged
 
@@ -670,7 +672,7 @@ def create_or_update_package(data: dict, name: str | None = None) -> dict:
 
 
 def associate_workflow_package(wid: str, workflow: dict, previous_id: str = "") -> None:
-    package_name = str(workflow.get("package_name") or "").strip()
+    package_name = recipe_package_name(workflow).strip()
     if not package_name:
         return
     require_safe_name(package_name, "package name")
@@ -690,8 +692,9 @@ def associate_workflow_package(wid: str, workflow: dict, previous_id: str = "") 
     canonical_name = str((inventory_row or {}).get("Package") or current.get("name") or package_name)
     stored = dict(overrides.get(stored_name) or {})
     source = dict(stored.get("source") or current.get("source") or {})
-    if workflow.get("github_repository"):
-        source.update({"type": "github", "repository": workflow["github_repository"]})
+    repository = str(((workflow.get("source") or {}).get("repository") or workflow.get("github_repository") or "")).strip()
+    if repository:
+        source.update({"type": "github", "repository": repository})
     if stored_name and stored_name != canonical_name:
         overrides.pop(stored_name, None)
     overrides[canonical_name] = {
@@ -703,6 +706,13 @@ def associate_workflow_package(wid: str, workflow: dict, previous_id: str = "") 
         "status": "ready",
     }
     save_package_overrides(overrides)
+
+
+def inspect_upstream_archive(workflow: dict) -> dict:
+    recipe = normalize_recipe(workflow)
+    if recipe["artifact"]["mode"] != "upstream_archive":
+        raise ValueError("archive inspection requires upstream_archive artifact mode")
+    return upstream_archive.inspect(recipe, token=github_token(DATA))
 
 
 def delete_package(name: str, delete_repo: bool = False, confirm: str = "") -> None:

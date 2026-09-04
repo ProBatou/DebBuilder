@@ -91,6 +91,8 @@ def latest_release(repository: str, token: str = "") -> dict:
         "name": row.get("name", ""),
         "url": row.get("html_url", ""),
         "archive_url": row.get("tarball_url", ""),
+        "tarball_url": row.get("tarball_url", ""),
+        "zipball_url": row.get("zipball_url", ""),
         "assets": [{
             "name": a.get("name", ""), "url": a.get("browser_download_url", ""),
             "size": a.get("size", 0), "content_type": a.get("content_type", ""),
@@ -113,13 +115,17 @@ def resolve_ref(repository: str, ref: str, *, kind: str = "manual", token: str =
             raise GitHubError("release_not_found", "Release or ref not found", status=404) from exc
         raise
     sha = str((row.get("object") or {}).get("sha") if kind == "tag" else row.get("sha") or "")
+    tarball_url = f"https://api.github.com/repos/{repo}/tarball/{encoded}"
+    zipball_url = f"https://api.github.com/repos/{repo}/zipball/{encoded}"
     return {
         "tag": value if kind == "tag" else "",
         "name": value,
         "ref": value,
         "commit": sha,
         "url": f"https://github.com/{repo}/tree/{quote(value, safe='')}",
-        "archive_url": f"https://api.github.com/repos/{repo}/tarball/{encoded}",
+        "archive_url": tarball_url,
+        "tarball_url": tarball_url,
+        "zipball_url": zipball_url,
         "assets": [],
     }
 

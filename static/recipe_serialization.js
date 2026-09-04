@@ -153,6 +153,28 @@ function collectWorkflow() {
   const serviceVisible = !!window.recipeServiceVisible;
   const serviceComplete = !!value('serviceName') && !!value('serviceCommand');
   const advanced = window.recipeAdvancedFields || {};
+  const artifactMode = $('recipeArtifactMode')?.value || 'source_build';
+  const archiveSource = $('recipeArchiveSource')?.value || 'auto';
+  const assetSelection = $('recipeAssetSelection')?.value || 'exact';
+  const artifact = {
+    mode: artifactMode,
+    type: artifactMode === 'upstream_archive' ? 'archive' : 'deb',
+    architecture: $('packageArchitecture')?.value || 'amd64',
+    match_package: true,
+    match_version: true
+  };
+  if (artifactMode === 'upstream_archive') {
+    artifact.archive_source = archiveSource;
+    artifact.archive_format = $('recipeArchiveFormat')?.value || 'tar.gz';
+    artifact.asset_selection = assetSelection;
+    artifact.selected_files = lines(value('recipeArtifactFiles'));
+    artifact.asset_name = archiveSource === 'release_asset' && assetSelection === 'exact' ? value('recipeArtifactName') : '';
+    artifact.name_pattern = archiveSource === 'release_asset' && assetSelection === 'pattern' ? value('recipeArtifactPattern') : '';
+  } else {
+    artifact.name_pattern = artifactMode === 'upstream_deb' ? value('recipeArtifactPattern') : '';
+    artifact.asset_name = '';
+    artifact.selected_files = [];
+  }
   return {
     schema_version: 1,
     name,
@@ -174,11 +196,7 @@ function collectWorkflow() {
       ref: value('recipeMetaSourceRef'),
       version: {source: $('recipeMetaVersionSource')?.value || 'tag', expression: value('recipeMetaVersionExpression')}
     },
-    artifact: {
-      mode: $('recipeArtifactMode')?.value || 'source_build', type: $('recipeArtifactMode')?.value === 'upstream_archive' ? 'archive' : 'deb',
-      architecture: $('packageArchitecture')?.value || 'amd64',
-      asset_name: value('recipeArtifactName'), name_pattern: value('recipeArtifactName') ? '' : value('recipeArtifactPattern'), selected_files: lines(value('recipeArtifactFiles')), match_package: true, match_version: true
-    },
+    artifact,
     build: {
       detected_project: $('buildDetectedProject')?.dataset.value || null,
       detected_files: lines($('buildDetectedFiles')?.dataset.value),
@@ -265,7 +283,7 @@ function renderWorkflow(wf) {
     window.recipeSuggestedOutputPaths = [];
     setValue('recipeMetaName', wf.name || ''); setValue('recipeMetaPackage', packageData.name || ''); setValue('recipeMetaGithub', source.repository || '');
     setValue('recipeMetaTracking', source.tracking || 'latest_release'); setValue('recipeMetaSourceRef', source.ref || ''); setValue('recipeMetaVersionSource', source.version?.source || 'tag'); setValue('recipeMetaVersionExpression', source.version?.expression || '');
-    setValue('recipeArtifactMode', artifact.mode || 'source_build'); setValue('recipeArtifactPattern', artifact.name_pattern || ''); setValue('recipeArtifactName', artifact.asset_name || ''); setValue('recipeArtifactFiles', (artifact.selected_files || []).join('\n'));
+    setValue('recipeArtifactMode', artifact.mode || 'source_build'); setValue('recipeArchiveSource', artifact.archive_source || ((artifact.asset_name || artifact.name_pattern) ? 'release_asset' : 'auto')); setValue('recipeArchiveFormat', artifact.archive_format || 'tar.gz'); setValue('recipeAssetSelection', artifact.asset_selection || (artifact.asset_name ? 'exact' : 'pattern')); setValue('recipeArtifactPattern', artifact.name_pattern || ''); setValue('recipeArtifactName', artifact.asset_name || ''); setValue('recipeArtifactFiles', (artifact.selected_files || []).join('\n'));
     $('recipeMetaActive').checked = wf.active !== false;
     if (typeof renderBuildEnvironment === 'function') renderBuildEnvironment({project_type:build.detected_project || '', detected_files:build.detected_files || [], build_dependencies:build.detected_dependencies || [], system_build_dependencies:build.detected_dependencies || [], build_tools:build.detected_tools || []});
     window.recipeExtraDependencies = [...(build.extra_dependencies || [])]; window.recipeSourceChanges = (build.source_changes || []).map(change => ({...change}));

@@ -32,6 +32,8 @@ def publication_readiness(run: dict) -> dict:
 
 
 def publish_artifact(run_id: str, *, store: BuildStore, repo_root: str | Path, distribution: str, component: str, confirm: str, runner=None) -> dict:
+    if not store.run_dir(run_id).is_dir():
+        raise PublicationError("build_run_not_found", "Build Run was not found")
     with store.locked_run(run_id):
         return _publish_artifact_locked(
             run_id,
@@ -63,6 +65,12 @@ def _publish_artifact_locked(run_id: str, *, store: BuildStore, repo_root: str |
         "readiness": publication_readiness(run), "preflight": {}, "command": None,
         "published_version": "", "error": None,
     }
+    artifact_publication_state = {
+        key: attempt[key] for key in ("id", "status", "requested_at", "finished_at", "published_version")
+    }
+    run.setdefault("publications", []).append(attempt)
+    artifact.setdefault("publications", []).append(artifact_publication_state)
+    store.save(run)
     try:
         if confirm != expected:
             raise PublicationError("publication_confirmation_required", f"Publication requires explicit confirmation: {expected}")
@@ -128,14 +136,17 @@ def _publish_artifact_locked(run_id: str, *, store: BuildStore, repo_root: str |
     finally:
         attempt["finished_at"] = utc_now()
         attempt["duration"] = round(time.monotonic() - started, 6)
-        run.setdefault("publications", []).append(attempt)
-        artifact.setdefault("publications", []).append({key: attempt[key] for key in ("id", "status", "requested_at", "finished_at", "published_version")})
+        artifact_publication_state.update({
+            key: attempt[key] for key in ("status", "finished_at", "published_version")
+        })
         store.append_event(run, f"Artifact publication {attempt['id']}: {attempt['status']}", level="error" if attempt["status"] == "failed" else "info")
         store.save(run)
     return attempt
 
 
 def reconcile_publication(run_id: str, *, store: BuildStore, repo_root: str | Path, distribution: str, component: str, runner=None) -> dict:
+    if not store.run_dir(run_id).is_dir():
+        raise PublicationError("build_run_not_found", "Build Run was not found")
     with store.locked_run(run_id):
         return _reconcile_publication_locked(
             run_id,
@@ -165,6 +176,12 @@ def _reconcile_publication_locked(run_id: str, *, store: BuildStore, repo_root: 
         "repository": {"root": str(root), "distribution": distribution, "component": component},
         "preflight": {}, "command": None, "published_version": "", "error": None,
     }
+    artifact_publication_state = {
+        key: attempt[key] for key in ("id", "status", "requested_at", "finished_at", "published_version")
+    }
+    run.setdefault("publications", []).append(attempt)
+    artifact.setdefault("publications", []).append(artifact_publication_state)
+    store.save(run)
     try:
         path = Path(artifact.get("path", ""))
         if run.get("status") != "success" or not path.is_file():
@@ -193,8 +210,9 @@ def _reconcile_publication_locked(run_id: str, *, store: BuildStore, repo_root: 
     finally:
         attempt["finished_at"] = utc_now()
         attempt["duration"] = round(time.monotonic() - started, 6)
-        run.setdefault("publications", []).append(attempt)
-        artifact.setdefault("publications", []).append({key: attempt[key] for key in ("id", "status", "requested_at", "finished_at", "published_version")})
+        artifact_publication_state.update({
+            key: attempt[key] for key in ("status", "finished_at", "published_version")
+        })
         store.append_event(run, f"Publication reconciliation {attempt['id']}: {attempt['status']}", level="error" if attempt["status"] == "failed" else "info")
         store.save(run)
     return attempt

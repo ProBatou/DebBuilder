@@ -214,6 +214,59 @@ class AdminApiTests(AdminApiCase):
         self.assertNotIn("build", settings["settings"])
         self.assertEqual(settings["settings"]["github"]["token"], "masked")
 
+    def test_execution_endpoints_project_every_canonical_lifecycle_transition(self):
+        store, run, artifact = self.successful_build_run(run_id="lifecycle-run", package="lifecycle", version="2.0-1")
+
+        def assert_state(lifecycle, *, active, validate, publish):
+            _, listed = self.request("GET", "/api/executions")
+            summary = next(row for row in listed["executions"] if row["id"] == run["id"])
+            _, response = self.request("GET", f"/api/executions/{run['id']}")
+            detail = response["execution"]
+            for row in (summary, detail):
+                self.assertEqual(row["lifecycle_status"], lifecycle)
+                self.assertEqual(row["lifecycle_active"], active)
+                self.assertEqual(row["allowed_actions"], {"validate": validate, "publish": publish})
+            self.assertEqual(detail["package"], "lifecycle")
+            return detail
+
+        run["status"] = "running"
+        run["steps"][4]["status"] = "running"
+        store.save(run)
+        detail = assert_state("building", active=True, validate=False, publish=False)
+        self.assertEqual(detail["steps"][4]["status"], "running")
+
+        run["status"] = "success"
+        run["steps"][4]["status"] = "success"
+        store.save(run)
+        detail = assert_state("validation_needed", active=False, validate=True, publish=False)
+        self.assertEqual(detail["artifact"]["path"], str(artifact))
+
+        run["validations"] = [{"id": "validation-one", "artifact": str(artifact), "status": "running"}]
+        store.save(run)
+        assert_state("validating", active=True, validate=False, publish=False)
+        run["validations"][-1]["status"] = "failed"
+        store.save(run)
+        assert_state("validation_failed", active=False, validate=True, publish=False)
+        run["validations"].append({"id": "validation-two", "artifact": str(artifact), "status": "running"})
+        store.save(run)
+        assert_state("validating", active=True, validate=False, publish=False)
+        run["validations"][-1]["status"] = "success"
+        store.save(run)
+        assert_state("ready_to_publish", active=False, validate=True, publish=True)
+
+        run["publications"] = [{"id": "publication-one", "status": "running"}]
+        store.save(run)
+        assert_state("publishing", active=True, validate=False, publish=False)
+        run["publications"][-1]["status"] = "failed"
+        store.save(run)
+        assert_state("publication_failed", active=False, validate=True, publish=True)
+        run["publications"].append({"id": "publication-two", "status": "running"})
+        store.save(run)
+        assert_state("publishing", active=True, validate=False, publish=False)
+        run["publications"][-1]["status"] = "success"
+        store.save(run)
+        assert_state("published", active=False, validate=True, publish=False)
+
     def test_execution_list_does_not_include_staging_inventory_or_manifest_contents(self):
         store = BuildStore(server.DATA / "builds")
         run = store.create({
@@ -268,17 +321,45 @@ class AdminApiTests(AdminApiCase):
         run["steps"][4]["details"] = {"commands": [{"index": 1, "stdout": "long output", "stderr": ""}]}
         store.save(run)
         store.append_log_line("cleanup-run", "long output")
+        stale_run = store.load("cleanup-run")
+        status, execution_list = self.request("GET", "/api/executions")
+        self.assertEqual(status, 200)
+        self.assertIn("cleanup-run", [row["id"] for row in execution_list["executions"]])
         status, deletion = self.request("DELETE", "/api/executions/cleanup-run/logs")
         self.assertEqual(status, 200)
         self.assertEqual(deletion["deletion"]["deleted"], "log_history")
+        self.assertTrue(deletion["deletion"]["history_deleted"])
+        self.assertFalse(deletion["deletion"]["visible"])
+        self.assertFalse(deletion["deletion"]["already_deleted"])
+        self.assertTrue(store.execution_history_deletion_path("cleanup-run").is_file())
         cleaned = store.load("cleanup-run")
         self.assertTrue(artifact.exists())
         self.assertEqual(cleaned["status"], "success")
         self.assertEqual(cleaned["artifact"]["path"], str(artifact))
         self.assertEqual(cleaned["steps"][4]["details"]["commands"][0]["stdout"], "")
+
+        # A lifecycle worker may still hold a pre-deletion Run snapshot. Its
+        # later save must not resurrect the execution in canonical history.
+        store.save(stale_run)
+        restarted_store = BuildStore(server.DATA / "builds")
+        self.assertTrue(restarted_store.execution_history_deleted("cleanup-run", restarted_store.load("cleanup-run")))
         package = server.get_package("cleanup")
         self.assertEqual(package["build"]["latest_run_id"], "cleanup-run")
         self.assertEqual(package["lifecycle_display_status"], "ready_to_publish")
+        self.assertNotIn("cleanup-run", [row["id"] for row in package.get("history", [])])
+        status, execution_list = self.request("GET", "/api/executions")
+        self.assertEqual(status, 200)
+        self.assertNotIn("cleanup-run", [row["id"] for row in execution_list["executions"]])
+        with self.assertRaises(urllib.error.HTTPError) as detail_error:
+            self.request("GET", "/api/executions/cleanup-run")
+        self.assertEqual(detail_error.exception.code, 404)
+        with self.assertRaises(urllib.error.HTTPError) as log_error:
+            self.request("GET", "/api/executions/cleanup-run/logs")
+        self.assertEqual(log_error.exception.code, 404)
+        status, repeated = self.request("DELETE", "/api/executions/cleanup-run/logs")
+        self.assertEqual(status, 200)
+        self.assertTrue(repeated["deletion"]["already_deleted"])
+        self.assertFalse(repeated["deletion"]["visible"])
 
     def test_clear_all_execution_logs_preserves_lifecycle_and_artifacts(self):
         store = BuildStore(server.DATA / "builds")
@@ -297,6 +378,7 @@ class AdminApiTests(AdminApiCase):
         run["steps"][4]["details"] = {"commands": [{"index": 1, "stdout": "long output", "stderr": ""}]}
         store.save(run)
         store.append_log_line("global-cleanup-run", "temporary detail")
+        stale_batch_one = store.load("batch-one")
         status, preview = self.request("POST", "/api/executions/delete-logs", {"all": True, "dry_run": True})
         self.assertEqual(status, 200)
         self.assertGreaterEqual(preview["count"], 3)
@@ -305,6 +387,8 @@ class AdminApiTests(AdminApiCase):
         self.assertEqual(status, 200)
         self.assertGreaterEqual(len(result["deleted"]), 3)
         self.assertEqual(result["errors"], [])
+        self.assertTrue(all(row["history_deleted"] and row["visible"] is False for row in result["deleted"]))
+        self.assertTrue(all(store.execution_history_deletion_path(run_id).is_file() for run_id in ("batch-one", "batch-two", "global-cleanup-run")))
         self.assertTrue(store.load("batch-one")["log_deleted"])
         cleaned = store.load("global-cleanup-run")
         self.assertTrue(cleaned["log_deleted"])
@@ -312,6 +396,22 @@ class AdminApiTests(AdminApiCase):
         self.assertEqual(cleaned["artifact"]["path"], str(artifact))
         self.assertEqual(cleaned["validations"][0]["status"], "success")
         self.assertEqual(server.get_package("global-cleanup")["lifecycle_display_status"], "ready_to_publish")
+
+        store.save(stale_batch_one)
+        restarted_store = BuildStore(server.DATA / "builds")
+        self.assertTrue(restarted_store.execution_history_deleted("batch-one", restarted_store.load("batch-one")))
+        status, execution_list = self.request("GET", "/api/executions")
+        self.assertEqual(status, 200)
+        visible_ids = [row["id"] for row in execution_list["executions"]]
+        for run_id in ("batch-one", "batch-two", "global-cleanup-run"):
+            self.assertNotIn(run_id, visible_ids)
+        self.assertNotIn("global-cleanup-run", [row["id"] for row in server.get_package("global-cleanup").get("history", [])])
+        with self.assertRaises(urllib.error.HTTPError) as detail_error:
+            self.request("GET", "/api/executions/batch-one")
+        self.assertEqual(detail_error.exception.code, 404)
+        status, second_preview = self.request("POST", "/api/executions/delete-logs", {"all": True, "dry_run": True})
+        self.assertEqual(status, 200)
+        self.assertEqual(second_preview["count"], 0)
 
     def test_repo_settings_can_be_updated_and_are_persisted(self):
         body = {
@@ -335,6 +435,63 @@ class AdminApiTests(AdminApiCase):
         self.assertTrue(settings_path.exists())
         saved = json.loads(settings_path.read_text())
         self.assertEqual(saved["apt"]["repository"], "https://repo.example.test")
+
+    def test_execution_deletion_rejects_active_runs_without_cancelling_them(self):
+        store, run, artifact = self.successful_build_run("busy-run")
+        run["validations"] = [{"status": "running"}]
+        store.save(run)
+        source = Path(run["workspace"]) / "source/keep"
+        source.write_text("active workspace")
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.request("DELETE", "/api/executions/busy-run/logs")
+        self.assertEqual(error.exception.code, 409)
+        self.assertEqual(json.loads(error.exception.read())["code"], "execution_active")
+        self.assertTrue(source.exists())
+        self.assertTrue(artifact.exists())
+        self.assertEqual(store.load(run["id"])["validations"][0]["status"], "running")
+        _, preview = self.request("POST", "/api/executions/delete-logs", {"all": True, "dry_run": True})
+        self.assertNotIn(run["id"], preview["ids"])
+        _, cleared = self.request("POST", "/api/executions/delete-logs", {"all": True})
+        self.assertNotIn(run["id"], [row["id"] for row in cleared["deleted"]])
+        _, visible = self.request("GET", "/api/executions")
+        self.assertIn(run["id"], [row["id"] for row in visible["executions"]])
+
+    def test_workspace_policy_round_trip_and_cleanup_after_automation(self):
+        store, run, artifact = self.successful_build_run("cleanup-automation")
+        source = Path(run["workspace"]) / "source/large-output"
+        source.write_text("temporary")
+        _, settings = self.request("GET", "/api/settings")
+        self.assertEqual(settings["settings"]["workspace_cleanup"], {"enabled": True, "failed_workspaces_to_retain": 5})
+        _, saved = self.request("POST", "/api/settings", {"workspace_cleanup": {"enabled": False, "failed_workspaces_to_retain": 2}})
+        self.assertEqual(saved["settings"]["workspace_cleanup"], {"enabled": False, "failed_workspaces_to_retain": 2})
+        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": run["id"], "status": "success"}):
+            server.run_recipe_pipeline_with_automation({}, dry_run=False)
+        self.assertTrue(source.exists())
+        self.request("POST", "/api/settings", {"workspace_cleanup": {"enabled": True}})
+        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": run["id"], "status": "success"}):
+            result = server.run_recipe_pipeline_with_automation({}, dry_run=False)
+        self.assertEqual(result["status"], "success")
+        self.assertFalse(source.exists())
+        self.assertTrue(artifact.exists())
+        self.assertIsNotNone(server.get_execution(run["id"]))
+        _, loaded = self.request("GET", "/api/settings")
+        self.assertEqual(loaded["settings"]["workspace_cleanup"]["failed_workspaces_to_retain"], 2)
+
+    def test_workspace_sweep_uses_current_data_and_worker_stops_cleanly(self):
+        store, run, _artifact = self.successful_build_run("sweep-run")
+        source = Path(run["workspace"]) / "source"
+        alternate = server.DATA / "other-data"
+        alternate.mkdir()
+        with mock.patch.object(server, "DATA", alternate):
+            self.assertEqual(server.cleanup_workspaces()["cleaned"], [])
+        self.assertTrue(source.exists())
+        stop = mock.Mock()
+        stop.is_set.side_effect = [False, True]
+        with mock.patch("debbuilder.app.cleanup_workspaces", wraps=server.cleanup_workspaces) as sweep:
+            server.workspace_retention_loop(stop)
+        sweep.assert_called_once_with()
+        stop.wait.assert_called_once_with(300)
+        self.assertFalse(source.exists())
 
     def test_all_safe_settings_sections_can_be_updated(self):
         body = {

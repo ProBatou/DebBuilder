@@ -45,6 +45,7 @@ function refreshRecipeApplicability() {
   if ($('buildOutputSection')) $('buildOutputSection').hidden = staticMappingsOnly;
   if ($('serviceEmptyState')) $('serviceEmptyState').hidden = !!window.recipeServiceVisible;
   if ($('serviceConfiguration')) $('serviceConfiguration').hidden = !window.recipeServiceVisible;
+  if (typeof scheduleRecipeStepUpdate === 'function') scheduleRecipeStepUpdate();
 }
 
 function renderAccountProvisioning(owner = {}) {
@@ -74,8 +75,14 @@ function configureService() {
   $('serviceName')?.focus();
 }
 
-function removeService() {
-  if (!confirm('Remove this systemd service configuration?')) return;
+async function removeService() {
+  const confirmed = await showConfirm({
+    title: 'Remove systemd service?',
+    description: 'This clears the service configuration from the current Recipe. The change is saved automatically.',
+    confirmLabel: 'Remove service',
+    danger: true,
+  });
+  if (!confirmed) return;
   window.recipeServiceVisible = false;
   SERVICE_FIELD_IDS.forEach(id => setValue(id, ''));
   setValue('serviceType', ''); setValue('serviceRestart', '');
@@ -208,7 +215,12 @@ async function dryRun() {
 async function buildReal() {
   const wf = collectWorkflow();
   if (!buildOutputIsComplete(wf.build.output)) throw new Error('Build output requires at least one relative path.');
-  if (!confirm(`Build ${wf.package?.name || wf.name} with the real pipeline?`)) return;
+  const confirmed = await showConfirm({
+    title: `Build ${wf.package?.name || wf.name}?`,
+    description: 'This starts the real build pipeline for the selected Recipe.',
+    confirmLabel: 'Start build',
+  });
+  if (!confirmed) return;
   const data = await postJson('/api/run', {workflow:wf, dry_run:false});
   await loadExecutions();
   switchView('logs');
@@ -218,7 +230,13 @@ async function deleteCurrentRecipe() {
   const id = $('workflowSelect')?.value || currentRecipeId || '';
   if (!id) throw new Error('No selected recipe');
   const name = $('recipeMetaName')?.value.trim() || id;
-  if (!confirm(`Permanently delete recipe "${name}"?\nThe published package and APT repository will not be modified.`)) return;
+  const confirmed = await showConfirm({
+    title: `Delete Recipe “${name}”?`,
+    description: 'The Recipe is permanently removed. The published package and APT repository are not modified.',
+    confirmLabel: 'Delete Recipe',
+    danger: true,
+  });
+  if (!confirmed) return;
   recipeMutationPaused = true;
   clearTimeout(autosaveTimer);
   autosaveRevision += 1;
@@ -236,6 +254,7 @@ async function deleteCurrentRecipe() {
       $('workflowName').value = '';
       $('recipeTitle').textContent = 'Recipe';
     }
+    showToast(`Recipe “${name}” deleted.`, {type: 'success'});
   } finally {
     recipeMutationPaused = false;
   }
@@ -243,12 +262,21 @@ async function deleteCurrentRecipe() {
 
 function reportAutosaveError(error) {
   console.error('Autosave recipe failed:', error);
+  setRecipeAutosaveState('error', `Save failed: ${error.message || error}`);
+}
+
+function setRecipeAutosaveState(state, message = '') {
+  const status = $('recipeAutosaveStatus');
+  if (!status) return;
+  status.dataset.state = state;
+  status.textContent = message;
 }
 
 function scheduleRecipeAutosave() {
   if (renderingWorkflow || recipeMutationPaused || !currentRecipeId) return;
   autosaveRevision += 1;
   autosaveDirty = true;
+  setRecipeAutosaveState('pending');
   clearTimeout(autosaveTimer);
   autosaveTimer = setTimeout(() => saveRecipeNow().catch(reportAutosaveError), 600);
 }
@@ -262,12 +290,17 @@ async function saveRecipeNow() {
   if (autosaveInFlight || recipeMutationPaused) return;
   const wf = collectWorkflow();
   if (!$('recipeMetaName')?.checkValidity() || !$('recipeMetaPackage')?.checkValidity() || !$('recipeMetaGithub')?.checkValidity()) {
+    setRecipeAutosaveState('error', 'Fix invalid fields to save');
     return;
   }
-  if (!buildOutputIsComplete(wf.build.output)) return;
+  if (!buildOutputIsComplete(wf.build.output)) {
+    setRecipeAutosaveState('error', 'Complete build output to save');
+    return;
+  }
   const revision = autosaveRevision;
   autosaveDirty = false;
   autosaveInFlight = true;
+  setRecipeAutosaveState('saving');
   const id = wf.name.replace(/[^a-zA-Z0-9_.+-]/g, '-');
   const previousId = currentRecipeId;
   try {
@@ -280,6 +313,7 @@ async function saveRecipeNow() {
         await refreshWorkflows();
         $('workflowSelect').value = id;
       }
+      setRecipeAutosaveState('saved');
     }
   } finally {
     autosaveInFlight = false;
@@ -287,6 +321,7 @@ async function saveRecipeNow() {
     autosaveIdleWaiters = [];
     waiters.forEach(resolve => resolve());
     if (autosaveDirty && !recipeMutationPaused) {
+      setRecipeAutosaveState('pending');
       clearTimeout(autosaveTimer);
       autosaveTimer = setTimeout(() => saveRecipeNow().catch(reportAutosaveError), 0);
     }
@@ -326,12 +361,13 @@ async function loadSelectedWorkflow() {
   const title = document.getElementById('recipeTitle');
   if (title) title.textContent = wf.name || id;
   refreshRecipeApplicability();
+  setRecipeAutosaveState('saved');
 }
 
-document.getElementById('btnDryRun').addEventListener('click', () => dryRun().catch(e => alert(e.message)));
-document.getElementById('btnLoad')?.addEventListener('click', () => loadSelectedWorkflow().catch(e => alert(e.message)));
+document.getElementById('btnDryRun').addEventListener('click', () => dryRun().catch(error => showToast(error.message, {type: 'error'})));
+document.getElementById('btnLoad')?.addEventListener('click', () => loadSelectedWorkflow().catch(error => showToast(error.message, {type: 'error'})));
 document.getElementById('btnRuns').addEventListener('click', () => switchView('logs'));
-document.getElementById('workflowSelect').addEventListener('change', () => loadSelectedWorkflow().catch(e => alert(e.message)));
+document.getElementById('workflowSelect').addEventListener('change', () => loadSelectedWorkflow().catch(error => showToast(error.message, {type: 'error'})));
 
 fetch('/api/status').then(r=>r.json()).then(j=>{
   const repo = j.repo_default || '';
@@ -346,7 +382,7 @@ $('installDestination')?.addEventListener('input',renderInstallContentSummary);
 $('installAccountProvisioning')?.addEventListener('change',refreshAccountProvisioning);
 ['installAccountUser','installAccountGroup'].forEach(id => $(id)?.addEventListener('input',refreshAccountProvisioning));
 $('btnConfigureService')?.addEventListener('click',configureService);
-$('btnRemoveService')?.addEventListener('click',removeService);
+$('btnRemoveService')?.addEventListener('click',()=>removeService().catch(error=>showToast(error.message, {type:'error'})));
 $('newRecipeVersionSource')?.addEventListener('change',toggleNewVersionExpression);
 $('newRecipeTracking')?.addEventListener('change',toggleNewVersionExpression);
 ['recipeMetaName','recipeMetaPackage','recipeMetaGithub','recipeMetaSourceRef','recipeMetaVersionExpression'].forEach(id => $(id)?.addEventListener('input',scheduleRecipeAutosave));
@@ -364,5 +400,5 @@ document.querySelectorAll('.recipe-build-card input, .recipe-build-card textarea
     scheduleRecipeAutosave();
   });
 });
-$('btnBuildReal')?.addEventListener('click',()=>buildReal().catch(error=>alert(error.message)));
-$('btnDeleteRecipeTop')?.addEventListener('click',()=>deleteCurrentRecipe().catch(error=>alert(`Delete failed: ${error.message}`)));
+$('btnBuildReal')?.addEventListener('click',()=>buildReal().catch(error=>showToast(error.message, {type:'error'})));
+$('btnDeleteRecipeTop')?.addEventListener('click',()=>deleteCurrentRecipe().catch(error=>showToast(`Delete failed: ${error.message}`, {type:'error'})));

@@ -135,6 +135,20 @@ class BuildExecutorTests(unittest.TestCase):
         self.assertEqual(seen["inactivity_timeout"], 42)
         self.assertEqual(seen["maximum_runtime"], 900)
 
+    def test_build_forwards_disabled_inactivity_timeout(self):
+        seen = {}
+        def runner(command, **kwargs):
+            seen.update(kwargs)
+            return {"command":command,"arguments":[command],"working_directory":"/source","configured_working_directory":".","status":"success","exit_code":0,"stdout":"","stderr":"","duration":0.1,"timed_out":False}
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            (source / "dist").mkdir()
+            configured = recipe(["build"], output={"mode":"path","path":"dist"})
+            configured["build"]["inactivity_timeout"] = None
+            result = execute_build(configured, {}, source, dry_run=False, runner=runner)
+        self.assertIsNone(result["plan"]["inactivity_timeout"])
+        self.assertIsNone(seen["inactivity_timeout"])
+
     def test_stops_at_first_failed_command_with_real_error(self):
         calls = []
         def runner(command, **_kwargs):

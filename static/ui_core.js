@@ -47,7 +47,11 @@ function statusBadge(label, state = 'neutral') {
 async function getJson(url) {
   const response = await fetch(url);
   const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || response.statusText);
+  if (!response.ok) {
+    const error = new Error(payload.error || response.statusText);
+    error.status = response.status;
+    throw error;
+  }
   return payload;
 }
 
@@ -70,3 +74,114 @@ function fmtTime(timestamp) {
     return '—';
   }
 }
+
+const APP_DIALOG_TYPES = new Set(['confirm', 'prompt']);
+const TOAST_TYPES = new Set(['success', 'info', 'warning', 'error']);
+let appDialogRequest = null;
+let appDialogPreviousFocus = null;
+
+function showToast(message, {type = 'info', duration = 5000} = {}) {
+  const region = $('toastRegion');
+  if (!region) return null;
+  const safeType = TOAST_TYPES.has(type) ? type : 'info';
+  const toast = document.createElement('div');
+  toast.className = `toast toast--${safeType}`;
+  toast.setAttribute('role', safeType === 'error' ? 'alert' : 'status');
+  toast.innerHTML = `<span class="toast-message"></span><button type="button" class="toast-dismiss" aria-label="Dismiss notification">×</button>`;
+  toast.querySelector('.toast-message').textContent = String(message || '');
+  const dismiss = () => {
+    toast.classList.add('toast--leaving');
+    setTimeout(() => toast.remove(), 160);
+  };
+  toast.querySelector('.toast-dismiss').addEventListener('click', dismiss);
+  region.appendChild(toast);
+  if (duration > 0) setTimeout(dismiss, duration);
+  return toast;
+}
+
+function settleAppDialog(value) {
+  const dialog = $('appDialog');
+  const request = appDialogRequest;
+  appDialogRequest = null;
+  if (dialog?.open) dialog.close();
+  if (appDialogPreviousFocus?.isConnected) appDialogPreviousFocus.focus();
+  appDialogPreviousFocus = null;
+  request?.resolve(value);
+}
+
+function openAppDialog({
+  type = 'confirm',
+  title,
+  description = '',
+  confirmLabel = 'Confirm',
+  cancelLabel = 'Cancel',
+  danger = false,
+  inputLabel = '',
+  inputValue = '',
+  inputPlaceholder = '',
+  inputRequired = false,
+} = {}) {
+  const dialog = $('appDialog');
+  if (!dialog || !APP_DIALOG_TYPES.has(type)) return Promise.resolve(type === 'prompt' ? null : false);
+  if (appDialogRequest) settleAppDialog(appDialogRequest.type === 'prompt' ? null : false);
+  appDialogPreviousFocus = document.activeElement;
+  $('appDialogTitle').textContent = title || (danger ? 'Confirm destructive action' : 'Confirm action');
+  const descriptionNode = $('appDialogDescription');
+  descriptionNode.textContent = description;
+  descriptionNode.hidden = !description;
+  const inputField = $('appDialogInputField');
+  const input = $('appDialogInput');
+  inputField.hidden = type !== 'prompt';
+  $('appDialogInputLabel').textContent = inputLabel || 'Value';
+  input.value = String(inputValue ?? '');
+  input.placeholder = inputPlaceholder;
+  input.required = !!inputRequired;
+  const confirmButton = $('appDialogConfirm');
+  confirmButton.textContent = confirmLabel;
+  confirmButton.classList.toggle('btn--danger', !!danger);
+  confirmButton.classList.toggle('btn--primary', !danger);
+  $('appDialogCancel').textContent = cancelLabel;
+  dialog.dataset.dialogType = type;
+  return new Promise(resolve => {
+    appDialogRequest = {resolve, type};
+    dialog.showModal();
+    (type === 'prompt' ? input : confirmButton).focus();
+    if (type === 'prompt') input.select();
+  });
+}
+
+function showConfirm(options) {
+  return openAppDialog({...options, type: 'confirm'}).then(Boolean);
+}
+
+function showPrompt(options) {
+  return openAppDialog({...options, type: 'prompt'});
+}
+
+function wireAppFeedback() {
+  const dialog = $('appDialog');
+  if (!dialog) return;
+  $('appDialogCancel')?.addEventListener('click', () => settleAppDialog(dialog.dataset.dialogType === 'prompt' ? null : false));
+  $('appDialogConfirm')?.addEventListener('click', () => {
+    if (dialog.dataset.dialogType === 'prompt') {
+      const input = $('appDialogInput');
+      if (!input.reportValidity()) return;
+      settleAppDialog(input.value);
+      return;
+    }
+    settleAppDialog(true);
+  });
+  $('appDialogForm')?.addEventListener('submit', event => {
+    event.preventDefault();
+    $('appDialogConfirm')?.click();
+  });
+  dialog.addEventListener('cancel', event => {
+    event.preventDefault();
+    settleAppDialog(dialog.dataset.dialogType === 'prompt' ? null : false);
+  });
+  dialog.addEventListener('click', event => {
+    if (event.target === dialog) settleAppDialog(dialog.dataset.dialogType === 'prompt' ? null : false);
+  });
+}
+
+wireAppFeedback();

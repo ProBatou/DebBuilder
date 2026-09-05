@@ -1,4 +1,6 @@
 import re
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -11,9 +13,10 @@ class StaticUiTests(unittest.TestCase):
         "static/js/pages/packages.js",
         "static/js/pages/logs.js",
         "static/js/recipe/source_changes.js",
+        "static/js/recipe/stepper.js",
         "static/js/admin.js",
     )
-    STYLESHEETS = ("static/style.css", "static/css/logs.css")
+    STYLESHEETS = ("static/style.css", "static/css/components.css", "static/css/pages.css")
 
     def admin_scripts(self):
         return "\n".join(self.read(path) for path in self.ADMIN_SCRIPTS)
@@ -26,7 +29,8 @@ class StaticUiTests(unittest.TestCase):
         self.assertIn('data-admin-action="validate-package"', admin)
         self.assertIn('data-admin-action="publish-package"', admin)
         self.assertIn('id="btnRevalidateExecution"', self.read("static/index.html"))
-        self.assertIn("function updateExecutionValidationButton", admin)
+        self.assertIn('id="btnPublishExecution"', self.read("static/index.html"))
+        self.assertIn("function updateExecutionActionButtons", admin)
         self.assertRegex(admin, r"validation\.status\s*\?\s*'Revalidate'\s*:\s*'Validate'")
         self.assertIn("/validate`, {}", admin)
         self.assertIn("/publish`, {confirm: confirmation}", admin)
@@ -51,6 +55,7 @@ class StaticUiTests(unittest.TestCase):
         self.assertNotIn('selectedExecutionIds', admin)
         self.assertNotIn('deleteSelectedLogs', admin)
         self.assertIn('id="btnDeleteExecutionLog"', html)
+        self.assertIn('id="btnPublishExecution"', html)
         self.assertIn('id="logVerbosity"', html)
         self.assertNotIn('id="logLiveStatus"', html)
         self.assertNotIn('id="btnResumeLive"', html)
@@ -62,13 +67,24 @@ class StaticUiTests(unittest.TestCase):
         self.assertIn('aria-selected="${executionIsSelected(execution.id) ?', admin)
         self.assertIn('/logs?verbosity=', admin)
         self.assertIn('after=${adminState.logOffset}', admin)
-        self.assertIn('setTimeout(pollOpenExecution, 1500)', admin)
+        self.assertIn("adminState.logVerbosity === 'raw'", admin)
+        self.assertIn('date.toLocaleString(undefined', admin)
+        self.assertIn("second: '2-digit'", admin)
+        self.assertIn('return actionPending ? 500 : executionIsLive(execution) ? 1500 : 5000', admin)
         self.assertIn('stopLogPolling();', admin)
         self.assertIn("adminState.logAutoScroll ? '● Live' : '↓ Jump to latest'", admin)
         self.assertNotIn("textContent='Done'", admin)
         self.assertIn("logAutoScroll: true", admin)
         self.assertIn("logFollowing: false", admin)
-        self.assertIn("adminState.logFollowing = true", admin)
+        self.assertIn("adminState.logFollowing = executionIsLive", admin)
+        self.assertIn("function applyCanonicalExecution", admin)
+        self.assertIn("syncExecutionListEntry(execution)", admin)
+        self.assertIn("execution?.lifecycle_active === true", admin)
+        self.assertIn("execution?.allowed_actions || {}", admin)
+        self.assertIn("['failed', 'build_failed', 'validation_failed', 'publication_failed']", admin)
+        self.assertNotIn("function executionCanValidateAgain", admin)
+        self.assertIn("async function publishExecution", admin)
+        self.assertIn("['Lifecycle', lifecycle]", admin)
         self.assertIn("function handleLogScroll", admin)
         self.assertIn("function resumeLiveLog", admin)
         self.assertIn("btnLogLiveBadge", admin)
@@ -79,16 +95,29 @@ class StaticUiTests(unittest.TestCase):
         self.assertIn('Date:', admin)
         self.assertIn('.execution-item.active', css)
         self.assertIn('[aria-selected="true"]', css)
-        self.assertIn('overflow-x:hidden', css)
+        self.assertRegex(css, r'overflow-x:\s*hidden')
+
+    @unittest.skipUnless(shutil.which("node"), "node unavailable")
+    def test_logs_canonical_state_refresh_updates_list_detail_and_actions(self):
+        subprocess.run(
+            ["node", "tests/js/test_logs_state.js"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
 
     def test_settings_page_has_global_safe_log_cleanup(self):
         settings = self.read("static/settings.js")
         self.assertIn('id="btnClearLogs"', settings)
-        self.assertIn('Clear logs', settings)
+        self.assertIn('Clear execution history', settings)
+        self.assertIn('Remove visible execution history and detailed logs', settings)
         self.assertIn('/api/executions/delete-logs', settings)
         self.assertIn('dry_run:true', settings)
         self.assertIn('all:true', settings)
         self.assertIn('does not delete any Recipe, package, published APT entry, build artifact, manifest, validation, or publication state', settings)
+        self.assertIn('expectedAbsentIds', settings)
+        self.assertNotRegex(settings, r"status\.textContent\s*=\s*`?Cleared")
 
     def test_settings_page_exposes_lifecycle_automation(self):
         settings = self.read("static/settings.js")
@@ -106,9 +135,9 @@ class StaticUiTests(unittest.TestCase):
         script = (ROOT / "static/recipe_serialization.js").read_text()
         html = self.read("static/index.html")
         self.assertIn("output: collectBuildOutput()", script)
-        self.assertIn("inactivity_timeout: Number(value('buildInactivityTimeout')", script)
+        self.assertIn("inactivity_timeout: value('buildInactivityTimeout') === '' ? null", script)
         self.assertIn("maximum_runtime: value('buildMaximumRuntime')", script)
-        self.assertIn("build.inactivity_timeout || 300", script)
+        self.assertIn("Object.prototype.hasOwnProperty.call(build, 'inactivity_timeout')", script)
         self.assertNotIn("build.timeout", script)
         self.assertIn('id="buildInactivityTimeout"', html)
         self.assertIn("Inactivity timeout", html)
@@ -195,7 +224,7 @@ class StaticUiTests(unittest.TestCase):
     def test_build_environment_is_a_compact_ecosystem_summary_with_three_global_states(self):
         html = self.read("static/index.html")
         app = self.read("static/app.js")
-        css = self.read("static/style.css")
+        css = self.styles()
         self.assertIn('class="build-environment-summary"', html)
         self.assertIn('class="build-environment-project" id="buildDetectedProject"', html)
         self.assertIn('id="buildDependenciesSummary" hidden', html)
@@ -219,7 +248,7 @@ class StaticUiTests(unittest.TestCase):
     def test_dependency_ui_distinguishes_all_four_states(self):
         html = (ROOT / "static" / "index.html").read_text()
         app = (ROOT / "static" / "app.js").read_text()
-        css = self.read("static/style.css")
+        css = self.styles()
         serialization = (ROOT / "static" / "recipe_serialization.js").read_text()
         self.assertIn("Dependencies:", html)
         self.assertIn("Manually added", html)
@@ -321,7 +350,7 @@ class StaticUiTests(unittest.TestCase):
         admin = self.admin_scripts()
         settings = self.read("static/settings.js")
         serialization = self.read("static/recipe_serialization.js")
-        css = self.read("static/style.css")
+        css = self.styles()
         self.assertEqual(html.count('<span class="nav-icon" aria-hidden="true"><svg'), 5)
         for emoji in ("📊", "📦", "🧱", "📋", "⚙️"):
             self.assertNotIn(emoji, html)
@@ -329,14 +358,14 @@ class StaticUiTests(unittest.TestCase):
         self.assertNotIn("function renderHealthState", admin)
         self.assertIn("dashboard-repo-summary", admin + css)
         self.assertIn("No build commands required.", html + serialization)
-        self.assertIn("--control-height:38px", css)
+        self.assertRegex(css, r"--control-height:\s*38px")
         self.assertIn('class="span-2 boolean-field"', html)
         self.assertNotIn("settingAllowRealRun", settings)
         self.assertNotIn("settingAllowUnsafeBuild", settings)
         self.assertNotIn("settingBuildTempDir", settings)
         self.assertNotIn('id="btnSaveSettings"', settings)
         self.assertNotIn("settings-save-bar", settings + css)
-        self.assertIn('id="settingsAutosaveStatus"', settings)
+        self.assertIn('id="settingsAutosaveStatus"', html)
         self.assertNotIn(">Saved</span>", settings)
         self.assertNotIn("Saving...", settings)
         self.assertIn("Save failed:", settings)
@@ -351,8 +380,8 @@ class StaticUiTests(unittest.TestCase):
         self.assertIn("middleTruncate(text, key === 'SHA-256' ? 22 : 30)", admin)
         self.assertIn('data-copy-value="${esc(text)}"', admin)
         self.assertIn("copyTextValue(button.dataset.copyValue || '')", admin)
-        self.assertIn("text-overflow:ellipsis;white-space:nowrap", css)
-        self.assertIn(".logs-detail-card .meta-copy-value", css)
+        self.assertRegex(css, r"text-overflow:\s*ellipsis")
+        self.assertIn(".meta-copy-value", css)
         self.assertNotIn(".logs-detail-card .meta-cell{min-width:0;overflow-wrap:anywhere", css)
 
     def test_installation_preview_is_derived_from_build_output_for_all_modes(self):
@@ -380,7 +409,7 @@ class StaticUiTests(unittest.TestCase):
         html = self.read("static/index.html")
         app = self.read("static/app.js")
         serialization = self.read("static/recipe_serialization.js")
-        css = self.read("static/style.css")
+        css = self.styles()
         self.assertIn('id="installAutomaticGroup"', html)
         self.assertIn("These files are installed automatically", html)
         self.assertIn("function installMappingRowHtml", serialization)
@@ -393,7 +422,7 @@ class StaticUiTests(unittest.TestCase):
     def test_lifecycle_labels_and_colors_are_shared(self):
         labels = self.read("static/ui_core.js")
         admin = self.admin_scripts()
-        css = self.read("static/style.css")
+        css = self.styles()
         expected = {
             "up_to_date": "Up to date",
             "update_available": "Update available",
@@ -418,6 +447,9 @@ class StaticUiTests(unittest.TestCase):
 
     def test_dashboard_packages_and_details_use_canonical_lifecycle_status(self):
         admin = self.admin_scripts()
+        pages = self.read("static/css/pages.css")
+        self.assertIn('latest-operation-row', admin)
+        self.assertRegex(pages, r"\.latest-operation-row\s*\{[^}]*align-items:\s*center;")
         self.assertIn("badge(execution.lifecycle_status || execution.status)", admin)
         self.assertIn("function lifecycleState(packageRow)", admin)
         self.assertIn("Current lifecycle", admin)
@@ -439,32 +471,147 @@ class StaticUiTests(unittest.TestCase):
     def test_sidebar_can_collapse_and_copy_install_command(self):
         html = self.read("static/index.html")
         admin_js = self.admin_scripts()
-        css = self.read("static/style.css")
+        css = self.styles()
         self.assertIn('id="btnSidebarCompact"', html)
         self.assertIn('class="sidebar-toggle"', html)
         self.assertIn('title="Collapse sidebar"', html)
         self.assertIn('aria-label="Collapse sidebar"', html)
         self.assertIn('<svg viewBox="0 0 24 24" aria-hidden="true">', html)
-        self.assertIn('/style.css?v=20260904-4', html)
-        self.assertIn('/css/logs.css?v=20260904-1', html)
+        self.assertIn('/style.css?v=20260905-1', html)
+        self.assertIn('/css/components.css?v=20260905-3', html)
+        self.assertIn('/css/pages.css?v=20260905-4', html)
+        self.assertNotIn('/css/logs.css', html)
         for script in ("/js/pages/dashboard.js", "/js/pages/packages.js", "/js/pages/logs.js", "/js/recipe/source_changes.js", "/js/admin.js"):
             self.assertIn(script, html)
-        self.assertIn('/settings.js?v=20260904-2', html)
+        self.assertIn('/ui_core.js?v=20260905-2', html)
+        self.assertIn('/settings.js?v=20260905-4', html)
+        self.assertIn('/js/pages/dashboard.js?v=20260905-2', html)
+        self.assertIn('/js/pages/logs.js?v=20260905-6', html)
+        self.assertIn('/js/admin.js?v=20260905-4', html)
         self.assertIn("debBuilderSidebarCompact", admin_js)
         self.assertIn("Expand sidebar", admin_js)
         self.assertIn("Collapse sidebar", admin_js)
         self.assertNotIn('>←</button>', html)
         self.assertNotIn("button.textContent = compact", admin_js)
-        self.assertIn("body.sidebar-collapsed .sidebar-toggle svg{transform:scaleX(-1)}", css)
-        self.assertIn(".sidebar-toggle:focus-visible", css)
+        self.assertRegex(css, r"body\.sidebar-collapsed \.sidebar-toggle svg\s*\{[^}]*transform:\s*scaleX\(-1\)")
+        self.assertIn("button:focus-visible", css)
         self.assertIn("copyInstallCommand", admin_js)
         self.assertIn("copied", css)
         self.assertNotIn("cop" + "ié", css)
 
+    def test_stylesheets_follow_the_shared_component_architecture(self):
+        html = self.read("static/index.html")
+        pages = self.read("static/css/pages.css")
+        self.assertIn('/style.css?v=20260905-1', html)
+        self.assertIn('/css/components.css?v=20260905-3', html)
+        self.assertIn('/css/pages.css?v=20260905-4', html)
+        self.assertNotIn('/css/logs.css', html)
+        self.assertFalse((ROOT / "static" / "css" / "logs.css").exists())
+        self.assertNotRegex(self.styles(), r"nth-(?:child|of-type)\s*\(")
+        self.assertIn(".mobile-log-open .logs-list-card", pages)
+        self.assertIn(".mobile-log-open .logs-detail-card", pages)
+
+    def test_stabilized_layouts_use_intrinsic_rows_and_explicit_groups(self):
+        html = self.read("static/index.html")
+        components = self.read("static/css/components.css")
+        pages = self.read("static/css/pages.css")
+        settings = self.read("static/settings.js")
+        self.assertRegex(pages, r"#view-packages\s*\{[^}]*grid-auto-rows:\s*max-content;[^}]*align-content:\s*start;")
+        self.assertRegex(pages, r"\.logs-list-card \.list\s*\{[^}]*grid-auto-rows:\s*max-content;[^}]*align-content:\s*start;")
+        self.assertRegex(components, r"\.data-list,\s*\.list\s*\{[^}]*grid-auto-rows:\s*max-content;[^}]*align-content:\s*start;")
+        for marker in (
+            "install-package-fields", "install-destination-fields", "install-ownership-fields",
+            "install-persistent-fields", "service-environment-fields", "service-dependency-fields",
+            "service-lifecycle-fields", "service-command-hook-fields", "service-output-fields",
+        ):
+            self.assertIn(marker, html)
+        self.assertNotIn("grid-area: auto", pages)
+        self.assertRegex(pages, r"\.recipe-form-group \.recipe-step-fields > label\s*\{[^}]*grid-row:\s*auto;")
+        self.assertRegex(html, r'class="span-12"><span>Persistent directories</span><textarea id="installDirectories"')
+        self.assertRegex(pages, r"\.service-environment-fields\s*\{[^}]*grid-template-columns:[^;}]*1fr[^;}]*2fr[^;}]*;")
+        self.assertIn(".service-command-hook-fields", pages)
+        self.assertIn("minmax(220px, 1fr)", pages)
+        for row in ("settings-layout-row--general", "settings-layout-row--integrations", "settings-layout-row--automation"):
+            self.assertIn(row, settings)
+        self.assertRegex(pages, r"\.settings-editable-area\s*\{[^}]*display:\s*flex;[^}]*flex-direction:\s*column;")
+        self.assertRegex(pages, r"\.settings-layout-row\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\);[^}]*align-items:\s*stretch;")
+        self.assertIn('class="settings-section settings-card card maintenance-settings-card"', settings)
+
+    def test_shared_feedback_replaces_native_browser_dialogs(self):
+        html = self.read("static/index.html")
+        core = self.read("static/ui_core.js")
+        components = self.read("static/css/components.css")
+        application_js = "\n".join(path.read_text() for path in (ROOT / "static").rglob("*.js"))
+        self.assertIsNone(re.search(r"\b(?:alert|confirm|prompt)\s*\(", application_js))
+        for element_id in ("toastRegion", "appDialog", "appDialogTitle", "appDialogDescription", "appDialogCancel", "appDialogConfirm"):
+            self.assertIn(f'id="{element_id}"', html)
+        for primitive in ("function showToast", "function showConfirm", "function showPrompt", "function settleAppDialog"):
+            self.assertIn(primitive, core)
+        self.assertIn("appDialogPreviousFocus", core)
+        self.assertIn("dialog.addEventListener('cancel'", core)
+        self.assertIn("event.target === dialog", core)
+        self.assertIn(".toast-region", components)
+        self.assertIn(".app-dialog", components)
+
+    @unittest.skipUnless(shutil.which("node"), "node unavailable")
+    def test_logs_delete_clears_client_selection_without_reopening_the_run(self):
+        subprocess.run(
+            ["node", "tests/js/test_logs_delete.js"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    @unittest.skipUnless(shutil.which("node"), "node unavailable")
+    def test_recipe_stepper_tracks_the_section_nearest_the_sticky_offset(self):
+        subprocess.run(
+            ["node", "tests/js/test_recipe_stepper.js"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_recipe_stepper_and_autosave_status_are_explicit(self):
+        html = self.read("static/index.html")
+        app = self.read("static/app.js")
+        pages = self.read("static/css/pages.css")
+        stepper = self.read("static/js/recipe/stepper.js")
+        self.assertIn('class="recipe-stepper"', html)
+        for step in ("source", "build", "install", "service"):
+            self.assertIn(f'id="recipe-step-{step}"', html)
+        self.assertIn('id="recipeAutosaveStatus"', html)
+        self.assertIn("function setRecipeAutosaveState", app)
+        for state in ("pending", "saving", "saved", "error"):
+            self.assertIn(f"'{state}'", app)
+        self.assertIn(".recipe-build-card.not-applicable", pages)
+        self.assertIn(".recipe-install-card.not-applicable", pages)
+        self.assertIn(".recipe-service-card.not-applicable", pages)
+        self.assertIn("function updateActiveRecipeStep", stepper)
+        self.assertIn("recipeStickyOffset()", stepper)
+        self.assertIn("aria-current", stepper)
+        self.assertIn('.recipe-stepper a.active', pages)
+
+    def test_hidden_states_remain_authoritative(self):
+        html = self.read("static/index.html")
+        css = self.styles()
+        self.assertRegex(css, r"\[hidden\]\s*\{\s*display:\s*none\s*!important;")
+        self.assertRegex(css, r"\.hidden\s*\{\s*display:\s*none\s*!important;")
+        for element_id in (
+            "mobileNavBackdrop",
+            "executionMoreDetails",
+            "buildDependenciesSummary",
+            "recipeArchiveInspectionField",
+            "staticSourceSummary",
+        ):
+            self.assertRegex(html, rf'id="{element_id}"[^>]*\bhidden\b')
+
     def test_settings_page_is_english_and_single_language(self):
         html = self.read("static/index.html")
         settings_js = self.read("static/settings.js")
-        self.assertIn("Editable settings", html)
+        self.assertIn("<h2>Settings</h2>", html)
+        self.assertIn('id="settingsAutosaveStatus"', html)
         self.assertIn("OIDC authentication", settings_js)
         self.assertIn("ntfy token (optional)", settings_js)
 
@@ -475,7 +622,7 @@ class StaticUiTests(unittest.TestCase):
             self.assertNotIn("block" + "ly.", text.lower())
 
     def test_css_has_recipe_layout_sections(self):
-        css = self.read("static/style.css")
+        css = self.styles()
         for marker in [
             ".recipe-simple-toolbar",
             ".recipe-source-card",
@@ -490,7 +637,7 @@ class StaticUiTests(unittest.TestCase):
     def test_recipe_mockup_is_english_and_has_consistent_visual_groups(self):
         html = self.read("static/index.html")
         admin_js = self.admin_scripts()
-        css = self.read("static/style.css")
+        css = self.styles()
         for marker in [
             "Build environment",
             "Source changes",

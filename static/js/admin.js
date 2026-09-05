@@ -1,6 +1,7 @@
 const adminState = {
   packages: [],
   executions: [],
+  executionListRevision: 0,
   selectedPackage: null,
   selectedExecution: null,
   executionAction: null,
@@ -29,6 +30,7 @@ function switchView(name) {
   if (name !== 'logs') stopLogPolling();
   document.querySelectorAll('.nav-link').forEach(button => button.classList.toggle('active', button.dataset.view === name));
   document.querySelectorAll('.view').forEach(view => view.classList.toggle('active', view.id === 'view-' + name));
+  if (name === 'recipes') scheduleRecipeStepUpdate();
   if (name === 'packages') loadPackages();
   if (name === 'logs') loadExecutions();
   if (name === 'settings') loadSettings();
@@ -36,7 +38,7 @@ function switchView(name) {
 }
 
 function isMobileViewport() {
-  return window.matchMedia('(max-width: 899px)').matches;
+  return window.matchMedia('(max-width: 900px)').matches;
 }
 
 function setMobileNav(open) {
@@ -125,12 +127,13 @@ async function handleAdminAction(element) {
 
 function wireAdmin() {
   restoreSidebarPreference();
+  initRecipeStepper();
   document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => switchView(button.dataset.view)));
   document.addEventListener('click', event => {
     const element = event.target.closest('[data-admin-action]');
     if (!element) return;
     event.stopPropagation();
-    handleAdminAction(element).catch(error => alert(error.message));
+    handleAdminAction(element).catch(error => showToast(error.message, {type: 'error'}));
   });
   $('packageSearch')?.addEventListener('input', renderPackages);
   $('packageFilter')?.addEventListener('change', renderPackages);
@@ -138,10 +141,13 @@ function wireAdmin() {
   $('logStatus')?.addEventListener('change', renderExecutions);
   $('logVerbosity')?.addEventListener('change', event => changeLogVerbosity(event.target.value));
   $('btnDeleteExecutionLog')?.addEventListener('click', () => {
-    if (adminState.selectedExecution) deleteExecutionLog(adminState.selectedExecution.id).catch(error => alert(error.message));
+    if (adminState.selectedExecution) deleteExecutionLog(adminState.selectedExecution.id).catch(error => showToast(error.message, {type: 'error'}));
   });
   $('btnRevalidateExecution')?.addEventListener('click', () => {
-    if (adminState.selectedExecution) validateExecution(adminState.selectedExecution.id).catch(error => alert(error.message));
+    if (adminState.selectedExecution) validateExecution(adminState.selectedExecution.id).catch(error => showToast(error.message, {type: 'error'}));
+  });
+  $('btnPublishExecution')?.addEventListener('click', () => {
+    if (adminState.selectedExecution) publishExecution(adminState.selectedExecution.id).catch(error => showToast(error.message, {type: 'error'}));
   });
   $('btnLogLiveBadge')?.addEventListener('click', resumeLiveLog);
   $('executionDetail')?.addEventListener('scroll', handleLogScroll);
@@ -153,7 +159,15 @@ function wireAdmin() {
       setTimeout(() => button.classList.remove('copied'), 900);
     }).catch(() => {});
   });
-  $('btnNewPackage')?.addEventListener('click', () => createPackageUi().catch(error => alert(error.message)));
+  $('executionMetaMore')?.addEventListener('click', event => {
+    const button = event.target.closest('[data-copy-value]');
+    if (!button) return;
+    copyTextValue(button.dataset.copyValue || '').then(() => {
+      button.classList.add('copied');
+      setTimeout(() => button.classList.remove('copied'), 900);
+    }).catch(() => {});
+  });
+  $('btnNewPackage')?.addEventListener('click', () => createPackageUi().catch(error => showToast(error.message, {type: 'error'})));
   $('btnNewRecipe')?.addEventListener('click', newRecipeUi);
   $('recipeMetaName')?.addEventListener('input', event => {$('recipeTitle').textContent = event.target.value || 'Recipe';});
   $('newRecipePackage')?.addEventListener('change', event => syncNewRecipeFromPackage(event.target.value));
@@ -242,8 +256,15 @@ function wireAdmin() {
     removeInstallMapping(Number(remove.dataset.removeInstallMapping));
     scheduleRecipeAutosave();
   });
-  $('btnAddBuildDependency')?.addEventListener('click', () => {
-    const dependency = prompt('Debian build dependency name');
+  $('btnAddBuildDependency')?.addEventListener('click', async () => {
+    const dependency = await showPrompt({
+      title: 'Add build dependency',
+      description: 'Enter one Debian package name.',
+      inputLabel: 'Package name',
+      inputPlaceholder: 'for example: libssl-dev',
+      inputRequired: true,
+      confirmLabel: 'Add dependency',
+    });
     if (dependency && !window.recipeExtraDependencies.includes(dependency.trim())) {
       window.recipeExtraDependencies.push(dependency.trim());
       renderDependencyChips();

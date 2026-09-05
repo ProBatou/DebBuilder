@@ -5,6 +5,7 @@ import os
 import re
 import selectors
 import shlex
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -12,6 +13,8 @@ from pathlib import Path
 SECRET_KEY = re.compile(r"(?i)(token|secret|password|passwd|api[_-]?key|credential)")
 SECRET_OPTION = re.compile(r"(?i)^--?(?:token|secret|password|passwd|api[_-]?key|credential)(?:=|$)")
 BASE_ENV_KEYS = ("PATH", "LANG", "LC_ALL", "TZ", "HOME")
+TERMINATION_GRACE = 0.2
+TERMINATION_REAP_TIMEOUT = 1.0
 
 
 class CommandValidationError(ValueError):
@@ -134,23 +137,114 @@ def redact_command(command: str, arguments: list[str], environment: dict[str, st
     return redacted
 
 
-def _stop_process(process: subprocess.Popen, *, grace: float = 0.2) -> tuple[int | None, bool]:
-    killed = False
-    if process.poll() is None:
-        process.terminate()
-        try:
-            return process.wait(timeout=grace), killed
-        except subprocess.TimeoutExpired:
-            killed = True
-            process.kill()
+def _read_process_output(selector, output: dict[str, list[str]], redaction_environment: dict[str, str], *, wait: float, on_output=None) -> bool:
+    activity = False
+    for key, _mask in selector.select(wait):
+        chunk = os.read(key.fileobj.fileno(), 4096)
+        if chunk:
+            activity = True
+            redacted = redact_text(chunk.decode("utf-8", errors="replace"), redaction_environment)
+            output[key.data].append(redacted)
+            if callable(on_output):
+                on_output({"stream": key.data, "text": redacted})
+        else:
+            selector.unregister(key.fileobj)
+            key.fileobj.close()
+    return activity
+
+
+def _process_group_exists(process_group: int) -> bool:
     try:
-        return process.wait(timeout=grace), killed
+        os.killpg(process_group, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _signal_process_group(process_group: int, requested_signal: int) -> bool:
+    try:
+        os.killpg(process_group, requested_signal)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _terminate_process_group(process: subprocess.Popen, process_group: int, selector, output: dict[str, list[str]], redaction_environment: dict[str, str], *, on_output=None, grace: float = TERMINATION_GRACE) -> tuple[int | None, bool, str]:
+    """Stop the whole command session and reap its direct child."""
+    errors = []
+    killed = False
+    try:
+        _signal_process_group(process_group, signal.SIGTERM)
+    except OSError as exc:
+        errors.append(f"could not terminate process group {process_group}: {exc}")
+
+    grace_deadline = time.monotonic() + grace
+    while time.monotonic() < grace_deadline:
+        process.poll()
+        try:
+            if not _process_group_exists(process_group):
+                break
+        except OSError as exc:
+            errors.append(f"could not inspect process group {process_group}: {exc}")
+            break
+        _read_process_output(
+            selector, output, redaction_environment,
+            wait=min(0.02, max(0.0, grace_deadline - time.monotonic())), on_output=on_output,
+        )
+
+    try:
+        group_alive = _process_group_exists(process_group)
+    except OSError as exc:
+        group_alive = True
+        errors.append(f"could not inspect process group {process_group}: {exc}")
+    if group_alive:
+        try:
+            killed = _signal_process_group(process_group, signal.SIGKILL)
+        except OSError as exc:
+            errors.append(f"could not kill process group {process_group}: {exc}")
+
+    reap_deadline = time.monotonic() + TERMINATION_REAP_TIMEOUT
+    while time.monotonic() < reap_deadline:
+        process.poll()
+        _read_process_output(
+            selector, output, redaction_environment,
+            wait=min(0.02, max(0.0, reap_deadline - time.monotonic())), on_output=on_output,
+        )
+        try:
+            if not _process_group_exists(process_group):
+                break
+        except OSError as exc:
+            errors.append(f"could not inspect process group {process_group}: {exc}")
+            break
+    else:
+        errors.append(f"process group {process_group} remained alive after SIGKILL")
+
+    remaining = max(0.0, reap_deadline - time.monotonic())
+    try:
+        exit_code = process.wait(timeout=remaining)
     except subprocess.TimeoutExpired:
-        return None, killed
+        exit_code = None
+        errors.append(f"process {process.pid} could not be reaped")
+
+    while selector.get_map() and time.monotonic() < reap_deadline:
+        _read_process_output(
+            selector, output, redaction_environment,
+            wait=min(0.02, max(0.0, reap_deadline - time.monotonic())), on_output=on_output,
+        )
+    if selector.get_map():
+        errors.append("command output pipes remained open after process-group termination")
+        for key in list(selector.get_map().values()):
+            selector.unregister(key.fileobj)
+            key.fileobj.close()
+    return exit_code, killed, "; ".join(dict.fromkeys(errors))
 
 
-def _stream_process(arguments: list[str], *, cwd: Path, env: dict[str, str], inactivity_timeout: float, maximum_runtime: float | None, redaction_environment: dict[str, str], on_output=None) -> dict:
-    process = subprocess.Popen(arguments, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False, bufsize=0)
+def _stream_process(arguments: list[str], *, cwd: Path, env: dict[str, str], inactivity_timeout: float | None, maximum_runtime: float | None, redaction_environment: dict[str, str], on_output=None) -> dict:
+    process = subprocess.Popen(
+        arguments, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        shell=False, bufsize=0, start_new_session=True,
+    )
+    process_group = process.pid
     selector = selectors.DefaultSelector()
     if process.stdout:
         selector.register(process.stdout, selectors.EVENT_READ, "stdout")
@@ -160,47 +254,58 @@ def _stream_process(arguments: list[str], *, cwd: Path, env: dict[str, str], ina
     started = time.monotonic()
     last_activity = started
     timeout_reason = None
-    while selector.get_map():
-        now = time.monotonic()
-        if maximum_runtime is not None and now - started >= maximum_runtime:
-            timeout_reason = "maximum_runtime"
-            break
-        if inactivity_timeout is not None and now - last_activity >= inactivity_timeout:
-            timeout_reason = "inactivity"
-            break
-        waits = [0.1]
-        if maximum_runtime is not None:
-            waits.append(max(0.0, maximum_runtime - (now - started)))
-        if inactivity_timeout is not None:
-            waits.append(max(0.0, inactivity_timeout - (now - last_activity)))
-        for key, _mask in selector.select(min(waits)):
-            chunk = os.read(key.fileobj.fileno(), 4096)
-            if chunk:
-                last_activity = time.monotonic()
-                redacted = redact_text(chunk.decode("utf-8", errors="replace"), redaction_environment)
-                output[key.data].append(redacted)
-                if callable(on_output):
-                    on_output({"stream": key.data, "text": redacted})
+    try:
+        while True:
+            process.poll()
+            group_alive = _process_group_exists(process_group)
+            if not selector.get_map() and not group_alive:
+                break
+            now = time.monotonic()
+            if maximum_runtime is not None and now - started >= maximum_runtime:
+                timeout_reason = "maximum_runtime"
+                break
+            if inactivity_timeout is not None and now - last_activity >= inactivity_timeout:
+                timeout_reason = "inactivity"
+                break
+            waits = [0.1]
+            if maximum_runtime is not None:
+                waits.append(max(0.0, maximum_runtime - (now - started)))
+            if inactivity_timeout is not None:
+                waits.append(max(0.0, inactivity_timeout - (now - last_activity)))
+            if selector.get_map():
+                activity = _read_process_output(selector, output, redaction_environment, wait=min(waits), on_output=on_output)
             else:
-                selector.unregister(key.fileobj)
-                key.fileobj.close()
-    if timeout_reason:
-        for key in list(selector.get_map().values()):
-            selector.unregister(key.fileobj)
-        exit_code, killed = _stop_process(process)
-        stdout, stderr = process.communicate()
-        if stdout:
-            output["stdout"].append(redact_text(stdout.decode("utf-8", errors="replace"), redaction_environment))
-        if stderr:
-            output["stderr"].append(redact_text(stderr.decode("utf-8", errors="replace"), redaction_environment))
-        if timeout_reason == "inactivity":
-            message = f"command stopped after {inactivity_timeout:g} seconds without stdout/stderr activity"
-        else:
-            message = f"command stopped after maximum runtime of {maximum_runtime:g} seconds"
-        output["stderr"].append(("\n" if output["stderr"] else "") + message)
-        return {"exit_code": None, "stdout": "".join(output["stdout"]), "stderr": "".join(output["stderr"]), "timed_out": True, "timeout_reason": timeout_reason, "process_exit_code": exit_code, "killed": killed}
-    exit_code = process.wait()
-    return {"exit_code": exit_code, "stdout": "".join(output["stdout"]), "stderr": "".join(output["stderr"]), "timed_out": False, "timeout_reason": ""}
+                time.sleep(min(waits))
+                activity = False
+            if activity:
+                last_activity = time.monotonic()
+        if timeout_reason:
+            exit_code, killed, termination_error = _terminate_process_group(
+                process, process_group, selector, output, redaction_environment, on_output=on_output,
+            )
+            if timeout_reason == "inactivity":
+                message = f"command stopped after {inactivity_timeout:g} seconds without stdout/stderr activity"
+            else:
+                message = f"command stopped after maximum runtime of {maximum_runtime:g} seconds"
+            output["stderr"].append(("\n" if output["stderr"] else "") + message)
+            if termination_error:
+                output["stderr"].append("\nprocess-group termination error: " + termination_error)
+            return {"exit_code": None, "stdout": "".join(output["stdout"]), "stderr": "".join(output["stderr"]), "timed_out": True, "timeout_reason": timeout_reason, "process_exit_code": exit_code, "killed": killed, "termination_error": termination_error}
+        exit_code = process.wait()
+        return {"exit_code": exit_code, "stdout": "".join(output["stdout"]), "stderr": "".join(output["stderr"]), "timed_out": False, "timeout_reason": "", "termination_error": ""}
+    except BaseException:
+        _terminate_process_group(process, process_group, selector, output, redaction_environment)
+        raise
+    finally:
+        selector.close()
+
+
+def _validated_timeout(value: float | None, what: str) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        raise CommandValidationError(f"{what} must be a positive number or None")
+    return float(value)
 
 
 def run_command(command: str, *, workspace: str | Path, working_directory: str = ".", environment: dict[str, str] | None = None, timeout: float | None = None, inactivity_timeout: float | None = 300, maximum_runtime: float | None = None, on_output=None) -> dict:
@@ -209,8 +314,10 @@ def run_command(command: str, *, workspace: str | Path, working_directory: str =
     safe_for_redaction = {key: value for key, value in (environment or {}).items() if isinstance(key, str) and isinstance(value, str)}
     if timeout is not None and maximum_runtime is None:
         maximum_runtime = timeout
-    result = {"command": redact_command(command, [], safe_for_redaction), "arguments": [], "working_directory": display_cwd, "configured_working_directory": display_cwd, "status": "failed", "exit_code": None, "process_exit_code": None, "stdout": "", "stderr": "", "duration": 0.0, "timed_out": False, "timeout_reason": "", "killed": False}
+    result = {"command": redact_command(command, [], safe_for_redaction), "arguments": [], "working_directory": display_cwd, "configured_working_directory": display_cwd, "status": "failed", "exit_code": None, "process_exit_code": None, "stdout": "", "stderr": "", "duration": 0.0, "timed_out": False, "timeout_reason": "", "killed": False, "termination_error": ""}
     try:
+        inactivity_timeout = _validated_timeout(inactivity_timeout, "inactivity_timeout")
+        maximum_runtime = _validated_timeout(maximum_runtime, "maximum_runtime")
         env = controlled_environment(workspace, environment)
         arguments = parse_command(command)
         redaction_environment = {**env, **{f"SECRET_ARGUMENT_{index}": value for index, value in enumerate(secret_argument_values(arguments), 1)}}
@@ -219,7 +326,7 @@ def run_command(command: str, *, workspace: str | Path, working_directory: str =
         result["working_directory"] = str(cwd)
         result["arguments"] = redact_arguments(arguments, redaction_environment)
         completed = _stream_process(arguments, cwd=cwd, env=env, inactivity_timeout=inactivity_timeout, maximum_runtime=maximum_runtime, redaction_environment=redaction_environment, on_output=on_output)
-        result.update({"exit_code": completed["exit_code"], "process_exit_code": completed.get("process_exit_code"), "stdout": completed["stdout"], "stderr": completed["stderr"], "timed_out": completed["timed_out"], "timeout_reason": completed.get("timeout_reason", ""), "killed": completed.get("killed", False), "status": "failed" if completed["timed_out"] else "success" if completed["exit_code"] == 0 else "failed"})
+        result.update({"exit_code": completed["exit_code"], "process_exit_code": completed.get("process_exit_code"), "stdout": completed["stdout"], "stderr": completed["stderr"], "timed_out": completed["timed_out"], "timeout_reason": completed.get("timeout_reason", ""), "killed": completed.get("killed", False), "termination_error": completed.get("termination_error", ""), "status": "failed" if completed["timed_out"] else "success" if completed["exit_code"] == 0 else "failed"})
     except (CommandValidationError, OSError) as exc:
         result["stderr"] = str(exc)
     result["duration"] = round(time.monotonic() - started, 6)

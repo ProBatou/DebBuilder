@@ -324,5 +324,7 @@ def create_handler(api):
                 api.json_response(self, {"ok": True, "deletion": api.delete_execution_log(run_id)})
             except FileNotFoundError:
                 api.json_response(self, {"error": "execution not found"}, 404)
+            except api.workspace_cleanup.WorkspaceBusyError as exc:
+                api.json_response(self, {"error": str(exc), "code": "execution_active"}, 409)
 
     return Handler

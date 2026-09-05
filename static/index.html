@@ -4,8 +4,9 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>DebBuilder</title>
-  <link rel="stylesheet" href="/style.css?v=20260904-4" />
-  <link rel="stylesheet" href="/css/logs.css?v=20260904-1" />
+  <link rel="stylesheet" href="/style.css?v=20260905-1" />
+  <link rel="stylesheet" href="/css/components.css?v=20260905-3" />
+  <link rel="stylesheet" href="/css/pages.css?v=20260905-4" />
 </head>
 <body>
   <header class="mobile-topbar" aria-label="Mobile navigation">
@@ -29,37 +30,37 @@
       <div class="status" id="status" role="button" tabindex="0" title="Click to copy command">loading…</div>
     </aside>
     <main class="content">
-      <section class="view active" id="view-dashboard">
-        <div class="page-head"><h2>Dashboard</h2><p>Source → Build → Validation → Publication · what needs your attention.</p></div>
+      <section class="view page active" id="view-dashboard">
+        <div class="page-head page-header"><div><h2>Dashboard</h2><p>Source → Build → Validation → Publication · what needs your attention.</p></div></div>
         <div class="dashboard-shell">
-          <div class="metrics dashboard-metrics" id="dashboardMetrics"></div>
+          <div class="metrics dashboard-metrics stat-grid" id="dashboardMetrics" aria-label="Package overview"></div>
           <section class="card dashboard-card dashboard-repo-card"><div id="dashboardRepoState">Loading repository…</div></section>
-          <section class="card dashboard-card"><div class="section-title"><h3>Package tracking</h3><button class="btn-primary" data-view="packages">View packages</button></div><div id="dashboardPackageFlow" class="dashboard-package-flow">Loading…</div></section>
-          <section class="card dashboard-card"><div class="section-title"><h3>Latest operations</h3><button data-view="logs">View logs</button></div><div id="latestOperations" class="list muted">Loading…</div></section>
+          <section class="card dashboard-card"><div class="section-title section-header"><div><h3>Package tracking</h3><p>Highest-priority package states.</p></div><button class="btn btn--ghost btn--sm" data-view="packages">View packages</button></div><div id="dashboardPackageFlow" class="dashboard-package-flow data-list">Loading…</div></section>
+          <section class="card dashboard-card"><div class="section-title section-header"><div><h3>Latest operations</h3><p>Recent lifecycle activity.</p></div><button class="btn btn--ghost btn--sm" data-view="logs">View logs</button></div><div id="latestOperations" class="list data-list muted">Loading…</div></section>
         </div>
       </section>
 
-      <section class="view" id="view-packages">
-        <div class="page-head split"><div><h2>Packages</h2><p>Managed Debian package entities, separate from automated recipes.</p></div><button id="btnNewPackage">+ New package</button></div>
-        <div class="filters package-filters"><input id="packageSearch" placeholder="Search packages…" /><select id="packageFilter"><option value="all">All</option><option value="ready">Up to date</option><option value="update_available">Update available</option><option value="failed">Error</option><option value="recipe_missing">Recipe needed</option></select></div>
-        <section class="card package-board"><div class="section-title"><h3>Known packages</h3><span class="muted" id="packageCount"></span></div><div id="packageList" class="package-list">Loading…</div></section>
-        <aside id="packageDrawer" class="drawer" aria-hidden="true"><div class="drawer-backdrop" id="packageDrawerBackdrop"></div><div class="drawer-panel"><div class="drawer-head"><div><span class="eyebrow">Package detail</span><h2 id="packageDrawerTitle">Package</h2></div><button id="btnClosePackageDrawer">Close</button></div><div id="packageDetail" class="detail muted">Select a package.</div></div></aside>
+      <section class="view page" id="view-packages">
+        <div class="page-head page-header"><div><h2>Packages</h2><p>Managed Debian package entities, separate from automated recipes.</p></div><div class="page-header-actions"><button class="btn btn-primary" id="btnNewPackage">+ New package</button></div></div>
+        <div class="toolbar package-toolbar" aria-label="Package filters"><div class="toolbar-fields"><label class="field field--grow"><span>Search</span><input id="packageSearch" type="search" placeholder="Name, source or recipe…" /></label><label class="field field--sm"><span>Status</span><select id="packageFilter"><option value="all">All</option><option value="ready">Up to date</option><option value="update_available">Update available</option><option value="failed">Error</option><option value="recipe_missing">Recipe needed</option></select></label></div><span class="muted toolbar-count" id="packageCount" aria-live="polite"></span></div>
+        <section class="card package-board"><div class="section-title section-header"><div><h3>Known packages</h3><p>Published, available and built versions at a glance.</p></div></div><div class="package-table-head" aria-hidden="true"><span>Package</span><span>Status</span><span>Published</span><span>Available</span><span>Built / arch</span></div><div id="packageList" class="package-list data-list">Loading…</div></section>
+        <aside id="packageDrawer" class="drawer" aria-hidden="true"><div class="drawer-backdrop" id="packageDrawerBackdrop"></div><div class="drawer-panel"><div class="drawer-head"><div><span class="eyebrow">Package detail</span><h2 id="packageDrawerTitle">Package</h2></div><button class="btn btn--ghost btn--sm" id="btnClosePackageDrawer">Close</button></div><div id="packageDetail" class="detail muted">Select a package.</div></div></aside>
       </section>
 
-      <section class="view" id="view-recipes">
+      <section class="view page" id="view-recipes">
+        <div class="page-head page-header recipe-page-header"><div><h2>Recipes</h2><p>Define source, build, Debian installation and optional service configuration.</p></div><div class="page-header-actions"><span id="recipeAutosaveStatus" class="autosave-status" data-state="saved" aria-live="polite"></span></div></div>
+        <nav class="recipe-stepper" aria-label="Recipe steps"><a class="active" href="#recipe-step-source" data-recipe-step="source" aria-current="step"><span>1</span><strong>Source</strong></a><a href="#recipe-step-build" data-recipe-step="build"><span>2</span><strong>Build</strong></a><a href="#recipe-step-install" data-recipe-step="install"><span>3</span><strong>Installation</strong></a><a href="#recipe-step-service" data-recipe-step="service"><span>4</span><strong>Service</strong></a></nav>
         <div class="recipe-workspace recipe-blank-workspace">
           <section class="recipe-main recipe-blank-main">
-            <div class="recipe-toolbar recipe-simple-toolbar card">
-              <label class="recipe-picker"><span>Recipe</span><select id="workflowSelect"></select></label>
-              <button id="btnNewRecipe">+ New</button>
-              <button class="danger" id="btnDeleteRecipeTop">Delete</button>
-              <button id="btnDryRun">Dry-run</button>
-              <button id="btnBuildReal">Build</button>
-              <button class="ghost" id="btnRuns">Runs</button>
+            <div class="recipe-toolbar recipe-simple-toolbar toolbar">
+              <label class="recipe-picker field"><span>Recipe</span><select id="workflowSelect"></select></label>
+              <div class="recipe-action-group"><button class="btn btn--ghost" id="btnNewRecipe">+ New</button><button class="btn btn--ghost" id="btnRuns">Runs</button></div>
+              <div class="recipe-action-group recipe-run-actions"><button class="btn btn--warning" id="btnDryRun">Dry-run</button><button class="btn btn--primary" id="btnBuildReal">Build</button></div>
+              <button class="btn btn--danger recipe-delete-action" id="btnDeleteRecipeTop">Delete</button>
               <input id="workflowName" type="hidden" />
             </div>
 
-            <section class="recipe-draft-card recipe-source-card card" aria-label="Recipe GitHub source">
+            <section id="recipe-step-source" class="recipe-draft-card recipe-source-card recipe-step-card card" aria-label="Recipe GitHub source">
               <div class="section-title recipe-draft-head">
                 <div>
                   <span class="eyebrow">Step 1</span>
@@ -78,7 +79,7 @@
                 <label id="recipeAssetSelectionField" hidden><span>Asset selection</span><select id="recipeAssetSelection"><option value="exact">Exact</option><option value="pattern">Pattern</option></select></label>
                 <label id="recipeArtifactPatternField" hidden><span>Release asset pattern</span><input id="recipeArtifactPattern" placeholder="*-linux-x64.deb"></label>
                 <label id="recipeArtifactNameField" hidden><span>Exact release asset</span><input id="recipeArtifactName" placeholder="project-x86_64-linux.tar.gz"></label>
-                <label id="recipeArtifactFilesField" hidden><span>Selected archive files</span><textarea id="recipeArtifactFiles" rows="2" placeholder="Select files after inspection"></textarea></label>
+                <label class="span-12" id="recipeArtifactFilesField" hidden><span>Selected archive files</span><textarea id="recipeArtifactFiles" rows="2" placeholder="Select files after inspection"></textarea></label>
                 <div id="recipeArchiveInspectionField" class="span-12 archive-inspection" hidden><button type="button" class="ghost compact-button" id="btnInspectArchive">Inspect archive</button><div id="recipeArchiveInspection" class="archive-inspection-results muted">No archive inspected.</div></div>
                 <label><span>Tracking</span><select id="recipeMetaTracking"><option value="latest_release">Latest release</option><option value="tag">Explicit tag</option><option value="manual">Manual ref</option></select></label>
                 <label id="recipeSourceRefField" hidden><span>GitHub ref</span><input id="recipeMetaSourceRef" placeholder="v1.2.3, main, or commit SHA"></label>
@@ -88,7 +89,7 @@
               <datalist id="packageOptions"></datalist>
             </section>
 
-            <section class="recipe-step-card recipe-build-card card" aria-label="Build step">
+            <section id="recipe-step-build" class="recipe-step-card recipe-build-card card" aria-label="Build step">
               <div class="section-title recipe-draft-head">
                 <div>
                   <span class="eyebrow">Step 2</span>
@@ -103,11 +104,11 @@
                 <section class="build-section" id="buildCommandsSection"><div class="build-section-head"><div><h3>Build commands</h3><p>Commands suggested from the detected project.</p></div><button type="button" class="ghost compact-button" id="btnEditBuildCommands">Edit commands</button></div><div class="build-command-preview build-command-empty" id="buildCommandPreview">No build commands required.</div><label class="build-command-editor hidden" id="buildCommandEditor"><span>One command per line</span><textarea id="buildCommands" rows="3"></textarea><small>Commands are executed directly; shell operators are not supported.</small></label></section>
                 <section class="build-section static-source-summary" id="staticSourceSummary" hidden><div class="build-section-head"><h3>Static source</h3></div><p>No build step is required.</p><p>Source files are used directly by Debian installation mappings.</p></section>
                 <section class="build-section build-output-section" id="buildOutputSection"><div class="build-section-head"><div><h3>Build output</h3><p>Which files and directories constitute the result of the build?</p></div><span class="value-origin configured-origin">Configured</span></div><div class="build-output-controls"><label><span>Mode</span><select id="buildOutputMode"><option value="source">Entire source tree</option><option value="path">Single path</option><option value="paths">Multiple paths</option></select></label><label id="buildOutputPathField" hidden><span>Included path</span><input id="buildOutputPath" placeholder="Relative file or directory path"></label></div><div id="buildOutputPathsEditor" class="build-output-paths" hidden><div class="build-output-list-head"><span>Included paths</span><button type="button" class="ghost compact-button" id="btnAddBuildOutputPath">+ Add path</button></div><div id="buildOutputPathList" class="build-output-path-list"></div><p id="buildOutputPathEmpty" class="build-output-empty" hidden>Add at least one file or directory path.</p></div><div id="buildOutputSuggestions" class="build-output-suggestions" hidden><div class="build-output-list-head"><span>Detected suggestions</span><small>Suggestions are not included until you add them.</small></div><div id="buildOutputSuggestionList" class="build-output-suggestion-list"></div></div></section>
-                <details class="build-advanced"><summary>Advanced options</summary><div class="build-advanced-grid"><label><span>Working directory</span><input id="buildWorkingDirectory" value="."></label><label><span>Inactivity timeout</span><input id="buildInactivityTimeout" type="number" min="1" step="1" value="300"><small>Seconds without stdout/stderr activity.</small></label><label><span>Maximum runtime</span><input id="buildMaximumRuntime" type="number" min="1" step="1" placeholder="Unlimited"><small>Optional absolute command limit.</small></label><label class="span-12"><span>Environment variables</span><textarea id="buildEnvironment" rows="2"></textarea></label></div></details>
+                <details class="build-advanced"><summary>Advanced options</summary><div class="build-advanced-grid"><label><span>Working directory</span><input id="buildWorkingDirectory" value="."></label><label><span>Inactivity timeout</span><input id="buildInactivityTimeout" type="number" min="1" step="1" value="300" placeholder="Disabled"><small>Seconds without stdout/stderr activity; empty disables it.</small></label><label><span>Maximum runtime</span><input id="buildMaximumRuntime" type="number" min="1" step="1" placeholder="Unlimited"><small>Optional absolute command limit.</small></label><label class="span-12"><span>Environment variables</span><textarea id="buildEnvironment" rows="2"></textarea></label></div></details>
               </div>
             </section>
 
-            <section class="recipe-step-card recipe-install-card card" aria-label="Debian packaging and installation step">
+            <section id="recipe-step-install" class="recipe-step-card recipe-install-card card" aria-label="Debian packaging and installation step">
               <div class="section-title recipe-draft-head">
                 <div>
                   <span class="eyebrow">Step 3</span>
@@ -117,48 +118,63 @@
                 <span class="step-note">Recipe v1</span>
               </div>
               <div class="recipe-form-stack">
-                <div class="recipe-form-group install-general-group">
-                  <span class="recipe-group-title">General</span>
-                  <div class="recipe-step-fields recipe-step-fields-wide">
+                <div class="recipe-form-group install-package-group">
+                  <span class="recipe-group-title">Package metadata</span>
+                  <div class="recipe-step-fields recipe-step-fields-wide install-package-fields">
                     <label class="span-2"><span>Architecture</span><select id="packageArchitecture"><option>amd64</option><option>all</option><option>arm64</option><option>armhf</option></select></label>
                     <label class="span-2"><span>Section</span><input id="packageSection" value="misc"></label>
                     <label class="span-2"><span>Priority</span><select id="packagePriority"><option>optional</option><option>required</option><option>important</option><option>standard</option><option>extra</option></select></label>
                     <label class="span-6"><span>Maintainer</span><input id="packageMaintainer" placeholder="Name &lt;email@example.org&gt;"></label>
-                    <label class="span-12"><span>Runtime Depends</span><input id="packageRuntimeDependencies"></label>
-                    <label class="span-12"><span>Description</span><textarea id="packageDescription" rows="2"></textarea></label>
+                    <label class="span-6"><span>Runtime Depends</span><input id="packageRuntimeDependencies"></label>
+                    <label class="span-6"><span>Description</span><textarea id="packageDescription" rows="2"></textarea></label>
+                  </div>
+                </div>
+                <div class="recipe-form-group install-destination-group">
+                  <span class="recipe-group-title">Installation</span>
+                  <div class="recipe-step-fields recipe-step-fields-wide install-destination-fields">
                     <label class="span-4"><span>Install directory</span><input id="installDestination"></label>
                     <label class="span-4"><span>Installed content</span><select id="installContentSource"><option value="build_output">Selected build output</option><option value="configured_files">Custom mappings</option></select></label>
-                    <label class="span-2"><span>Dirs</span><select id="installDirectoryMode"><option>0755</option><option>0750</option><option>0700</option></select></label>
-                    <label class="span-2"><span>Files</span><select id="installFileMode"><option>0644</option><option>0640</option><option>0600</option></select></label>
+                    <label class="span-2"><span>Directory mode</span><select id="installDirectoryMode"><option>0755</option><option>0750</option><option>0700</option></select></label>
+                    <label class="span-2"><span>File mode</span><select id="installFileMode"><option>0644</option><option>0640</option><option>0600</option></select></label>
+                  </div>
+                </div>
+                <div class="recipe-form-group install-ownership-group">
+                  <span class="recipe-group-title">Ownership and account</span>
+                  <div class="recipe-step-fields recipe-step-fields-wide install-ownership-fields">
                     <label class="span-3"><span>Payload user</span><input id="installOwnerUser"></label>
                     <label class="span-3"><span>Payload group</span><input id="installOwnerGroup"></label>
                     <label class="span-3"><span>Service account</span><input id="installAccountUser"></label>
                     <label class="span-3"><span>Service group</span><input id="installAccountGroup"></label>
                     <label class="span-12"><span>Account provisioning</span><select id="installAccountProvisioning"><option value="ensure">Ensure account exists</option><option value="existing">Use existing account</option></select></label>
+                  </div>
+                </div>
+                <div class="recipe-form-group install-persistent-group">
+                  <span class="recipe-group-title">Persistent directories</span>
+                  <div class="recipe-step-fields recipe-step-fields-wide install-persistent-fields">
                     <label class="span-12"><span>Persistent directories</span><textarea id="installDirectories" rows="3" placeholder="/var/lib/example | example | example | 0750"></textarea></label>
                   </div>
                 </div>
                 <div class="recipe-form-group install-automatic-group" id="installAutomaticGroup">
                   <div class="install-mapping-head"><div><span class="recipe-group-title">Selected build output</span><p>These files are installed automatically under the install directory.</p></div></div>
-                  <div class="install-mapping-table install-mapping-table-automatic"><div class="install-mapping-columns"><span>Source</span><span>Destination</span></div><div id="installContentSummary" class="install-mapping-list"></div></div>
+                  <div class="install-mapping-table install-mapping-table-automatic"><div class="install-mapping-columns"><span class="mapping-source-heading">Source</span><span class="mapping-destination-heading">Destination</span></div><div id="installContentSummary" class="install-mapping-list"></div></div>
                 </div>
                 <div class="recipe-form-group install-config-group">
                   <div class="install-mapping-head"><div><span class="recipe-group-title" id="installMappingTitle">Additional mappings</span><p id="installMappingHelp">Optionally install extra files from the selected build output at specific absolute paths.</p></div><button type="button" class="ghost compact-button" id="btnAddInstallMapping">+ Add mapping</button></div>
-                  <div class="install-mapping-table"><div class="install-mapping-columns"><span>Source</span><span>Destination</span><span>Policy</span><span>Owner</span><span>Group</span><span>Mode</span><span></span></div><div id="installMappingList" class="install-mapping-list"></div><p id="installMappingEmpty" class="build-output-empty">No mappings configured.</p></div>
+                  <div class="install-mapping-table"><div class="install-mapping-columns"><span class="mapping-source-heading">Source</span><span class="mapping-destination-heading">Destination</span><span>Policy</span><span>Owner</span><span>Group</span><span>Mode</span><span></span></div><div id="installMappingList" class="install-mapping-list"></div><p id="installMappingEmpty" class="build-output-empty">No mappings configured.</p></div>
                 </div>
-                <div class="recipe-form-group install-scripts-group">
-                  <span class="recipe-group-title">Maintainer scripts</span>
+                <details class="recipe-form-group recipe-disclosure install-scripts-group">
+                  <summary><span class="recipe-group-title">Maintainer scripts</span><small>Optional package lifecycle hooks</small></summary>
                   <div class="maintainer-script-grid" aria-label="Debian maintainer scripts">
                     <label><span>preinst</span><textarea id="maintainerPreinst" rows="3"></textarea></label>
                     <label><span>postinst</span><textarea id="maintainerPostinst" rows="3"></textarea></label>
                     <label><span>prerm</span><textarea id="maintainerPrerm" rows="3"></textarea></label>
                     <label><span>postrm</span><textarea id="maintainerPostrm" rows="3"></textarea></label>
                   </div>
-                </div>
+                </details>
               </div>
             </section>
 
-            <section class="recipe-step-card recipe-service-card card" aria-label="systemd service step">
+            <section id="recipe-step-service" class="recipe-step-card recipe-service-card card" aria-label="systemd service step">
               <div class="section-title recipe-draft-head">
                 <div>
                   <span class="eyebrow">Step 4</span>
@@ -170,7 +186,7 @@
               <div class="service-empty-state" id="serviceEmptyState"><p>No systemd service configured.</p><button type="button" id="btnConfigureService">+ Configure service</button></div>
               <div id="serviceConfiguration" hidden>
               <div class="service-primary-groups">
-                <div class="recipe-form-group service-general-group"><span class="recipe-group-title">General service settings</span><div class="recipe-step-fields recipe-step-fields-wide">
+                <div class="recipe-form-group service-general-group"><span class="recipe-group-title">General service settings</span><div class="recipe-step-fields recipe-step-fields-wide service-general-fields">
                   <label class="span-3"><span>Service name</span><input id="serviceName" required></label>
                   <label class="span-2"><span>Type</span><select id="serviceType"><option>simple</option><option>exec</option><option>forking</option><option>oneshot</option><option>notify</option><option>dbus</option></select></label>
                   <label class="span-2"><span>User</span><input id="serviceUser"></label>
@@ -178,7 +194,7 @@
                   <label class="span-2 boolean-field"><span>Enable at boot</span><input id="serviceEnabled" type="checkbox"></label>
                   <label class="span-3"><span>Restart</span><select id="serviceRestart"><option>on-failure</option><option>always</option><option>no</option><option>on-abnormal</option><option>on-watchdog</option><option>on-abort</option></select></label>
                 </div></div>
-                <div class="recipe-form-group service-command-group"><span class="recipe-group-title">Command</span><div class="recipe-step-fields recipe-step-fields-wide">
+                <div class="recipe-form-group service-command-group"><span class="recipe-group-title">Command</span><div class="recipe-step-fields recipe-step-fields-wide service-command-fields">
                   <label class="span-12"><span>Command</span><textarea id="serviceCommand" rows="2" required></textarea></label>
                 </div></div>
               </div>
@@ -187,14 +203,14 @@
                 <div class="systemd-advanced-groups">
                   <div class="recipe-form-group">
                     <span class="recipe-group-title">Environment</span>
-                    <div class="recipe-step-fields recipe-step-fields-wide">
+                    <div class="recipe-step-fields recipe-step-fields-wide service-environment-fields">
                       <label class="span-5"><span>EnvironmentFile</span><input id="serviceEnvironmentFiles"></label>
                       <label class="span-7"><span>Environment</span><textarea id="serviceEnvironment" rows="2"></textarea></label>
                     </div>
                   </div>
                   <div class="recipe-form-group">
                     <span class="recipe-group-title">Dependencies</span>
-                    <div class="recipe-step-fields recipe-step-fields-wide">
+                    <div class="recipe-step-fields recipe-step-fields-wide service-dependency-fields">
                       <label class="span-4"><span>After</span><input id="serviceAfter"></label>
                       <label class="span-4"><span>Wants</span><input id="serviceWants"></label>
                       <label class="span-4"><span>Requires</span><input id="serviceRequires" value=""></label>
@@ -203,7 +219,7 @@
                   </div>
                   <div class="recipe-form-group">
                     <span class="recipe-group-title">Lifecycle and timers</span>
-                    <div class="recipe-step-fields recipe-step-fields-wide">
+                    <div class="recipe-step-fields recipe-step-fields-wide service-lifecycle-fields">
                       <label class="span-3"><span>RestartSec</span><input id="serviceRestartSec"></label>
                       <label class="span-3"><span>TimeoutStartSec</span><input id="serviceTimeoutStartSec"></label>
                       <label class="span-3"><span>TimeoutStopSec</span><input id="serviceTimeoutStopSec"></label>
@@ -216,7 +232,7 @@
                   </div>
                   <div class="recipe-form-group">
                     <span class="recipe-group-title">Commands</span>
-                    <div class="recipe-step-fields recipe-step-fields-wide">
+                    <div class="recipe-step-fields recipe-step-fields-wide service-command-hook-fields">
                       <label class="span-4"><span>ExecStartPre</span><textarea id="serviceExecStartPre" rows="2"></textarea></label>
                       <label class="span-4"><span>ExecStartPost</span><textarea id="serviceExecStartPost" rows="2"></textarea></label>
                       <label class="span-4"><span>ExecStop</span><textarea id="serviceExecStop" rows="2"></textarea></label>
@@ -224,7 +240,7 @@
                   </div>
                   <div class="recipe-form-group">
                     <span class="recipe-group-title">Output</span>
-                    <div class="recipe-step-fields recipe-step-fields-wide">
+                    <div class="recipe-step-fields recipe-step-fields-wide service-output-fields">
                       <label class="span-6"><span>StandardOutput</span><select id="serviceStandardOutput"><option value="">Not set</option><option>journal</option><option>inherit</option><option>null</option><option>append:/var/log/debbuilder.log</option></select></label>
                       <label class="span-6"><span>StandardError</span><select id="serviceStandardError"><option value="">Not set</option><option>journal</option><option>inherit</option><option>null</option><option>append:/var/log/debbuilder.err</option></select></label>
                     </div>
@@ -239,14 +255,13 @@
         </div>
       </section>
 
-      <section class="view" id="view-logs">
-        <div class="page-head"><h2>Logs</h2><p>Executions linked to packages when available.</p></div>
-        <div class="filters"><input id="logSearch" placeholder="Search logs…" /><select id="logStatus"><option value="all">All statuses</option><option value="success">Success</option><option value="running">Running</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option></select></div>
-        <div class="logs-layout"><section class="card logs-list-card"><div class="section-title"><h3>Executions</h3></div><div id="executionList" class="list compact-list" role="listbox">Loading…</div></section><section class="card logs-detail-card"><div class="log-detail-head"><h3>Execution detail</h3><div class="log-detail-actions"><label><span>Verbosity</span><select id="logVerbosity"><option value="compact">Compact</option><option value="normal" selected>Normal</option><option value="verbose">Verbose</option><option value="raw">Raw</option></select></label><button type="button" class="btn-primary" id="btnRevalidateExecution" hidden>Revalidate</button><button type="button" class="danger" id="btnDeleteExecutionLog">Delete log/history</button><button id="btnCloseLogDetail" class="mobile-only">Close</button></div></div><div class="log-context-panel"><div id="executionMeta" class="execution-meta muted">Select an execution.</div><div id="executionSteps" class="steps"></div></div><div class="log-terminal"><pre id="executionDetail" class="logbox">No log selected.</pre><button type="button" id="btnLogLiveBadge" class="log-live-badge" hidden>● Live</button></div></section></div>
+      <section class="view page" id="view-logs">
+        <div class="page-head page-header"><div><h2>Logs</h2><p>Executions linked to packages when available.</p></div></div>
+        <div class="logs-layout"><section class="card logs-list-card"><div class="section-title section-header"><div><h3>Executions</h3><p>Search and select a run.</p></div></div><div class="log-filters"><label class="field"><span>Search</span><input id="logSearch" type="search" placeholder="Package, recipe or run…" /></label><label class="field"><span>Status</span><select id="logStatus"><option value="all">All statuses</option><option value="success">Success</option><option value="running">Running</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option></select></label></div><div id="executionList" class="list data-list compact-list" role="listbox">Loading…</div></section><section class="card logs-detail-card"><div class="log-detail-head"><div><span class="eyebrow">Selected run</span><h3>Execution detail</h3></div><div class="log-detail-actions"><label class="field"><span>Verbosity</span><select id="logVerbosity"><option value="compact">Compact</option><option value="normal" selected>Normal</option><option value="verbose">Verbose</option><option value="raw">Raw</option></select></label><button type="button" class="btn btn-primary" id="btnRevalidateExecution" hidden>Revalidate</button><button type="button" class="btn btn--success" id="btnPublishExecution" hidden>Publish</button><button type="button" class="btn btn--danger" id="btnDeleteExecutionLog" disabled>Delete log/history</button><button id="btnCloseLogDetail" class="btn btn--ghost mobile-only">Back to runs</button></div></div><div class="log-context-panel"><div id="executionMeta" class="execution-meta muted">Select an execution.</div><details id="executionMoreDetails" class="execution-more" hidden><summary>More metadata</summary><div id="executionMetaMore" class="execution-meta execution-meta-more muted"></div></details><div id="executionSteps" class="steps"></div></div><div class="log-terminal"><pre id="executionDetail" class="logbox">No log selected.</pre><button type="button" id="btnLogLiveBadge" class="log-live-badge" hidden>● Live</button></div></section></div>
       </section>
 
-      <section class="view" id="view-settings">
-        <div class="page-head"><h2>Editable settings</h2><p>Active APT repository configuration, stored locally outside Git.</p></div>
+      <section class="view page" id="view-settings">
+        <div class="page-head page-header"><div><h2>Settings</h2><p>Active configuration stored locally outside Git.</p></div><div class="page-header-actions"><span id="settingsAutosaveStatus" class="autosave-status" data-state="saved" aria-live="polite"></span></div></div>
         <div id="settingsPanel" class="settings-grid">Loading…</div>
       </section>
     </main>
@@ -275,15 +290,25 @@
     </form>
   </dialog>
 
+  <div id="toastRegion" class="toast-region" aria-live="polite" aria-relevant="additions"></div>
+  <dialog id="appDialog" class="app-dialog" aria-labelledby="appDialogTitle" aria-describedby="appDialogDescription">
+    <form id="appDialogForm">
+      <header><h3 id="appDialogTitle">Confirm action</h3><p id="appDialogDescription"></p></header>
+      <label id="appDialogInputField" class="field" hidden><span id="appDialogInputLabel">Value</span><input id="appDialogInput" autocomplete="off"></label>
+      <div class="app-dialog-actions"><button type="button" class="btn btn--ghost" id="appDialogCancel">Cancel</button><button type="submit" class="btn btn--primary" id="appDialogConfirm">Confirm</button></div>
+    </form>
+  </dialog>
 
-  <script src="/ui_core.js?v=20260904-1"></script>
-  <script src="/settings.js?v=20260904-2"></script>
+
+  <script src="/ui_core.js?v=20260905-2"></script>
+  <script src="/settings.js?v=20260905-4"></script>
   <script src="/recipe_serialization.js?v=20260903-2"></script>
-  <script src="/app.js?v=20260903-2"></script>
-  <script src="/js/pages/dashboard.js?v=20260904-1"></script>
-  <script src="/js/pages/packages.js?v=20260904-1"></script>
-  <script src="/js/pages/logs.js?v=20260904-1"></script>
+  <script src="/app.js?v=20260905-2"></script>
+  <script src="/js/pages/dashboard.js?v=20260905-2"></script>
+  <script src="/js/pages/packages.js?v=20260905-2"></script>
+  <script src="/js/pages/logs.js?v=20260905-6"></script>
   <script src="/js/recipe/source_changes.js?v=20260904-1"></script>
-  <script src="/js/admin.js?v=20260904-1"></script>
+  <script src="/js/recipe/stepper.js?v=20260905-1"></script>
+  <script src="/js/admin.js?v=20260905-4"></script>
 </body>
 </html>

@@ -206,7 +206,7 @@ function collectWorkflow() {
       commands: lines(value('buildCommands')),
       environment: environment(value('buildEnvironment')),
       working_directory: value('buildWorkingDirectory') || '.',
-      inactivity_timeout: Number(value('buildInactivityTimeout') || advanced.inactivity_timeout || 300),
+      inactivity_timeout: value('buildInactivityTimeout') === '' ? null : Number(value('buildInactivityTimeout')),
       maximum_runtime: value('buildMaximumRuntime') ? Number(value('buildMaximumRuntime')) : null,
       output: collectBuildOutput()
     },
@@ -275,7 +275,7 @@ function renderWorkflow(wf) {
     const account = install.account || owner;
     const scripts = install.maintainer_scripts || {};
     const service = wf.service || {};
-    window.recipeAdvancedFields = {version_revision: packageData.version_revision || '1', inactivity_timeout: build.inactivity_timeout || 300, maximum_runtime: build.maximum_runtime || '', service_description: service.description || '', service_working_directory: service.working_directory || ''};
+    window.recipeAdvancedFields = {version_revision: packageData.version_revision || '1', inactivity_timeout: Object.prototype.hasOwnProperty.call(build, 'inactivity_timeout') ? build.inactivity_timeout : 300, maximum_runtime: build.maximum_runtime || '', service_description: service.description || '', service_working_directory: service.working_directory || ''};
     const configuredOutput = build.output || {};
     const outputMode = ['source','path','paths'].includes(configuredOutput.mode) ? configuredOutput.mode : (configuredOutput.path ? 'path' : 'source');
     window.recipeBuildOutput = {mode:outputMode, path:configuredOutput.path || '', paths:[...(configuredOutput.paths || [])]};

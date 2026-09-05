@@ -12,16 +12,18 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import os
 import re
 import sys
 import time
+import threading
 import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import artifact_publication, artifact_validation, auth_service, automation_service, build_pipeline, deb_inspector, execution_service, notifications, package_service, release_cache, settings_service, storage, upstream_archive
+from . import artifact_publication, artifact_validation, auth_service, automation_service, build_pipeline, deb_inspector, execution_service, notifications, package_service, release_cache, settings_service, storage, upstream_archive, workspace_cleanup
 from .build_store import BuildStore
 from .http_handler import create_handler
 from .recipe_schema import normalize_recipe, recipe_for_storage, require_safe_name, validate_recipe_metadata
@@ -155,13 +157,36 @@ def run_post_build_automation(run_id: str, *, dry_run: bool, settings: dict | No
 
 
 def run_recipe_pipeline_with_automation(workflow: dict, *, dry_run: bool = True) -> dict:
-    return automation_service.run_with_automation(
-        workflow,
-        dry_run=dry_run,
-        pipeline=run_recipe_pipeline,
-        automate=run_post_build_automation,
-        notify_completion=lambda result: notification_service().notify_automatic_completion(result),
-    )
+    try:
+        return automation_service.run_with_automation(
+            workflow,
+            dry_run=dry_run,
+            pipeline=run_recipe_pipeline,
+            automate=run_post_build_automation,
+            notify_completion=lambda result: notification_service().notify_automatic_completion(result),
+        )
+    finally:
+        cleanup_workspaces()
+
+
+def cleanup_workspaces() -> dict:
+    """Use the current DATA/settings; cleanup failures never change a Run result."""
+    try:
+        result = workspace_cleanup.apply_retention(
+            BuildStore(DATA / "builds"), app_settings().get("workspace_cleanup"),
+        )
+        for error in result["errors"]:
+            logging.getLogger(__name__).warning("Workspace cleanup: %s", error)
+        return result
+    except Exception as exc:
+        logging.getLogger(__name__).exception("Workspace retention sweep failed")
+        return {"cleaned": [], "retained": [], "skipped": [], "errors": [{"error": str(exc)}]}
+
+
+def workspace_retention_loop(stop: threading.Event) -> None:
+    while not stop.is_set():
+        cleanup_workspaces()
+        stop.wait(300)
 
 
 def validate_build_artifact(run_id: str, payload: dict | None = None) -> dict:
@@ -324,7 +349,10 @@ def list_executions(limit: int = 50, *, structured_runs: list[dict] | None = Non
 
 
 def get_execution(run_id: str) -> dict | None:
-    return execution_service.get_execution(BuildStore(DATA / "builds"), run_id)
+    execution = execution_service.get_execution(BuildStore(DATA / "builds"), run_id)
+    if execution:
+        execution["package"] = build_run_package(execution)
+    return execution
 
 
 def get_execution_log(run_id: str, *, verbosity: str = "normal", after: int = 0) -> dict | None:
@@ -487,7 +515,15 @@ Handler = create_handler(sys.modules[__name__])
 
 def main():
     print(f"DebBuilder Repo UI listening on http://{RUNTIME.host}:{RUNTIME.port}")
-    ThreadingHTTPServer((RUNTIME.host, RUNTIME.port), Handler).serve_forever()
+    with ThreadingHTTPServer((RUNTIME.host, RUNTIME.port), Handler) as server:
+        stop = threading.Event()
+        retention = threading.Thread(target=workspace_retention_loop, args=(stop,), name="workspace-retention", daemon=True)
+        retention.start()
+        try:
+            server.serve_forever()
+        finally:
+            stop.set()
+            retention.join()
 
 
 if __name__ == "__main__":

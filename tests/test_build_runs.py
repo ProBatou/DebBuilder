@@ -6,7 +6,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from debbuilder import build_pipeline
+from debbuilder import build_pipeline, execution_service
 from debbuilder.build_models import STEP_NAMES
 from debbuilder.build_store import BuildStore
 
@@ -124,15 +124,40 @@ class BuildStoreTests(unittest.TestCase):
             second = store.log_slice("log-run", first["text"].index("second"))
             self.assertIn("first", first["text"])
             self.assertIn("second", second["text"])
+            stale_run = store.load("log-run")
             deleted = store.clear_log_history("log-run")
             cleaned = store.load("log-run")
             self.assertEqual(deleted["deleted"], "log_history")
+            self.assertFalse(deleted["already_deleted"])
+            self.assertTrue(store.execution_history_deletion_path("log-run").is_file())
             self.assertEqual(cleaned["status"], "success")
             self.assertEqual(cleaned["artifact"]["path"], str(artifact))
             self.assertEqual(cleaned["validations"][0]["status"], "success")
             self.assertEqual(cleaned["publications"][0]["status"], "success")
             self.assertEqual(cleaned["steps"][4]["details"]["commands"][0]["stdout"], "")
             self.assertTrue(cleaned["log_deleted"])
+            store.save(stale_run)
+            restarted_store = BuildStore(Path(temporary) / "builds")
+            self.assertTrue(restarted_store.execution_history_deleted("log-run", restarted_store.load("log-run")))
+            repeated = restarted_store.clear_log_history("log-run")
+            self.assertTrue(repeated["already_deleted"])
+
+    def test_log_completion_tracks_the_whole_execution_lifecycle(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = BuildStore(Path(temporary) / "builds")
+            run = store.create(recipe(), mode="build", run_id="lifecycle-log")
+            run["status"] = "success"
+            run["artifact"] = {"path": str(Path(run["workspace"]) / "artifacts/demo.deb")}
+            run["validations"] = [{"status": "running"}]
+            store.save(run)
+            self.assertFalse(execution_service.get_log(store, run["id"], verbosity="raw")["complete"])
+            run["validations"][-1]["status"] = "success"
+            run["publications"] = [{"status": "running"}]
+            store.save(run)
+            self.assertFalse(execution_service.get_log(store, run["id"], verbosity="raw")["complete"])
+            run["publications"][-1]["status"] = "success"
+            store.save(run)
+            self.assertTrue(execution_service.get_log(store, run["id"], verbosity="raw")["complete"])
 
     def test_phase_three_records_real_source_and_detection_details(self):
         with tempfile.TemporaryDirectory() as temporary:

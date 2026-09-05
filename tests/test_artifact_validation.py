@@ -1,9 +1,10 @@
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
-from debbuilder import artifact_validation
+from debbuilder import artifact_validation, build_pipeline, workspace_cleanup
 from debbuilder.build_store import BuildStore
 from debbuilder.validation_backend import BackendError, OciSystemdBackend
 from debbuilder.validation_profiles import python_satisfies
@@ -94,6 +95,25 @@ class MixedPolicyBackend(FakeBackend):
 
 
 class ArtifactValidationTests(unittest.TestCase):
+    def test_validation_after_workspace_cleanup_preserves_artifact_and_holds_lease(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store, run = self.successful_run(temporary)
+            workspace_cleanup.clean_workspace(store, run["id"])
+            self.assertFalse((Path(run["workspace"]) / "source").exists())
+            def backend_factory(**kwargs):
+                # Even preparation, before the persisted status becomes running,
+                # owns the workspace and cannot race deletion.
+                with self.assertRaises(workspace_cleanup.WorkspaceBusyError):
+                    store.clear_log_history(run["id"])
+                return FakeBackend(**kwargs)
+            result = artifact_validation.validate_artifact(run["id"], store=store, backend_factory=backend_factory)
+            self.assertEqual(result["status"], "success")
+            self.assertTrue(Path(run["artifact"]["path"]).exists())
+            store.clear_log_history(run["id"])
+            repeated = artifact_validation.validate_artifact(run["id"], store=store, backend_factory=FakeBackend)
+            self.assertEqual(repeated["status"], "success")
+            self.assertTrue(store.execution_history_deleted(run["id"]))
+
     def successful_run(self, root, configured=None):
         store = BuildStore(Path(root) / "builds")
         run = store.create(configured or recipe(), mode="build", run_id="successful-run")
@@ -120,6 +140,37 @@ class ArtifactValidationTests(unittest.TestCase):
             self.assertEqual(permissions["status"], "success")
             self.assertEqual(permissions["details"]["symbolic_links"], "excluded (target permissions apply)")
             self.assertEqual(permissions["details"]["count"], 3)
+
+    def test_validation_running_state_is_visible_until_backend_completion(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store, run = self.successful_run(temporary)
+            entered = threading.Event()
+            release = threading.Event()
+            result = {}
+
+            class BlockingBackend(FakeBackend):
+                def start(self, validation_id):
+                    entered.set()
+                    if not release.wait(2):
+                        raise RuntimeError("test backend was not released")
+                    return super().start(validation_id)
+
+            thread = threading.Thread(
+                target=lambda: result.setdefault("validation", artifact_validation.validate_artifact(
+                    run["id"], store=store, backend_factory=BlockingBackend,
+                )),
+            )
+            thread.start()
+            self.assertTrue(entered.wait(1))
+            persisted = store.load(run["id"])
+            self.assertEqual(persisted["validations"][-1]["status"], "running")
+            self.assertEqual(build_pipeline.execution_summary(persisted)["lifecycle_status"], "validating")
+            self.assertTrue(build_pipeline.execution_summary(persisted)["lifecycle_active"])
+            release.set()
+            thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(result["validation"]["status"], "success")
+            self.assertEqual(store.load(run["id"])["validations"][-1]["status"], "success")
 
     def test_backend_failure_is_a_validation_failure_not_a_build_failure(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -266,6 +317,7 @@ class ArtifactValidationTests(unittest.TestCase):
             outside.write_bytes(b"old")
             with self.assertRaisesRegex(artifact_validation.ValidationError, "belong"):
                 artifact_validation.validate_artifact(run["id"], store=store, previous_artifact=str(outside), backend_factory=FakeBackend)
+            self.assertEqual(store.load(run["id"]).get("validations", []), [])
 
     def test_oci_backend_reports_missing_runtime_without_host_execution(self):
         with tempfile.TemporaryDirectory() as temporary:

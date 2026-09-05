@@ -93,6 +93,8 @@ def _config_paths(run: dict) -> list[str]:
 
 
 def validate_artifact(run_id: str, *, store: BuildStore, previous_artifact: str = "", backend_factory=None, profile: str = "bookworm", allowed_previous_roots: tuple[str | Path, ...] = ()) -> dict:
+    if not store.run_dir(run_id).is_dir():
+        raise ValidationError("build_run_not_found", "Build Run was not found")
     with store.locked_run(run_id):
         return _validate_artifact_locked(
             run_id,
@@ -173,6 +175,13 @@ def _validate_artifact_locked(run_id: str, *, store: BuildStore, previous_artifa
     config_policies = {row["destination"]: row["policy"] for row in recipe["install"]["config_files"]} if not upstream_mode else {}
     marker = f"debbuilder-validation-{validation_id}"
     installed = False
+    artifact_validation_state = {
+        "id": validation_id, "status": "running", "started_at": result["started_at"],
+        "finished_at": None, "previous_artifact": result["previous_artifact"],
+    }
+    run.setdefault("validations", []).append(result)
+    run["artifact"].setdefault("validations", []).append(artifact_validation_state)
+    store.save(run)
     try:
         result["backend"] = backend.start(validation_id)
         result["backend"]["profile"] = selected_profile["name"]
@@ -294,10 +303,9 @@ def _validate_artifact_locked(run_id: str, *, store: BuildStore, previous_artifa
             result["error"] = {"code": exc.code, "message": str(exc), "details": exc.details}
         result["finished_at"] = utc_now()
         result["duration"] = round(time.monotonic() - started, 6)
-        run.setdefault("validations", []).append(result)
-        run["artifact"].setdefault("validations", []).append({
-            "id": validation_id, "status": result["status"], "started_at": result["started_at"],
-            "finished_at": result["finished_at"], "previous_artifact": result["previous_artifact"],
+        artifact_validation_state.update({
+            "status": result["status"], "finished_at": result["finished_at"],
+            "previous_artifact": result["previous_artifact"],
         })
         store.append_event(run, f"Artifact validation {validation_id}: {result['status']}", level="error" if result["status"] == "failed" else "info")
         store.save(run)

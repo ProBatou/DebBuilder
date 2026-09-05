@@ -82,6 +82,60 @@ Secrets and local runtime state are stored under `DEBBUILDER_DATA_DIR` (the sour
 
 Build tools are resolved from the same effective `PATH` used to run build commands. Administrators can extend the DebBuilder service's `PATH` in `/etc/debbuilder/debbuilder.env`, while a Recipe can provide a build-specific `PATH` through its build environment. Tools found there do not need to be owned by a Debian package; manually added build dependencies remain Debian packages checked with `dpkg-query`.
 
+## Execution history and workspace retention
+
+A Run directory contains both persistent history and disposable build data.
+Automatic cleanup only removes the fixed entries `source/` (including compiler
+outputs), `staging/`, `downloads/` and `source.tar.gz`. It keeps `run.json`, the
+Recipe snapshot, logs, manifests, final `.deb` artifacts and validation records
+(including the previous artifact copied for upgrade validation). Validation and
+publication use the retained artifact and metadata, not the source or staging
+trees. Unknown workspace entries are retained.
+
+Settings → Maintenance exposes `workspace_cleanup.enabled` (default `true`) and
+`workspace_cleanup.failed_workspaces_to_retain` (default `5`, integer 0–1000).
+These are application settings, also available through GET/POST `/api/settings`;
+existing settings files receive the defaults without a Recipe migration.
+
+Cleanup runs after a build/dry-run request and its configured automation finish,
+and in a background sweep at server startup and every five minutes. Completed
+successful/prepared runs are eligible immediately, even if manual validation or
+publication will happen later. The five most recent failed/cancelled workspaces
+are kept globally across all Recipes, ordered by the latest lifecycle completion
+time; older failures are cleaned. Failed dry-runs follow the same rule. Already
+cleaned workspaces do not consume retention slots. There is no age limit or
+automatic deletion of final artifacts/history in this policy.
+
+“Delete log/history” and “Clear execution history” remove completed execution
+history and detailed output, and also reclaim disposable workspace data even
+when automatic cleanup is disabled. Recipes, managed Packages and APT contents
+are unaffected. A separate `.execution-history-deleted.json` tombstone keeps the
+Run absent from Logs despite later metadata rewrites/restarts. List APIs omit
+deleted history, detail/log APIs return 404, and repeated deletion is idempotent.
+DELETE returns the `workspace_cleanup` result alongside the history deletion.
+Active or leased executions return HTTP 409 (`execution_active`); clear-all
+excludes them and reports per-execution failures if a state changes after its
+preview. Deletion never cancels a build, validation or publication.
+
+Build, validation, publication, reconciliation and cleanup share a per-Run
+filesystem lock, including across server processes. Cleanup takes this lock
+without waiting and re-reads canonical metadata before deleting. It opens the
+builds root and Run using directory descriptors with symlink following disabled,
+rejects traversal, mismatched Run/workspace identities, unsafe metadata and
+top-level symlink/mounted targets, and uses descriptor-relative, symlink-safe
+recursive deletion. Nested symlinks are unlinked without visiting their targets.
+An artifact recorded inside a disposable tree blocks cleanup. Missing disposable
+entries are safe to retry; `.workspace-cleanup.json` records successful removal.
+Cleanup errors are reported and retried by subsequent sweeps without changing
+the build/lifecycle result. Before removal, Linux `/proc` is checked for processes
+whose working directory, executable or open descriptors use the Run workspace;
+such a Run is kept even if its metadata says failed. Inaccessible process data
+also defers cleanup. Runs still marked active after a crash are preserved until
+their state is resolved. Commands run in dedicated process sessions; inactivity
+and optional maximum-runtime expiry terminate the complete process group before
+the runner returns, so cleanup remains a final safety check rather than process
+management.
+
 ## Python projects
 
 Python detection recognizes `pyproject.toml`, `setup.py`, `setup.cfg`, `requirements.txt`, `requirements-*.txt`, `Pipfile`, `poetry.lock`, and `uv.lock`. It parses declared build-system, interpreter, dependency, and entry-point metadata without executing project files and without translating PyPI names into Debian package names.

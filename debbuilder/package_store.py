@@ -72,6 +72,8 @@ def summarize_runs(runs: list[dict], summary, *, include_history: bool = True) -
     history = []
     if include_history:
         for run in runs:
+            if run.get("_execution_history_deleted"):
+                continue
             build = summary(run)
             history.append(build)
             for validation in run.get("validations", []):

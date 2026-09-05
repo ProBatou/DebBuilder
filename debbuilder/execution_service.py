@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from typing import Callable
 
-from . import build_pipeline
+from . import build_pipeline, workspace_cleanup
 from .build_store import BuildStore
 from .recipe_schema import require_safe_name
 
@@ -16,7 +16,11 @@ def list_executions(
     limit: int = 50,
     runs: list[dict] | None = None,
 ) -> list[dict]:
-    selected = store.list(limit=limit) if runs is None else runs[:limit]
+    candidates = store.list(limit=1_000_000) if runs is None else runs
+    selected = [
+        run for run in candidates
+        if not store.execution_history_deleted(str(run["id"]), run)
+    ][:limit]
     return [
         {
             **build_pipeline.execution_summary(run),
@@ -30,7 +34,9 @@ def list_executions(
 def get_execution(store: BuildStore, run_id: str) -> dict | None:
     require_safe_name(run_id, "execution")
     run = store.load(run_id)
-    return build_pipeline.execution_detail(run) if run else None
+    if not run or store.execution_history_deleted(run_id, run):
+        return None
+    return build_pipeline.execution_detail(run)
 
 
 def _error_lines(run: dict) -> list[str]:
@@ -83,25 +89,24 @@ def get_log(store: BuildStore, run_id: str, *, verbosity: str = "normal", after:
     require_safe_name(run_id, "execution")
     run = store.load(run_id)
     verbosity = verbosity if verbosity in {"compact", "normal", "verbose", "raw"} else "normal"
-    if not run:
+    if not run or store.execution_history_deleted(run_id, run):
         return None
+    lifecycle_complete = not build_pipeline.execution_summary(run)["lifecycle_active"]
     if verbosity == "raw":
         chunk = store.log_slice(run_id, after)
-        return {**chunk, "complete": run.get("status") not in {"pending", "running"}, "verbosity": verbosity}
+        return {**chunk, "complete": lifecycle_complete, "verbosity": verbosity}
     rendered = format_log(run, verbosity=verbosity)
     start = max(0, min(int(after or 0), len(rendered)))
-    return {"text": rendered[start:], "offset": len(rendered), "size": len(rendered), "complete": run.get("status") not in {"pending", "running"}, "verbosity": verbosity}
+    return {"text": rendered[start:], "offset": len(rendered), "size": len(rendered), "complete": lifecycle_complete, "verbosity": verbosity}
 
 
 def delete_log(store: BuildStore, run_id: str) -> dict:
     require_safe_name(run_id, "execution")
-    if not store.load(run_id):
-        raise FileNotFoundError("execution not found")
-    return store.clear_log_history(run_id)
+    return {**store.clear_log_history(run_id), "history_deleted": True, "visible": False}
 
 
 def delete_logs(store: BuildStore, run_ids: list[str] | None = None, *, all_runs: bool = False, dry_run: bool = False) -> dict:
-    selected = [str(run["id"]) for run in store.list(limit=1_000_000)] if all_runs else list(run_ids or [])
+    selected = workspace_cleanup.completed_history_ids(store) if all_runs else list(run_ids or [])
     if dry_run:
         return {"count": len(selected), "ids": selected}
     deleted, errors = [], []

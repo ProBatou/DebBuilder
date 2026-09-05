@@ -76,6 +76,14 @@ class RecipeSchemaTests(unittest.TestCase):
         self.assertEqual(recipe["build"]["inactivity_timeout"], 300)
         self.assertIsNone(recipe["build"]["maximum_runtime"])
 
+    def test_inactivity_timeout_accepts_only_null_or_positive_values(self):
+        disabled = validate_recipe_metadata({"name": "demo", "build": {"inactivity_timeout": None}})
+        self.assertIsNone(disabled["build"]["inactivity_timeout"])
+        self.assertIsNone(recipe_for_storage(disabled)["build"]["inactivity_timeout"])
+        for value in (0, -1, "0", "-1"):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "positive integer"):
+                validate_recipe_metadata({"name": "demo", "build": {"inactivity_timeout": value}})
+
     def test_storage_and_read_shapes_are_canonical(self):
         stored = recipe_for_storage({"name": "demo", "package": {"name": "demo"}, "source": {"repository": "owner/demo"}})
         self.assertIn("package", stored)

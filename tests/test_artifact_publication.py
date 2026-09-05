@@ -1,11 +1,12 @@
 import gzip
 import hashlib
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from debbuilder import artifact_publication
+from debbuilder import artifact_publication, build_pipeline, workspace_cleanup
 from debbuilder.build_store import BuildStore
 
 
@@ -33,6 +34,26 @@ class RepreproRunner:
 
 
 class ArtifactPublicationTests(unittest.TestCase):
+    def test_publication_after_workspace_cleanup_uses_retained_artifact_and_holds_lease(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store, run = self.make_run(temporary)
+            repo, _ = self.make_repo(temporary)
+            artifact = Path(run["artifact"]["path"])
+            original = artifact.read_bytes()
+            workspace_cleanup.clean_workspace(store, run["id"])
+            runner = RepreproRunner()
+            def locked_runner(*args, **kwargs):
+                with self.assertRaises(workspace_cleanup.WorkspaceBusyError):
+                    store.clear_log_history(run["id"])
+                return runner(*args, **kwargs)
+            with mock.patch("debbuilder.artifact_publication.deb_inspector.inspect_deb", return_value=run["artifact"]["inspection"]):
+                result = artifact_publication.publish_artifact(
+                    run["id"], store=store, repo_root=repo, distribution="bookworm", component="main",
+                    confirm="publish:demo:2.0-1", runner=locked_runner,
+                )
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(artifact.read_bytes(), original)
+
     def make_run(self, root):
         store = BuildStore(Path(root) / "builds")
         recipe = {"name": "demo", "package": {"name": "demo", "architecture": "all", "maintainer": "Demo <demo@example.test>"}, "source": {"repository": "owner/demo"}}
@@ -81,6 +102,48 @@ class ArtifactPublicationTests(unittest.TestCase):
             self.assertTrue(any(" includedeb " in command for command in runner.commands))
             signing_call = next(kwargs for command, kwargs in runner.calls if " includedeb " in command)
             self.assertEqual(signing_call["environment"]["GNUPGHOME"], str(Path.home() / ".gnupg"))
+
+    def test_publication_running_state_is_visible_until_repository_completion(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store, run = self.make_run(temporary)
+            repo, _ = self.make_repo(temporary)
+            entered = threading.Event()
+            release = threading.Event()
+            result = {}
+
+            class BlockingRunner(RepreproRunner):
+                def __init__(self):
+                    super().__init__()
+                    self.blocked = False
+
+                def __call__(self, command, **kwargs):
+                    if not self.blocked:
+                        self.blocked = True
+                        entered.set()
+                        if not release.wait(2):
+                            raise RuntimeError("test repository runner was not released")
+                    return super().__call__(command, **kwargs)
+
+            inspection = {"ok": True, "package": "demo", "version": "2.0-1", "architecture": "all"}
+            runner = BlockingRunner()
+            with mock.patch("debbuilder.artifact_publication.deb_inspector.inspect_deb", return_value=inspection):
+                thread = threading.Thread(
+                    target=lambda: result.setdefault("publication", artifact_publication.publish_artifact(
+                        run["id"], store=store, repo_root=repo, distribution="bookworm", component="main",
+                        confirm="publish:demo:2.0-1", runner=runner,
+                    )),
+                )
+                thread.start()
+                self.assertTrue(entered.wait(1))
+                persisted = store.load(run["id"])
+                self.assertEqual(persisted["publications"][-1]["status"], "running")
+                self.assertEqual(build_pipeline.execution_summary(persisted)["lifecycle_status"], "publishing")
+                self.assertTrue(build_pipeline.execution_summary(persisted)["lifecycle_active"])
+                release.set()
+                thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(result["publication"]["status"], "success")
+            self.assertEqual(store.load(run["id"])["publications"][-1]["status"], "success")
 
     def test_unvalidated_artifact_is_not_published(self):
         with tempfile.TemporaryDirectory() as temporary:

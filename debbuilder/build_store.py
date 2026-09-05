@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
 import secrets
 import time
 from contextlib import contextmanager
@@ -15,6 +14,7 @@ from .build_models import new_run, utc_now, validate_run
 from .recipe_schema import recipe_for_storage, require_safe_name
 
 WORKSPACE_DIRECTORIES = ("source", "staging", "artifacts", "logs", "manifests")
+EXECUTION_HISTORY_DELETION_FILE = ".execution-history-deleted.json"
 
 
 def make_run_id() -> str:
@@ -29,12 +29,36 @@ class BuildStore:
         require_safe_name(run_id, "build run id")
         return self.root / run_id
 
+    def execution_history_deletion_path(self, run_id: str) -> Path:
+        return self.run_dir(run_id) / EXECUTION_HISTORY_DELETION_FILE
+
+    def execution_history_deleted(self, run_id: str, run: dict | None = None) -> bool:
+        """Return persistent Logs-history visibility independently from Run rewrites."""
+        if self.execution_history_deletion_path(run_id).is_file():
+            return True
+        if run and run.get("log_deleted"):
+            self._record_execution_history_deletion(run_id)
+            return True
+        return False
+
+    def _record_execution_history_deletion(self, run_id: str) -> dict:
+        path = self.execution_history_deletion_path(run_id)
+        marker = storage.load_json(path, None)
+        if isinstance(marker, dict) and marker.get("deleted_at"):
+            return marker
+        marker = {"run_id": run_id, "deleted_at": utc_now()}
+        storage.save_json(path, marker)
+        path.chmod(0o600)
+        return marker
+
     @contextmanager
-    def locked_run(self, run_id: str):
-        """Serialize a complete lifecycle mutation for one Build Run."""
+    def locked_run(self, run_id: str, *, blocking: bool = True):
+        """Lease the workspace across processes and serialize Run mutations."""
+        from .workspace_cleanup import locked_workspace
         path = self.run_dir(run_id) / "run.json"
-        with storage.locked_path(path):
-            yield
+        with locked_workspace(self.root, run_id, blocking=blocking) as fd:
+            with storage.locked_path(path):
+                yield fd
 
     def create(self, recipe: dict, *, recipe_id: str = "", mode: str = "dry_run", run_id: str | None = None) -> dict:
         canonical = recipe_for_storage(recipe)
@@ -123,35 +147,8 @@ class BuildStore:
         return path
 
     def clear_log_history(self, run_id: str) -> dict:
-        run = self.load(run_id)
-        if not run:
-            raise FileNotFoundError("build run not found")
-        workspace = self.run_dir(run_id)
-        logs = workspace / "logs"
-        removed = []
-        if logs.exists():
-            shutil.rmtree(logs)
-            removed.append("logs")
-        logs.mkdir(mode=0o700, exist_ok=True)
-        (logs / "commands").mkdir(mode=0o700, exist_ok=True)
-        for step in run.get("steps", []):
-            details = step.get("details") if isinstance(step, dict) else None
-            if isinstance(details, dict):
-                for command in details.get("commands") or []:
-                    if isinstance(command, dict):
-                        command["stdout"] = ""
-                        command["stderr"] = ""
-                        command["log_deleted"] = True
-        for validation in run.get("validations") or []:
-            for command in validation.get("commands") or []:
-                if isinstance(command, dict):
-                    command["stdout"] = ""
-                    command["stderr"] = ""
-                    command["log_deleted"] = True
-        run["events"] = []
-        run["log_deleted"] = True
-        self.save(run)
-        return {"id": run_id, "deleted": "log_history", "removed": removed}
+        from .workspace_cleanup import delete_history
+        return delete_history(self, run_id)
 
     def _manifest_path(self, run_id: str, relative_path: str) -> Path:
         """Resolve a manifest reference without allowing it outside its Run."""

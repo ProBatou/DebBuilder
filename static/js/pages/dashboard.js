@@ -3,13 +3,13 @@ function dashboardLifecycleState(packageRow) {
 }
 
 function metricCard(value, label, detail = '', tone = '') {
-  return `<div class="metric dashboard-metric ${tone}"><strong>${esc(value)}</strong><span>${esc(label)}</span>${detail ? `<em>${esc(detail)}</em>` : ''}</div>`;
+  return `<article class="metric dashboard-metric stat-card ${tone}"><strong>${esc(value)}</strong><span>${esc(label)}</span>${detail ? `<em>${esc(detail)}</em>` : ''}</article>`;
 }
 
 function compactPackageRow(packageRow) {
   const version = packageRow.version || {};
   const state = dashboardLifecycleState(packageRow);
-  return `<div class="dashboard-package-row" role="button" tabindex="0" data-admin-action="open-dashboard-package" data-package-name="${esc(packageRow.name)}"><div class="dashboard-package-identity"><strong>${esc(packageRow.name)}</strong><span>${esc(sourceLabel(packageRow))}</span></div><div class="dashboard-package-version"><span>Published</span><strong>${esc(version.published || packageRow.apt_version || '—')}</strong></div><div class="dashboard-package-version"><span>Source</span><strong>${esc(version.source || packageRow.upstream_version || '—')}</strong></div><div class="dashboard-package-state">${badge(state)}</div></div>`;
+  return `<div class="dashboard-package-row list-row" role="button" tabindex="0" data-admin-action="open-dashboard-package" data-package-name="${esc(packageRow.name)}"><div class="dashboard-package-identity"><strong>${esc(packageRow.name)}</strong><span>${esc(sourceLabel(packageRow))}</span></div><div class="dashboard-package-version"><span>Published</span><strong>${esc(version.published || packageRow.apt_version || '—')}</strong></div><div class="dashboard-package-version"><span>Source</span><strong>${esc(version.source || packageRow.upstream_version || '—')}</strong></div><div class="dashboard-package-state">${badge(state)}</div></div>`;
 }
 
 function renderRepoState(settings, packages) {
@@ -17,7 +17,7 @@ function renderRepoState(settings, packages) {
   const architectures = [...new Set(packages.map(packageRow => packageRow.architecture || 'all'))].sort();
   const configured = !!(apt.repository && apt.distribution && apt.component);
   const repository = String(apt.repository || 'Not configured').replace(/^https?:\/\//, '').replace(/\/$/, '');
-  return `<div class="dashboard-repo-summary"><h3>APT repository</h3><span>${esc(repository)} · ${esc(apt.distribution || '—')} · ${esc(apt.component || '—')} · ${esc(architectures.join(', ') || apt.architecture || '—')}</span>${statusBadge(configured ? 'CONFIGURED' : 'CHECK', configured ? 'active' : 'warning')}</div>`;
+  return `<div class="dashboard-repo-summary"><div><span class="eyebrow">Repository</span><h3>APT repository</h3></div><span>${esc(repository)} · ${esc(apt.distribution || '—')} · ${esc(apt.component || '—')} · ${esc(architectures.join(', ') || apt.architecture || '—')}</span>${statusBadge(configured ? 'CONFIGURED' : 'CHECK', configured ? 'active' : 'warning')}</div>`;
 }
 
 async function loadDashboard() {
@@ -46,7 +46,7 @@ async function loadDashboard() {
     (rank[dashboardLifecycleState(left)] ?? 7) - (rank[dashboardLifecycleState(right)] ?? 7)
       || left.name.localeCompare(right.name)
   ).slice(0, 12);
-  if ($('dashboardPackageFlow')) $('dashboardPackageFlow').innerHTML = priority.map(compactPackageRow).join('') || '<p class="muted">No tracked packages.</p>';
+  if ($('dashboardPackageFlow')) $('dashboardPackageFlow').innerHTML = priority.map(compactPackageRow).join('') || '<div class="empty-state">No tracked packages.</div>';
   $('latestOperations').classList.add('latest-ops');
-  $('latestOperations').innerHTML = (dashboard.latest_operations || []).map(execution => `<div class="item" role="button" tabindex="0" data-admin-action="open-dashboard-execution" data-execution-id="${esc(execution.id)}"><div class="item-title"><span>${esc(packageLabelForExecution(execution))} · ${esc(execution.action || 'build')}</span>${badge(execution.lifecycle_status || execution.status)}</div><div class="item-meta">Build ${esc(execution.build_status || execution.status)} · ${esc(STATUS_LABELS[execution.lifecycle_status] || execution.lifecycle_status || execution.status)} · ${esc(execution.id)} · ${fmtTime(execution.updated)}</div></div>`).join('') || '<p class="muted">No recent operation.</p>';
+  $('latestOperations').innerHTML = (dashboard.latest_operations || []).map(execution => `<div class="item list-row latest-operation-row" role="button" tabindex="0" data-admin-action="open-dashboard-execution" data-execution-id="${esc(execution.id)}"><div class="latest-operation-copy"><div class="item-title"><span>${esc(packageLabelForExecution(execution))} · ${esc(execution.action || 'build')}</span></div><div class="item-meta">Build ${esc(execution.build_status || execution.status)} · ${esc(STATUS_LABELS[execution.lifecycle_status] || execution.lifecycle_status || execution.status)} · ${esc(execution.id)} · ${fmtTime(execution.updated)}</div></div>${badge(execution.lifecycle_status || execution.status)}</div>`).join('') || '<div class="empty-state">No recent operation.</div>';
 }

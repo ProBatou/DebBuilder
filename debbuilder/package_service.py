@@ -233,7 +233,12 @@ class PackageService:
             normalized_package_name(row.get("Package")): row for row in live_rows if row.get("Package")
         }
         runs_by_package: dict[str, list[dict]] = {}
-        for run in BuildStore(self.data_dir / "builds").list(limit=1000):
+        build_store = BuildStore(self.data_dir / "builds")
+        for stored_run in build_store.list(limit=1000):
+            run = {
+                **stored_run,
+                "_execution_history_deleted": build_store.execution_history_deleted(str(stored_run["id"]), stored_run),
+            }
             key = normalized_package_name(build_run_package(run))
             if key:
                 packages.setdefault(key, self._empty_package(key))

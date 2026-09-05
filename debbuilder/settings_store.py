@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl, urlparse
 
 from . import storage
+from .workspace_cleanup import DEFAULT_POLICY, validate_policy
 
 _SECRET_WORDS = re.compile(r"(?i)(token|secret|password|passwd|apikey|api_key|client_secret)")
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -38,6 +39,7 @@ def default_settings(repo_url: str, suite: str, component: str, architecture: st
             "auto_validate_after_successful_build": False,
             "auto_publish_after_successful_validation": False,
         },
+        "workspace_cleanup": dict(DEFAULT_POLICY),
         "security": security or {"auth_mode": "none", "oidc_issuer": "", "oidc_client_id": "", "oidc_redirect_uri": ""},
     }
 
@@ -267,6 +269,12 @@ def validate_settings(payload: dict, current: dict) -> dict:
             auto_validate = True
         result["automation"]["auto_validate_after_successful_build"] = auto_validate
         result["automation"]["auto_publish_after_successful_validation"] = auto_publish
+
+    if "workspace_cleanup" in payload:
+        policy = payload["workspace_cleanup"]
+        if not isinstance(policy, dict):
+            raise ValueError("workspace_cleanup settings must be an object")
+        result["workspace_cleanup"] = validate_policy({**result.get("workspace_cleanup", DEFAULT_POLICY), **policy})
 
     if "security" in payload:
         security = payload.get("security")

@@ -108,6 +108,16 @@ def run_pipeline(recipe: dict, *, store: BuildStore, dry_run: bool, recipe_id: s
     """Execute the connected pipeline through Dependencies and Source changes."""
     canonical = validate_recipe_metadata(recipe)
     run = store.create(canonical, recipe_id=recipe_id or canonical["name"], mode="dry_run" if dry_run else "build")
+    with store.locked_run(run["id"]):
+        return _run_pipeline_locked(
+            canonical, run, store=store, dry_run=dry_run, github_token=github_token,
+            acquire=acquire, detector=detector, dependency_check=dependency_check,
+            change_applier=change_applier, upstream_acquirer=upstream_acquirer,
+            lifecycle_callback=lifecycle_callback,
+        )
+
+
+def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_run: bool, github_token: str, acquire, detector, dependency_check, change_applier, upstream_acquirer, lifecycle_callback) -> dict:
     run_started = time.monotonic()
     run.update({"status": "running", "started_at": utc_now()})
     store.save(run)
@@ -292,19 +302,27 @@ def execution_summary(run: dict) -> dict:
     publications = run.get("publications") or []
     validation_status = validations[-1]["status"] if validations else "not_run"
     publication_status = publications[-1]["status"] if publications else "not_run"
-    from .package_store import derive_lifecycle_status
+    from .package_store import allowed_actions, derive_lifecycle_status
+    build_status = run.get("status", "pending")
+    lifecycle_status = derive_lifecycle_status(build_status, validation_status, publication_status)
+    actions = allowed_actions(lifecycle_status, str(run.get("recipe_id") or ""), run)
     return {
         "id": run["id"], "package": run.get("recipe_id", ""),
         "action": "dry-run" if run.get("mode") == "dry_run" else "build",
         "version": (run.get("version") or {}).get("debian", ""),
-        "status": run.get("status", "pending"), "build_status": run.get("status", "pending"), "updated": run.get("created_at_epoch"),
+        "status": build_status, "build_status": build_status, "updated": run.get("created_at_epoch"),
         "duration": run.get("duration"), "workspace": run.get("workspace", ""),
         "validation_count": len(validations), "validation_status": validation_status, "publication_status": publication_status,
-        "lifecycle_status": derive_lifecycle_status(run.get("status", "pending"), validation_status, publication_status),
+        "lifecycle_status": lifecycle_status,
+        "lifecycle_active": build_status in {"pending", "running"} or validation_status == "running" or publication_status == "running",
+        "allowed_actions": {"validate": actions["validate"], "publish": actions["publish"]},
     }
 
 
 def execution_detail(run: dict) -> dict:
-    detail = {**execution_summary(run), **run}
+    summary = execution_summary(run)
+    detail = {**summary, **run}
+    for field in ("build_status", "validation_status", "publication_status", "lifecycle_status", "lifecycle_active", "allowed_actions"):
+        detail[field] = summary[field]
     detail["script"] = ""
     return detail

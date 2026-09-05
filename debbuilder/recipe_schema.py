@@ -70,7 +70,7 @@ def _positive_int_or_default(value, default: int, what: str) -> int:
 
 
 def _optional_positive_int(value, what: str) -> int | None:
-    if value in (None, "", 0, "0", False):
+    if value in (None, ""):
         return None
     try:
         parsed = int(value)
@@ -199,7 +199,7 @@ def normalize_recipe(workflow: dict) -> dict:
             "extra_dependencies": _string_list(build_in.get("extra_dependencies"), "build.extra_dependencies"),
             "source_changes": _list(build_in.get("source_changes"), "build.source_changes"),
             "commands": _string_list(build_in.get("commands"), "build.commands"),
-            "inactivity_timeout": _positive_int_or_default(build_in.get("inactivity_timeout"), 300, "build.inactivity_timeout"),
+            "inactivity_timeout": _optional_positive_int(build_in["inactivity_timeout"], "build.inactivity_timeout") if "inactivity_timeout" in build_in else 300,
             "maximum_runtime": _optional_positive_int(build_in.get("maximum_runtime"), "build.maximum_runtime"),
             "environment": _environment(build_in.get("environment"), "build.environment"),
             "working_directory": str(build_in.get("working_directory") or "."),
@@ -301,8 +301,8 @@ def validate_recipe_metadata(workflow: dict) -> dict:
         re.compile(expression)
     build = recipe["build"]
     artifact = recipe["artifact"]
-    if not 1 <= build["inactivity_timeout"] <= 86400:
-        raise ValueError("build.inactivity_timeout must be between 1 and 86400 seconds")
+    if build["inactivity_timeout"] is not None and not 1 <= build["inactivity_timeout"] <= 86400:
+        raise ValueError("build.inactivity_timeout must be null or between 1 and 86400 seconds")
     if build["maximum_runtime"] is not None and not 1 <= build["maximum_runtime"] <= 604800:
         raise ValueError("build.maximum_runtime must be empty or between 1 and 604800 seconds")
     if artifact["mode"] not in ARTIFACT_MODES:

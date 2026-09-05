@@ -69,8 +69,14 @@ function renderPackages() {
   if ($('packageCount')) $('packageCount').textContent = `${rows.length} shown`;
   $('packageList').innerHTML = rows.map(packageRow => {
     const version = packageRow.version || {};
-    return `<article class="package-row lifecycle" role="button" tabindex="0" data-admin-action="open-package" data-package-name="${esc(packageRow.name)}"><div><div class="package-name">${esc(packageRow.name)}</div><div class="package-sub">${esc(sourceLabel(packageRow))}${packageRow.recipe ? ` · recipe ${esc(packageRow.recipe)}` : ''}</div></div><div>${badge(lifecycleState(packageRow))}</div><div><div class="package-sub">Published version</div><strong>${esc(version.published || packageRow.apt_version || 'Not published')}</strong></div><div><div class="package-sub">Available version</div><strong>${esc(version.source || packageRow.upstream_version || 'Unknown')}</strong><div class="package-sub">Ref ${esc(sourceRefLabel(packageRow))}</div></div><div><div class="package-sub">Built / arch</div><strong>${esc(version.candidate || 'Never built')} · ${esc(packageRow.architecture || 'all')}</strong><div class="package-sub">Latest run: ${esc((packageRow.build || {}).latest_status || 'none')}</div></div></article>`;
-  }).join('') || '<p class="muted">No package.</p>';
+    return `<article class="package-row package-table-row list-row lifecycle" role="button" tabindex="0" data-admin-action="open-package" data-package-name="${esc(packageRow.name)}"><div class="package-cell package-identity" data-label="Package"><div class="package-name">${esc(packageRow.name)}</div><div class="package-sub">${esc(sourceLabel(packageRow))}${packageRow.recipe ? ` · recipe ${esc(packageRow.recipe)}` : ''}</div></div><div class="package-cell package-status" data-label="Status">${badge(lifecycleState(packageRow))}</div><div class="package-cell" data-label="Published"><strong>${esc(version.published || packageRow.apt_version || 'Not published')}</strong></div><div class="package-cell" data-label="Available"><strong>${esc(version.source || packageRow.upstream_version || 'Unknown')}</strong><div class="package-sub">Ref ${esc(sourceRefLabel(packageRow))}</div></div><div class="package-cell" data-label="Built / arch"><strong>${esc(version.candidate || 'Never built')} · ${esc(packageRow.architecture || 'all')}</strong><div class="package-sub">Latest run: ${esc((packageRow.build || {}).latest_status || 'none')}</div></div></article>`;
+  }).join('') || '<div class="empty-state">No package matches these filters.</div>';
+}
+
+function packageDetailSection(title, rows) {
+  const normalizedLabels = {Lifecycle: 'Current lifecycle', 'Latest built': 'Latest built version'};
+  const content = rows.map(([label, value, isHtml = false]) => `<div class="detail-pair"><dt>${esc(normalizedLabels[label] || label)}</dt><dd>${isHtml ? value : esc(value || '—')}</dd></div>`).join('');
+  return `<section class="drawer-section section"><h3>${esc(title)}</h3><dl class="detail-grid">${content}</dl></section>`;
 }
 
 function closePackageDrawer() {
@@ -94,17 +100,32 @@ async function openPackage(name) {
   const publication = packageRow.publication || {};
   const artifactName = (build.last_artifact || '').split('/').pop();
   const artifact = [artifactName, build.artifact_source, build.artifact_sha256].filter(Boolean).join(' · ');
-  $('packageDetail').innerHTML = `<div class="package-lifecycle-panel"><section><h3>General</h3><dl><dt>Linked recipe</dt><dd>${esc(packageRow.recipe || 'None')}</dd><dt>Description</dt><dd>${esc(packageRow.description || 'Not set')}</dd><dt>Architecture</dt><dd>${esc(packageRow.architecture || 'all')}</dd><dt>Dependencies</dt><dd>${esc(packageRow.depends || 'None declared')}</dd></dl></section><section><h3>Source</h3><dl><dt>Type</dt><dd>${esc(source.type || 'Unknown')}</dd><dt>Repository</dt><dd>${esc(source.repository || 'Not set')}</dd><dt>Strategy</dt><dd>${esc(packageRow.tracking || packageRow.version_strategy || version.strategy || 'Not set')}</dd><dt>Resolved ref</dt><dd>${esc(sourceRefLabel(packageRow))}</dd><dt>Latest resolved release</dt><dd>${esc(source.latest_release || 'Not fetched')}</dd></dl></section><section><h3>Versions</h3><dl><dt>Available upstream version</dt><dd>${esc(version.source || packageRow.upstream_version || 'Unknown')}</dd><dt>Latest built version</dt><dd>${esc(version.candidate || 'None')}</dd><dt>Published version</dt><dd>${esc(version.published || packageRow.apt_version || 'Not published')}</dd><dt>Current lifecycle</dt><dd>${badge(lifecycleState(packageRow))}</dd></dl></section><section><h3>Build</h3><dl><dt>Method</dt><dd>${esc(build.method || 'Not set')}</dd><dt>Latest run status</dt><dd>${esc(build.latest_status || 'No real run')}</dd><dt>Latest run</dt><dd>${esc(build.latest_run_id || 'None')}</dd><dt>Artifact run</dt><dd>${esc(build.last_build_id || 'None')}</dd><dt>Latest artifact</dt><dd>${esc(artifact || 'None')}</dd></dl></section><section><h3>Validation & publication</h3><dl><dt>Current run validation</dt><dd>${validation.status ? `${esc(validation.status)} · ${esc(validation.finished_at || validation.started_at || '')}` : 'Not run'}</dd><dt>Current run publication</dt><dd>${publication.status ? `${esc(publication.status)} · ${esc(publication.finished_at || publication.requested_at || '')}` : 'Not run'}</dd><dt>Repository version</dt><dd>${esc(version.published || packageRow.apt_version || 'None')} remains published</dd></dl></section><section><h3>APT repository</h3><dl><dt>Repository</dt><dd>${esc(repository.url || 'Not configured')}</dd><dt>Distribution</dt><dd>${esc(repository.distribution || 'Not configured')}</dd><dt>Component</dt><dd>${esc(repository.component || 'Not configured')}</dd><dt>Architectures</dt><dd>${esc((repository.architectures || [packageRow.architecture || 'all']).join(', '))}</dd><dt>Publication</dt><dd>${repository.published ? 'Published' : 'Not published'}</dd></dl></section></div><div class="actions package-actions">${actionButtons(packageRow)}</div><h3>History</h3>${(packageRow.history || []).map(execution => `<div class="item" role="button" tabindex="0" data-admin-action="open-history-execution" data-execution-id="${esc(execution.id)}"><div class="item-title"><span>${esc(execution.id)} · ${esc(execution.action)}</span>${badge(execution.lifecycle_status || execution.status)}</div><div class="item-meta">${fmtTime(execution.updated)}</div></div>`).join('') || '<p class="muted">No linked history.</p>'}<div class="danger-zone"><button class="danger" data-admin-action="delete-package" data-package-name="${esc(packageRow.name)}">Delete from DebBuilder</button><p class="muted">Does not delete the package from the APT repository.</p></div>`;
+  $('packageDetail').innerHTML = `<div class="package-lifecycle-panel stack stack--sm">${packageDetailSection('General', [['Linked recipe', packageRow.recipe || 'None'], ['Description', packageRow.description || 'Not set'], ['Architecture', packageRow.architecture || 'all'], ['Dependencies', packageRow.depends || 'None declared']])}${packageDetailSection('Source', [['Type', source.type || 'Unknown'], ['Repository', source.repository || 'Not set'], ['Strategy', packageRow.tracking || packageRow.version_strategy || version.strategy || 'Not set'], ['Resolved ref', sourceRefLabel(packageRow)], ['Latest release', source.latest_release || 'Not fetched']])}${packageDetailSection('Versions', [['Available upstream', version.source || packageRow.upstream_version || 'Unknown'], ['Latest built', version.candidate || 'None'], ['Published', version.published || packageRow.apt_version || 'Not published'], ['Lifecycle', badge(lifecycleState(packageRow)), true]])}${packageDetailSection('Build', [['Method', build.method || 'Not set'], ['Latest run status', build.latest_status || 'No real run'], ['Latest run', build.latest_run_id || 'None'], ['Artifact run', build.last_build_id || 'None'], ['Latest artifact', artifact || 'None']])}${packageDetailSection('Validation & publication', [['Validation', validation.status ? `${validation.status} · ${validation.finished_at || validation.started_at || ''}` : 'Not run'], ['Publication', publication.status ? `${publication.status} · ${publication.finished_at || publication.requested_at || ''}` : 'Not run'], ['Repository version', `${version.published || packageRow.apt_version || 'None'} remains published`]])}${packageDetailSection('APT repository', [['Repository', repository.url || 'Not configured'], ['Distribution', repository.distribution || 'Not configured'], ['Component', repository.component || 'Not configured'], ['Architectures', (repository.architectures || [packageRow.architecture || 'all']).join(', ')], ['Publication', repository.published ? 'Published' : 'Not published']])}</div><div class="package-action-bar toolbar"><div class="toolbar-actions">${actionButtons(packageRow)}</div></div><section class="drawer-history"><div class="section-header"><h3>History</h3></div><div class="data-list">${(packageRow.history || []).map(execution => `<div class="item list-row" role="button" tabindex="0" data-admin-action="open-history-execution" data-execution-id="${esc(execution.id)}"><div class="item-title"><span>${esc(execution.id)} · ${esc(execution.action)}</span>${badge(execution.lifecycle_status || execution.status)}</div><div class="item-meta">${fmtTime(execution.updated)}</div></div>`).join('') || '<div class="empty-state">No linked history.</div>'}</div></section><div class="danger-zone"><div><strong>Remove package</strong><p class="muted">Does not delete the package from the APT repository.</p></div><button class="btn btn--danger" data-admin-action="delete-package" data-package-name="${esc(packageRow.name)}">Delete from DebBuilder</button></div>`;
 }
 
 async function createPackageUi() {
-  const name = prompt('Debian package name?');
+  const name = await showPrompt({
+    title: 'New package',
+    description: 'Create the managed package entity first; a Recipe can be attached afterward.',
+    inputLabel: 'Debian package name',
+    inputPlaceholder: 'example-package',
+    inputRequired: true,
+    confirmLabel: 'Continue',
+  });
   if (!name) return;
-  const repository = prompt('Optional GitHub repository (owner/repo)?', '');
+  const repository = await showPrompt({
+    title: 'Link a GitHub repository',
+    description: 'Optional. Leave this empty to create a manually managed package.',
+    inputLabel: 'GitHub repository',
+    inputPlaceholder: 'owner/repository',
+    inputValue: '',
+    confirmLabel: 'Create package',
+  });
   const body = {name, architecture: 'all', source: repository ? {type: 'github', repository} : {type: 'manual'}};
   await postJson('/api/packages', body);
   await loadPackages();
   await openPackage(name);
+  showToast(`Package ${name} created.`, {type: 'success'});
 }
 
 async function openLinkedRecipe(recipe) {
@@ -123,12 +144,19 @@ async function createRecipeForPackage(name) {
 }
 
 async function deletePackageUi(name) {
-  if (!confirm(`Delete ${name} from DebBuilder?\nThe package will NOT be removed from the APT repository.`)) return;
+  const confirmed = await showConfirm({
+    title: `Delete ${name} from DebBuilder?`,
+    description: 'The package entity is removed from DebBuilder. The APT repository is not modified.',
+    confirmLabel: 'Delete package',
+    danger: true,
+  });
+  if (!confirmed) return;
   const response = await fetch('/api/packages/' + encodeURIComponent(name), {method: 'DELETE'});
   const payload = await response.json();
   if (!response.ok) throw new Error(payload.error || response.statusText);
   closePackageDrawer();
   await loadPackages();
+  showToast(`Package ${name} deleted from DebBuilder.`, {type: 'success'});
 }
 
 async function validatePackage(name) {
@@ -136,7 +164,7 @@ async function validatePackage(name) {
   const runId = packageRow?.build?.latest_run_id;
   if (!runId) throw new Error('No successful Build Run is ready to validate');
   const response = await postLifecycleJson(`/api/executions/${encodeURIComponent(runId)}/validate`, {});
-  alert(`Validation: ${response.validation.status}${response.validation.error ? `\n${response.validation.error.message}` : ''}`);
+  showToast(`Validation: ${response.validation.status}${response.validation.error ? ` — ${response.validation.error.message}` : ''}`, {type: response.validation.error ? 'error' : 'success'});
   await loadPackages();
   await openPackage(name);
 }
@@ -148,27 +176,39 @@ async function publishPackage(name) {
   const runId = build.latest_run_id || build.last_build_id;
   if (!runId || !version) throw new Error('No validated Build Run is ready to publish');
   const confirmation = `publish:${name}:${version}`;
-  if (!confirm(`Publish the validated artifact ${name} ${version} to APT?\n\nRequired confirmation: ${confirmation}`)) return;
+  const confirmed = await showConfirm({
+    title: `Publish ${name} ${version}?`,
+    description: `This publishes the validated artifact to APT.\nRequired confirmation: ${confirmation}`,
+    confirmLabel: 'Publish to APT',
+  });
+  if (!confirmed) return;
   const response = await postLifecycleJson(`/api/executions/${encodeURIComponent(runId)}/publish`, {confirm: confirmation});
-  alert(`Publication: ${response.publication.status}${response.publication.error ? `\n${response.publication.error.message}` : ''}`);
+  showToast(`Publication: ${response.publication.status}${response.publication.error ? ` — ${response.publication.error.message}` : ''}`, {type: response.publication.error ? 'error' : 'success'});
   await loadPackages();
 }
 
 async function buildPackage(name, dryRun = true) {
   const packageRow = adminState.packages.find(row => row.name === name);
   if (!packageRow || !packageRow.recipe) {
-    alert('No linked recipe.');
+    showToast('No linked Recipe.', {type: 'warning'});
     return;
   }
-  if (!dryRun && !confirm(`Really build ${name} and validate the resulting package?`)) return;
+  if (!dryRun) {
+    const confirmed = await showConfirm({
+      title: `Build ${name}?`,
+      description: 'This starts the real build pipeline and validates the resulting package.',
+      confirmLabel: 'Start build',
+    });
+    if (!confirmed) return;
+  }
   const workflow = await getJson('/api/workflows/' + encodeURIComponent(packageRow.recipe));
   try {
     const run = await postJson('/api/run', {workflow, dry_run: dryRun});
-    alert(dryRun ? `Test finished: ${run.run_id} · code ${run.returncode}` : `Build finished: ${run.run_id} · status ${run.status || run.returncode}`);
+    showToast(dryRun ? `Test finished: ${run.run_id} · code ${run.returncode}` : `Build finished: ${run.run_id} · status ${run.status || run.returncode}`, {type: 'success'});
     await Promise.all([loadExecutions(), loadPackages()]);
     await openPackage(name);
   } catch (error) {
-    alert(`${dryRun ? 'Test' : 'Build'} failed: ${error.message}`);
+    showToast(`${dryRun ? 'Test' : 'Build'} failed: ${error.message}`, {type: 'error'});
   }
 }
 
@@ -191,7 +231,7 @@ function newRecipeUi(packageName = '') {
 async function createRecipeFromDialog() {
   const packageName = $('newRecipePackage').value.trim();
   if (!packageName) {
-    alert('Create a package first, then attach a recipe to it.');
+    showToast('Create a package first, then attach a Recipe to it.', {type: 'warning'});
     return;
   }
   const tracking = $('newRecipeTracking').value;

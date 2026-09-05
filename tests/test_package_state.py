@@ -142,6 +142,8 @@ class PackageStoreTests(unittest.TestCase):
         self.assertEqual(status("success", "success", "failed"), "publication_failed")
         self.assertEqual(status("success", "success", "success"), "published")
         self.assertEqual(status("failed"), "build_failed")
+        self.assertEqual(status("queued"), "queued")
+        self.assertEqual(status("cancelling"), "cancelling")
 
     def test_run_summary_never_borrows_lifecycle_events_from_an_older_run(self):
         def summary(run):

@@ -69,10 +69,10 @@ class WorkspaceCleanupTests(unittest.TestCase):
         self.assertEqual(workspace_cleanup.apply_retention(BuildStore(self.store.root))["cleaned"], [])
 
     def test_active_build_pending_validation_publication_and_steps_are_never_cleaned_or_deleted(self):
-        for phase in ("pending", "running", "validation", "publication", "step"):
+        for phase in ("pending", "queued", "running", "cancelling", "validation", "publication", "step"):
             with self.subTest(phase=phase):
                 run, root = self.make_run(phase)
-                if phase in {"pending", "running"}:
+                if phase in {"pending", "queued", "running", "cancelling"}:
                     run["status"] = phase
                 elif phase == "step":
                     run["steps"][4]["status"] = "running"
@@ -86,6 +86,18 @@ class WorkspaceCleanupTests(unittest.TestCase):
         result = workspace_cleanup.apply_retention(self.store, {"failed_workspaces_to_retain": 0})
         self.assertEqual(result["cleaned"], [])
         self.assertEqual(execution_service.delete_logs(self.store, all_runs=True, dry_run=True)["count"], 0)
+
+    def test_precreated_run_workspace_is_not_cleaned_as_terminal(self):
+        run = build_pipeline.create_pipeline_run(recipe(), store=self.store, dry_run=False)
+        workspace = Path(run["workspace"])
+        (workspace / "source/preserved").write_text("pending execution")
+
+        result = workspace_cleanup.apply_retention(self.store, {"failed_workspaces_to_retain": 0})
+
+        self.assertEqual(result["cleaned"], [])
+        self.assertTrue((workspace / "source/preserved").is_file())
+        with self.assertRaises(workspace_cleanup.WorkspaceBusyError):
+            execution_service.delete_log(self.store, run["id"])
 
     def test_dry_runs_clean_prepared_and_retain_recent_failures(self):
         _run, prepared = self.make_run("prepared", status="prepared", mode="dry_run")

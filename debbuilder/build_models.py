@@ -9,7 +9,10 @@ STEP_NAMES = (
     "staging", "debian_metadata", "systemd", "package", "artifact",
 )
 STEP_STATUSES = frozenset({"pending", "running", "success", "failed", "skipped"})
-RUN_STATUSES = frozenset({"pending", "running", "prepared", "success", "failed", "cancelled"})
+RUN_STATUSES = frozenset({
+    "pending", "queued", "running", "cancelling",
+    "prepared", "success", "failed", "cancelled",
+})
 
 
 def utc_now() -> str:

@@ -1,12 +1,25 @@
 """Canonical Recipe-to-Build-Run pipeline orchestration."""
 from __future__ import annotations
 
+import json
 import time
 
 from .build_models import utc_now
 from .build_store import BuildStore
 from . import build_executor, deb_inspector, debian_packaging, dependency_checker, project_detection, source_acquisition, source_changes, upstream_archive, upstream_artifact
 from .recipe_schema import validate_recipe_metadata
+
+
+class PipelineRunError(RuntimeError):
+    """A deterministic error raised before an existing Run can execute."""
+
+    def __init__(self, code: str, message: str, *, details: dict | None = None):
+        super().__init__(message)
+        self.code = code
+        self.details = details or {}
+
+    def as_dict(self) -> dict:
+        return {"code": self.code, "message": str(self), "details": self.details}
 
 
 def _step(run: dict, name: str) -> dict:
@@ -104,17 +117,57 @@ def _run_upstream_artifact(canonical: dict, run: dict, *, store: BuildStore, dry
     return _finish_run(run, store, started, lifecycle_callback, canonical)
 
 
-def run_pipeline(recipe: dict, *, store: BuildStore, dry_run: bool, recipe_id: str = "", github_token: str = "", acquire=None, detector=None, dependency_check=None, change_applier=None, upstream_acquirer=None, lifecycle_callback=None) -> dict:
-    """Execute the connected pipeline through Dependencies and Source changes."""
+def create_pipeline_run(recipe: dict, *, store: BuildStore, dry_run: bool, recipe_id: str = "") -> dict:
+    """Validate a Recipe and persist an isolated pending Run without executing it."""
     canonical = validate_recipe_metadata(recipe)
-    run = store.create(canonical, recipe_id=recipe_id or canonical["name"], mode="dry_run" if dry_run else "build")
-    with store.locked_run(run["id"]):
+    return store.create(
+        canonical,
+        recipe_id=recipe_id or canonical["name"],
+        mode="dry_run" if dry_run else "build",
+    )
+
+
+def execute_pipeline_run(run_id: str, *, store: BuildStore, github_token: str = "", acquire=None, detector=None, dependency_check=None, change_applier=None, upstream_acquirer=None, lifecycle_callback=None) -> dict:
+    """Execute exactly once from an existing Run's immutable Recipe snapshot."""
+    if not store.run_dir(run_id).is_dir():
+        raise PipelineRunError("build_run_not_found", "Build Run was not found", details={"run_id": run_id})
+    with store.locked_run(run_id):
+        run = store.load(run_id)
+        if not run:
+            raise PipelineRunError("build_run_not_found", "Build Run was not found", details={"run_id": run_id})
+        if run.get("status") != "pending":
+            raise PipelineRunError(
+                "build_run_not_pending",
+                f"Build Run cannot execute from status {run.get('status')}",
+                details={"run_id": run_id, "status": run.get("status")},
+            )
+        snapshot_path = store.run_dir(run_id) / "recipe.json"
+        try:
+            canonical = validate_recipe_metadata(json.loads(snapshot_path.read_text()))
+        except (OSError, ValueError, TypeError) as exc:
+            raise PipelineRunError(
+                "build_run_snapshot_invalid",
+                "Build Run Recipe snapshot is missing or invalid",
+                details={"run_id": run_id},
+            ) from exc
+        dry_run = run.get("mode") == "dry_run"
         return _run_pipeline_locked(
             canonical, run, store=store, dry_run=dry_run, github_token=github_token,
             acquire=acquire, detector=detector, dependency_check=dependency_check,
             change_applier=change_applier, upstream_acquirer=upstream_acquirer,
             lifecycle_callback=lifecycle_callback,
         )
+
+
+def run_pipeline(recipe: dict, *, store: BuildStore, dry_run: bool, recipe_id: str = "", github_token: str = "", acquire=None, detector=None, dependency_check=None, change_applier=None, upstream_acquirer=None, lifecycle_callback=None) -> dict:
+    """Create and synchronously execute one canonical Build Run."""
+    run = create_pipeline_run(recipe, store=store, dry_run=dry_run, recipe_id=recipe_id)
+    return execute_pipeline_run(
+        run["id"], store=store, github_token=github_token,
+        acquire=acquire, detector=detector, dependency_check=dependency_check,
+        change_applier=change_applier, upstream_acquirer=upstream_acquirer,
+        lifecycle_callback=lifecycle_callback,
+    )
 
 
 def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_run: bool, github_token: str, acquire, detector, dependency_check, change_applier, upstream_acquirer, lifecycle_callback) -> dict:
@@ -314,7 +367,7 @@ def execution_summary(run: dict) -> dict:
         "duration": run.get("duration"), "workspace": run.get("workspace", ""),
         "validation_count": len(validations), "validation_status": validation_status, "publication_status": publication_status,
         "lifecycle_status": lifecycle_status,
-        "lifecycle_active": build_status in {"pending", "running"} or validation_status == "running" or publication_status == "running",
+        "lifecycle_active": build_status in {"pending", "queued", "running", "cancelling"} or validation_status == "running" or publication_status == "running",
         "allowed_actions": {"validate": actions["validate"], "publish": actions["publish"]},
     }
 

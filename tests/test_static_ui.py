@@ -144,8 +144,28 @@ class StaticUiTests(unittest.TestCase):
         self.assertIn('id="buildMaximumRuntime"', html)
         self.assertIn("Maximum runtime", html)
         self.assertIn("Unlimited", html)
-        self.assertIn("advanced.version_revision || '1'", script)
+        self.assertNotIn("advanced.version_revision", script)
         self.assertIn("advanced.service_working_directory", script)
+
+    def test_recipe_version_revision_is_a_compact_step_one_field(self):
+        html = self.read("static/index.html")
+        script = self.read("static/recipe_serialization.js")
+        app = self.read("static/app.js")
+        self.assertIn('id="recipePackageVersionRevision" type="text" value="1" required', html)
+        self.assertIn("version_revision: value('recipePackageVersionRevision')", script)
+        self.assertIn("setValue('recipePackageVersionRevision', packageData.version_revision ?? '1')", script)
+        self.assertIn("assertRecipeVersionRevisionIsValid", app)
+        self.assertIn("'recipePackageVersionRevision'", app)
+
+    @unittest.skipUnless(shutil.which("node"), "node unavailable")
+    def test_recipe_serialization_keeps_placeholders_out_of_persistent_directories(self):
+        subprocess.run(
+            ["node", "tests/js/test_recipe_serialization.js"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
 
     def test_multiple_build_output_paths_are_fully_editable(self):
         html = self.read("static/index.html")

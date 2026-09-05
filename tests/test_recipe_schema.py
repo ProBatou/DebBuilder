@@ -55,10 +55,18 @@ class RecipeSchemaTests(unittest.TestCase):
         })
         self.assertEqual(recipe["schema_version"], 1)
         self.assertEqual(recipe["package"]["name"], "demo")
+        self.assertEqual(recipe["package"]["version_revision"], "1")
         self.assertEqual(recipe["source"]["repository"], "owner/demo")
         self.assertEqual(recipe["install"]["destination"], "/opt/demo")
         self.assertEqual(recipe["build"]["output"], {"mode": "source", "path": ""})
         self.assertNotEqual(recipe["install"]["owner"], recipe["service"])
+
+    def test_version_revision_round_trips_as_the_canonical_package_field(self):
+        for version_revision in ("1", "2", "1+b1"):
+            with self.subTest(version_revision=version_revision):
+                stored = recipe_for_storage({"name": "demo", "package": {"name": "demo", "version_revision": version_revision}})
+                self.assertEqual(stored["package"]["version_revision"], version_revision)
+                self.assertEqual(normalize_recipe(stored)["package"]["version_revision"], version_revision)
 
     def test_legacy_build_timeout_migrates_to_inactivity_timeout(self):
         recipe = validate_recipe_metadata({

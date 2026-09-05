@@ -197,7 +197,13 @@ function renderInstallContentSummary() {
   summary.innerHTML = rows.map(row => installMappingRowHtml(row)).join('');
 }
 
+function assertRecipeVersionRevisionIsValid() {
+  if ($('recipePackageVersionRevision')?.checkValidity()) return;
+  throw new Error('Debian revision is required.');
+}
+
 async function dryRun() {
+  assertRecipeVersionRevisionIsValid();
   const wf = collectWorkflow();
   if (!buildOutputIsComplete(wf.build.output)) throw new Error('Build output requires at least one relative path.');
   const data = await postJson('/api/run', {workflow:wf, dry_run:true});
@@ -213,6 +219,7 @@ async function dryRun() {
 }
 
 async function buildReal() {
+  assertRecipeVersionRevisionIsValid();
   const wf = collectWorkflow();
   if (!buildOutputIsComplete(wf.build.output)) throw new Error('Build output requires at least one relative path.');
   const confirmed = await showConfirm({
@@ -289,7 +296,7 @@ function waitForAutosaveIdle() {
 async function saveRecipeNow() {
   if (autosaveInFlight || recipeMutationPaused) return;
   const wf = collectWorkflow();
-  if (!$('recipeMetaName')?.checkValidity() || !$('recipeMetaPackage')?.checkValidity() || !$('recipeMetaGithub')?.checkValidity()) {
+  if (!$('recipeMetaName')?.checkValidity() || !$('recipeMetaPackage')?.checkValidity() || !$('recipeMetaGithub')?.checkValidity() || !$('recipePackageVersionRevision')?.checkValidity()) {
     setRecipeAutosaveState('error', 'Fix invalid fields to save');
     return;
   }
@@ -385,7 +392,7 @@ $('btnConfigureService')?.addEventListener('click',configureService);
 $('btnRemoveService')?.addEventListener('click',()=>removeService().catch(error=>showToast(error.message, {type:'error'})));
 $('newRecipeVersionSource')?.addEventListener('change',toggleNewVersionExpression);
 $('newRecipeTracking')?.addEventListener('change',toggleNewVersionExpression);
-['recipeMetaName','recipeMetaPackage','recipeMetaGithub','recipeMetaSourceRef','recipeMetaVersionExpression'].forEach(id => $(id)?.addEventListener('input',scheduleRecipeAutosave));
+['recipeMetaName','recipeMetaPackage','recipeMetaGithub','recipeMetaSourceRef','recipeMetaVersionExpression','recipePackageVersionRevision'].forEach(id => $(id)?.addEventListener('input',scheduleRecipeAutosave));
 ['recipeMetaTracking','recipeMetaVersionSource','recipeMetaActive','recipeArtifactMode','recipeArchiveSource','recipeArchiveFormat','recipeAssetSelection'].forEach(id => $(id)?.addEventListener('change',event=>{toggleVersionExpression();refreshRecipeApplicability();scheduleRecipeAutosave(event);}));
 ['recipeArtifactPattern','recipeArtifactName','recipeArtifactFiles'].forEach(id => $(id)?.addEventListener('input',scheduleRecipeAutosave));
 $('btnInspectArchive')?.addEventListener('click',()=>inspectArchive().catch(error=>renderArchiveInspectionError({message:error.message})));

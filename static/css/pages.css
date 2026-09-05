@@ -338,6 +338,7 @@
 }
 
 .recipe-source-card .recipe-metadata > label { grid-column: span 3; }
+.recipe-source-card .recipe-metadata > .recipe-version-revision { grid-column: span 1; }
 .recipe-source-card .recipe-metadata > .span-12,
 .recipe-source-card .recipe-metadata > .archive-inspection { grid-column: 1 / -1; }
 

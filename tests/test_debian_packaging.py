@@ -1,3 +1,4 @@
+import re
 import shutil
 import tempfile
 import unittest
@@ -176,6 +177,55 @@ class DebianPackagingTests(unittest.TestCase):
             )
             self.assertEqual((workspace / "staging/usr/share/demo/config-templates/etc/demo/demo.env").read_text(), "DEMO=1\n")
             self.assertFalse((workspace / "staging/opt/demo/packaging").exists())
+
+    def test_missing_mapping_source_reports_mapping_context_and_resolution(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = self.make_workspace(temporary)
+            recipe = packaging_recipe(service=False)
+            recipe["install"]["config_files"] = [
+                {"source": "etc/demo/demo.conf", "destination": "/etc/demo/demo.conf"},
+                {"source": "dist/app", "destination": "/opt/demo/app"},
+            ]
+            with self.assertRaisesRegex(
+                debian_packaging.PackagingError,
+                rf'Install mapping 2 failed: source "dist/app" resolved to "{re.escape(str(workspace / "source" / "dist" / "app"))}"; destination "/opt/demo/app"; does not exist',
+            ):
+                debian_packaging.prepare_staging(
+                    recipe, {"output": {"path": str(workspace / "source")}, "version": "1.0-1"}, workspace,
+                )
+
+    def test_configuration_mapping_accepts_safe_internal_symlink(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = self.make_workspace(temporary)
+            (workspace / "source/demo-link.conf").symlink_to("etc/demo/demo.conf")
+            recipe = packaging_recipe(service=False)
+            recipe["install"]["content"]["source"] = "configured_files"
+            recipe["install"]["config_files"] = [
+                {"source": "demo-link.conf", "destination": "/etc/demo/demo.conf"},
+            ]
+            debian_packaging.prepare_staging(
+                recipe, {"output": {"path": str(workspace / "source")}, "version": "1.0-1"}, workspace,
+            )
+            self.assertEqual((workspace / "staging/etc/demo/demo.conf").read_text(), "port=8080\n")
+
+    def test_configuration_mapping_rejects_symlink_escaping_source_with_context(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = self.make_workspace(temporary)
+            outside = workspace / "outside.conf"
+            outside.write_text("outside\n")
+            (workspace / "source/demo-link.conf").symlink_to(outside)
+            recipe = packaging_recipe(service=False)
+            recipe["install"]["content"]["source"] = "configured_files"
+            recipe["install"]["config_files"] = [
+                {"source": "demo-link.conf", "destination": "/etc/demo/demo.conf"},
+            ]
+            with self.assertRaisesRegex(
+                debian_packaging.PackagingError,
+                rf'Install mapping 1 failed: source "demo-link.conf" resolved to "{re.escape(str(outside))}"; destination "/etc/demo/demo.conf"; source escapes acquired source',
+            ):
+                debian_packaging.prepare_staging(
+                    recipe, {"output": {"path": str(workspace / "source")}, "version": "1.0-1"}, workspace,
+                )
 
     def test_preserves_safe_relative_symlinked_payload(self):
         with tempfile.TemporaryDirectory() as temporary:

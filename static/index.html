@@ -84,6 +84,7 @@
                 <label><span>Tracking</span><select id="recipeMetaTracking"><option value="latest_release">Latest release</option><option value="tag">Explicit tag</option><option value="manual">Manual ref</option></select></label>
                 <label id="recipeSourceRefField" hidden><span>GitHub ref</span><input id="recipeMetaSourceRef" placeholder="v1.2.3, main, or commit SHA"></label>
                 <label><span>Debian version</span><select id="recipeMetaVersionSource"><option value="tag">From GitHub tag</option><option value="release_name">From release name</option><option value="regex">Custom expression</option><option value="build">Provided by build</option></select></label>
+                <label class="recipe-version-revision"><span>Debian revision</span><input id="recipePackageVersionRevision" type="text" value="1" required></label>
                 <label id="recipeVersionExpressionField" hidden><span>Expression / regex</span><input id="recipeMetaVersionExpression"></label>
               </div>
               <datalist id="packageOptions"></datalist>

@@ -167,6 +167,16 @@ function wireAdmin() {
       setTimeout(() => button.classList.remove('copied'), 900);
     }).catch(() => {});
   });
+  $('executionDiagnostic')?.addEventListener('click', event => {
+    const button = event.target.closest('[data-diagnostic-recipe]');
+    if (!button) return;
+    openDiagnosticRecipe(button.dataset.diagnosticRecipe, button.dataset.diagnosticStep).catch(error => showToast(error.message, {type:'error'}));
+  });
+  $('recipePreflight')?.addEventListener('click', event => {
+    const button = event.target.closest('[data-copy-preflight-command]');
+    if (!button) return;
+    copyTextValue(button.dataset.copyPreflightCommand).then(() => showToast('Suggested command copied. Review it before adding it to the Recipe.')).catch(error => showToast(error.message, {type:'error'}));
+  });
   $('btnNewPackage')?.addEventListener('click', () => createPackageUi().catch(error => showToast(error.message, {type: 'error'})));
   $('btnNewRecipe')?.addEventListener('click', newRecipeUi);
   $('recipeMetaName')?.addEventListener('input', event => {$('recipeTitle').textContent = event.target.value || 'Recipe';});

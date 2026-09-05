@@ -27,7 +27,7 @@ function element() {
 const nodes = Object.fromEntries([
   'btnDeleteExecutionLog', 'btnLogLiveBadge', 'btnPublishExecution', 'btnRevalidateExecution',
   'executionDetail', 'executionList', 'executionMeta', 'executionMetaMore',
-  'executionMoreDetails', 'executionSteps', 'logSearch', 'logStatus', 'view-logs',
+  'executionDiagnostic', 'executionMoreDetails', 'executionSteps', 'logSearch', 'logStatus', 'view-logs',
 ].map(id => [id, element()]));
 nodes['view-logs'].classList.add('active');
 const logsLayout = element();
@@ -83,6 +83,7 @@ const context = vm.createContext({
   $: id => nodes[id] || null,
 });
 
+vm.runInContext(fs.readFileSync('static/js/build_insight.js', 'utf8'), context, {filename: 'build_insight.js'});
 vm.runInContext(fs.readFileSync('static/js/pages/logs.js', 'utf8'), context, {filename: 'logs.js'});
 context.openExecution = async () => { reopenCount += 1; };
 

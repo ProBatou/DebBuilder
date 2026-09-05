@@ -64,7 +64,11 @@ def _tool_check(name: str, requirement: str, *, workspace: str | Path, working_d
     )
     path = shutil.which(name, path=search_path)
     if not path:
-        return {"tool": name, "name": name, "path": "", "version": "", "version_output": "", "requirement": requirement, "status": "missing", "available": False, "version_satisfied": None}
+        return {
+            "tool": name, "name": name, "path": "", "version": "", "version_output": "",
+            "requirement": requirement, "status": "missing", "available": False,
+            "version_satisfied": None, "working_directory": str(cwd), "search_path": search_path,
+        }
     result = runner(
         f"{shlex.quote(path)} --version", workspace=workspace,
         working_directory=working_directory, environment=environment or {}, timeout=15,

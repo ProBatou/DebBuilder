@@ -129,10 +129,14 @@ async function createPackageUi() {
 }
 
 async function openLinkedRecipe(recipe) {
+  await refreshWorkflows();
+  const select = $('workflowSelect');
+  if (!Array.from(select?.options || []).some(option => option.value === recipe)) {
+    throw new Error(`Recipe ${recipe} no longer exists.`);
+  }
+  select.value = recipe;
   closePackageDrawer();
   switchView('recipes');
-  await refreshWorkflows();
-  $('workflowSelect').value = recipe;
   await loadSelectedWorkflow();
 }
 

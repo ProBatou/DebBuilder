@@ -29,7 +29,7 @@ function element() {
 const nodes = Object.fromEntries([
   'btnPublishExecution', 'btnRevalidateExecution', 'executionDetail', 'executionList',
   'executionMeta', 'executionMetaMore', 'executionMoreDetails', 'executionSteps',
-  'logSearch', 'logStatus', 'view-logs',
+  'executionDiagnostic', 'logSearch', 'logStatus', 'view-logs',
 ].map(id => [id, element()]));
 nodes['view-logs'].classList.add('active');
 nodes.executionMoreDetails.hidden = true;
@@ -82,6 +82,7 @@ const context = vm.createContext({
   $: id => nodes[id] || null,
 });
 
+vm.runInContext(fs.readFileSync('static/js/build_insight.js', 'utf8'), context, {filename: 'build_insight.js'});
 vm.runInContext(fs.readFileSync('static/js/pages/logs.js', 'utf8'), context, {filename: 'logs.js'});
 
 function canonical(lifecycle, allowedActions, validationStatus, publicationStatus) {

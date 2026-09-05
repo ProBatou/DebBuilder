@@ -32,6 +32,9 @@ def showcase_recipes() -> dict[str, dict]:
             "content": "UI_SHOWCASE=1\n",
         }],
     })
+    recipes["debbuilder"]["install"]["directories"] = [
+        {"path": "/var/lib/debbuilder/builds", "owner": "root", "group": "root", "mode": "0750"},
+    ]
     archive = copy.deepcopy(recipes["ssh-notify"])
     archive.update({"name": "archive-agent"})
     archive["package"].update({
@@ -111,6 +114,10 @@ def complete_step(step: dict, status: str, index: int, summary: str = "") -> Non
     })
 
 
+def run_step(run: dict, name: str) -> dict:
+    return next(step for step in run["steps"] if step["name"] == name)
+
+
 def seed_run(
     store: BuildStore,
     recipe: dict,
@@ -138,18 +145,85 @@ def seed_run(
             {"at": timestamp, "level": "info", "message": "Dependencies: resolved from the isolated fixture"},
         ],
     })
+    run_step(run, "source")["details"] = {
+        "repository": recipe["source"]["repository"], "strategy": recipe["source"].get("tracking", "latest_release"),
+        "ref": f"v{upstream}", "tag": f"v{upstream}", "upstream_version": upstream,
+        "debian_version": run["version"]["debian"], "source_directory": "source",
+    }
     if status == "prepared":
         for step in run["steps"]:
             complete_step(step, "success" if step["name"] in {"source", "detection", "dependencies", "source_changes", "staging", "debian_metadata"} else "skipped", index)
+        run_step(run, "source")["details"] = {
+            "repository": recipe["source"]["repository"], "strategy": "latest_release", "ref": f"v{upstream}",
+            "tag": f"v{upstream}", "upstream_version": upstream, "debian_version": run["version"]["debian"],
+            "source_directory": "source",
+        }
+        run_step(run, "detection")["details"] = {
+            "project_type": "python", "display_name": "Python · pyproject.toml", "detected_files": ["pyproject.toml", "debbuilder/__init__.py"],
+            "build_tools": ["python3"], "system_build_dependencies": ["python3", "python3-build"],
+            "proposed_commands": ["python3 -m build --wheel"], "suggested_output_paths": ["dist"],
+            "warnings": ["No locked Python dependency file was detected."],
+        }
+        run_step(run, "dependencies")["details"] = {
+            "tools": ["python3"], "detected_tools": ["python3"], "available_tools": ["python3"], "missing_tools": [],
+            "detected": ["python3", "python3-build"], "manually_added": ["dpkg-dev"],
+            "required": ["python3", "python3-build", "dpkg-dev"], "available": ["python3", "python3-build", "dpkg-dev"], "missing": [],
+        }
+        source_change = recipe["build"]["source_changes"][0]
+        run_step(run, "source_changes")["details"] = {
+            "requested": 1, "applied_count": 1,
+            "applied": [{"index": 1, "operation": source_change["operation"], "path": source_change["path"], "matches": None, "status": "applied", "anchor": "", "anchor_truncated": False}],
+        }
+        run_step(run, "build")["details"] = {
+            "executed": False, "reason": "dry_run", "commands": [],
+            "plan": {
+                "selection": {"source": "detection_proposal", "commands": ["python3 -m build --wheel"], "confirmed": False},
+                "commands": [{"command": "python3 -m build --wheel", "arguments": ["python3", "-m", "build", "--wheel"]}],
+                "working_directory": "/showcase/builds/ui-01-prepared/source", "configured_working_directory": ".",
+                "environment_keys": ["PYTHONUNBUFFERED"], "inactivity_timeout": 300, "maximum_runtime": 1200,
+                "output": {"mode": "paths", "paths": [
+                    {"mode": "path", "configured_path": "debbuilder", "path": "/showcase/source/debbuilder", "exists": True, "kind": "directory"},
+                    {"mode": "path", "configured_path": "server.py", "path": "/showcase/source/server.py", "exists": True, "kind": "file"},
+                    {"mode": "path", "configured_path": "static", "path": "/showcase/source/static", "exists": True, "kind": "directory"},
+                ]},
+            },
+            "output": {"mode": "paths", "paths": [{"configured_path": "debbuilder"}, {"configured_path": "server.py"}, {"configured_path": "static"}]},
+        }
+        staging = {
+            "preview": True, "version": run["version"]["debian"], "install_destination": "/opt/debbuilder",
+            "include_output": True, "content_available": True, "content_file_count": 38, "content_manifest": "manifests/staging-files.json",
+            "warnings": ["Build output is unavailable because build commands are not executed during dry-run"],
+            "ownership": {"user": "root", "group": "root", "applied_by": "postinst"},
+            "permissions": {"directories": "0755", "files": "0644"},
+            "account": {"user": "root", "group": "root", "create_user": False, "create_group": False},
+            "configurations": [{"source": "packaging/debbuilder.env", "destination": "/etc/debbuilder/debbuilder.env", "staged_path": "/usr/share/debbuilder/config-templates/etc/debbuilder/debbuilder.env", "policy": "create_if_missing", "mode": "0644", "owner": "root", "group": "root"}],
+            "directories": recipe["install"]["directories"], "conffiles": [],
+            "control": f"Package: debbuilder\nVersion: {run['version']['debian']}\nArchitecture: all\nMaintainer: DebBuilder UI <ui@example.test>\nDescription: Debian package build console\n",
+            "maintainer_scripts": {"preinst": "#!/bin/sh\nset -e\ninstall -d -m 0750 -o root -g root /var/lib/debbuilder/builds\n", "postinst": "#!/bin/sh\nset -e\nsystemctl daemon-reload || true\nsystemctl enable debbuilder.service || true\n"},
+            "systemd": {"configured": True, "enabled": True, "path": "/usr/lib/systemd/system/debbuilder.service", "content": "[Unit]\nDescription=debbuilder\n\n[Service]\nType=simple\nUser=root\nGroup=root\nEnvironment=\"PYTHONUNBUFFERED=1\"\nExecStart=/usr/bin/python3 /opt/debbuilder/server.py\nRestart=on-failure\n\n[Install]\nWantedBy=multi-user.target\n"},
+        }
+        run_step(run, "staging")["details"] = staging
+        run_step(run, "debian_metadata")["details"] = {key: staging[key] for key in ("control", "conffiles", "configurations", "maintainer_scripts")}
+        run_step(run, "systemd")["details"] = staging["systemd"]
     elif status == "running":
         complete_step(run["steps"][0], "success", index, "Fetched example/worker-agent at v2.4.0")
         complete_step(run["steps"][1], "success", index, "Detected Node.js project")
         complete_step(run["steps"][2], "running", index, "Checking build dependencies")
     elif status == "failed":
-        complete_step(run["steps"][0], "success", index, f"Fetched {recipe['source']['repository']}")
-        complete_step(run["steps"][1], "failed", index, "Project detection failed")
-        error = {"stage": "detection", "code": "project_not_detected", "message": "No supported project marker was found in the source archive."}
-        run["steps"][1]["error"] = error
+        complete_step(run_step(run, "source"), "success", index, f"Fetched {recipe['source']['repository']}")
+        complete_step(run_step(run, "detection"), "success", index, "Detected Node.js project")
+        run_step(run, "detection")["details"] = {"project_type": "nodejs", "display_name": "Node.js", "detected_files": ["package.json", "pnpm-lock.yaml"]}
+        complete_step(run_step(run, "dependencies"), "success", index, "Build dependencies available")
+        complete_step(run_step(run, "source_changes"), "success", index, "No source changes configured")
+        complete_step(run_step(run, "build"), "failed", index, "Build command 2 failed with exit code 2")
+        failed_command = {
+            "index": 2, "command": "pnpm build --filter @example/application-with-a-deliberately-long-workspace-name", "arguments": ["pnpm", "build"],
+            "working_directory": "/showcase/builds/ui-04-build-failed/source", "configured_working_directory": ".",
+            "status": "failed", "exit_code": 2, "stdout": "Compiling application…\n", "stderr": "Error: module @example/runtime-config could not be resolved\n", "duration": 18.4, "timed_out": False, "timeout_reason": "",
+        }
+        error = {"stage": "build", "code": "build_command_failed", "message": "Build command 2 failed with exit code 2", "details": {"failed_command": failed_command, "commands": [failed_command], "plan": {"inactivity_timeout": 300, "maximum_runtime": 1200}}}
+        run_step(run, "build")["details"] = error["details"]
+        run_step(run, "build")["error"] = error
         run["error"] = error
     elif status == "success":
         for step in run["steps"]:
@@ -177,16 +251,26 @@ def seed_run(
             }
             if validation == "failed":
                 validation_record.update({
-                    "error": {"code": "validation_failed", "message": "The isolated upgrade scenario reported a configuration conflict."},
-                    "checks": [{"name": "upgrade", "status": "failed", "summary": "Configuration conflict detected"}],
+                    "error": {"code": "validation_failed", "message": "The isolated service check reported an inactive unit.", "details": {}},
+                    "checks": [{"name": "systemd_active_after_grace", "status": "failed", "error": "archive-agent.service exited during startup grace"}],
+                    "commands": [{"command": "systemctl is-active --quiet archive-agent.service", "arguments": ["systemctl", "is-active", "--quiet", "archive-agent.service"], "accepted": False, "status": "failed", "exit_code": 3, "stdout": "", "stderr": "inactive", "duration": 0.04}],
                 })
             run["validations"] = [validation_record]
         if publication != "not_run":
-            run["publications"] = [{
+            publication_record = {
                 "id": f"publication-{run_id}", "status": publication, "artifact": str(artifact_path),
                 "requested_at": timestamp, "finished_at": timestamp,
                 "published_version": run["version"]["debian"], "distribution": "stable", "component": "main",
-            }]
+                "repository": {"root": "/var/lib/debbuilder/repository", "distribution": "stable", "component": "main"},
+                "readiness": {"ready": True, "reasons": []}, "preflight": {"architecture_policy": "explicitly configured"},
+            }
+            if publication == "failed":
+                publication_record.update({
+                    "published_version": "",
+                    "command": {"command": "reprepro -b /var/lib/debbuilder/repository includedeb stable artifact.deb", "status": "failed", "exit_code": 1, "stdout": "", "stderr": "No matching signing key was available", "duration": 0.2},
+                    "error": {"code": "reprepro_include_failed", "message": "APT publication failed because reprepro could not sign the exported index.", "details": {}},
+                })
+            run["publications"] = [publication_record]
     store.save(run)
     store.append_log_line(run_id, f"Run {run_id} entered canonical state {status}")
     if validation != "not_run":
@@ -232,13 +316,14 @@ def seed(data_dir: Path, repo_root: Path) -> None:
     ])
 
     store = BuildStore(data_dir / "builds")
-    seed_run(store, recipes["seerr"], "ui-01-prepared", 1, mode="dry_run", status="prepared", upstream="2.0.0")
+    seed_run(store, recipes["debbuilder"], "ui-01-prepared", 1, mode="dry_run", status="prepared", upstream="0.1.9")
     seed_run(store, recipes["worker-agent"], "ui-02-running", 2, status="running", upstream="2.4.0")
     seed_run(store, recipes["ssh-notify"], "ui-03-validation-needed", 3, status="success", upstream="2.1.0")
     seed_run(store, recipes["seerr"], "ui-04-build-failed", 4, status="failed", upstream="2.0.0")
     seed_run(store, recipes["archive-agent"], "ui-05-validation-failed", 5, status="success", upstream="5.0.0", validation="failed")
     seed_run(store, recipes["vendor-cli"], "ui-06-ready-to-publish", 6, status="success", upstream="3.3.0", validation="success")
     seed_run(store, recipes["release-tool"], "ui-07-published", 7, status="success", upstream="7.1.0", validation="success", publication="success")
+    seed_run(store, recipes["release-tool"], "ui-00-publication-failed", 0, status="success", upstream="6.9.0", validation="success", publication="failed")
 
 
 def main() -> None:

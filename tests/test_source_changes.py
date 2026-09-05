@@ -58,7 +58,17 @@ class SourceChangesTests(unittest.TestCase):
                 with self.assertRaises(SourceChangeError) as raised:
                     apply_change(self.root, {"operation":"replace","path":"app.txt","search":search,"content":"changed"})
                 self.assertEqual(raised.exception.code, code)
+                self.assertEqual(raised.exception.details["anchor"], search)
+                self.assertFalse(raised.exception.details["anchor_truncated"])
                 self.assertEqual(target.read_text(), "same same")
+
+    def test_large_anchor_is_bounded_in_result_metadata(self):
+        search = "x" * 240
+        target = self.root / "large.txt"
+        target.write_text(search)
+        result = apply_change(self.root, {"operation":"replace", "path":"large.txt", "search":search, "content":"done"})
+        self.assertEqual(len(result["anchor"]), 160)
+        self.assertTrue(result["anchor_truncated"])
 
     def test_rejects_traversal_absolute_paths_and_symlink_components(self):
         outside = Path(self.temporary.name) / "outside.txt"

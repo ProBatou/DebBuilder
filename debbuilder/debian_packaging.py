@@ -179,14 +179,26 @@ def prepare_staging(recipe: dict, build_result: dict, workspace: str | Path, *, 
             f'Install mapping {mapping_index} failed: source "{source_name}" '
             f'resolved to "{source_file}"; destination "{destination_path}"'
         )
+        mapping_details = {
+            "mapping_index": mapping_index,
+            "source": source_name,
+            "resolved_source": str(source_file),
+            "destination": destination_path,
+        }
         try:
             source_file.relative_to(source_root)
         except ValueError as exc:
-            raise PackagingError("unsafe_configuration_source", f"{mapping_context}; source escapes acquired source") from exc
+            raise PackagingError(
+                "unsafe_configuration_source", f"{mapping_context}; source escapes acquired source",
+                details={**mapping_details, "cause": "source escapes acquired source"},
+            ) from exc
         if source_file.is_symlink() or not source_file.is_file():
             if not preview:
                 cause = "is a symbolic link" if source_file.is_symlink() else "does not exist" if not source_file.exists() else "is not a regular file"
-                raise PackagingError("configuration_source_missing", f"{mapping_context}; {cause}")
+                raise PackagingError(
+                    "configuration_source_missing", f"{mapping_context}; {cause}",
+                    details={**mapping_details, "cause": cause},
+                )
             preview_warnings.append(f"{mapping_context}; source is unavailable during preview")
         policy = configured.get("policy", "dpkg_conffile")
         mapping_mode = configured.get("mode") or install["file_mode"]
@@ -205,7 +217,10 @@ def prepare_staging(recipe: dict, build_result: dict, workspace: str | Path, *, 
             try:
                 staged_path = _stage_path(staging, destination_path)
             except PackagingError as exc:
-                raise PackagingError(exc.code, f"{mapping_context}; {exc}") from exc
+                raise PackagingError(
+                    exc.code, f"{mapping_context}; {exc}",
+                    details={**mapping_details, "cause": str(exc)},
+                ) from exc
             staged_path.parent.mkdir(parents=True, exist_ok=True)
             if source_file.is_file():
                 shutil.copyfile(source_file, staged_path)

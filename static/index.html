@@ -6,7 +6,7 @@
   <title>DebBuilder</title>
   <link rel="stylesheet" href="/style.css?v=20260905-1" />
   <link rel="stylesheet" href="/css/components.css?v=20260905-4" />
-  <link rel="stylesheet" href="/css/pages.css?v=20260905-6" />
+  <link rel="stylesheet" href="/css/pages.css?v=20260905-7" />
 </head>
 <body>
   <header class="mobile-topbar" aria-label="Mobile navigation">
@@ -55,11 +55,16 @@
             <div class="recipe-toolbar recipe-simple-toolbar toolbar">
               <label class="recipe-picker field"><span>Recipe</span><select id="workflowSelect"></select></label>
               <div class="recipe-action-group recipe-data-actions"><button class="btn btn--ghost" id="btnNewRecipe">+ New</button><button class="btn btn--ghost" id="btnRecipeJson">JSON</button><button class="btn btn--ghost" id="btnImportRecipe">Import</button><button class="btn btn--ghost" id="btnRuns">Runs</button></div>
-              <div class="recipe-action-group recipe-run-actions"><button class="btn btn--warning" id="btnDryRun">Dry-run</button><button class="btn btn--primary" id="btnBuildReal">Build</button></div>
+              <div class="recipe-action-group recipe-run-actions"><button class="btn btn--warning" id="btnDryRun">Test</button><button class="btn btn--primary" id="btnBuildReal">Build</button></div>
               <button class="btn btn--danger recipe-delete-action" id="btnDeleteRecipeTop">Delete</button>
               <input id="workflowName" type="hidden" />
               <input id="recipeImportFile" type="file" accept="application/json,.json" hidden />
             </div>
+
+            <section id="recipePreflight" class="card preflight-report" aria-live="polite" hidden>
+              <div class="preflight-head"><div><span class="eyebrow">Test report</span><h2>Build preflight</h2><p id="recipePreflightSummary">Resolved and prepared without executing build commands.</p></div><span id="recipePreflightStatus" class="settings-badge neutral">Prepared</span></div>
+              <div id="recipePreflightContent"></div>
+            </section>
 
             <section id="recipe-step-source" class="recipe-draft-card recipe-source-card recipe-step-card card" aria-label="Recipe GitHub source">
               <div class="section-title recipe-draft-head">
@@ -259,7 +264,7 @@
 
       <section class="view page" id="view-logs">
         <div class="page-head page-header"><div><h2>Logs</h2><p>Executions linked to packages when available.</p></div></div>
-        <div class="logs-layout"><section class="card logs-list-card"><div class="section-title section-header"><div><h3>Executions</h3><p>Search and select a run.</p></div></div><div class="log-filters"><label class="field"><span>Search</span><input id="logSearch" type="search" placeholder="Package, recipe or run…" /></label><label class="field"><span>Status</span><select id="logStatus"><option value="all">All statuses</option><option value="success">Success</option><option value="running">Running</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option></select></label></div><div id="executionList" class="list data-list compact-list" role="listbox">Loading…</div></section><section class="card logs-detail-card"><div class="log-detail-head"><div><span class="eyebrow">Selected run</span><h3>Execution detail</h3></div><div class="log-detail-actions"><label class="field"><span>Verbosity</span><select id="logVerbosity"><option value="compact">Compact</option><option value="normal" selected>Normal</option><option value="verbose">Verbose</option><option value="raw">Raw</option></select></label><button type="button" class="btn btn-primary" id="btnRevalidateExecution" hidden>Revalidate</button><button type="button" class="btn btn--success" id="btnPublishExecution" hidden>Publish</button><button type="button" class="btn btn--danger" id="btnDeleteExecutionLog" disabled>Delete log/history</button><button id="btnCloseLogDetail" class="btn btn--ghost mobile-only">Back to runs</button></div></div><div class="log-context-panel"><div id="executionMeta" class="execution-meta muted">Select an execution.</div><details id="executionMoreDetails" class="execution-more" hidden><summary>More metadata</summary><div id="executionMetaMore" class="execution-meta execution-meta-more muted"></div></details><div id="executionSteps" class="steps"></div></div><div class="log-terminal"><pre id="executionDetail" class="logbox">No log selected.</pre><button type="button" id="btnLogLiveBadge" class="log-live-badge" hidden>● Live</button></div></section></div>
+        <div class="logs-layout"><section class="card logs-list-card"><div class="section-title section-header"><div><h3>Executions</h3><p>Search and select a run.</p></div></div><div class="log-filters"><label class="field"><span>Search</span><input id="logSearch" type="search" placeholder="Package, recipe or run…" /></label><label class="field"><span>Status</span><select id="logStatus"><option value="all">All statuses</option><option value="success">Success</option><option value="running">Running</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option></select></label></div><div id="executionList" class="list data-list compact-list" role="listbox">Loading…</div></section><section class="card logs-detail-card"><div class="log-detail-head"><div><span class="eyebrow">Selected run</span><h3>Execution detail</h3></div><div class="log-detail-actions"><label class="field"><span>Verbosity</span><select id="logVerbosity"><option value="compact">Compact</option><option value="normal" selected>Normal</option><option value="verbose">Verbose</option><option value="raw">Raw</option></select></label><button type="button" class="btn btn-primary" id="btnRevalidateExecution" hidden>Revalidate</button><button type="button" class="btn btn--success" id="btnPublishExecution" hidden>Publish</button><button type="button" class="btn btn--danger" id="btnDeleteExecutionLog" disabled>Delete log/history</button><button id="btnCloseLogDetail" class="btn btn--ghost mobile-only">Back to runs</button></div></div><section id="executionDiagnostic" class="execution-diagnostic" aria-live="polite" hidden></section><div class="log-context-panel"><div id="executionMeta" class="execution-meta muted">Select an execution.</div><details id="executionMoreDetails" class="execution-more" hidden><summary>More metadata</summary><div id="executionMetaMore" class="execution-meta execution-meta-more muted"></div></details><div id="executionSteps" class="steps"></div></div><div class="log-terminal"><pre id="executionDetail" class="logbox">No log selected.</pre><button type="button" id="btnLogLiveBadge" class="log-live-badge" hidden>● Live</button></div></section></div>
       </section>
 
       <section class="view page" id="view-settings">
@@ -319,10 +324,11 @@
   <script src="/ui_core.js?v=20260905-2"></script>
   <script src="/settings.js?v=20260905-4"></script>
   <script src="/recipe_serialization.js?v=20260903-2"></script>
-  <script src="/app.js?v=20260905-3"></script>
+  <script src="/js/build_insight.js?v=20260905-1"></script>
+  <script src="/app.js?v=20260905-4"></script>
   <script src="/js/pages/dashboard.js?v=20260905-2"></script>
   <script src="/js/pages/packages.js?v=20260905-2"></script>
-  <script src="/js/pages/logs.js?v=20260905-6"></script>
+  <script src="/js/pages/logs.js?v=20260905-7"></script>
   <script src="/js/recipe/source_changes.js?v=20260904-1"></script>
   <script src="/js/recipe/stepper.js?v=20260905-2"></script>
   <script src="/js/recipe/json_editor.js?v=20260905-1"></script>

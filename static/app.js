@@ -210,11 +210,11 @@ async function dryRun() {
   if (data.detection) {
     renderBuildEnvironment(data.detection);
     if (typeof setBuildOutputSuggestions === 'function') setBuildOutputSuggestions(data.detection.suggested_output_paths || []);
-    if (!(wf.build?.commands || []).length) renderBuildCommands(data.detection.proposed_commands);
   }
   if (data.dependencies) {
     renderDependencyCheck(data.dependencies);
   }
+  renderPreflightReport(data, wf);
   await loadExecutions();
 }
 
@@ -281,6 +281,7 @@ function setRecipeAutosaveState(state, message = '') {
 
 function scheduleRecipeAutosave() {
   if (renderingWorkflow || recipeMutationPaused || !currentRecipeId) return;
+  markPreflightStale();
   autosaveRevision += 1;
   autosaveDirty = true;
   setRecipeAutosaveState('pending');
@@ -364,6 +365,7 @@ async function loadSelectedWorkflow() {
   const wf = await res.json();
   if (!res.ok) throw new Error(wf.error || res.statusText);
   currentRecipeId = id;
+  clearPreflightReport();
   renderWorkflow(wf);
   document.getElementById('workflowName').value = wf.name || id;
   const title = document.getElementById('recipeTitle');

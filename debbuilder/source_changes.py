@@ -67,7 +67,13 @@ def apply_change(source_root: str | Path, change: dict, *, index: int = 1) -> di
     if operation not in OPERATIONS:
         raise SourceChangeError("unsupported_source_change", f"Unsupported source change operation: {operation}", index=index)
     target = _safe_target(source_root, relative_path, allow_missing=operation == "create_file")
-    details = {"index": index, "operation": operation, "path": relative_path, "matches": None, "status": "applied"}
+    search_value = change.get("search")
+    anchor = str(search_value) if isinstance(search_value, str) else ""
+    details = {
+        "index": index, "operation": operation, "path": relative_path,
+        "matches": None, "status": "applied",
+        "anchor": anchor[:160], "anchor_truncated": len(anchor) > 160,
+    }
     try:
         if operation == "create_file":
             if target.exists():

@@ -246,6 +246,7 @@ function clearOpenExecution() {
     $('executionMoreDetails').removeAttribute('open');
   }
   if ($('executionSteps')) $('executionSteps').textContent = '';
+  renderExecutionDiagnostic(null);
   if ($('executionDetail')) $('executionDetail').textContent = 'No log selected.';
   updateExecutionActionButtons(null);
   closeLogDetail();
@@ -354,8 +355,15 @@ function renderOpenExecution(execution, {preserveLog = false} = {}) {
     $('executionMetaMore').insertAdjacentHTML('beforeend', executionMetaHtml([['Validation backend', validation.backend?.runtime || '—'], ['Profile', validation.profile.name || '—'], ['Node', node?.details?.actual || 'Not required'], ['Network', validation.backend?.network || 'disabled']]));
   }
   if ($('executionSteps')) $('executionSteps').innerHTML = (execution.steps || []).map(step => `<span class="step-chip ${esc(step.status || 'pending')}">${symbols[step.status] || '○'} ${esc(step.name)} · ${esc(step.status || 'pending')}</span>`).join('');
+  renderExecutionDiagnostic(execution);
   updateExecutionActionButtons(execution);
   if (!preserveLog && $('executionDetail')) $('executionDetail').textContent = 'Loading log…';
+}
+
+async function openDiagnosticRecipe(recipeId, step) {
+  await openLinkedRecipe(recipeId);
+  const target = $(`recipe-step-${step}`);
+  target?.scrollIntoView({behavior:'smooth', block:'start'});
 }
 
 async function openExecution(id) {

@@ -189,10 +189,17 @@ class DebianPackagingTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 debian_packaging.PackagingError,
                 rf'Install mapping 2 failed: source "dist/app" resolved to "{re.escape(str(workspace / "source" / "dist" / "app"))}"; destination "/opt/demo/app"; does not exist',
-            ):
+            ) as raised:
                 debian_packaging.prepare_staging(
                     recipe, {"output": {"path": str(workspace / "source")}, "version": "1.0-1"}, workspace,
                 )
+            self.assertEqual(raised.exception.details, {
+                "mapping_index": 2,
+                "source": "dist/app",
+                "resolved_source": str(workspace / "source" / "dist" / "app"),
+                "destination": "/opt/demo/app",
+                "cause": "does not exist",
+            })
 
     def test_configuration_mapping_accepts_safe_internal_symlink(self):
         with tempfile.TemporaryDirectory() as temporary:

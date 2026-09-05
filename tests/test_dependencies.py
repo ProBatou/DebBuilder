@@ -139,6 +139,14 @@ class DependencyCheckerTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "missing_build_tools")
         self.assertEqual(raised.exception.details["tool_checks"][0]["status"], "version_mismatch")
 
+    def test_missing_tool_records_where_path_resolution_was_attempted(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            with self.assertRaises(DependencyError) as raised:
+                check_dependencies([], [], tools=["definitely-not-a-real-build-tool"], workspace=workspace, environment={"PATH": "/usr/bin:/bin"})
+        check = raised.exception.details["tool_checks"][0]
+        self.assertEqual(check["working_directory"], str(Path(workspace).resolve()))
+        self.assertEqual(check["search_path"], "/usr/bin:/bin")
+
 
 if __name__ == "__main__":
     unittest.main()

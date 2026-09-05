@@ -39,6 +39,18 @@ async function capture(page, testInfo, name, {fullPage = true} = {}) {
   await page.screenshot({path: artifactPath(testInfo, name), fullPage});
 }
 
+async function captureElement(page, testInfo, name, locator) {
+  await expectNoHorizontalOverflow(page);
+  if (testInfo.project.name === 'desktop') {
+    await page.evaluate(() => {
+      document.body.style.overflow = 'visible';
+      document.querySelector('.app-shell').style.height = 'auto';
+      document.querySelector('.content').style.overflow = 'visible';
+    });
+  }
+  await locator.screenshot({path: artifactPath(testInfo, name)});
+}
+
 async function expectFullyInViewport(page, locator) {
   const box = await locator.boundingBox();
   expect(box).not.toBeNull();
@@ -64,7 +76,7 @@ test.afterEach(async ({page}) => {
 test('Dashboard loads its canonical package and lifecycle projections', async ({page}, testInfo) => {
   await expect(page.getByRole('heading', {name: 'Dashboard'})).toBeVisible();
   await expect(page.locator('#dashboardPackageFlow .dashboard-package-row')).toHaveCount(8);
-  await expect(page.locator('#latestOperations .latest-operation-row')).toHaveCount(7);
+  await expect(page.locator('#latestOperations .latest-operation-row')).toHaveCount(8);
   await expect(page.locator('#dashboardRepoState')).toContainText('repo.example.invalid/ui-showcase');
   await capture(page, testInfo, 'dashboard');
 });
@@ -168,6 +180,10 @@ test('Recipe JSON stays canonical across view, edit, apply, export, and import',
   imported.install.destination = `/opt/${importedId}`;
   imported.install.owner = {user: importedId, group: importedId, create_user: false, create_group: false};
   imported.install.account = {user: importedId, group: importedId, create_user: false, create_group: false};
+  imported.install.directories = imported.install.directories.map(directory => ({
+    ...directory,
+    path: directory.path.replace('/debbuilder', `/${importedId}`),
+  }));
   await page.locator('#recipeImportFile').setInputFiles({
     name: 'unsafe-client-name.json',
     mimeType: 'application/json',
@@ -336,7 +352,7 @@ test('Read-only Recipe JSON remains viewable, copyable, and exportable', async (
 
 test('Logs selects an execution and renders lifecycle, steps, and output', async ({page}, testInfo) => {
   await openView(page, 'logs');
-  await expect(page.locator('#executionList .execution-item')).toHaveCount(7);
+  await expect(page.locator('#executionList .execution-item')).toHaveCount(8);
   await capture(page, testInfo, 'logs');
   await page.locator('#executionList [data-execution-id="ui-06-ready-to-publish"]').click();
   await expect(page.locator('#executionMeta')).toContainText('Ready to publish');
@@ -347,6 +363,84 @@ test('Logs selects an execution and renders lifecycle, steps, and output', async
     await expect(page.locator('.logs-list-card')).toBeHidden();
   }
   await capture(page, testInfo, 'log-detail', {fullPage: false});
+});
+
+test('Logs explains build, validation, and publication failures', async ({page}, testInfo) => {
+  await openView(page, 'logs');
+  const openFailure = async id => {
+    if (testInfo.project.name === 'mobile' && await page.locator('.logs-list-card').isHidden()) {
+      await page.locator('#btnCloseLogDetail').click();
+    }
+    await page.locator(`#executionList [data-execution-id="${id}"]`).click();
+    await expect(page.locator('#executionDiagnostic')).toBeVisible();
+  };
+
+  await openFailure('ui-04-build-failed');
+  await expect(page.locator('#executionDiagnostic')).toContainText('Build command failed');
+  await expect(page.locator('#executionDiagnostic')).toContainText('pnpm build --filter');
+  await expect(page.locator('#executionDiagnostic')).toContainText('Exit code');
+  await expect(page.locator('#executionDiagnostic')).toContainText('What to do next');
+  if (testInfo.project.name === 'desktop') {
+    await expectFullyInViewport(page, page.locator('#executionDiagnostic .diagnostic-next'));
+  }
+  await capture(page, testInfo, 'log-build-diagnostic', {fullPage:false});
+  await page.locator('#executionDiagnostic [data-diagnostic-recipe]').click();
+  await expect(page.locator('#view-recipes')).toHaveClass(/active/);
+  await expect(page.locator('#workflowSelect')).toHaveValue('seerr');
+  await expect(page.locator('#recipe-step-build')).toBeInViewport();
+  await openView(page, 'logs');
+
+  await openFailure('ui-05-validation-failed');
+  await expect(page.locator('#executionDiagnostic')).toContainText('Package validation failed');
+  await expect(page.locator('#executionDiagnostic')).toContainText('bookworm');
+  await expect(page.locator('#executionDiagnostic')).toContainText('systemd_active_after_grace');
+  await capture(page, testInfo, 'log-validation-diagnostic', {fullPage:false});
+
+  await openFailure('ui-00-publication-failed');
+  await expect(page.locator('#executionDiagnostic')).toContainText('APT publication failed');
+  await expect(page.locator('#executionDiagnostic')).toContainText('reprepro_include_failed');
+  await expect(page.locator('#executionDiagnostic')).toContainText('No matching signing key');
+  await capture(page, testInfo, 'log-publication-diagnostic', {fullPage:false});
+});
+
+test('Test renders a structured preflight without applying detected commands', async ({page}, testInfo) => {
+  await page.evaluate(() => {
+    window.__preflightClipboard = '';
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {writeText: async value => { window.__preflightClipboard = value; }},
+    });
+  });
+  const detailResponse = await page.request.get('/api/executions/ui-01-prepared');
+  expect(detailResponse.ok()).toBe(true);
+  const seeded = (await detailResponse.json()).execution;
+  const preflight = {...seeded, run_id:seeded.id, returncode:0};
+  for (const name of ['source','detection','dependencies','source_changes','build','staging']) {
+    preflight[name] = seeded.steps.find(step => step.name === name)?.details || null;
+  }
+  await page.route('**/api/run', route => route.fulfill({status:200, contentType:'application/json', body:JSON.stringify(preflight)}));
+
+  await openView(page, 'recipes');
+  await page.locator('#workflowSelect').selectOption('debbuilder');
+  await expect(page.locator('#buildCommands')).toHaveValue('');
+  await page.locator('#btnDryRun').click();
+  await expect(page.locator('#recipePreflight')).toBeVisible();
+  await expect(page.locator('#recipePreflight')).toContainText('Build preflight');
+  await expect(page.locator('#recipePreflight')).toContainText('Source & project');
+  await expect(page.locator('#recipePreflight')).toContainText('Dependencies & build plan');
+  await expect(page.locator('#recipePreflight')).toContainText('Source changes');
+  await expect(page.locator('#recipePreflight')).toContainText('Debian package plan');
+  await expect(page.locator('#recipePreflight')).toContainText('Systemd service');
+  await expect(page.locator('#recipePreflight')).toContainText('Suggested');
+  await expect(page.locator('#recipePreflight')).toContainText('commands not executed');
+  await expect(page.locator('[data-copy-preflight-command]')).toHaveCount(1);
+  await expect(page.locator('#recipePreflight')).toContainText('add it explicitly with Edit commands');
+  await page.locator('[data-copy-preflight-command]').click();
+  await expect.poll(() => page.evaluate(() => window.__preflightClipboard)).toBe('python3 -m build --wheel');
+  await page.locator('.toast-dismiss').click();
+  await expect(page.locator('#recipePreflight')).toContainText('blocker');
+  await expect(page.locator('#buildCommands')).toHaveValue('');
+  await captureElement(page, testInfo, 'recipe-preflight', page.locator('#recipePreflight'));
 });
 
 test('Settings renders every section without performing actions', async ({page}, testInfo) => {

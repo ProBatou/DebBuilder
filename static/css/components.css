@@ -373,6 +373,8 @@ button.ghost { border-color: var(--border); background: transparent; color: var(
   .page-header { min-height: 0; flex-direction: column; }
   .page-header-actions { width: 100%; }
   .toolbar,.toolbar-fields { align-items: stretch; flex-direction: column; }
+  .toolbar-fields { flex-basis: auto; }
+  .toolbar-fields > .field { flex: 0 0 auto; }
   .toolbar-actions { display: grid; width: 100%; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .field-grid { grid-template-columns: 1fr; }
   .field-grid > [class*="col-"] { grid-column: 1; }

@@ -11,7 +11,7 @@ function setActiveRecipeStep(step) {
 }
 
 function recipeStickyOffset() {
-  let offset = 12;
+  let offset = 24;
   ['.mobile-topbar', '.recipe-stepper', '.recipe-simple-toolbar'].forEach(selector => {
     const node = document.querySelector(selector);
     if (!node) return;

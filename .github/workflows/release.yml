@@ -7,7 +7,7 @@ name: GitHub Release
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing version tag to release, for example v0.1.6"
+        description: "Existing version tag to release, for example v1.2.3"
         required: true
         type: string
 

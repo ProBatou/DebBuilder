@@ -167,6 +167,23 @@ for file in $(find static -name '*.js' -type f); do node --check "$file"; done
 git diff --check
 ```
 
+### Visual UI tests
+
+The Playwright workflow starts the real DebBuilder server on a free loopback
+port with a fresh temporary `DEBBUILDER_DATA_DIR` and repository directory. It
+loads the existing Recipe fixtures plus deterministic showcase Build Runs, and
+removes that isolated runtime after the tests.
+
+```bash
+npm install
+npx playwright install chromium
+npm run test:ui
+```
+
+Desktop and mobile captures are written to `.ui-artifacts/desktop/` and
+`.ui-artifacts/mobile/`. The local HTML report and failure traces are kept below
+`.ui-artifacts/` as well; the whole directory is ignored by Git.
+
 ## Repository access command
 
 The sidebar displays an install command derived from `DEBBUILDER_REPO_URL`:
@@ -190,4 +207,4 @@ DebBuilder is meant to be self-hosted and operated by trusted administrators.
 
 ## Version
 
-The current release is DebBuilder 0.1.6.
+The current release is DebBuilder 0.1.9.

@@ -67,6 +67,11 @@ assert.equal(links[1].classList.contains('active'), true);
 assert.equal(links[1].getAttribute('aria-current'), 'step');
 assert.equal(links[0].getAttribute('aria-current'), undefined);
 
+sections.build.top = 100;
+context.updateActiveRecipeStep();
+assert.equal(links[1].classList.contains('active'), true);
+assert.equal(links[1].getAttribute('aria-current'), 'step');
+
 sections.build.classList.add('not-applicable');
 sections.install.top = 70;
 context.updateActiveRecipeStep();

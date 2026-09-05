@@ -59,6 +59,7 @@ assert.match(nodes.recipePreflightContent.innerHTML, /add it explicitly with Edi
 assert.match(nodes.recipePreflightContent.innerHTML, /Source changes/);
 assert.match(nodes.recipePreflightContent.innerHTML, /Debian package plan/);
 assert.match(nodes.recipePreflightContent.innerHTML, /Systemd service/);
+assert.match(nodes.recipePreflightContent.innerHTML, /WorkingDirectory/);
 assert.match(nodes.recipePreflightContent.innerHTML, /Lockfile is missing/);
 assert.match(nodes.recipePreflightContent.innerHTML, /blocker/);
 assert.match(nodes.recipePreflightContent.innerHTML, /long-argument-/);

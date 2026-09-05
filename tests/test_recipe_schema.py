@@ -158,6 +158,29 @@ class RecipeSchemaTests(unittest.TestCase):
         self.assertEqual(recipe["service"]["user"], "demo")
         self.assertEqual(recipe["build"]["output"], {"mode": "source", "path": ""})
 
+    def test_storage_preserves_explicit_systemd_description_and_working_directory(self):
+        stored = recipe_for_storage({
+            "name": "demo", "package": {"name": "demo", "description": "Demo package\nLong description."},
+            "source": {"repository": "owner/demo"},
+            "service": {
+                "name": "demo.service", "command": "/opt/demo/bin/demo", "description": "Demo worker",
+                "working_directory": "/opt/demo",
+            },
+        })
+        self.assertEqual(stored["package"]["description"], "Demo package\nLong description.")
+        self.assertEqual(stored["service"]["description"], "Demo worker")
+        self.assertEqual(stored["service"]["working_directory"], "/opt/demo")
+        self.assertEqual(validate_recipe_metadata(stored)["service"]["working_directory"], "/opt/demo")
+
+    def test_service_description_and_working_directory_keep_historical_defaults(self):
+        stored = recipe_for_storage({
+            "name": "legacy-service", "package": {"name": "legacy-service"},
+            "service": {"name": "legacy-service.service", "command": "/opt/legacy-service/bin/serve"},
+        })
+        self.assertEqual(stored["service"]["description"], "legacy-service")
+        self.assertEqual(stored["service"]["working_directory"], "")
+        self.assertEqual(recipe_for_storage(stored), stored)
+
     def test_validation_rejects_unsafe_paths_and_unknown_source_changes(self):
         base = {"name": "demo", "package": {"name": "demo"}, "source": {"repository": "owner/demo"}}
         with self.assertRaisesRegex(ValueError, "working_directory"):

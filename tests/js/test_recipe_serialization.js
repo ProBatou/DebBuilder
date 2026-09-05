@@ -64,7 +64,7 @@ assert.equal(JSON.stringify(context.collectWorkflow().install.directories), '[]'
 const roundTrip = {
   name: 'typed-demo',
   active: false,
-  package: {name: 'typed-demo', version_revision: '1+b1', runtime_dependencies: []},
+  package: {name: 'typed-demo', version_revision: '1+b1', description: 'Typed demo\nLong Debian description.', runtime_dependencies: []},
   source: {repository: 'owner/typed-demo', version: {source: 'tag'}},
   artifact: {mode: 'source_build'},
   build: {
@@ -76,15 +76,35 @@ const roundTrip = {
     directories: [{path: '/var/lib/typed-demo', owner: 'typed-demo', group: 'typed-demo', mode: '0750'}],
     config_files: [], content: {source: 'build_output'},
   },
-  service: {enabled: false},
+  service: {enabled: false, name: 'typed-demo.service', command: '/opt/typed-demo/bin/serve', description: ' Typed demo worker ', working_directory: '/opt/typed-demo'},
 };
 context.renderWorkflow(roundTrip);
 const collected = context.collectWorkflow();
 assert.equal(collected.active, false);
 assert.equal(collected.package.version_revision, '1+b1');
+assert.equal(collected.package.description, roundTrip.package.description);
 assert.deepEqual(JSON.parse(JSON.stringify(collected.package.runtime_dependencies)), []);
 assert.deepEqual(JSON.parse(JSON.stringify(collected.build.source_changes)), roundTrip.build.source_changes);
 assert.deepEqual(JSON.parse(JSON.stringify(collected.install.directories)), roundTrip.install.directories);
 assert.deepEqual(JSON.parse(JSON.stringify(collected.install.config_files)), []);
 assert.equal(collected.build.inactivity_timeout, null);
 assert.equal(collected.build.maximum_runtime, null);
+assert.equal(collected.service.description, roundTrip.service.description);
+assert.equal(collected.service.working_directory, roundTrip.service.working_directory);
+
+for (const description of ['Short description', 'First line\nSecond line\nThird line', '  leading and trailing spaces  ', 'UTF-8: café, € & <package>']) {
+  context.renderWorkflow({name: 'description-demo', package: {name: 'description-demo', description}, install: {directories: []}});
+  assert.equal(context.collectWorkflow().package.description, description);
+}
+
+context.renderWorkflow({
+  name: 'legacy-service', package: {name: 'legacy-service'}, install: {directories: []},
+  service: {name: 'legacy-service.service', command: '/opt/legacy-service/bin/serve'},
+});
+const legacyCollected = context.collectWorkflow();
+assert.equal(legacyCollected.service.description, 'legacy-service');
+assert.equal(legacyCollected.service.working_directory, '');
+nodes.serviceWorkingDirectory.value = '/opt/legacy-service';
+assert.equal(context.collectWorkflow().service.working_directory, '/opt/legacy-service');
+nodes.serviceWorkingDirectory.value = '';
+assert.equal(context.collectWorkflow().service.working_directory, '');

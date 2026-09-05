@@ -62,6 +62,7 @@ function removeInstallMapping(index) {
 }
 
 function value(id) { return $(id)?.value.trim() || ''; }
+function rawValue(id) { return $(id)?.value || ''; }
 function setValue(id, next) { if ($(id)) $(id).value = next ?? ''; }
 
 function installDirectories(value) {
@@ -151,7 +152,6 @@ function collectWorkflow() {
   const createGroup = accountProvisioning === 'ensure' && accountGroup !== 'root';
   const serviceVisible = !!window.recipeServiceVisible;
   const serviceComplete = !!value('serviceName') && !!value('serviceCommand');
-  const advanced = window.recipeAdvancedFields || {};
   const artifactMode = $('recipeArtifactMode')?.value || 'source_build';
   const archiveSource = $('recipeArchiveSource')?.value || 'auto';
   const assetSelection = $('recipeAssetSelection')?.value || 'exact';
@@ -185,7 +185,7 @@ function collectWorkflow() {
       section: value('packageSection') || 'misc',
       priority: value('packagePriority') || 'optional',
       maintainer: value('packageMaintainer'),
-      description: value('packageDescription') || packageName,
+      description: rawValue('packageDescription') || packageName,
       runtime_dependencies: lines(value('packageRuntimeDependencies'))
     },
     source: {
@@ -224,7 +224,7 @@ function collectWorkflow() {
     service: {
       enabled: serviceVisible && serviceComplete && !!$('serviceEnabled')?.checked,
       name: serviceVisible ? value('serviceName') : '',
-      description: serviceVisible ? (advanced.service_description || packageName) : '',
+      description: serviceVisible ? (rawValue('serviceDescription') || packageName) : '',
       type: serviceVisible ? ($('serviceType')?.value || 'simple') : '',
       user: serviceVisible ? value('serviceUser') : '',
       group: serviceVisible ? value('serviceGroup') : '',
@@ -238,7 +238,7 @@ function collectWorkflow() {
       kill_signal: $('serviceKillSignal')?.value || '',
       exec_start_pre: lines(value('serviceExecStartPre')), exec_start_post: lines(value('serviceExecStartPost')), exec_stop: lines(value('serviceExecStop')),
       standard_output: $('serviceStandardOutput')?.value || '', standard_error: $('serviceStandardError')?.value || '',
-      working_directory: serviceVisible ? (advanced.service_working_directory || '') : ''
+      working_directory: serviceVisible ? value('serviceWorkingDirectory') : ''
     },
   };
 }
@@ -275,7 +275,7 @@ function renderWorkflow(wf) {
     const account = install.account || owner;
     const scripts = install.maintainer_scripts || {};
     const service = wf.service || {};
-    window.recipeAdvancedFields = {inactivity_timeout: Object.prototype.hasOwnProperty.call(build, 'inactivity_timeout') ? build.inactivity_timeout : 300, maximum_runtime: build.maximum_runtime || '', service_description: service.description || '', service_working_directory: service.working_directory || ''};
+    window.recipeAdvancedFields = {inactivity_timeout: Object.prototype.hasOwnProperty.call(build, 'inactivity_timeout') ? build.inactivity_timeout : 300, maximum_runtime: build.maximum_runtime || ''};
     const configuredOutput = build.output || {};
     const outputMode = ['source','path','paths'].includes(configuredOutput.mode) ? configuredOutput.mode : (configuredOutput.path ? 'path' : 'source');
     window.recipeBuildOutput = {mode:outputMode, path:configuredOutput.path || '', paths:[...(configuredOutput.paths || [])]};
@@ -294,7 +294,7 @@ function renderWorkflow(wf) {
     setValue('installOwnerUser', owner.user || packageData.name); setValue('installOwnerGroup', owner.group || packageData.name); setValue('installAccountUser', account.user || owner.user || packageData.name); setValue('installAccountGroup', account.group || owner.group || packageData.name); setValue('installDirectories', installDirectoriesText(install.directories)); if (typeof renderAccountProvisioning === 'function') renderAccountProvisioning(account); window.recipeInstallMappings = (install.config_files || []).map(row => normalizeInstallMapping(row)); renderInstallMappings();
     setValue('maintainerPreinst', scripts.preinst); setValue('maintainerPostinst', scripts.postinst); setValue('maintainerPrerm', scripts.prerm); setValue('maintainerPostrm', scripts.postrm);
     window.recipeServiceVisible = !!String(service.name || '').trim() && !!String(service.command || '').trim(); if ($('serviceEnabled')) $('serviceEnabled').checked = service.enabled === true; setValue('serviceType', service.type || ''); setValue('serviceName', service.name || ''); setValue('serviceUser', service.user || ''); setValue('serviceGroup', service.group || ''); setValue('serviceRestart', service.restart || ''); setValue('serviceCommand', service.command);
-    setValue('serviceEnvironmentFiles', (service.environment_files || []).join('\n')); setValue('serviceEnvironment', environmentText(service.environment)); setValue('serviceAfter', (service.after || []).join(' ')); setValue('serviceWants', (service.wants || []).join(' ')); setValue('serviceRequires', (service.requires || []).join(' '));
+    setValue('serviceDescription', service.description || ''); setValue('serviceWorkingDirectory', service.working_directory || ''); setValue('serviceEnvironmentFiles', (service.environment_files || []).join('\n')); setValue('serviceEnvironment', environmentText(service.environment)); setValue('serviceAfter', (service.after || []).join(' ')); setValue('serviceWants', (service.wants || []).join(' ')); setValue('serviceRequires', (service.requires || []).join(' '));
     setValue('serviceConflicts', (service.conflicts || []).join(' ')); setValue('serviceLimitNOFILE', service.limit_nofile); setValue('serviceKillMode', service.kill_mode); setValue('serviceSyslogIdentifier', service.syslog_identifier); setValue('serviceAmbientCapabilities', (service.ambient_capabilities || []).join(' '));
     setValue('serviceRestartSec', service.restart_sec); setValue('serviceTimeoutStartSec', service.timeout_start_sec); setValue('serviceTimeoutStopSec', service.timeout_stop_sec); setValue('serviceKillSignal', service.kill_signal); setValue('serviceExecStartPre', (service.exec_start_pre || []).join('\n')); setValue('serviceExecStartPost', (service.exec_start_post || []).join('\n')); setValue('serviceExecStop', (service.exec_stop || []).join('\n')); setValue('serviceStandardOutput', service.standard_output); setValue('serviceStandardError', service.standard_error);
   } finally { renderingWorkflow = false; toggleVersionExpression(); if (typeof refreshRecipeApplicability === 'function') refreshRecipeApplicability(); }

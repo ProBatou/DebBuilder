@@ -407,6 +407,11 @@
 .recipe-step-card > .section-title p { max-width: 72ch; font-size: var(--text-label); }
 .recipe-step-card > .section-title .eyebrow { color: var(--info-strong); }
 .step-note { align-self: flex-start; min-height: 22px; padding: 3px 8px; text-transform: uppercase; letter-spacing: .04em; }
+.recipe-active-toggle { display: flex; align-items: center; gap: var(--space-2); margin-left: auto; max-width: 250px; color: var(--text); cursor: pointer; }
+.recipe-active-toggle input { inline-size: 18px; block-size: 18px; margin: 0; accent-color: var(--info-strong); }
+.recipe-active-toggle span { display: grid; gap: 1px; }
+.recipe-active-toggle strong { font-size: var(--text-label); }
+.recipe-active-toggle small { color: var(--text-muted); font-size: var(--text-help); line-height: 1.25; }
 
 .recipe-metadata,
 .recipe-step-fields,
@@ -451,6 +456,7 @@
 .recipe-metadata input,.recipe-metadata select,.recipe-step-fields input,.recipe-step-fields select,.install-mapping-row input,.install-mapping-row select { height: var(--control-height); min-height: var(--control-height); }
 .recipe-step-fields textarea,.maintainer-script-grid textarea { min-height: 64px; resize: vertical; }
 .install-package-fields textarea { min-height: 80px; }
+.install-package-fields .package-description-field textarea { min-height: var(--control-height); resize: vertical; }
 .install-persistent-fields textarea { min-height: 96px; }
 .recipe-form-group .recipe-step-fields > label { grid-row: auto; }
 .span-1 { grid-column: span 1; }
@@ -560,6 +566,7 @@
 .remove-service-button { width: max-content; margin-top: var(--space-2); }
 
 .service-general-fields,
+.service-unit-fields,
 .service-environment-fields,
 .service-dependency-fields,
 .service-lifecycle-fields,
@@ -571,6 +578,7 @@
 .service-command-hook-fields { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
 .service-output-fields { grid-template-columns: repeat(2, minmax(240px, 1fr)); }
 .service-general-fields > label,
+.service-unit-fields > label,
 .service-environment-fields > label,
 .service-dependency-fields > label,
 .service-lifecycle-fields > label,
@@ -632,7 +640,7 @@
   .recipe-source-card .recipe-metadata > label { grid-column: span 3; }
   .recipe-step-fields > .span-7,.recipe-step-fields > .span-8,.recipe-step-fields > .span-12 { grid-column: 1 / -1; }
   .install-destination-fields > .span-4 { grid-column: span 3; }
-  .service-general-fields,.service-environment-fields,.service-dependency-fields,.service-lifecycle-fields,.service-command-hook-fields,.service-output-fields { grid-template-columns: repeat(2, minmax(180px, 1fr)); }
+  .service-general-fields,.service-unit-fields,.service-environment-fields,.service-dependency-fields,.service-lifecycle-fields,.service-command-hook-fields,.service-output-fields { grid-template-columns: repeat(2, minmax(180px, 1fr)); }
   .recipe-step-card { scroll-margin-top: 196px; }
   .maintainer-script-grid > label { grid-column: span 3; }
   .install-mapping-columns,.install-mapping-row { grid-template-columns: 1fr; }
@@ -650,7 +658,8 @@
   .recipe-step-card { scroll-margin-top: 108px; padding: var(--space-3); }
   .recipe-step-card > .section-title { align-items: flex-start; flex-direction: column; }
   .recipe-metadata,.recipe-step-fields,.recipe-source-card .recipe-metadata,.maintainer-script-grid,.build-advanced-grid,.source-change-fields { grid-template-columns: 1fr; }
-  .service-general-fields,.service-environment-fields,.service-dependency-fields,.service-lifecycle-fields,.service-command-hook-fields,.service-output-fields { grid-template-columns: 1fr; }
+  .service-general-fields,.service-unit-fields,.service-environment-fields,.service-dependency-fields,.service-lifecycle-fields,.service-command-hook-fields,.service-output-fields { grid-template-columns: 1fr; }
+  .recipe-active-toggle { align-self: flex-start; margin-left: 0; }
   .recipe-source-card .recipe-metadata > label,.recipe-step-fields > [class*="span-"],.maintainer-script-grid > label,.source-change-fields > label,.source-change-fields > label:first-child,.change-preview { grid-column: 1; }
   .build-section-head,.install-mapping-head,.dependency-row,.build-output-list-head { align-items: stretch; flex-direction: column; }
   .build-output-controls,.build-output-path-row,.build-output-suggestion,.source-change-row,.change-type-picker,.before-after,.service-empty-state { grid-template-columns: 1fr; }

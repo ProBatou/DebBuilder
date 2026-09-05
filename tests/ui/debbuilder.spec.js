@@ -106,10 +106,29 @@ test('Recipes selects a showcase Recipe, changes step, and closes a safe modal',
   await expect(page.locator('#workflowSelect option')).toHaveCount(8);
   await page.locator('#workflowSelect').selectOption('debbuilder');
   await expect(page.locator('#recipeTitle')).toHaveText('debbuilder');
+  await expect(page.locator('#recipeMetaActive')).toBeChecked();
+  await page.locator('#recipeMetaActive').uncheck();
+  await expect(page.locator('#btnDryRun')).toBeDisabled();
+  await expect(page.locator('#btnBuildReal')).toBeDisabled();
+  await page.locator('#recipeMetaActive').check();
+  await expect(page.locator('#btnDryRun')).toBeEnabled();
+  await expect(page.locator('#packageDescription')).toHaveAttribute('rows', '1');
+  await capture(page, testInfo, 'recipe-source');
   await page.locator('[data-recipe-step="build"]').click();
   await expect(page.locator('[data-recipe-step="build"]')).toHaveAttribute('aria-current', 'step');
   await expect(page.locator('#recipe-step-build')).toBeInViewport();
   await capture(page, testInfo, 'recipes');
+
+  await page.locator('[data-recipe-step="install"]').click();
+  await expect(page.locator('#recipe-step-install')).toBeInViewport();
+  await capture(page, testInfo, 'recipe-install');
+
+  await page.locator('[data-recipe-step="service"]').click();
+  await expect(page.locator('#recipe-step-service')).toBeInViewport();
+  await page.locator('.systemd-advanced').evaluate(node => { node.open = true; });
+  await expect(page.locator('#serviceDescription')).toBeVisible();
+  await expect(page.locator('#serviceWorkingDirectory')).toBeVisible();
+  await capture(page, testInfo, 'recipe-service-advanced');
 
   await page.locator('#btnAddSourceChange').click();
   await expect(page.locator('#sourceChangeDialog')).toBeVisible();
@@ -213,6 +232,56 @@ test('Recipe JSON stays canonical across view, edit, apply, export, and import',
   expect(cleanup.ok()).toBe(true);
   const packageCleanup = await page.request.delete(`/api/packages/${importedId}`);
   expect(packageCleanup.ok()).toBe(true);
+});
+
+test('Recipe form and JSON preserve enabled, Debian description, service description, and WorkingDirectory', async ({page}, testInfo) => {
+  const id = `recipe-roundtrip-${testInfo.project.name}`;
+  const imported = {
+    schema_version: 1, name: id, active: false,
+    package: {name: id, description: 'Imported Debian description\nLong text: café & <package>'},
+    source: {provider: 'github', repository: `example/${id}`, tracking: 'latest_release', ref: '', version: {source: 'tag', expression: ''}},
+    service: {name: `${id}.service`, command: `/opt/${id}/bin/serve`, description: 'Imported service', working_directory: `/opt/${id}`},
+  };
+  try {
+    await openView(page, 'recipes');
+    await page.locator('#recipeImportFile').setInputFiles({
+      name: `${id}.json`, mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(imported)),
+    });
+    await page.locator('#btnApplyRecipeJson').click();
+    await page.locator('#appDialogConfirm').click();
+    await expect(page.locator('#workflowSelect')).toHaveValue(id);
+    await expect(page.locator('#recipeMetaActive')).not.toBeChecked();
+    await expect(page.locator('#btnDryRun')).toBeDisabled();
+    await expect(page.locator('#packageDescription')).toHaveValue(imported.package.description);
+    await page.locator('.systemd-advanced').evaluate(node => { node.open = true; });
+    await expect(page.locator('#serviceDescription')).toHaveValue(imported.service.description);
+    await expect(page.locator('#serviceWorkingDirectory')).toHaveValue(imported.service.working_directory);
+
+    await page.locator('#btnRecipeJson').click();
+    let json = JSON.parse(await page.locator('#recipeJsonEditor').inputValue());
+    expect(json.active).toBe(false);
+    expect(json.package.description).toBe(imported.package.description);
+    expect(json.service.description).toBe(imported.service.description);
+    expect(json.service.working_directory).toBe(imported.service.working_directory);
+    await page.locator('#btnCancelRecipeJson').click();
+
+    const editedDescription = ' Edited Debian description\nKeeps spaces & symbols: € < > ';
+    await page.locator('#recipeMetaActive').check();
+    await page.locator('#packageDescription').fill(editedDescription);
+    await page.locator('#serviceDescription').fill(' Edited service description ');
+    await page.locator('#serviceWorkingDirectory').fill(`/opt/${id}/runtime`);
+    await expect(page.locator('#recipeAutosaveStatus')).toHaveAttribute('data-state', 'saved', {timeout: 3000});
+    await page.locator('#btnRecipeJson').click();
+    json = JSON.parse(await page.locator('#recipeJsonEditor').inputValue());
+    expect(json.active).toBe(true);
+    expect(json.package.description).toBe(editedDescription);
+    expect(json.service.description).toBe(' Edited service description ');
+    expect(json.service.working_directory).toBe(`/opt/${id}/runtime`);
+    await page.locator('#btnCancelRecipeJson').click();
+  } finally {
+    await page.request.delete(`/api/workflows/${id}`);
+    await page.request.delete(`/api/packages/${id}`);
+  }
 });
 
 test('Recipe JSON Apply drains an older autosave before persisting JSON', async ({page}, testInfo) => {

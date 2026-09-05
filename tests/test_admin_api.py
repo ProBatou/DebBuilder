@@ -723,6 +723,19 @@ class AdminApiTests(AdminApiCase):
         self.assertEqual(created["recipe"], "new-app")
         self.assertEqual(created["source"]["repository"], "example/new-app")
 
+    def test_package_projection_uses_a_disabled_recipe_only_as_the_no_enabled_recipe_fallback(self):
+        disabled = {"name": "disabled-fallback", "active": False, "package": {"name": "fallback-app"}, "source": {"repository": "example/fallback"}}
+        status, _ = self.request("POST", "/api/workflows/disabled-fallback", {"workflow": disabled})
+        self.assertEqual(status, 200)
+        records = server.package_projection_service().recipe_records_by_package()
+        self.assertEqual(records["fallback-app"]["id"], "disabled-fallback")
+
+        enabled = {"name": "enabled-preferred", "active": True, "package": {"name": "fallback-app"}, "source": {"repository": "example/preferred"}}
+        status, _ = self.request("POST", "/api/workflows/enabled-preferred", {"workflow": enabled})
+        self.assertEqual(status, 200)
+        records = server.package_projection_service().recipe_records_by_package()
+        self.assertEqual(records["fallback-app"]["id"], "enabled-preferred")
+
     def test_recipe_created_from_package_stays_linked_after_canonical_reload(self):
         status, created = self.request("POST", "/api/packages", {"name": "nested-app", "architecture": "amd64", "source": {"type": "github", "repository": "example/nested-app"}})
         self.assertEqual(status, 200)
@@ -817,10 +830,19 @@ class AdminApiTests(AdminApiCase):
         self.assertEqual(ctx.exception.code, 403)
         self.assertTrue((server.EXAMPLES / "webapp-recipe.json").exists())
 
-    def test_disabled_recipe_cannot_run(self):
-        with self.assertRaises(urllib.error.HTTPError) as ctx:
-            self.request("POST", "/api/run", {"workflow":{"name":"disabled","active":False,"steps":[]}, "dry_run":True})
-        self.assertEqual(ctx.exception.code, 409)
+    def test_disabled_recipe_cannot_run_via_direct_test_or_build_api(self):
+        for dry_run in (True, False):
+            with self.subTest(dry_run=dry_run), self.assertRaises(urllib.error.HTTPError) as ctx:
+                self.request("POST", "/api/run", {"workflow":{"name":"disabled","active":False,"steps":[]}, "dry_run":dry_run})
+            self.assertEqual(ctx.exception.code, 409)
+
+    def test_legacy_run_payload_without_active_remains_enabled(self):
+        workflow = {"name": "legacy-enabled", "steps": []}
+        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": "legacy-run", "status": "success"}) as run:
+            status, response = self.request("POST", "/api/run", {"workflow": workflow, "dry_run": True})
+        self.assertEqual(status, 200)
+        self.assertEqual(response["run_id"], "legacy-run")
+        run.assert_called_once_with(workflow, dry_run=True)
 
     def test_real_build_uses_structured_pipeline_without_legacy_settings_gate(self):
         workflow = {"name": "enabled", "active": True, "steps": []}

@@ -9,6 +9,7 @@ class SystemdUnitTests(unittest.TestCase):
             "enabled": True, "description": "Demo service", "after": ["network.target"],
             "wants": [], "requires": [], "type": "simple", "user": "svc-user",
             "group": "svc-group", "environment_files": ["-/etc/demo/env"],
+            "working_directory": "/opt/demo",
             "environment": {"MODE": "production"}, "exec_start_pre": ["/bin/true"],
             "command": "/opt/demo/bin/demo --serve", "exec_start_post": [], "exec_stop": [],
             "restart": "on-failure", "restart_sec": "", "timeout_start_sec": "30",
@@ -17,6 +18,7 @@ class SystemdUnitTests(unittest.TestCase):
         })
         self.assertIn("User=svc-user", unit)
         self.assertIn("Group=svc-group", unit)
+        self.assertIn("WorkingDirectory=/opt/demo", unit)
         self.assertIn("ExecStart=/opt/demo/bin/demo --serve", unit)
         self.assertIn('Environment="MODE=production"', unit)
         self.assertIn("TimeoutStartSec=30", unit)
@@ -30,6 +32,12 @@ class SystemdUnitTests(unittest.TestCase):
     def test_unit_generation_does_not_depend_on_boot_enablement(self):
         unit = generate_unit({"enabled": False, "name": "demo.service", "command": "/bin/true"})
         self.assertIn("ExecStart=/bin/true", unit)
+        self.assertNotIn("Description=", unit)
+
+    def test_absent_or_empty_working_directory_is_omitted(self):
+        for service in ({"command": "/bin/true"}, {"command": "/bin/true", "working_directory": ""}):
+            with self.subTest(service=service):
+                self.assertNotIn("WorkingDirectory=", generate_unit(service))
 
     def test_advanced_directives_are_rendered_and_lists_are_repeated(self):
         unit = generate_unit({

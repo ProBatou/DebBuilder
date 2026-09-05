@@ -34,15 +34,19 @@ const recipe = {
   schema_version: 1,
   name: 'typed-demo',
   active: false,
-  package: {name: 'typed-demo', version_revision: '1+b1', runtime_dependencies: []},
+  package: {name: 'typed-demo', version_revision: '1+b1', description: 'Typed demo\nLong description: café & <safe>', runtime_dependencies: []},
   build: {source_changes: [], inactivity_timeout: null},
   install: {directories: [{path: '/var/lib/typed-demo'}]},
+  service: {name: 'typed-demo.service', command: '/opt/typed-demo/bin/serve', description: ' Typed service ', working_directory: '/opt/typed-demo'},
 };
 const text = tools.canonicalRecipeJson(recipe);
 assert.equal(text.endsWith('\n'), true);
 assert.deepEqual(JSON.parse(JSON.stringify(tools.parseRecipeJsonText(text))), recipe);
 assert.equal(tools.parseRecipeJsonText(text).active, false);
 assert.equal(tools.parseRecipeJsonText(text).package.version_revision, '1+b1');
+assert.equal(tools.parseRecipeJsonText(text).package.description, recipe.package.description);
+assert.equal(tools.parseRecipeJsonText(text).service.description, recipe.service.description);
+assert.equal(tools.parseRecipeJsonText(text).service.working_directory, recipe.service.working_directory);
 assert.deepEqual(JSON.parse(JSON.stringify(tools.parseRecipeJsonText(text).build.source_changes)), []);
 assert.equal(tools.parseRecipeJsonText(text).build.inactivity_timeout, null);
 assert.throws(() => tools.parseRecipeJsonText(''), /empty/i);

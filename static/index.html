@@ -73,7 +73,7 @@
                   <h2>GitHub source</h2>
                   <span id="recipeTitle" class="hidden">Recipe</span>
                 </div>
-                <input id="recipeMetaActive" type="checkbox" checked hidden>
+                <label class="recipe-active-toggle"><input id="recipeMetaActive" type="checkbox" checked><span><strong>Recipe enabled</strong><small>Disables Test and Build. Package projection falls back to it only when no enabled Recipe is available.</small></span></label>
               </div>
               <div class="recipe-metadata" aria-label="Recipe metadata">
                 <input id="recipeMetaName" type="hidden">
@@ -133,7 +133,7 @@
                     <label class="span-2"><span>Priority</span><select id="packagePriority"><option>optional</option><option>required</option><option>important</option><option>standard</option><option>extra</option></select></label>
                     <label class="span-6"><span>Maintainer</span><input id="packageMaintainer" placeholder="Name &lt;email@example.org&gt;"></label>
                     <label class="span-6"><span>Runtime Depends</span><input id="packageRuntimeDependencies"></label>
-                    <label class="span-6"><span>Description</span><textarea id="packageDescription" rows="2"></textarea></label>
+                    <label class="span-6 package-description-field"><span>Debian description</span><textarea id="packageDescription" rows="1" placeholder="Short package summary"></textarea><small>The first line is the package summary; additional lines are preserved as Debian long description text.</small></label>
                   </div>
                 </div>
                 <div class="recipe-form-group install-destination-group">
@@ -208,6 +208,13 @@
               <details class="systemd-advanced">
                 <summary>Advanced options</summary>
                 <div class="systemd-advanced-groups">
+                  <div class="recipe-form-group">
+                    <span class="recipe-group-title">Unit</span>
+                    <div class="recipe-step-fields recipe-step-fields-wide service-unit-fields">
+                      <label class="span-6"><span>Service description</span><input id="serviceDescription" placeholder="What this service does"><small>Optional. Empty uses the package name in the generated unit.</small></label>
+                      <label class="span-6"><span>Working directory</span><input id="serviceWorkingDirectory" placeholder="/opt/example"><small>Optional. Empty omits WorkingDirectory from the generated unit.</small></label>
+                    </div>
+                  </div>
                   <div class="recipe-form-group">
                     <span class="recipe-group-title">Environment</span>
                     <div class="recipe-step-fields recipe-step-fields-wide service-environment-fields">

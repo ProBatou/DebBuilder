@@ -146,7 +146,8 @@ class StaticUiTests(unittest.TestCase):
         self.assertIn("Maximum runtime", html)
         self.assertIn("Unlimited", html)
         self.assertNotIn("advanced.version_revision", script)
-        self.assertIn("advanced.service_working_directory", script)
+        self.assertNotIn("advanced.service_working_directory", script)
+        self.assertIn("value('serviceWorkingDirectory')", script)
 
     def test_recipe_version_revision_is_a_compact_step_one_field(self):
         html = self.read("static/index.html")
@@ -216,7 +217,16 @@ class StaticUiTests(unittest.TestCase):
         html = self.read("static/index.html")
         for marker in ['id="workflowSelect"', 'id="btnNewRecipe"', 'id="btnDeleteRecipeTop"', 'id="btnDryRun"', 'id="btnBuildReal"', 'id="btnRuns"']:
             self.assertIn(marker, html)
-        self.assertIn('id="recipeMetaActive" type="checkbox" checked hidden', html)
+        self.assertIn('id="recipeMetaActive" type="checkbox" checked', html)
+        self.assertIn('Package projection falls back to it only when no enabled Recipe is available.', html)
+
+    def test_recipe_form_exposes_canonical_package_and_service_fields(self):
+        html = self.read("static/index.html")
+        recipe_serialization = self.read("static/recipe_serialization.js")
+        for marker in ('id="packageDescription" rows="1"', 'id="serviceDescription"', 'id="serviceWorkingDirectory"'):
+            self.assertIn(marker, html)
+        self.assertIn("rawValue('packageDescription')", recipe_serialization)
+        self.assertIn("value('serviceWorkingDirectory')", recipe_serialization)
 
     def test_obsolete_technical_outputs_are_removed(self):
         html = self.read("static/index.html")

@@ -45,6 +45,13 @@ function refreshRecipeApplicability() {
   if ($('buildOutputSection')) $('buildOutputSection').hidden = staticMappingsOnly;
   if ($('serviceEmptyState')) $('serviceEmptyState').hidden = !!window.recipeServiceVisible;
   if ($('serviceConfiguration')) $('serviceConfiguration').hidden = !window.recipeServiceVisible;
+  const recipeEnabled = $('recipeMetaActive')?.checked !== false;
+  ['btnDryRun', 'btnBuildReal'].forEach(id => {
+    const button = $(id);
+    if (!button) return;
+    button.disabled = !recipeEnabled;
+    button.title = recipeEnabled ? '' : 'Enable this Recipe to test or build it.';
+  });
   if (typeof scheduleRecipeStepUpdate === 'function') scheduleRecipeStepUpdate();
 }
 
@@ -65,7 +72,7 @@ function refreshAccountProvisioning() {
   if (user === 'root' && group === 'root') { mode = 'existing'; setValue('installAccountProvisioning', mode); }
 }
 
-const SERVICE_FIELD_IDS = ['serviceName','serviceUser','serviceGroup','serviceCommand','serviceEnvironmentFiles','serviceEnvironment','serviceAfter','serviceWants','serviceRequires','serviceConflicts','serviceRestartSec','serviceTimeoutStartSec','serviceTimeoutStopSec','serviceKillSignal','serviceKillMode','serviceLimitNOFILE','serviceSyslogIdentifier','serviceAmbientCapabilities','serviceExecStartPre','serviceExecStartPost','serviceExecStop','serviceStandardOutput','serviceStandardError'];
+const SERVICE_FIELD_IDS = ['serviceName','serviceDescription','serviceUser','serviceGroup','serviceCommand','serviceWorkingDirectory','serviceEnvironmentFiles','serviceEnvironment','serviceAfter','serviceWants','serviceRequires','serviceConflicts','serviceRestartSec','serviceTimeoutStartSec','serviceTimeoutStopSec','serviceKillSignal','serviceKillMode','serviceLimitNOFILE','serviceSyslogIdentifier','serviceAmbientCapabilities','serviceExecStartPre','serviceExecStartPost','serviceExecStop','serviceStandardOutput','serviceStandardError'];
 
 function configureService() {
   window.recipeServiceVisible = true;
@@ -87,8 +94,6 @@ async function removeService() {
   SERVICE_FIELD_IDS.forEach(id => setValue(id, ''));
   setValue('serviceType', ''); setValue('serviceRestart', '');
   if ($('serviceEnabled')) $('serviceEnabled').checked = false;
-  window.recipeAdvancedFields.service_description = '';
-  window.recipeAdvancedFields.service_working_directory = '';
   refreshRecipeApplicability();
   scheduleRecipeAutosave();
 }

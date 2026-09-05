@@ -40,6 +40,13 @@ jobs:
             exit 1
           fi
 
+          version="$(python3 -c 'from debbuilder import __version__; print(__version__)')"
+          tag_version="${tag#v}"
+          if [[ "$tag_version" != "$version" ]]; then
+            echo "Release tag version $tag_version does not match debbuilder.__version__ $version" >&2
+            exit 1
+          fi
+
           git fetch --force --tags origin "refs/tags/$tag:refs/tags/$tag"
           git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null
 

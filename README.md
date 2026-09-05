@@ -207,4 +207,4 @@ DebBuilder is meant to be self-hosted and operated by trusted administrators.
 
 ## Version
 
-The current release is DebBuilder 0.1.9.
+The current release is DebBuilder 0.1.11.

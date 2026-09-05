@@ -136,6 +136,67 @@ class ProjectDetectionTests(unittest.TestCase):
         self.assertIn("no build", result["display_name"])
         self.assertIn("No build command is required", result["build_description"])
 
+    def test_python_application_prefers_itself_over_weak_node_tooling(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "demo").mkdir()
+            (root / "demo/__init__.py").write_text("")
+            (root / "server.py").write_text('if __name__ == "__main__":\n    print("ok")\n')
+            (root / "package.json").write_text(json.dumps({"scripts": {"test": "node tests.js"}}))
+            result = detect_project(root)
+        self.assertEqual(result["project_type"], "python")
+        self.assertNotIn("nodejs", result["build_dependencies"])
+        self.assertNotIn("npm", result["build_dependencies"])
+        self.assertFalse(any(command.startswith("npm") for command in result["proposed_commands"]))
+
+    def test_python_application_and_node_build_script_are_ambiguous(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "demo").mkdir()
+            (root / "demo/__init__.py").write_text("")
+            (root / "server.py").write_text('if __name__ == "__main__":\n    print("ok")\n')
+            (root / "package.json").write_text(json.dumps({"scripts": {"build": "vite build"}}))
+            with self.assertRaises(DetectionError) as raised:
+                detect_project(root)
+        self.assertEqual(raised.exception.code, "ambiguous_project")
+        self.assertEqual([row["project_type"] for row in raised.exception.details["candidates"]], ["nodejs", "python"])
+
+    def test_python_application_and_node_start_script_are_ambiguous(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "demo").mkdir()
+            (root / "demo/__init__.py").write_text("")
+            (root / "server.py").write_text('if __name__ == "__main__":\n    print("ok")\n')
+            (root / "package.json").write_text(json.dumps({"scripts": {"start": "node server.js"}}))
+            with self.assertRaises(DetectionError) as raised:
+                detect_project(root)
+        self.assertEqual(raised.exception.code, "ambiguous_project")
+        self.assertEqual([row["project_type"] for row in raised.exception.details["candidates"]], ["nodejs", "python"])
+
+    def test_weak_node_project_remains_node_when_it_is_the_only_candidate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "package.json").write_text(json.dumps({"scripts": {"test": "node tests.js"}}))
+            result = detect_project(root)
+        self.assertEqual(result["project_type"], "nodejs")
+        self.assertFalse(result["strong_application"])
+
+    def test_private_node_manifest_alone_is_not_a_strong_application_marker(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "package.json").write_text(json.dumps({"private": True}))
+            result = detect_project(root)
+        self.assertEqual(result["project_type"], "nodejs")
+        self.assertFalse(result["strong_application"])
+
+    def test_current_debbuilder_checkout_is_detected_as_python_not_node_tooling(self):
+        root = Path(__file__).resolve().parents[1]
+        result = detect_project(root)
+        self.assertEqual(result["project_type"], "python")
+        self.assertNotIn("nodejs", result["build_dependencies"])
+        self.assertNotIn("npm", result["build_dependencies"])
+        self.assertFalse(any(command.startswith("npm") for command in result["proposed_commands"]))
+
     def test_project_metadata_without_build_system_does_not_imply_a_wheel_build(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -179,6 +240,16 @@ class ProjectDetectionTests(unittest.TestCase):
             (root / "server/Cargo.toml").write_text('[package]\nname="server"\nversion="1"\n')
             result = detect_project(root)
         self.assertEqual(result["project_type"], "rust")
+
+    def test_rust_and_strong_node_application_remain_ambiguous(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "Cargo.toml").write_text("[package]\n")
+            (root / "package.json").write_text(json.dumps({"scripts": {"build": "vite build"}}))
+            with self.assertRaises(DetectionError) as raised:
+                detect_project(root)
+        self.assertEqual(raised.exception.code, "ambiguous_project")
+        self.assertEqual([row["project_type"] for row in raised.exception.details["candidates"]], ["nodejs", "rust"])
 
     def test_strong_python_and_rust_markers_are_ambiguous(self):
         with tempfile.TemporaryDirectory() as temporary:

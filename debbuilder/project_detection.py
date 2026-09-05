@@ -465,8 +465,12 @@ def _detect_static(source: Path, root: Path) -> dict | None:
 def detect_project(source_directory: str | Path, *, working_directory: str = ".") -> dict:
     source, root = _project_root(source_directory, working_directory)
     node, python, rust = _detect_node(source, root), _detect_python(source, root), _detect_rust(source, root)
-    if rust and rust.get("workspace_members") and node and not node.get("strong_application"):
-        node = None
+    if node and not node.get("strong_application"):
+        # A tooling-only package.json is not an application candidate when an
+        # existing detector has identified a Python application. Keep the
+        # established Rust workspace exception for the same reason.
+        if python or (rust and rust.get("workspace_members")):
+            node = None
     candidates = [candidate for candidate in (node, python, rust) if candidate]
     if not candidates:
         static = _detect_static(source, root)

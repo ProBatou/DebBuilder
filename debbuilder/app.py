@@ -26,7 +26,7 @@ from pathlib import Path
 from . import artifact_publication, artifact_validation, auth_service, automation_service, build_pipeline, deb_inspector, execution_service, notifications, package_service, release_cache, settings_service, storage, upstream_archive, workspace_cleanup
 from .build_store import BuildStore
 from .http_handler import create_handler
-from .recipe_schema import normalize_recipe, recipe_for_storage, require_safe_name, validate_recipe_metadata
+from .recipe_schema import RecipeDocumentError, normalize_recipe, recipe_document_for_storage, recipe_for_storage, require_safe_name, validate_recipe_metadata
 from .settings_store import cookie_secret, github_token, oidc_client_secret
 from .runtime import RuntimeConfig
 
@@ -225,6 +225,40 @@ def reconcile_build_publication(run_id: str, payload: dict | None = None) -> dic
 def read_workflow_file(path: Path) -> dict:
     data = json.loads(path.read_text())
     return validate_recipe_metadata(data)
+
+
+def recipe_json_validation(recipe) -> dict:
+    """Canonicalize Recipe JSON without writing it."""
+    canonical = recipe_document_for_storage(recipe)
+    existing = workflow_path(canonical["name"])
+    collision = None
+    if existing:
+        collision = {
+            "exists": True,
+            "source": "user" if existing.resolve().parent == USER_WORKFLOWS.resolve() else "example",
+            "replaceable": existing.resolve().parent == USER_WORKFLOWS.resolve(),
+        }
+    return {"ok": True, "recipe": canonical, "id": canonical["name"], "collision": collision}
+
+
+def import_recipe_json(recipe, *, replace: bool = False) -> dict:
+    """Create or explicitly replace a user Recipe from canonical JSON."""
+    preflight = recipe_document_for_storage(recipe)
+    workflow_id = preflight["name"]
+    destination = workflow_path(workflow_id, for_write=True)
+    assert destination is not None
+    with storage.locked_path(destination):
+        canonical = recipe_document_for_storage(recipe)
+        existing = workflow_path(workflow_id)
+        if existing:
+            is_user_recipe = existing.resolve().parent == USER_WORKFLOWS.resolve()
+            if not is_user_recipe:
+                raise PermissionError("shipped recipes are read-only and cannot be replaced")
+            if not replace:
+                raise FileExistsError("recipe id already exists; explicit replacement is required")
+        storage.save_json(destination, canonical)
+    associate_workflow_package(workflow_id, canonical)
+    return {"ok": True, "id": workflow_id, "recipe": canonical, "created": existing is None, "replaced": existing is not None}
 
 
 def list_workflows() -> list[dict]:

@@ -60,3 +60,31 @@ assert.equal(JSON.stringify(context.collectWorkflow().install.directories), JSON
 
 nodes.installDirectories.value = '';
 assert.equal(JSON.stringify(context.collectWorkflow().install.directories), '[]');
+
+const roundTrip = {
+  name: 'typed-demo',
+  active: false,
+  package: {name: 'typed-demo', version_revision: '1+b1', runtime_dependencies: []},
+  source: {repository: 'owner/typed-demo', version: {source: 'tag'}},
+  artifact: {mode: 'source_build'},
+  build: {
+    source_changes: [{operation: 'create_file', path: 'config.ini', content: 'enabled=true\n'}],
+    extra_dependencies: [], commands: [], environment: {}, output: {mode: 'source'},
+    inactivity_timeout: null, maximum_runtime: null,
+  },
+  install: {
+    directories: [{path: '/var/lib/typed-demo', owner: 'typed-demo', group: 'typed-demo', mode: '0750'}],
+    config_files: [], content: {source: 'build_output'},
+  },
+  service: {enabled: false},
+};
+context.renderWorkflow(roundTrip);
+const collected = context.collectWorkflow();
+assert.equal(collected.active, false);
+assert.equal(collected.package.version_revision, '1+b1');
+assert.deepEqual(JSON.parse(JSON.stringify(collected.package.runtime_dependencies)), []);
+assert.deepEqual(JSON.parse(JSON.stringify(collected.build.source_changes)), roundTrip.build.source_changes);
+assert.deepEqual(JSON.parse(JSON.stringify(collected.install.directories)), roundTrip.install.directories);
+assert.deepEqual(JSON.parse(JSON.stringify(collected.install.config_files)), []);
+assert.equal(collected.build.inactivity_timeout, null);
+assert.equal(collected.build.maximum_runtime, null);

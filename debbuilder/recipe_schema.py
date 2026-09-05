@@ -19,6 +19,16 @@ SOURCE_ARCHIVE_FORMATS = {"tar.gz", "zip"}
 CONFIG_POLICIES = {"dpkg_conffile", "replace", "create_if_missing"}
 SERVICE_TYPES = {"simple", "exec", "forking", "oneshot", "notify", "dbus"}
 RESTART_POLICIES = {"", "no", "always", "on-success", "on-failure", "on-abnormal", "on-abort", "on-watchdog"}
+SOURCE_CHANGE_FIELDS = {"operation", "path", "search", "content"}
+
+
+class RecipeDocumentError(ValueError):
+    """Structured validation failure for user-supplied Recipe JSON."""
+
+    def __init__(self, code: str, message: str, *, path: str = "$"):
+        super().__init__(message)
+        self.code = code
+        self.path = path
 
 
 def require_safe_name(value: str, what: str = "name") -> str:
@@ -433,6 +443,46 @@ def recipe_for_storage(workflow: dict) -> dict:
         recipe["build"]["output"].pop("path", None)
     recipe["service"].pop("configured", None)
     return recipe
+
+
+def _find_unknown_field(value, canonical, path: str = "$") -> str | None:
+    """Find fields discarded by canonical normalization without duplicating its shape."""
+    if isinstance(value, dict) and isinstance(canonical, dict):
+        unknown = sorted(set(value) - set(canonical))
+        if unknown:
+            return f"{path}.{unknown[0]}"
+        for key in value:
+            found = _find_unknown_field(value[key], canonical[key], f"{path}.{key}")
+            if found:
+                return found
+    elif isinstance(value, list) and isinstance(canonical, list):
+        for index, (item, normalized) in enumerate(zip(value, canonical)):
+            item_path = f"{path}[{index}]"
+            if path == "$.build.source_changes" and isinstance(item, dict):
+                unknown = sorted(set(item) - SOURCE_CHANGE_FIELDS)
+                if unknown:
+                    return f"{item_path}.{unknown[0]}"
+            found = _find_unknown_field(item, normalized, item_path)
+            if found:
+                return found
+    return None
+
+
+def recipe_document_for_storage(workflow) -> dict:
+    """Validate imported/edited JSON and return the one canonical storage shape."""
+    if not isinstance(workflow, dict):
+        raise RecipeDocumentError("invalid_root", "Recipe JSON root must be an object")
+    if "name" not in workflow or not isinstance(workflow.get("name"), str) or not workflow["name"].strip():
+        raise RecipeDocumentError("missing_id", "Recipe JSON must contain a non-empty string name", path="$.name")
+    migrated = migrate_legacy_recipe(workflow)
+    try:
+        normalized = validate_recipe_metadata(migrated)
+    except (TypeError, ValueError, re.error) as exc:
+        raise RecipeDocumentError("invalid_recipe", str(exc)) from exc
+    unknown = _find_unknown_field(migrated, normalized)
+    if unknown:
+        raise RecipeDocumentError("unknown_field", f"Unknown Recipe field: {unknown}", path=unknown)
+    return recipe_for_storage(normalized)
 
 
 def normalize_github_version(value: str) -> str:

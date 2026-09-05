@@ -190,10 +190,40 @@ def create_handler(api):
             try:
                 data = api.read_body(self)
                 self._post(data)
+            except json.JSONDecodeError as exc:
+                if self.path in {"/api/recipes/validate", "/api/recipes/import"}:
+                    api.json_response(self, {"ok": False, "error": {"code": "invalid_json", "message": f"JSON syntax error at line {exc.lineno}, column {exc.colno}", "path": "$"}}, 400)
+                else:
+                    api.json_response(self, {"error": str(exc)}, 400)
             except Exception as exc:
-                api.json_response(self, {"error": str(exc)}, 400)
+                if self.path in {"/api/recipes/validate", "/api/recipes/import"}:
+                    api.json_response(self, {"ok": False, "error": {"code": "invalid_request", "message": str(exc), "path": "$"}}, 400)
+                else:
+                    api.json_response(self, {"error": str(exc)}, 400)
 
         def _post(self, data: dict):
+            if self.path == "/api/recipes/validate":
+                recipe = data.get("recipe") if isinstance(data, dict) and "recipe" in data else data
+                try:
+                    api.json_response(self, api.recipe_json_validation(recipe))
+                except api.RecipeDocumentError as exc:
+                    api.json_response(self, {"ok": False, "error": {"code": exc.code, "message": str(exc), "path": exc.path}}, 422)
+                return
+            if self.path == "/api/recipes/import":
+                recipe = data.get("recipe") if isinstance(data, dict) else data
+                replace = data.get("replace", False) if isinstance(data, dict) else False
+                if not isinstance(replace, bool):
+                    api.json_response(self, {"ok": False, "error": {"code": "invalid_replace", "message": "replace must be a boolean", "path": "$.replace"}}, 422)
+                    return
+                try:
+                    api.json_response(self, api.import_recipe_json(recipe, replace=replace))
+                except api.RecipeDocumentError as exc:
+                    api.json_response(self, {"ok": False, "error": {"code": exc.code, "message": str(exc), "path": exc.path}}, 422)
+                except FileExistsError as exc:
+                    api.json_response(self, {"ok": False, "error": {"code": "recipe_exists", "message": str(exc), "path": "$.name"}}, 409)
+                except PermissionError as exc:
+                    api.json_response(self, {"ok": False, "error": {"code": "readonly_recipe", "message": str(exc), "path": "$.name"}}, 403)
+                return
             if self.path == "/api/run":
                 workflow = data.get("workflow", data)
                 if workflow.get("active") is False:
@@ -271,7 +301,12 @@ def create_handler(api):
             stored = api.recipe_for_storage(normalized)
             destination = api.workflow_path(workflow_id, for_write=True)
             assert destination is not None
-            api.storage.save_json(destination, stored)
+            with api.storage.locked_path(destination):
+                existing = api.workflow_path(workflow_id)
+                if existing and existing.resolve().parent != api.USER_WORKFLOWS.resolve():
+                    api.json_response(self, {"error": "shipped recipes are read-only"}, 403)
+                    return
+                api.storage.save_json(destination, stored)
             previous_id = str(data.get("previous_id") or "")
             if previous_id and previous_id != workflow_id:
                 previous = api.workflow_path(previous_id)

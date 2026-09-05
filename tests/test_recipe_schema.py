@@ -1,9 +1,44 @@
+import json
 import unittest
+from pathlib import Path
 
-from debbuilder.recipe_schema import normalize_recipe, recipe_for_storage, validate_recipe_metadata
+from debbuilder.recipe_schema import RecipeDocumentError, normalize_recipe, recipe_document_for_storage, recipe_for_storage, validate_recipe_metadata
 
 
 class RecipeSchemaTests(unittest.TestCase):
+    def test_json_document_accepts_supported_fixtures_and_canonical_round_trips(self):
+        fixtures = Path(__file__).parent / "fixtures" / "recipes"
+        for path in sorted(fixtures.glob("*.json")):
+            with self.subTest(recipe=path.name):
+                stored = recipe_document_for_storage(json.loads(path.read_text()))
+                self.assertEqual(recipe_document_for_storage(stored), stored)
+
+    def test_json_document_uses_canonical_storage_pipeline(self):
+        stored = recipe_document_for_storage({
+            "name": "legacy", "package": {"name": "legacy", "version_revision": "1+b1"},
+            "build": {"timeout": 120, "output": {"mode": "source"}},
+            "install": {"directories": [], "config_policy": "replace", "config_files": []},
+            "service": {"configured": False},
+        })
+        self.assertEqual(stored["package"]["version_revision"], "1+b1")
+        self.assertEqual(stored["build"]["inactivity_timeout"], 120)
+        self.assertNotIn("timeout", stored["build"])
+        self.assertNotIn("path", stored["build"]["output"])
+        self.assertNotIn("configured", stored["service"])
+
+    def test_json_document_rejects_bad_roots_missing_ids_and_unknown_fields(self):
+        cases = [
+            ([], "invalid_root"),
+            (None, "invalid_root"),
+            ({"package": {"name": "demo"}}, "missing_id"),
+            ({"name": "demo", "unexpected": True}, "unknown_field"),
+            ({"name": "demo", "package": []}, "invalid_recipe"),
+        ]
+        for value, code in cases:
+            with self.subTest(value=value), self.assertRaises(RecipeDocumentError) as raised:
+                recipe_document_for_storage(value)
+            self.assertEqual(raised.exception.code, code)
+
     def test_upstream_archive_fhs_account_directories_and_mapping_overrides(self):
         recipe = validate_recipe_metadata({
             "name": "demo", "package": {"name": "demo", "architecture": "amd64"},

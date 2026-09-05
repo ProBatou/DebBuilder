@@ -578,6 +578,114 @@ class AdminApiTests(AdminApiCase):
         self.assertFalse((server.USER_WORKFLOWS / "flood.json").exists())
         self.assertTrue((server.USER_WORKFLOWS / "flood-release.json").exists())
 
+    def test_recipe_json_validation_is_canonical_and_does_not_write(self):
+        recipe = {
+            "name": "validated-only", "package": {"name": "validated-only", "version_revision": "1+b1"},
+            "build": {"timeout": 90, "output": {"mode": "source"}},
+            "install": {"directories": []},
+        }
+        before = list(server.USER_WORKFLOWS.iterdir())
+        status, result = self.request("POST", "/api/recipes/validate", {"recipe": recipe})
+        self.assertEqual(status, 200)
+        self.assertEqual(result["recipe"]["package"]["version_revision"], "1+b1")
+        self.assertEqual(result["recipe"]["build"]["inactivity_timeout"], 90)
+        self.assertNotIn("path", result["recipe"]["build"]["output"])
+        self.assertIsNone(result["collision"])
+        self.assertEqual(before, list(server.USER_WORKFLOWS.iterdir()))
+
+    def test_recipe_json_validation_reports_structured_errors(self):
+        for recipe, code in (([], "invalid_root"), ({"package": {}}, "missing_id"), ({"name": "demo", "unknown": 1}, "unknown_field"), ({"name": "demo", "build": []}, "invalid_recipe")):
+            with self.subTest(code=code), self.assertRaises(urllib.error.HTTPError) as raised:
+                self.request("POST", "/api/recipes/validate", {"recipe": recipe})
+            self.assertEqual(raised.exception.code, 422)
+            payload = json.loads(raised.exception.read().decode())
+            self.assertEqual(payload["error"]["code"], code)
+            self.assertIn("message", payload["error"])
+
+        request = urllib.request.Request(
+            self.base_url + "/api/recipes/validate",
+            data=b'{"recipe":', method="POST", headers={"Content-Type": "application/json"},
+        )
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request, timeout=5)
+        self.assertEqual(raised.exception.code, 400)
+        syntax_error = json.loads(raised.exception.read().decode())["error"]
+        self.assertEqual(syntax_error["code"], "invalid_json")
+        self.assertIn("line 1", syntax_error["message"])
+
+    def test_recipe_json_import_requires_explicit_collision_replacement(self):
+        recipe = {"name": "imported", "package": {"name": "imported"}, "install": {"directories": []}}
+        status, created = self.request("POST", "/api/recipes/import", {"recipe": recipe, "replace": False})
+        self.assertEqual(status, 200)
+        self.assertTrue(created["created"])
+        self.assertFalse(created["replaced"])
+        self.assertTrue((server.USER_WORKFLOWS / "imported.json").exists())
+
+        replacement = {**recipe, "package": {"name": "imported", "version_revision": "1+b1"}}
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            self.request("POST", "/api/recipes/import", {"recipe": replacement, "replace": False})
+        self.assertEqual(raised.exception.code, 409)
+        self.assertEqual(json.loads(raised.exception.read().decode())["error"]["code"], "recipe_exists")
+        self.assertEqual(json.loads((server.USER_WORKFLOWS / "imported.json").read_text())["package"]["version_revision"], "1")
+
+        status, replaced = self.request("POST", "/api/recipes/import", {"recipe": replacement, "replace": True})
+        self.assertEqual(status, 200)
+        self.assertFalse(replaced["created"])
+        self.assertTrue(replaced["replaced"])
+        self.assertEqual(json.loads((server.USER_WORKFLOWS / "imported.json").read_text())["package"]["version_revision"], "1+b1")
+
+    def test_recipe_json_import_rechecks_collision_after_validation(self):
+        recipe = {"name": "late-collision", "package": {"name": "late-collision"}, "install": {"directories": []}}
+        status, validated = self.request("POST", "/api/recipes/validate", {"recipe": recipe})
+        self.assertEqual(status, 200)
+        self.assertIsNone(validated["collision"])
+
+        appeared = server.recipe_for_storage({
+            "name": "late-collision", "package": {"name": "late-collision", "description": "Created concurrently"},
+        })
+        server.storage.save_json(server.USER_WORKFLOWS / "late-collision.json", appeared)
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            self.request("POST", "/api/recipes/import", {"recipe": validated["recipe"], "replace": False})
+        self.assertEqual(raised.exception.code, 409)
+        self.assertEqual(json.loads(raised.exception.read().decode())["error"]["code"], "recipe_exists")
+        persisted = json.loads((server.USER_WORKFLOWS / "late-collision.json").read_text())
+        self.assertEqual(persisted["package"]["description"], "Created concurrently")
+
+    def test_recipe_json_import_cannot_replace_shipped_recipe(self):
+        recipe = {"name": "webapp-recipe", "package": {"name": "webapp"}, "install": {"directories": []}}
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            self.request("POST", "/api/recipes/import", {"recipe": recipe, "replace": True})
+        self.assertEqual(raised.exception.code, 403)
+        self.assertEqual(json.loads(raised.exception.read().decode())["error"]["code"], "readonly_recipe")
+        self.assertFalse((server.USER_WORKFLOWS / "webapp-recipe.json").exists())
+
+    def test_shipped_recipe_cannot_be_modified_through_workflow_api(self):
+        status, viewed = self.request("GET", "/api/workflows/webapp-recipe")
+        self.assertEqual(status, 200)
+        viewed["package"]["description"] = "Direct API overwrite"
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            self.request("POST", "/api/workflows/webapp-recipe", {"workflow": viewed, "previous_id": "webapp-recipe"})
+        self.assertEqual(raised.exception.code, 403)
+        self.assertFalse((server.USER_WORKFLOWS / "webapp-recipe.json").exists())
+        self.assertNotEqual(
+            json.loads((server.EXAMPLES / "webapp-recipe.json").read_text())["package"].get("description"),
+            "Direct API overwrite",
+        )
+
+    def test_recipe_json_payload_limit_is_enforced_by_server(self):
+        request = urllib.request.Request(
+            self.base_url + "/api/recipes/validate",
+            data=b"{" + (b" " * 2_000_000),
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request, timeout=5)
+        self.assertEqual(raised.exception.code, 400)
+        error = json.loads(raised.exception.read().decode())["error"]
+        self.assertEqual(error["code"], "invalid_request")
+        self.assertIn("body too large", error["message"])
+
     def test_user_recipe_can_be_deleted_without_repository_or_system_deletion(self):
         workflow = {"name":"temporary","package":{"name":"temporary"},"source":{"repository":"example/temporary","tracking":"latest_release"},"active":True}
         status, _ = self.request("POST", "/api/workflows/temporary", {"workflow": workflow})

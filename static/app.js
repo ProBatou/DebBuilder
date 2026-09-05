@@ -344,6 +344,7 @@ async function refreshWorkflows() {
   (data.workflows || []).forEach(w => {
     const opt = document.createElement('option');
     opt.value = w.id;
+    opt.dataset.writable = String(w.writable !== false);
     opt.textContent = `${w.name} · ${w.source}${w.writable ? '' : ' readonly'}`;
     opt.title = opt.textContent;
     select.appendChild(opt);

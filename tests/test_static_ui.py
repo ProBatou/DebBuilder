@@ -499,7 +499,7 @@ class StaticUiTests(unittest.TestCase):
         self.assertIn('<svg viewBox="0 0 24 24" aria-hidden="true">', html)
         self.assertIn('/style.css?v=20260905-1', html)
         self.assertIn('/css/components.css?v=20260905-4', html)
-        self.assertIn('/css/pages.css?v=20260905-5', html)
+        self.assertIn('/css/pages.css?v=20260905-6', html)
         self.assertNotIn('/css/logs.css', html)
         for script in ("/js/pages/dashboard.js", "/js/pages/packages.js", "/js/pages/logs.js", "/js/recipe/source_changes.js", "/js/admin.js"):
             self.assertIn(script, html)
@@ -524,7 +524,7 @@ class StaticUiTests(unittest.TestCase):
         pages = self.read("static/css/pages.css")
         self.assertIn('/style.css?v=20260905-1', html)
         self.assertIn('/css/components.css?v=20260905-4', html)
-        self.assertIn('/css/pages.css?v=20260905-5', html)
+        self.assertIn('/css/pages.css?v=20260905-6', html)
         self.assertNotIn('/css/logs.css', html)
         self.assertFalse((ROOT / "static" / "css" / "logs.css").exists())
         self.assertNotRegex(self.styles(), r"nth-(?:child|of-type)\s*\(")

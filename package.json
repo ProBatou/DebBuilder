@@ -2,7 +2,7 @@
   "name": "debbuilder-ui-tests",
   "private": true,
   "scripts": {
-    "test:js": "node tests/js/test_logs_delete.js && node tests/js/test_logs_state.js && node tests/js/test_recipe_serialization.js && node tests/js/test_recipe_stepper.js",
+    "test:js": "node tests/js/test_logs_delete.js && node tests/js/test_logs_state.js && node tests/js/test_recipe_serialization.js && node tests/js/test_recipe_json.js && node tests/js/test_recipe_stepper.js",
     "test:ui": "node tests/ui/run-ui-tests.js"
   },
   "devDependencies": {

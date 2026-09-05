@@ -6,7 +6,7 @@
   <title>DebBuilder</title>
   <link rel="stylesheet" href="/style.css?v=20260905-1" />
   <link rel="stylesheet" href="/css/components.css?v=20260905-4" />
-  <link rel="stylesheet" href="/css/pages.css?v=20260905-5" />
+  <link rel="stylesheet" href="/css/pages.css?v=20260905-6" />
 </head>
 <body>
   <header class="mobile-topbar" aria-label="Mobile navigation">
@@ -54,10 +54,11 @@
           <section class="recipe-main recipe-blank-main">
             <div class="recipe-toolbar recipe-simple-toolbar toolbar">
               <label class="recipe-picker field"><span>Recipe</span><select id="workflowSelect"></select></label>
-              <div class="recipe-action-group"><button class="btn btn--ghost" id="btnNewRecipe">+ New</button><button class="btn btn--ghost" id="btnRuns">Runs</button></div>
+              <div class="recipe-action-group recipe-data-actions"><button class="btn btn--ghost" id="btnNewRecipe">+ New</button><button class="btn btn--ghost" id="btnRecipeJson">JSON</button><button class="btn btn--ghost" id="btnImportRecipe">Import</button><button class="btn btn--ghost" id="btnRuns">Runs</button></div>
               <div class="recipe-action-group recipe-run-actions"><button class="btn btn--warning" id="btnDryRun">Dry-run</button><button class="btn btn--primary" id="btnBuildReal">Build</button></div>
               <button class="btn btn--danger recipe-delete-action" id="btnDeleteRecipeTop">Delete</button>
               <input id="workflowName" type="hidden" />
+              <input id="recipeImportFile" type="file" accept="application/json,.json" hidden />
             </div>
 
             <section id="recipe-step-source" class="recipe-draft-card recipe-source-card recipe-step-card card" aria-label="Recipe GitHub source">
@@ -72,7 +73,7 @@
               <div class="recipe-metadata" aria-label="Recipe metadata">
                 <input id="recipeMetaName" type="hidden">
                 <input id="recipeMetaPackage" type="hidden">
-                <label><span>GitHub project</span><input id="recipeMetaGithub" placeholder="owner/repository" pattern="[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"></label>
+                <label><span>GitHub project</span><input id="recipeMetaGithub" placeholder="owner/repository" pattern="[A-Za-z0-9_.\-]+\/[A-Za-z0-9_.\-]+"></label>
                 <label><span>Artifact workflow</span><select id="recipeArtifactMode"><option value="source_build">Build from source</option><option value="upstream_deb">Use upstream Debian package</option><option value="upstream_archive">Use upstream release archive</option></select></label>
                 <label id="recipeArchiveSourceField" hidden><span>Archive source</span><select id="recipeArchiveSource"><option value="auto">Auto</option><option value="github_source">GitHub source archive</option><option value="release_asset">Release asset</option></select></label>
                 <label id="recipeArchiveFormatField" hidden><span>Source archive format</span><select id="recipeArchiveFormat"><option value="tar.gz">tar.gz</option><option value="zip">zip</option></select></label>
@@ -273,7 +274,7 @@
       <header><h3>New recipe</h3><p>Choose an existing package; the recipe will be attached to it.</p></header>
       <input id="newRecipeName" type="hidden">
       <label><span>Debian package</span><select id="newRecipePackage" required></select><small>Create the package on the Packages page first if needed.</small></label>
-      <label><span>GitHub project</span><input id="newRecipeGithub" placeholder="owner/repository" required pattern="[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"></label>
+      <label><span>GitHub project</span><input id="newRecipeGithub" placeholder="owner/repository" required pattern="[A-Za-z0-9_.\-]+\/[A-Za-z0-9_.\-]+"></label>
       <label><span>Tracking</span><select id="newRecipeTracking"><option value="latest_release">Latest release</option><option value="tag">Explicit tag</option><option value="manual">Manual ref</option></select></label>
       <label id="newRecipeSourceRefField" hidden><span>GitHub ref</span><input id="newRecipeSourceRef" placeholder="v1.2.3, main, or commit SHA"></label>
       <label><span>Debian version</span><select id="newRecipeVersionSource"><option value="tag">From GitHub tag</option><option value="release_name">From release name</option><option value="regex">Custom expression</option><option value="build">Provided by build</option></select></label>
@@ -291,6 +292,20 @@
     </form>
   </dialog>
 
+  <dialog id="recipeJsonDialog" class="recipe-dialog recipe-json-dialog" aria-labelledby="recipeJsonTitle">
+    <form method="dialog" id="recipeJsonForm">
+      <header class="recipe-json-head"><div><span class="eyebrow">Advanced Recipe</span><h3 id="recipeJsonTitle">Recipe JSON</h3><p id="recipeJsonDescription">Canonical persistable representation</p></div><button type="button" class="ghost dialog-close" id="btnCloseRecipeJson" aria-label="Close">×</button></header>
+      <div class="recipe-json-toolbar"><span id="recipeJsonMode" class="settings-badge neutral">View</span><div><button type="button" class="btn btn--ghost btn--sm" id="btnCopyRecipeJson">Copy</button><button type="button" class="btn btn--ghost btn--sm" id="btnExportRecipeJson">Export</button><button type="button" class="btn btn--ghost btn--sm" id="btnEditRecipeJson">Edit JSON</button></div></div>
+      <textarea id="recipeJsonEditor" class="recipe-json-editor" aria-label="Recipe JSON" readonly spellcheck="false"></textarea>
+      <div id="recipeJsonError" class="recipe-json-error" role="alert" hidden></div>
+      <section id="recipeJsonPreview" class="recipe-json-preview" aria-labelledby="recipeJsonPreviewTitle" hidden>
+        <div><h4 id="recipeJsonPreviewTitle">Change preview</h4><p id="recipeJsonChangeSummary"></p></div>
+        <div class="recipe-json-before-after"><div><strong>Before</strong><pre id="recipeJsonBefore"></pre></div><div><strong>After</strong><pre id="recipeJsonAfter"></pre></div></div>
+      </section>
+      <div class="actions recipe-json-actions"><button type="button" class="btn btn--ghost" id="btnCancelRecipeJson">Close</button><button type="button" class="btn btn--ghost" id="btnValidateRecipeJson" hidden>Validate</button><button type="button" class="btn btn--primary" id="btnApplyRecipeJson" hidden disabled>Apply</button></div>
+    </form>
+  </dialog>
+
   <div id="toastRegion" class="toast-region" aria-live="polite" aria-relevant="additions"></div>
   <dialog id="appDialog" class="app-dialog" aria-labelledby="appDialogTitle" aria-describedby="appDialogDescription">
     <form id="appDialogForm">
@@ -304,12 +319,13 @@
   <script src="/ui_core.js?v=20260905-2"></script>
   <script src="/settings.js?v=20260905-4"></script>
   <script src="/recipe_serialization.js?v=20260903-2"></script>
-  <script src="/app.js?v=20260905-2"></script>
+  <script src="/app.js?v=20260905-3"></script>
   <script src="/js/pages/dashboard.js?v=20260905-2"></script>
   <script src="/js/pages/packages.js?v=20260905-2"></script>
   <script src="/js/pages/logs.js?v=20260905-6"></script>
   <script src="/js/recipe/source_changes.js?v=20260904-1"></script>
   <script src="/js/recipe/stepper.js?v=20260905-2"></script>
+  <script src="/js/recipe/json_editor.js?v=20260905-1"></script>
   <script src="/js/admin.js?v=20260905-4"></script>
 </body>
 </html>

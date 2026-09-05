@@ -39,6 +39,13 @@ async function capture(page, testInfo, name, {fullPage = true} = {}) {
   await page.screenshot({path: artifactPath(testInfo, name), fullPage});
 }
 
+async function expectFullyInViewport(page, locator) {
+  const box = await locator.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box.y).toBeGreaterThanOrEqual(0);
+  expect(box.y + box.height).toBeLessThanOrEqual(page.viewportSize().height + 1);
+}
+
 test.beforeEach(async ({page}) => {
   page.uiErrors = [];
   page.on('pageerror', error => page.uiErrors.push(`pageerror: ${error.message}`));
@@ -98,6 +105,233 @@ test('Recipes selects a showcase Recipe, changes step, and closes a safe modal',
   await capture(page, testInfo, 'recipe-modal', {fullPage: false});
   await page.locator('#btnCancelSourceChange').click();
   await expect(page.locator('#sourceChangeDialog')).not.toBeVisible();
+});
+
+test('Recipe JSON stays canonical across view, edit, apply, export, and import', async ({page}, testInfo) => {
+  const editedDescription = `Edited through canonical JSON on ${testInfo.project.name}`;
+  const importedId = `json-import-${testInfo.project.name}`;
+  await page.evaluate(() => {
+    window.__recipeJsonClipboard = '';
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {writeText: async value => { window.__recipeJsonClipboard = value; }},
+    });
+  });
+  await openView(page, 'recipes');
+  await page.locator('#workflowSelect').selectOption('debbuilder');
+  await expect(page.locator('#recipeTitle')).toHaveText('debbuilder');
+
+  await page.locator('#recipePackageVersionRevision').fill('1+b1');
+  await page.locator('#btnRecipeJson').click();
+  const editor = page.locator('#recipeJsonEditor');
+  await expect(page.locator('#recipeJsonDialog')).toBeVisible();
+  await expect(editor).toHaveAttribute('readonly', '');
+  const viewed = JSON.parse(await editor.inputValue());
+  expect(viewed.package.version_revision).toBe('1+b1');
+  expect(viewed.service).not.toHaveProperty('configured');
+  expect(viewed.build.output).not.toHaveProperty('path');
+  await page.locator('#btnCopyRecipeJson').click();
+  await expect.poll(() => page.evaluate(() => window.__recipeJsonClipboard)).toContain('"version_revision": "1+b1"');
+  const downloadPromise = page.waitForEvent('download');
+  await page.locator('#btnExportRecipeJson').click();
+  expect((await downloadPromise).suggestedFilename()).toBe('debbuilder.json');
+  await expectFullyInViewport(page, page.locator('#btnCancelRecipeJson'));
+  await capture(page, testInfo, 'recipe-json-view', {fullPage: false});
+
+  await page.locator('#btnEditRecipeJson').click();
+  viewed.package.description = editedDescription;
+  await editor.fill(JSON.stringify(viewed, null, 2));
+  await expect(page.locator('#btnApplyRecipeJson')).toBeDisabled();
+  await page.locator('#btnValidateRecipeJson').click();
+  await expect(page.locator('#recipeJsonPreview')).toBeVisible();
+  await expect(page.locator('#recipeJsonChangeSummary')).toContainText('$.package.description');
+  await expect(page.locator('#btnApplyRecipeJson')).toBeEnabled();
+  await expectFullyInViewport(page, page.locator('#btnApplyRecipeJson'));
+  await capture(page, testInfo, 'recipe-json-edit-preview', {fullPage: false});
+
+  await page.locator('#btnApplyRecipeJson').click();
+  await expect(page.locator('#appDialog')).toBeVisible();
+  await expect(page.locator('#appDialogDescription')).toContainText('form will be refreshed');
+  await page.locator('#appDialogConfirm').click();
+  await expect(page.locator('#recipeJsonDialog')).not.toBeVisible();
+  await expect(page.locator('#packageDescription')).toHaveValue(editedDescription);
+
+  await page.locator('#btnRecipeJson').click();
+  await expect(editor).toHaveValue(new RegExp(editedDescription));
+  await page.locator('#btnCancelRecipeJson').click();
+
+  const imported = structuredClone(viewed);
+  imported.name = importedId;
+  imported.package.name = importedId;
+  imported.package.description = 'Imported canonical Recipe';
+  imported.source.repository = `example/${importedId}`;
+  imported.install.destination = `/opt/${importedId}`;
+  imported.install.owner = {user: importedId, group: importedId, create_user: false, create_group: false};
+  imported.install.account = {user: importedId, group: importedId, create_user: false, create_group: false};
+  await page.locator('#recipeImportFile').setInputFiles({
+    name: 'unsafe-client-name.json',
+    mimeType: 'application/json',
+    buffer: Buffer.from(JSON.stringify(imported)),
+  });
+  await expect(page.locator('#recipeJsonDialog')).toBeVisible();
+  await expect(page.locator('#recipeJsonDescription')).toContainText('create a new Recipe');
+  await expect(page.locator('#btnApplyRecipeJson')).toBeEnabled();
+  await expectFullyInViewport(page, page.locator('#btnApplyRecipeJson'));
+  await capture(page, testInfo, 'recipe-json-import', {fullPage: false});
+  await page.locator('#btnApplyRecipeJson').click();
+  await expect(page.locator('#appDialogTitle')).toHaveText(`Create Recipe “${importedId}”?`);
+  await page.locator('#appDialogConfirm').click();
+  await expect(page.locator('#workflowSelect')).toHaveValue(importedId);
+  await expect(page.locator('#packageDescription')).toHaveValue('Imported canonical Recipe');
+
+  await page.locator('#recipeImportFile').setInputFiles({
+    name: 'collision.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(imported)),
+  });
+  await expect(page.locator('#recipeJsonDescription')).toContainText('replace the existing user Recipe');
+  await page.locator('#btnApplyRecipeJson').click();
+  await expect(page.locator('#appDialogTitle')).toHaveText(`Replace Recipe “${importedId}”?`);
+  await page.locator('#appDialogCancel').click();
+  await expect(page.locator('#recipeJsonDialog')).toBeVisible();
+  await page.locator('#btnCancelRecipeJson').click();
+  const cleanup = await page.request.delete(`/api/workflows/${importedId}`);
+  expect(cleanup.ok()).toBe(true);
+  const packageCleanup = await page.request.delete(`/api/packages/${importedId}`);
+  expect(packageCleanup.ok()).toBe(true);
+});
+
+test('Recipe JSON Apply drains an older autosave before persisting JSON', async ({page}, testInfo) => {
+  const workflowUrl = '**/api/workflows/debbuilder';
+  const originalResponse = await page.request.get('/api/workflows/debbuilder');
+  expect(originalResponse.ok()).toBe(true);
+  const original = await originalResponse.json();
+  let releaseAutosave;
+  let autosaveStarted;
+  const autosaveGate = new Promise(resolve => { releaseAutosave = resolve; });
+  const firstWriteStarted = new Promise(resolve => { autosaveStarted = resolve; });
+  const writes = [];
+  await page.route(workflowUrl, async route => {
+    if (route.request().method() !== 'POST') return route.continue();
+    writes.push(route.request().postDataJSON());
+    if (writes.length === 1) {
+      autosaveStarted();
+      await autosaveGate;
+    }
+    return route.continue();
+  });
+
+  try {
+    await openView(page, 'recipes');
+    await page.locator('#workflowSelect').selectOption('debbuilder');
+    await page.locator('#packageDescription').fill(`Delayed form autosave on ${testInfo.project.name}`);
+    await firstWriteStarted;
+
+    await page.locator('#btnRecipeJson').click();
+    const editor = page.locator('#recipeJsonEditor');
+    const applied = JSON.parse(await editor.inputValue());
+    applied.package.description = `JSON wins after delayed autosave on ${testInfo.project.name}`;
+    await page.locator('#btnEditRecipeJson').click();
+    await editor.fill(JSON.stringify(applied, null, 2));
+    await page.locator('#btnValidateRecipeJson').click();
+    await expect(page.locator('#btnApplyRecipeJson')).toBeEnabled();
+    await page.locator('#btnApplyRecipeJson').click();
+    await page.locator('#appDialogConfirm').click();
+
+    await page.waitForTimeout(150);
+    expect(writes).toHaveLength(1);
+    releaseAutosave();
+    await expect(page.locator('#recipeJsonDialog')).not.toBeVisible();
+    expect(writes).toHaveLength(2);
+
+    const persistedResponse = await page.request.get('/api/workflows/debbuilder');
+    expect(persistedResponse.ok()).toBe(true);
+    const persisted = await persistedResponse.json();
+    expect(persisted.package.description).toBe(applied.package.description);
+  } finally {
+    releaseAutosave();
+    await page.unroute(workflowUrl);
+    const restored = await page.request.post('/api/workflows/debbuilder', {data: {workflow: original, previous_id: 'debbuilder'}});
+    expect(restored.ok()).toBe(true);
+  }
+});
+
+test('Recipe JSON Apply failure stays visible and can be retried', async ({page}, testInfo) => {
+  const workflowUrl = '**/api/workflows/debbuilder';
+  const originalResponse = await page.request.get('/api/workflows/debbuilder');
+  expect(originalResponse.ok()).toBe(true);
+  const original = await originalResponse.json();
+  let failNextWrite = true;
+  await page.route(workflowUrl, async route => {
+    if (route.request().method() === 'POST' && failNextWrite) {
+      failNextWrite = false;
+      return route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({error: 'Forced Recipe save failure'}),
+      });
+    }
+    return route.continue();
+  });
+
+  try {
+    await openView(page, 'recipes');
+    await page.locator('#workflowSelect').selectOption('debbuilder');
+    const previousDescription = await page.locator('#packageDescription').inputValue();
+    await page.locator('#btnRecipeJson').click();
+    const editor = page.locator('#recipeJsonEditor');
+    const applied = JSON.parse(await editor.inputValue());
+    applied.package.description = `Retryable JSON change on ${testInfo.project.name}`;
+    await page.locator('#btnEditRecipeJson').click();
+    await editor.fill(JSON.stringify(applied, null, 2));
+    await page.locator('#btnValidateRecipeJson').click();
+    await page.locator('#btnApplyRecipeJson').click();
+    await page.locator('#appDialogConfirm').click();
+
+    await expect(page.locator('#recipeJsonDialog')).toBeVisible();
+    await expect(page.locator('#recipeJsonError')).toContainText('Forced Recipe save failure');
+    await expect(page.locator('#recipeAutosaveStatus')).toHaveAttribute('data-state', 'error');
+    await expect(page.locator('#recipeAutosaveStatus')).toContainText('not saved');
+    await expect(page.locator('#packageDescription')).toHaveValue(previousDescription);
+    await expect(page.locator('#btnApplyRecipeJson')).toBeEnabled();
+    await expect.poll(() => page.uiErrors.filter(message => message.includes('status of 500')).length).toBe(1);
+    page.uiErrors = page.uiErrors.filter(message => !message.includes('status of 500'));
+
+    await page.locator('#btnApplyRecipeJson').click();
+    await page.locator('#appDialogConfirm').click();
+    await expect(page.locator('#recipeJsonDialog')).not.toBeVisible();
+    await expect(page.locator('#packageDescription')).toHaveValue(applied.package.description);
+    await expect(page.locator('#recipeAutosaveStatus')).toHaveAttribute('data-state', 'saved');
+    const persisted = await (await page.request.get('/api/workflows/debbuilder')).json();
+    expect(persisted.package.description).toBe(applied.package.description);
+  } finally {
+    await page.unroute(workflowUrl);
+    const restored = await page.request.post('/api/workflows/debbuilder', {data: {workflow: original, previous_id: 'debbuilder'}});
+    expect(restored.ok()).toBe(true);
+  }
+});
+
+test('Read-only Recipe JSON remains viewable, copyable, and exportable', async ({page}) => {
+  await page.evaluate(() => {
+    window.__recipeJsonClipboard = '';
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {writeText: async value => { window.__recipeJsonClipboard = value; }},
+    });
+  });
+  await openView(page, 'recipes');
+  await page.locator('#workflowSelect').selectOption('debbuilder');
+  await page.locator('#workflowSelect option:checked').evaluate(option => { option.dataset.writable = 'false'; });
+  await page.locator('#btnRecipeJson').click();
+
+  await expect(page.locator('#recipeJsonDialog')).toBeVisible();
+  await expect(page.locator('#recipeJsonEditor')).toHaveAttribute('readonly', '');
+  await expect(page.locator('#btnEditRecipeJson')).toBeDisabled();
+  await expect(page.locator('#btnApplyRecipeJson')).toBeHidden();
+  await page.locator('#btnCopyRecipeJson').click();
+  await expect.poll(() => page.evaluate(() => window.__recipeJsonClipboard)).toContain('"name": "debbuilder"');
+  const downloadPromise = page.waitForEvent('download');
+  await page.locator('#btnExportRecipeJson').click();
+  expect((await downloadPromise).suggestedFilename()).toBe('debbuilder.json');
+  await page.locator('#btnCancelRecipeJson').click();
 });
 
 test('Logs selects an execution and renders lifecycle, steps, and output', async ({page}, testInfo) => {

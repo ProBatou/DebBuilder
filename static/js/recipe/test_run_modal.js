@@ -1,7 +1,7 @@
 /* global $, STATUS_LABELS, esc, getJson, executionDiagnosticHtml, preflightReportPresentation */
 
 const testRunModalState = {
-  runId: '', workflow: null, execution: null, pollTimer: null,
+  runId: '', workflow: null, execution: null, pollTimer: null, buildAction: null,
 };
 
 function testRunIsActive(execution) {
@@ -49,6 +49,7 @@ function renderTestRunModal(execution, logText = '') {
   if (statusBadge) {
     statusBadge.className = `badge ${esc(status)}`;
     statusBadge.textContent = label;
+    statusBadge.hidden = true;
   }
   if (help) help.textContent = active
     ? 'This Test continues in the background. You can close this window at any time.'
@@ -109,16 +110,19 @@ async function pollTestRunModal() {
   }
 }
 
-function openTestRunModal({runId, workflow}) {
+function openTestRunModal({runId, workflow, buildAction = null, subject = 'recipe'}) {
   stopTestRunModalPolling();
   testRunModalState.runId = runId;
   testRunModalState.workflow = workflow;
   testRunModalState.execution = null;
-  $('testRunTitle').textContent = workflow?.name || workflow?.package?.name || 'Recipe';
+  const packageName = workflow?.package?.name || workflow?.name || 'Recipe';
+  $('testRunKind').textContent = subject === 'package' ? 'Test package' : 'Test recipe';
+  $('testRunTitle').textContent = packageName;
   $('testRunDescription').textContent = `Run ${runId} · this Test continues in the background.`;
   $('testRunPrepared').hidden = true;
   $('testRunFailed').hidden = true;
   $('btnTestRunBuild').hidden = true;
+  testRunModalState.buildAction = typeof buildAction === 'function' ? buildAction : null;
   renderTestRunModal({status: 'queued', lifecycle_active: true});
   const dialog = $('testRunDialog');
   if (!dialog.open) dialog.showModal();
@@ -140,7 +144,8 @@ function wireTestRunModal() {
   $('btnTestRunLogs')?.addEventListener('click', () => viewTestRunLogs().catch(error => showToast(error.message, {type: 'error'})));
   $('btnTestRunBuild')?.addEventListener('click', () => {
     closeTestRunModal();
-    buildReal().catch(error => showToast(error.message, {type: 'error'}));
+    const buildAction = testRunModalState.buildAction || (() => buildReal());
+    buildAction().catch(error => showToast(error.message, {type: 'error'}));
   });
   dialog.addEventListener('close', stopTestRunModalPolling);
   dialog.addEventListener('click', event => {

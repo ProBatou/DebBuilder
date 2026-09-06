@@ -207,16 +207,21 @@ async function buildPackage(name, dryRun = true) {
     });
     if (!confirmed) return;
   }
-  const workflow = await getJson('/api/workflows/' + encodeURIComponent(packageRow.recipe));
   const submissionKey = `${name}:${dryRun}`;
   if (packageRunSubmissions.has(submissionKey)) return;
   packageRunSubmissions.add(submissionKey);
   try {
+    const workflow = await getJson('/api/workflows/' + encodeURIComponent(packageRow.recipe));
     const run = await postJson('/api/run', {workflow, dry_run: dryRun});
     showToast(`${dryRun ? 'Test' : 'Build'} queued: ${run.run_id}`, {type: 'info'});
     await Promise.all([loadExecutions(), loadPackages()]);
-    switchView('logs');
-    await openExecution(run.run_id);
+    if (dryRun) {
+      closePackageDrawer();
+      openTestRunModal({runId: run.run_id, workflow, buildAction: () => buildPackage(name, false), subject: 'package'});
+    } else {
+      switchView('logs');
+      await openExecution(run.run_id);
+    }
   } catch (error) {
     showToast(`${dryRun ? 'Test' : 'Build'} failed: ${error.message}`, {type: 'error'});
   } finally {

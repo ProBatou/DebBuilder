@@ -60,14 +60,19 @@ const result = {
 context.renderPreflightReport(result, workflow);
 assert.equal(nodes.recipePreflight.hidden, false);
 assert.equal(nodes.recipePreflightStatus.textContent, 'Action required');
-assert.match(nodes.recipePreflightContent.innerHTML, /Configured/);
-assert.match(nodes.recipePreflightContent.innerHTML, /Detected/);
-assert.match(nodes.recipePreflightContent.innerHTML, /Suggested/);
-assert.match(nodes.recipePreflightContent.innerHTML, /Resolved/);
-assert.match(nodes.recipePreflightContent.innerHTML, /Prepared/);
-assert.match(nodes.recipePreflightContent.innerHTML, /Commands not executed/);
+assert.match(nodes.recipePreflightContent.innerHTML, /Build commands are not executed during a Test/);
+assert.match(nodes.recipePreflightContent.innerHTML, /preflight-overview/);
+assert.match(nodes.recipePreflightContent.innerHTML, /Build requirements &amp; plan/);
+assert.match(nodes.recipePreflightContent.innerHTML, /preflight-package-overview/);
+assert.match(nodes.recipePreflightContent.innerHTML, /Detected suggestion; save it in the Recipe/);
+assert.match(nodes.recipePreflightContent.innerHTML, /Source details/);
+assert.match(nodes.recipePreflightContent.innerHTML, /Build details/);
+assert.match(nodes.recipePreflightContent.innerHTML, /Package details/);
+assert.doesNotMatch(nodes.recipePreflightContent.innerHTML, /preflight-origin-legend/);
+assert.doesNotMatch(nodes.recipePreflightContent.innerHTML, /value-origin/);
+assert.doesNotMatch(nodes.recipePreflightContent.innerHTML, /insight-origin/);
 assert.match(nodes.recipePreflightContent.innerHTML, /data-copy-preflight-command=/);
-assert.match(nodes.recipePreflightContent.innerHTML, /add it explicitly with Edit commands/);
+assert.match(nodes.recipePreflightContent.innerHTML, /save it in the Recipe before a real Build/);
 assert.match(nodes.recipePreflightContent.innerHTML, /Source changes/);
 assert.match(nodes.recipePreflightContent.innerHTML, /Debian package plan/);
 assert.match(nodes.recipePreflightContent.innerHTML, /Systemd service/);
@@ -94,7 +99,9 @@ const staticProject = {
   build:{executed:false, plan:{selection:{source:'static', confirmed:true}, commands:[], output:{mode:'source'}}}, staging:{warnings:[]}, steps:[],
 };
 assert.equal(hasBlocker(context.preflightFindings(staticProject, {artifact:{mode:'source_build'}})), false);
-assert.match(context.preflightBuildSection(staticProject, {artifact:{mode:'source_build'}}), /Not required/);
+assert.match(context.preflightBuildSection(staticProject, {artifact:{mode:'source_build'}}), /No build command is required for this source/);
+assert.match(context.preflightBuildSection(staticProject, {artifact:{mode:'source_build'}}), /No additional build requirements were found/);
+assert.match(context.preflightSourceSection(staticProject, {artifact:{mode:'upstream_archive'}}), /No source build required/);
 
 const incompleteSource = {
   ...staticProject,

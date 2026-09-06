@@ -68,6 +68,7 @@ function functionSource(source, name, nextName) {
 
   const packages = fs.readFileSync('static/js/pages/packages.js', 'utf8');
   const packageFollowed = [];
+  const packageModals = [];
   const packageContext = vm.createContext({
     packageRunSubmissions: new Set(),
     adminState: {packages: [{name: 'demo', recipe: 'demo-recipe'}]},
@@ -79,10 +80,15 @@ function functionSource(source, name, nextName) {
     loadPackages: async () => {},
     switchView: view => switched.push(view),
     openExecution: async id => packageFollowed.push(id),
+    openTestRunModal: payload => packageModals.push(payload),
+    closePackageDrawer: () => {},
   });
   vm.runInContext(functionSource(packages, 'buildPackage', 'createRecipeFromDialog'), packageContext);
   await vm.runInContext("Promise.all([buildPackage('demo', true), buildPackage('demo', true)])", packageContext);
-  assert.deepEqual(packageFollowed, ['package-run']);
+  assert.deepEqual(packageFollowed, []);
+  assert.deepEqual(packageModals.map(row => row.runId), ['package-run']);
+  assert.equal(typeof packageModals[0].buildAction, 'function');
+  assert.equal(packageModals[0].subject, 'package');
   assert.equal(toasts.at(-1), 'Test queued: package-run');
 
   console.log('async run JS tests passed');

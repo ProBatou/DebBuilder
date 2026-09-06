@@ -176,6 +176,7 @@ body.sidebar-collapsed .nav-link { width: 48px; justify-content: center; padding
 /* Overlays */
 .drawer { display: none; position: fixed; inset: 0; z-index: 40; }
 .drawer.open { display: block; }
+#packageDrawer[aria-hidden="true"] { display: none; }
 .drawer-backdrop { position: absolute; inset: 0; background: rgba(5, 10, 18, .6); }
 .drawer-panel { position: absolute; inset: 0 0 0 auto; height: 100%; overflow: auto; border-left: 1px solid var(--border); background: var(--surface-1); box-shadow: var(--shadow); }
 .drawer-head { display: flex; justify-content: space-between; gap: var(--space-3); }

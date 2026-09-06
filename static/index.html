@@ -4,9 +4,9 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>DebBuilder</title>
-  <link rel="stylesheet" href="/style.css?v=20260905-1" />
+  <link rel="stylesheet" href="/style.css?v=20260906-2" />
   <link rel="stylesheet" href="/css/components.css?v=20260905-4" />
-  <link rel="stylesheet" href="/css/pages.css?v=20260905-7" />
+  <link rel="stylesheet" href="/css/pages.css?v=20260906-4" />
 </head>
 <body>
   <header class="mobile-topbar" aria-label="Mobile navigation">
@@ -320,8 +320,8 @@
 
   <dialog id="testRunDialog" class="recipe-dialog test-run-dialog" aria-labelledby="testRunTitle">
     <form method="dialog" id="testRunForm">
-      <header class="test-run-head"><div><span class="eyebrow">Test Recipe</span><h3 id="testRunTitle">Recipe</h3><p id="testRunDescription">This Test continues in the background.</p></div><button type="button" class="ghost dialog-close" id="btnCloseTestRun" aria-label="Close">×</button></header>
-      <section class="test-run-progress" aria-live="polite"><div><strong id="testRunState">Queued</strong><p id="testRunStateHelp">Waiting for the worker. You can close this window while the Test continues.</p></div><span id="testRunStatus" class="badge queued">Queued</span></section>
+      <header class="test-run-head"><div><span class="eyebrow" id="testRunKind">Test</span><h3 id="testRunTitle">Recipe</h3><p id="testRunDescription">This Test continues in the background.</p></div><button type="button" class="ghost dialog-close" id="btnCloseTestRun" aria-label="Close">×</button></header>
+      <section class="test-run-progress" aria-live="polite"><div><strong id="testRunState">Queued</strong><p id="testRunStateHelp">Waiting for the worker. You can close this window while the Test continues.</p></div><span id="testRunStatus" class="badge queued" hidden>Queued</span></section>
       <pre id="testRunLiveLog" class="test-run-live-log" aria-label="Recent Test progress">Waiting for progress…</pre>
       <section id="testRunPrepared" class="preflight-report test-run-preflight" hidden><div class="preflight-head"><div><span class="eyebrow">Test report</span><h2>Build preflight</h2><p id="testRunPreflightSummary"></p></div><span id="testRunPreflightStatus" class="settings-badge neutral">Prepared</span></div><div id="testRunPreflightContent"></div></section>
       <section id="testRunFailed" class="execution-diagnostic test-run-diagnostic" aria-live="polite" hidden></section>
@@ -342,11 +342,11 @@
   <script src="/ui_core.js?v=20260906-1"></script>
   <script src="/settings.js?v=20260905-4"></script>
   <script src="/recipe_serialization.js?v=20260903-2"></script>
-  <script src="/js/build_insight.js?v=20260905-1"></script>
-  <script src="/js/recipe/test_run_modal.js?v=20260906-1"></script>
+  <script src="/js/build_insight.js?v=20260906-2"></script>
+  <script src="/js/recipe/test_run_modal.js?v=20260906-3"></script>
   <script src="/app.js?v=20260906-1"></script>
   <script src="/js/pages/dashboard.js?v=20260905-2"></script>
-  <script src="/js/pages/packages.js?v=20260906-1"></script>
+  <script src="/js/pages/packages.js?v=20260906-3"></script>
   <script src="/js/pages/logs.js?v=20260905-7"></script>
   <script src="/js/recipe/source_changes.js?v=20260904-1"></script>
   <script src="/js/recipe/stepper.js?v=20260905-2"></script>

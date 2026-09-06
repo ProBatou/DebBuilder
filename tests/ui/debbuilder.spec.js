@@ -492,6 +492,7 @@ test('Test accepts HTTP 202 and follows the returned Run in a Recipe modal', asy
   await page.locator('#btnDryRun').click();
   await expect(page.locator('#view-recipes')).toHaveClass(/active/);
   await expect(page.locator('#testRunDialog')).toBeVisible();
+  await expect(page.locator('#testRunKind')).toHaveText('Test recipe');
   await expect(page.locator('#testRunState')).toHaveText('Prepared');
   await expect(page.locator('#testRunPrepared')).toBeVisible();
   await expect(page.locator('#testRunPreflightContent')).toContainText('Source & project');
@@ -502,6 +503,54 @@ test('Test accepts HTTP 202 and follows the returned Run in a Recipe modal', asy
   await expect(page.locator('#view-logs')).toHaveClass(/active/);
   await expect(page.locator('#executionMeta')).toContainText('#ui-01-prepared');
   await expect(page.locator('#executionMeta')).toContainText('Prepared');
+});
+
+test('Package Test follows the same modal without opening Logs', async ({page}, testInfo) => {
+  await page.route('**/api/run', route => route.fulfill({status:202, contentType:'application/json', body:JSON.stringify({run_id:'ui-01-prepared', status:'queued'})}));
+  await openView(page, 'packages');
+  await page.locator('[data-package-name="debbuilder"][data-admin-action="open-package"]').click();
+  await expect(page.locator('#packageDrawer')).toHaveClass(/open/);
+  await page.locator('#packageDetail [data-admin-action="build-package"][data-dry-run="true"]').click();
+  await expect(page.locator('#view-packages')).toHaveClass(/active/);
+  await expect(page.locator('#testRunDialog')).toBeVisible();
+  await expect(page.locator('#testRunKind')).toHaveText('Test package');
+  await expect(page.locator('#testRunState')).toHaveText('Prepared');
+  await expect(page.locator('#view-logs')).not.toHaveClass(/active/);
+  await expect(page.locator('#packageDrawer')).not.toHaveClass(/open/);
+  await expect(page.locator('#packageDrawer')).toHaveAttribute('aria-hidden', 'true');
+  const dialogBox = await page.locator('#testRunDialog').boundingBox();
+  const preflightBox = await page.locator('#testRunPreflightContent').boundingBox();
+  expect(dialogBox?.width).toBeGreaterThan(testInfo.project.name === 'desktop' ? 900 : 360);
+  expect(preflightBox?.width).toBeGreaterThan(testInfo.project.name === 'desktop' ? 850 : 340);
+  await capture(page, testInfo, 'package-test-followed-run', {fullPage:false});
+  await page.locator('#btnTestRunLogs').click();
+  await expect(page.locator('#view-logs')).toHaveClass(/active/);
+  await expect(page.locator('#executionMeta')).toContainText('#ui-01-prepared');
+});
+
+test('Recipe Test modal keeps running progress compact', async ({page}, testInfo) => {
+  await page.route('**/api/run', route => route.fulfill({status:202, contentType:'application/json', body:JSON.stringify({run_id:'ui-02-running', status:'queued'})}));
+  await openView(page, 'recipes');
+  await page.locator('#workflowSelect').selectOption('worker-agent');
+  await page.locator('#btnDryRun').click();
+  await expect(page.locator('#testRunDialog')).toBeVisible();
+  await expect(page.locator('#testRunState')).toHaveText('Running');
+  await expect(page.locator('#testRunLiveLog')).toBeVisible();
+  await capture(page, testInfo, 'recipe-test-running', {fullPage:false});
+  await page.locator('#btnTestRunClose').click();
+  await expect(page.locator('#testRunDialog')).not.toBeVisible();
+});
+
+test('Recipe Test modal presents a failed diagnostic', async ({page}, testInfo) => {
+  await page.route('**/api/run', route => route.fulfill({status:202, contentType:'application/json', body:JSON.stringify({run_id:'ui-04-build-failed', status:'queued'})}));
+  await openView(page, 'recipes');
+  await page.locator('#workflowSelect').selectOption('seerr');
+  await page.locator('#btnDryRun').click();
+  await expect(page.locator('#testRunDialog')).toBeVisible();
+  await expect(page.locator('#testRunState')).toHaveText('Test failed');
+  await expect(page.locator('#testRunFailed')).toContainText('Build command failed');
+  await capture(page, testInfo, 'recipe-test-failed', {fullPage:false});
+  await page.locator('#btnTestRunClose').click();
 });
 
 test('Settings renders every section without performing actions', async ({page}, testInfo) => {

@@ -24,7 +24,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from . import artifact_publication, artifact_validation, auth_service, automation_service, build_pipeline, deb_inspector, execution_service, notifications, package_service, release_cache, settings_service, storage, upstream_archive, workspace_cleanup
+from .build_models import utc_now
 from .build_store import BuildStore
+from .execution_manager import ExecutionManager, ExecutionManagerError
 from .http_handler import create_handler
 from .recipe_schema import RecipeDocumentError, normalize_recipe, recipe_document_for_storage, recipe_for_storage, require_safe_name, validate_recipe_metadata
 from .settings_store import cookie_secret, github_token, oidc_client_secret
@@ -63,6 +65,19 @@ PUBLIC_REPO_FILES = {"/repository.gpg", "/install.sh"}
 
 NOTIFICATION_SERVICE = None
 GITHUB_RELEASE_CACHE_SERVICE = None
+
+
+class RunAdmissionError(RuntimeError):
+    """Structured HTTP-facing failure while admitting a Build Run."""
+
+    def __init__(self, code: str, message: str, *, status: int, details: dict | None = None):
+        super().__init__(message)
+        self.code = code
+        self.status = status
+        self.details = details or {}
+
+    def as_dict(self) -> dict:
+        return {"code": self.code, "message": str(self), "details": self.details}
 
 
 def is_public_repo_path(path: str) -> bool:
@@ -145,12 +160,12 @@ def run_recipe_pipeline(workflow: dict, *, dry_run: bool = True) -> dict:
     )
 
 
-def run_post_build_automation(run_id: str, *, dry_run: bool, settings: dict | None = None) -> dict:
+def run_post_build_automation(run_id: str, *, dry_run: bool, settings: dict | None = None, store: BuildStore | None = None) -> dict:
     return automation_service.run_post_build(
         run_id,
         dry_run=dry_run,
         settings=settings or app_settings(),
-        store=BuildStore(DATA / "builds"),
+        store=store or BuildStore(DATA / "builds"),
         validate=validate_build_artifact,
         publish=publish_build_artifact,
     )
@@ -167,6 +182,121 @@ def run_recipe_pipeline_with_automation(workflow: dict, *, dry_run: bool = True)
         )
     finally:
         cleanup_workspaces()
+
+
+def execute_queued_recipe_run(run_id: str, *, store: BuildStore, expected_initial_status: str) -> dict:
+    """Execute one admitted Run and its existing post-build lifecycle."""
+    run = store.load(run_id)
+    dry_run = bool(run and run.get("mode") == "dry_run")
+    try:
+        result = build_pipeline.execute_pipeline_run(
+            run_id,
+            store=store,
+            expected_initial_status=expected_initial_status,
+            github_token=github_token(DATA),
+            lifecycle_callback=notify_lifecycle,
+        )
+        return automation_service.complete_with_automation(
+            result,
+            dry_run=dry_run,
+            automate=lambda submitted_run_id, *, dry_run: run_post_build_automation(
+                submitted_run_id, dry_run=dry_run, store=store,
+            ),
+            notify_completion=lambda completed: notification_service().notify_automatic_completion(completed),
+        )
+    finally:
+        cleanup_workspaces()
+
+
+def create_execution_manager(*, store: BuildStore | None = None, queue_capacity: int = 8, execute=None) -> ExecutionManager:
+    """Construct, but do not start, the server's single execution manager."""
+    callback = execute or (lambda run_id, **kwargs: execute_queued_recipe_run(run_id, **kwargs))
+    return ExecutionManager(store or BuildStore(DATA / "builds"), queue_capacity=queue_capacity, execute=callback)
+
+
+def start_execution_manager(http_server, manager: ExecutionManager | None = None) -> ExecutionManager:
+    """Attach and explicitly start one manager before HTTP serving begins."""
+    if getattr(http_server, "execution_manager", None) is not None:
+        raise RuntimeError("HTTP server already has an execution manager")
+    selected = manager or create_execution_manager()
+    selected.start()
+    http_server.execution_manager = selected
+    return selected
+
+
+def stop_execution_manager(http_server, *, timeout: float | None = None) -> None:
+    """Stop and detach the HTTP server's manager after submitted work drains."""
+    manager = getattr(http_server, "execution_manager", None)
+    if manager is None:
+        return
+    manager.stop(timeout=timeout)
+    http_server.execution_manager = None
+
+
+def _enqueue_failure_details(exc: Exception, run_id: str) -> dict:
+    details = {"run_id": run_id, "exception_type": type(exc).__name__}
+    if isinstance(exc, ExecutionManagerError):
+        details["manager_code"] = exc.code
+    return details
+
+
+def _mark_enqueue_failed(store: BuildStore, run_id: str, exc: Exception) -> None:
+    safe_error = {
+        "stage": "queue",
+        "code": "execution_enqueue_failed",
+        "message": "The Build Run could not be submitted for execution",
+        "details": _enqueue_failure_details(exc, run_id),
+    }
+    with store.locked_run(run_id):
+        run = store.load(run_id)
+        if not run or run.get("status") not in {"pending", "queued"}:
+            return
+        run.update({"status": "failed", "finished_at": utc_now(), "duration": 0.0, "error": safe_error})
+        store.save(run)
+    try:
+        store.append_log_line(run_id, "Execution enqueue failed; Run marked failed.", level="error")
+    except OSError as exc:
+        logging.getLogger(__name__).warning("Could not append enqueue failure log for Run %s (%s)", run_id, type(exc).__name__)
+
+
+def enqueue_recipe_run(manager: ExecutionManager | None, workflow: dict, *, dry_run: bool = True) -> dict:
+    """Reserve capacity, persist exactly one Run, and submit it asynchronously."""
+    if manager is None:
+        raise RunAdmissionError(
+            "execution_manager_unavailable", "Execution manager is unavailable", status=503,
+        )
+    try:
+        with manager.reserve() as reservation:
+            run = build_pipeline.create_pipeline_run(
+                workflow,
+                store=manager.store,
+                dry_run=dry_run,
+                recipe_id=str(workflow.get("name") or "recipe"),
+            )
+            try:
+                reservation.submit(str(run["id"]))
+            except Exception as exc:
+                _mark_enqueue_failed(manager.store, str(run["id"]), exc)
+                if isinstance(exc, ExecutionManagerError) and exc.code in {
+                    "execution_manager_not_accepting", "execution_manager_stopped", "execution_reservation_inactive",
+                }:
+                    raise RunAdmissionError(
+                        "execution_manager_unavailable", "Execution manager is unavailable", status=503,
+                        details={"run_id": run["id"]},
+                    ) from exc
+                raise RunAdmissionError(
+                    "execution_enqueue_failed", "The Build Run could not be submitted for execution", status=500,
+                    details={"run_id": run["id"]},
+                ) from exc
+    except ExecutionManagerError as exc:
+        if exc.code == "execution_queue_full":
+            raise RunAdmissionError(
+                exc.code, "The Build/Test queue is full; try again later", status=429, details=exc.details,
+            ) from exc
+        raise RunAdmissionError(
+            "execution_manager_unavailable", "Execution manager is unavailable", status=503,
+        ) from exc
+    return {"run_id": run["id"], "status": "queued"}
 
 
 def cleanup_workspaces() -> dict:
@@ -550,6 +680,7 @@ Handler = create_handler(sys.modules[__name__])
 def main():
     print(f"DebBuilder Repo UI listening on http://{RUNTIME.host}:{RUNTIME.port}")
     with ThreadingHTTPServer((RUNTIME.host, RUNTIME.port), Handler) as server:
+        start_execution_manager(server)
         stop = threading.Event()
         retention = threading.Thread(target=workspace_retention_loop, args=(stop,), name="workspace-retention", daemon=True)
         retention.start()
@@ -558,6 +689,7 @@ def main():
         finally:
             stop.set()
             retention.join()
+            stop_execution_manager(server)
 
 
 if __name__ == "__main__":

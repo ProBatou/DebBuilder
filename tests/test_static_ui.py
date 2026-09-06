@@ -245,14 +245,14 @@ class StaticUiTests(unittest.TestCase):
         self.assertIn("step.status || 'pending'", admin)
         self.assertNotIn('`<span class="step-chip">✓ ${esc(s.name)}</span>`', admin)
 
-    def test_dry_run_displays_detection_proposals_without_executing_them(self):
+    def test_dry_run_follows_the_asynchronous_run_without_executing_proposals_in_browser(self):
         app = (ROOT / "static" / "app.js").read_text()
         insight = self.read("static/js/build_insight.js")
         self.assertIn("detection_proposal", insight)
         self.assertIn("Detected suggestions are read-only", insight)
         self.assertNotIn("renderBuildCommands(data.detection.proposed_commands)", app)
-        self.assertIn("renderBuildEnvironment(data.detection)", app)
-        self.assertIn("renderPreflightReport(data, wf)", app)
+        self.assertIn("Test queued: ${data.run_id}", app)
+        self.assertIn("openExecution(data.run_id)", app)
 
     def test_logs_and_recipe_have_structured_insight_surfaces(self):
         html = self.read("static/index.html")
@@ -301,7 +301,7 @@ class StaticUiTests(unittest.TestCase):
         self.assertIn('id="buildAvailableDependencies"', html)
         self.assertIn('id="buildMissingDependencies"', html)
         self.assertIn("function renderDependencyCheck(dependencies)", app)
-        self.assertIn("renderDependencyCheck(data.dependencies)", app)
+        self.assertIn("openExecution(data.run_id)", app)
         self.assertIn("renderDependencyCheck();", serialization)
         self.assertIn(".dependency-check-results", css)
         self.assertNotIn(".build-dependency-state>span", css)
@@ -527,7 +527,7 @@ class StaticUiTests(unittest.TestCase):
         self.assertNotIn('/css/logs.css', html)
         for script in ("/js/pages/dashboard.js", "/js/pages/packages.js", "/js/pages/logs.js", "/js/recipe/source_changes.js", "/js/admin.js"):
             self.assertIn(script, html)
-        self.assertIn('/ui_core.js?v=20260905-2', html)
+        self.assertIn('/ui_core.js?v=20260906-1', html)
         self.assertIn('/settings.js?v=20260905-4', html)
         self.assertIn('/js/pages/dashboard.js?v=20260905-2', html)
         self.assertIn('/js/pages/logs.js?v=20260905-7', html)

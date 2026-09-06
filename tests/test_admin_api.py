@@ -838,26 +838,29 @@ class AdminApiTests(AdminApiCase):
 
     def test_legacy_run_payload_without_active_remains_enabled(self):
         workflow = {"name": "legacy-enabled", "steps": []}
-        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": "legacy-run", "status": "success"}) as run:
+        execute, finished = self.terminal_executor("prepared")
+        with mock.patch("debbuilder.app.execute_queued_recipe_run", side_effect=execute):
             status, response = self.request("POST", "/api/run", {"workflow": workflow, "dry_run": True})
-        self.assertEqual(status, 200)
-        self.assertEqual(response["run_id"], "legacy-run")
-        run.assert_called_once_with(workflow, dry_run=True)
+            self.assertTrue(finished.wait(2))
+        self.assertEqual(status, 202)
+        self.assertEqual(response["status"], "queued")
+        self.assertEqual(BuildStore(server.DATA / "builds").load(response["run_id"])["mode"], "dry_run")
 
     def test_real_build_uses_structured_pipeline_without_legacy_settings_gate(self):
         workflow = {"name": "enabled", "active": True, "steps": []}
-        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": "real-run", "status": "success"}) as run:
+        execute, finished = self.terminal_executor("success")
+        with mock.patch("debbuilder.app.execute_queued_recipe_run", side_effect=execute):
             status, response = self.request("POST", "/api/run", {"workflow": workflow, "dry_run": False})
-        self.assertEqual(status, 200)
-        self.assertEqual(response["run_id"], "real-run")
-        run.assert_called_once_with(workflow, dry_run=False)
+            self.assertTrue(finished.wait(2))
+        self.assertEqual(status, 202)
+        self.assertEqual(response["status"], "queued")
+        self.assertEqual(BuildStore(server.DATA / "builds").load(response["run_id"])["mode"], "build")
 
     def test_auto_validation_does_not_run_after_dry_run(self):
         server.update_settings({"automation": {"auto_validate_after_successful_build": True, "auto_publish_after_successful_validation": True}})
         workflow = {"name": "dry-auto", "active": True, "steps": []}
         with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": "dry-run", "status": "success"}) as run, mock.patch("debbuilder.app.validate_build_artifact") as validate:
-            status, response = self.request("POST", "/api/run", {"workflow": workflow, "dry_run": True})
-        self.assertEqual(status, 200)
+            response = server.run_recipe_pipeline_with_automation(workflow, dry_run=True)
         self.assertEqual(response["run_id"], "dry-run")
         run.assert_called_once_with(workflow, dry_run=True)
         validate.assert_not_called()
@@ -875,8 +878,7 @@ class AdminApiTests(AdminApiCase):
             return validation
 
         with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": run["id"], "status": "success"}), mock.patch("debbuilder.app.validate_build_artifact", side_effect=validate) as validate_mock, mock.patch("debbuilder.app.publish_build_artifact") as publish:
-            status, response = self.request("POST", "/api/run", {"workflow": {"name": "latest-auto-recipe", "active": True}, "dry_run": False})
-        self.assertEqual(status, 200)
+            response = server.run_recipe_pipeline_with_automation({"name": "latest-auto-recipe", "active": True}, dry_run=False)
         validate_mock.assert_called_once_with("latest-auto-run", {})
         publish.assert_not_called()
         self.assertEqual(response["validation"]["status"], "success")
@@ -902,8 +904,7 @@ class AdminApiTests(AdminApiCase):
             return validation
 
         with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": "current-auto-run", "status": "success"}), mock.patch("debbuilder.app.validate_build_artifact", side_effect=validate) as validate_mock:
-            status, _response = self.request("POST", "/api/run", {"workflow": {"name": "same-auto-recipe", "active": True}, "dry_run": False})
-        self.assertEqual(status, 200)
+            server.run_recipe_pipeline_with_automation({"name": "same-auto-recipe", "active": True}, dry_run=False)
         validate_mock.assert_called_once()
         self.assertEqual(len(store.load("old-auto-run")["validations"]), 1)
         self.assertEqual(store.load("current-auto-run")["validations"][0]["artifact"], str(current_artifact))
@@ -920,8 +921,7 @@ class AdminApiTests(AdminApiCase):
             return validation
 
         with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": run["id"], "status": "success"}), mock.patch("debbuilder.app.validate_build_artifact", side_effect=validate):
-            status, response = self.request("POST", "/api/run", {"workflow": {"name": "failed-auto-recipe", "active": True}, "dry_run": False})
-        self.assertEqual(status, 200)
+            response = server.run_recipe_pipeline_with_automation({"name": "failed-auto-recipe", "active": True}, dry_run=False)
         self.assertEqual(response["validation"]["status"], "failed")
         self.assertEqual(server.get_package("failed-auto")["lifecycle_display_status"], "validation_failed")
 
@@ -945,8 +945,7 @@ class AdminApiTests(AdminApiCase):
             return publication
 
         with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": run["id"], "status": "success"}), mock.patch("debbuilder.app.validate_build_artifact", side_effect=validate), mock.patch("debbuilder.app.publish_build_artifact", side_effect=publish) as publish_mock:
-            status, response = self.request("POST", "/api/run", {"workflow": {"name": "publish-auto-recipe", "active": True}, "dry_run": False})
-        self.assertEqual(status, 200)
+            response = server.run_recipe_pipeline_with_automation({"name": "publish-auto-recipe", "active": True}, dry_run=False)
         publish_mock.assert_called_once()
         self.assertEqual(response["publication"]["status"], "success")
         self.assertEqual(server.get_package("publish-auto")["lifecycle_display_status"], "published")
@@ -963,14 +962,16 @@ class AdminApiTests(AdminApiCase):
         dependency_state = {"detected":["python3","python3-pip"],"manually_added":[],"required":["python3","python3-pip"],"available":["python3","python3-pip"],"missing":[],"checks":[],"installation_attempted":False}
         with mock.patch("debbuilder.build_pipeline.source_acquisition.acquire_source", side_effect=acquire), mock.patch("debbuilder.build_pipeline.dependency_checker.check_dependencies", return_value=dependency_state):
             status, result = self.request("POST", "/api/run", {"workflow": workflow, "dry_run": True})
-        self.assertEqual(status, 200)
-        self.assertEqual(result["status"], "prepared")
-        workspace = Path(result["workspace"])
+            run = self.wait_for_run(result["run_id"])
+        self.assertEqual(status, 202)
+        self.assertEqual(result["status"], "queued")
+        self.assertEqual(run["status"], "prepared")
+        workspace = Path(run["workspace"])
         self.assertEqual(workspace.parent, server.DATA / "builds")
         self.assertTrue((workspace / "recipe.json").exists())
-        self.assertEqual([step["status"] for step in result["steps"][:4]], ["success"] * 4)
-        self.assertEqual(result["steps"][4]["status"], "skipped")
-        self.assertEqual([step["status"] for step in result["steps"][5:]], ["success", "success", "skipped", "skipped", "skipped"])
+        self.assertEqual([step["status"] for step in run["steps"][:4]], ["success"] * 4)
+        self.assertEqual(run["steps"][4]["status"], "skipped")
+        self.assertEqual([step["status"] for step in run["steps"][5:]], ["success", "success", "skipped", "skipped", "skipped"])
         _, executions = self.request("GET", "/api/executions")
         row = next(item for item in executions["executions"] if item["id"] == result["run_id"])
         self.assertEqual(row["status"], "prepared")

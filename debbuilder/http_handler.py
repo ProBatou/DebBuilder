@@ -230,7 +230,12 @@ def create_handler(api):
                     api.json_response(self, {"error": "recipe is disabled"}, 409)
                     return
                 dry_run = bool(data.get("dry_run", True))
-                api.json_response(self, api.run_recipe_pipeline_with_automation(workflow, dry_run=dry_run))
+                try:
+                    result = api.enqueue_recipe_run(getattr(self.server, "execution_manager", None), workflow, dry_run=dry_run)
+                except api.RunAdmissionError as exc:
+                    api.json_response(self, {"error": exc.as_dict()}, exc.status)
+                    return
+                api.json_response(self, result, 202)
                 return
             if self.path == "/api/upstream-archive/inspect":
                 workflow = data.get("workflow", data)

@@ -21,6 +21,8 @@ const STATUS_LABELS = {
   publication_failed: 'Publication failed',
   ready_to_publish: 'Ready to publish',
   published: 'Published',
+  queued: 'Queued',
+  building: 'Running',
   running: 'Running',
   failed: 'Error',
   cancelled: 'Cancelled',
@@ -48,7 +50,7 @@ async function getJson(url) {
   const response = await fetch(url);
   const payload = await response.json();
   if (!response.ok) {
-    const error = new Error(payload.error || response.statusText);
+    const error = new Error(payload.error?.message || payload.error || response.statusText);
     error.status = response.status;
     throw error;
   }
@@ -62,7 +64,7 @@ async function postJson(url, body) {
     body: JSON.stringify(body),
   });
   const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || response.statusText);
+  if (!response.ok) throw new Error(payload.error?.message || payload.error || response.statusText);
   return payload;
 }
 

@@ -27,6 +27,8 @@ function packageVersionLabel(packageRow) {
   return packageRow.apt_version || (packageRow.version || {}).published || 'not published';
 }
 
+const packageRunSubmissions = new Set();
+
 function recipeIdFromPackageName(name) {
   return name.replace(/[^a-zA-Z0-9_.+-]/g, '-');
 }
@@ -206,13 +208,19 @@ async function buildPackage(name, dryRun = true) {
     if (!confirmed) return;
   }
   const workflow = await getJson('/api/workflows/' + encodeURIComponent(packageRow.recipe));
+  const submissionKey = `${name}:${dryRun}`;
+  if (packageRunSubmissions.has(submissionKey)) return;
+  packageRunSubmissions.add(submissionKey);
   try {
     const run = await postJson('/api/run', {workflow, dry_run: dryRun});
-    showToast(dryRun ? `Test finished: ${run.run_id} · code ${run.returncode}` : `Build finished: ${run.run_id} · status ${run.status || run.returncode}`, {type: 'success'});
+    showToast(`${dryRun ? 'Test' : 'Build'} queued: ${run.run_id}`, {type: 'info'});
     await Promise.all([loadExecutions(), loadPackages()]);
-    await openPackage(name);
+    switchView('logs');
+    await openExecution(run.run_id);
   } catch (error) {
     showToast(`${dryRun ? 'Test' : 'Build'} failed: ${error.message}`, {type: 'error'});
+  } finally {
+    packageRunSubmissions.delete(submissionKey);
   }
 }
 

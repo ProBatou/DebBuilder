@@ -43,7 +43,12 @@ class Handler(app.Handler):
 
 def main():
     print(f"DebBuilder Repo UI listening on http://{app.RUNTIME.host}:{app.RUNTIME.port}")
-    app.ThreadingHTTPServer((app.RUNTIME.host, app.RUNTIME.port), Handler).serve_forever()
+    with app.ThreadingHTTPServer((app.RUNTIME.host, app.RUNTIME.port), Handler) as http_server:
+        app.start_execution_manager(http_server)
+        try:
+            http_server.serve_forever()
+        finally:
+            app.stop_execution_manager(http_server)
 
 
 if __name__ == "__main__":

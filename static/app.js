@@ -7,6 +7,7 @@ let autosaveRevision = 0;
 let autosaveDirty = false;
 let recipeMutationPaused = false;
 let autosaveIdleWaiters = [];
+let recipeRunSubmissionInFlight = false;
 
 function toggleVersionExpression() {
   if ($('recipeVersionExpressionField')) $('recipeVersionExpressionField').hidden = $('recipeMetaVersionSource')?.value !== 'regex';
@@ -49,8 +50,8 @@ function refreshRecipeApplicability() {
   ['btnDryRun', 'btnBuildReal'].forEach(id => {
     const button = $(id);
     if (!button) return;
-    button.disabled = !recipeEnabled;
-    button.title = recipeEnabled ? '' : 'Enable this Recipe to test or build it.';
+    button.disabled = !recipeEnabled || recipeRunSubmissionInFlight;
+    button.title = recipeRunSubmissionInFlight ? 'A Build/Test submission is already in progress.' : recipeEnabled ? '' : 'Enable this Recipe to test or build it.';
   });
   if (typeof scheduleRecipeStepUpdate === 'function') scheduleRecipeStepUpdate();
 }
@@ -208,34 +209,47 @@ function assertRecipeVersionRevisionIsValid() {
 }
 
 async function dryRun() {
-  assertRecipeVersionRevisionIsValid();
-  const wf = collectWorkflow();
-  if (!buildOutputIsComplete(wf.build.output)) throw new Error('Build output requires at least one relative path.');
-  const data = await postJson('/api/run', {workflow:wf, dry_run:true});
-  if (data.detection) {
-    renderBuildEnvironment(data.detection);
-    if (typeof setBuildOutputSuggestions === 'function') setBuildOutputSuggestions(data.detection.suggested_output_paths || []);
+  if (recipeRunSubmissionInFlight) return;
+  recipeRunSubmissionInFlight = true;
+  refreshRecipeApplicability();
+  try {
+    assertRecipeVersionRevisionIsValid();
+    const wf = collectWorkflow();
+    if (!buildOutputIsComplete(wf.build.output)) throw new Error('Build output requires at least one relative path.');
+    const data = await postJson('/api/run', {workflow:wf, dry_run:true});
+    showToast(`Test queued: ${data.run_id}`, {type:'info'});
+    await loadExecutions({resumePolling:false});
+    switchView('logs');
+    await openExecution(data.run_id);
+  } finally {
+    recipeRunSubmissionInFlight = false;
+    refreshRecipeApplicability();
   }
-  if (data.dependencies) {
-    renderDependencyCheck(data.dependencies);
-  }
-  renderPreflightReport(data, wf);
-  await loadExecutions();
 }
 
 async function buildReal() {
-  assertRecipeVersionRevisionIsValid();
-  const wf = collectWorkflow();
-  if (!buildOutputIsComplete(wf.build.output)) throw new Error('Build output requires at least one relative path.');
-  const confirmed = await showConfirm({
-    title: `Build ${wf.package?.name || wf.name}?`,
-    description: 'This starts the real build pipeline for the selected Recipe.',
-    confirmLabel: 'Start build',
-  });
-  if (!confirmed) return;
-  const data = await postJson('/api/run', {workflow:wf, dry_run:false});
-  await loadExecutions();
-  switchView('logs');
+  if (recipeRunSubmissionInFlight) return;
+  recipeRunSubmissionInFlight = true;
+  refreshRecipeApplicability();
+  try {
+    assertRecipeVersionRevisionIsValid();
+    const wf = collectWorkflow();
+    if (!buildOutputIsComplete(wf.build.output)) throw new Error('Build output requires at least one relative path.');
+    const confirmed = await showConfirm({
+      title: `Build ${wf.package?.name || wf.name}?`,
+      description: 'This starts the real build pipeline for the selected Recipe.',
+      confirmLabel: 'Start build',
+    });
+    if (!confirmed) return;
+    const data = await postJson('/api/run', {workflow:wf, dry_run:false});
+    showToast(`Build queued: ${data.run_id}`, {type:'info'});
+    await loadExecutions({resumePolling:false});
+    switchView('logs');
+    await openExecution(data.run_id);
+  } finally {
+    recipeRunSubmissionInFlight = false;
+    refreshRecipeApplicability();
+  }
 }
 
 async function deleteCurrentRecipe() {

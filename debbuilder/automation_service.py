@@ -55,6 +55,22 @@ def run_with_automation(
     notify_completion: Callable[[dict], object],
 ) -> dict:
     result = pipeline(workflow, dry_run=dry_run)
+    return complete_with_automation(
+        result,
+        dry_run=dry_run,
+        automate=automate,
+        notify_completion=notify_completion,
+    )
+
+
+def complete_with_automation(
+    result: dict,
+    *,
+    dry_run: bool,
+    automate: Callable[..., dict],
+    notify_completion: Callable[[dict], object],
+) -> dict:
+    """Apply the existing automation lifecycle to an already executed Run."""
     run_id = str(result.get("run_id") or "")
     if run_id and result.get("status") == "success":
         automation = automate(run_id, dry_run=dry_run)

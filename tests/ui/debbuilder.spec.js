@@ -484,44 +484,17 @@ test('Logs explains build, validation, and publication failures', async ({page},
   await capture(page, testInfo, 'log-publication-diagnostic', {fullPage:false});
 });
 
-test('Test renders a structured preflight without applying detected commands', async ({page}, testInfo) => {
-  await page.evaluate(() => {
-    window.__preflightClipboard = '';
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: {writeText: async value => { window.__preflightClipboard = value; }},
-    });
-  });
-  const detailResponse = await page.request.get('/api/executions/ui-01-prepared');
-  expect(detailResponse.ok()).toBe(true);
-  const seeded = (await detailResponse.json()).execution;
-  const preflight = {...seeded, run_id:seeded.id, returncode:0};
-  for (const name of ['source','detection','dependencies','source_changes','build','staging']) {
-    preflight[name] = seeded.steps.find(step => step.name === name)?.details || null;
-  }
-  await page.route('**/api/run', route => route.fulfill({status:200, contentType:'application/json', body:JSON.stringify(preflight)}));
-
+test('Test accepts HTTP 202 and follows the returned Run in Logs', async ({page}, testInfo) => {
+  await page.route('**/api/run', route => route.fulfill({status:202, contentType:'application/json', body:JSON.stringify({run_id:'ui-01-prepared', status:'queued'})}));
   await openView(page, 'recipes');
   await page.locator('#workflowSelect').selectOption('debbuilder');
   await expect(page.locator('#buildCommands')).toHaveValue('');
   await page.locator('#btnDryRun').click();
-  await expect(page.locator('#recipePreflight')).toBeVisible();
-  await expect(page.locator('#recipePreflight')).toContainText('Build preflight');
-  await expect(page.locator('#recipePreflight')).toContainText('Source & project');
-  await expect(page.locator('#recipePreflight')).toContainText('Dependencies & build plan');
-  await expect(page.locator('#recipePreflight')).toContainText('Source changes');
-  await expect(page.locator('#recipePreflight')).toContainText('Debian package plan');
-  await expect(page.locator('#recipePreflight')).toContainText('Systemd service');
-  await expect(page.locator('#recipePreflight')).toContainText('Suggested');
-  await expect(page.locator('#recipePreflight')).toContainText('commands not executed');
-  await expect(page.locator('[data-copy-preflight-command]')).toHaveCount(1);
-  await expect(page.locator('#recipePreflight')).toContainText('add it explicitly with Edit commands');
-  await page.locator('[data-copy-preflight-command]').click();
-  await expect.poll(() => page.evaluate(() => window.__preflightClipboard)).toBe('python3 -m build --wheel');
-  await page.locator('.toast-dismiss').click();
-  await expect(page.locator('#recipePreflight')).toContainText('blocker');
-  await expect(page.locator('#buildCommands')).toHaveValue('');
-  await captureElement(page, testInfo, 'recipe-preflight', page.locator('#recipePreflight'));
+  await expect(page.locator('#view-logs')).toHaveClass(/active/);
+  await expect(page.locator('#executionMeta')).toContainText('#ui-01-prepared');
+  await expect(page.locator('#executionMeta')).toContainText('Prepared');
+  await expect(page.locator('.toast-region')).toContainText('Test queued: ui-01-prepared');
+  await capture(page, testInfo, 'recipe-test-followed-run', {fullPage:false});
 });
 
 test('Settings renders every section without performing actions', async ({page}, testInfo) => {

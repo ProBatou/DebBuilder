@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import tempfile
 import threading
+import time
 import unittest
 import urllib.request
 from http.server import ThreadingHTTPServer
@@ -52,6 +53,7 @@ class AdminApiCase(unittest.TestCase):
         server.AUTH_MODE = "none"
         server.GITHUB_RELEASE_CACHE_SERVICE = None
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        self.execution_manager = server.start_execution_manager(self.httpd)
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self.thread.start()
         self.base_url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
@@ -59,6 +61,7 @@ class AdminApiCase(unittest.TestCase):
     def tearDown(self):
         self.httpd.shutdown()
         self.thread.join(timeout=2)
+        server.stop_execution_manager(self.httpd, timeout=5)
         self.httpd.server_close()
         for name, value in self.old.items():
             setattr(server, name, value)
@@ -74,6 +77,30 @@ class AdminApiCase(unittest.TestCase):
         )
         with urllib.request.urlopen(request, timeout=5) as response:
             return response.status, json.loads(response.read().decode())
+
+    def wait_for_run(self, run_id: str, *, statuses=("prepared", "success", "failed"), timeout=5):
+        deadline = time.monotonic() + timeout
+        store = BuildStore(server.DATA / "builds")
+        while time.monotonic() < deadline:
+            run = store.load(run_id)
+            if run and run.get("status") in statuses:
+                return run
+            time.sleep(0.01)
+        self.fail(f"Run {run_id} did not reach {statuses}")
+
+    def terminal_executor(self, status: str):
+        finished = threading.Event()
+
+        def execute(run_id, *, store, expected_initial_status):
+            store.transition_status(run_id, expected=expected_initial_status, status="running")
+            with store.locked_run(run_id):
+                run = store.load(run_id)
+                run["status"] = status
+                store.save(run)
+            finished.set()
+            return {"run_id": run_id, "status": status}
+
+        return execute, finished
 
     def successful_build_run(self, run_id="auto-run", package="auto-package", version="1.0-1"):
         recipe = {

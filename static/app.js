@@ -218,9 +218,7 @@ async function dryRun() {
     if (!buildOutputIsComplete(wf.build.output)) throw new Error('Build output requires at least one relative path.');
     const data = await postJson('/api/run', {workflow:wf, dry_run:true});
     showToast(`Test queued: ${data.run_id}`, {type:'info'});
-    await loadExecutions({resumePolling:false});
-    switchView('logs');
-    await openExecution(data.run_id);
+    openTestRunModal({runId: data.run_id, workflow: wf});
   } finally {
     recipeRunSubmissionInFlight = false;
     refreshRecipeApplicability();

@@ -32,6 +32,10 @@ assert.match(nodes.executionDiagnostic.innerHTML, /diagnostic-details" hidden/);
 context.setExecutionDiagnosticExpanded(true);
 assert.match(nodes.executionDiagnostic.innerHTML, /Hide details/);
 assert.doesNotMatch(nodes.executionDiagnostic.innerHTML, /diagnostic-details" hidden/);
+const compactDiagnostic = context.executionDiagnosticHtml(diagnosticExecution, {includeDetails:false});
+assert.match(compactDiagnostic, /Command exceeded its limit/);
+assert.match(compactDiagnostic, /Increase the configured maximum runtime/);
+assert.doesNotMatch(compactDiagnostic, /diagnostic-toggle-row/);
 
 context.renderExecutionDiagnostic({status:'failed', error:{message:'Old run failed'}});
 assert.equal(nodes.executionDiagnostic.hidden, true);

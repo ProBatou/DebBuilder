@@ -484,17 +484,24 @@ test('Logs explains build, validation, and publication failures', async ({page},
   await capture(page, testInfo, 'log-publication-diagnostic', {fullPage:false});
 });
 
-test('Test accepts HTTP 202 and follows the returned Run in Logs', async ({page}, testInfo) => {
+test('Test accepts HTTP 202 and follows the returned Run in a Recipe modal', async ({page}, testInfo) => {
   await page.route('**/api/run', route => route.fulfill({status:202, contentType:'application/json', body:JSON.stringify({run_id:'ui-01-prepared', status:'queued'})}));
   await openView(page, 'recipes');
   await page.locator('#workflowSelect').selectOption('debbuilder');
   await expect(page.locator('#buildCommands')).toHaveValue('');
   await page.locator('#btnDryRun').click();
+  await expect(page.locator('#view-recipes')).toHaveClass(/active/);
+  await expect(page.locator('#testRunDialog')).toBeVisible();
+  await expect(page.locator('#testRunState')).toHaveText('Prepared');
+  await expect(page.locator('#testRunPrepared')).toBeVisible();
+  await expect(page.locator('#testRunPreflightContent')).toContainText('Source & project');
+  await expect(page.locator('#btnTestRunBuild')).toBeVisible();
+  await expect(page.locator('.toast-region')).toContainText('Test queued: ui-01-prepared');
+  await capture(page, testInfo, 'recipe-test-followed-run', {fullPage:false});
+  await page.locator('#btnTestRunLogs').click();
   await expect(page.locator('#view-logs')).toHaveClass(/active/);
   await expect(page.locator('#executionMeta')).toContainText('#ui-01-prepared');
   await expect(page.locator('#executionMeta')).toContainText('Prepared');
-  await expect(page.locator('.toast-region')).toContainText('Test queued: ui-01-prepared');
-  await capture(page, testInfo, 'recipe-test-followed-run', {fullPage:false});
 });
 
 test('Settings renders every section without performing actions', async ({page}, testInfo) => {

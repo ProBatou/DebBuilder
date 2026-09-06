@@ -22,6 +22,22 @@ function stepDetails(result, name) {
   return (result.steps || []).find(step => step.name === name)?.details || {};
 }
 
+function executionDiagnosticHtml(execution, {expanded = false, includeDetails = true} = {}) {
+  const diagnostic = execution?.diagnostic;
+  if (!diagnostic) return '';
+  const locations = diagnostic.where || [];
+  const facts = diagnostic.facts || [];
+  const recipeAction = diagnostic.recipe_step && execution.recipe_id
+    ? `<button type="button" class="btn btn--ghost btn--sm diagnostic-recipe-action" data-diagnostic-recipe="${esc(execution.recipe_id)}" data-diagnostic-step="${esc(diagnostic.recipe_step)}">Open Recipe · ${esc(diagnostic.recipe_step)}</button>`
+    : '';
+  const details = includeDetails ? `<div class="diagnostic-toggle-row"><button type="button" class="btn btn--ghost btn--sm" data-diagnostic-toggle aria-expanded="${expanded ? 'true' : 'false'}">${expanded ? 'Hide details' : 'Show details'}</button></div><div class="diagnostic-details" ${expanded ? '' : 'hidden'}><div class="diagnostic-facts">${facts.map(row => {
+    const multiline = String(row.value || '').includes('\n');
+    const value = multiline ? `<pre>${esc(row.value)}</pre>` : `<strong>${esc(row.value)}</strong>`;
+    return `<div><span>${esc(row.label)}</span>${value}</div>`;
+  }).join('')}</div><div class="diagnostic-next"><span>What to do next</span><p>${esc(diagnostic.next_action || 'Review the raw log before retrying.')}</p>${recipeAction}</div></div>` : diagnostic.next_action ? `<div class="diagnostic-next"><span>What to do next</span><p>${esc(diagnostic.next_action)}</p></div>` : '';
+  return `<div class="diagnostic-head"><div><span class="eyebrow">Primary diagnostic</span><h4>${esc(diagnostic.title || 'Execution failed')}</h4></div><span class="badge failed">${esc(diagnostic.code || 'failed')}</span></div><p class="diagnostic-reason">${esc(diagnostic.reason || 'No detailed reason was recorded.')}</p>${locations.length ? `<div class="diagnostic-context">${locations.map(row => `<span><b>${esc(row.label)}</b> ${esc(row.value)}</span>`).join('')}</div>` : ''}${details}`;
+}
+
 function renderExecutionDiagnostic(execution) {
   const node = $('executionDiagnostic');
   if (!node) return;
@@ -31,17 +47,8 @@ function renderExecutionDiagnostic(execution) {
     node.innerHTML = '';
     return;
   }
-  const locations = diagnostic.where || [];
-  const facts = diagnostic.facts || [];
   const expanded = typeof adminState !== 'undefined' && adminState.diagnosticExpandedRunId === execution?.id;
-  const recipeAction = diagnostic.recipe_step && execution.recipe_id
-    ? `<button type="button" class="btn btn--ghost btn--sm diagnostic-recipe-action" data-diagnostic-recipe="${esc(execution.recipe_id)}" data-diagnostic-step="${esc(diagnostic.recipe_step)}">Open Recipe · ${esc(diagnostic.recipe_step)}</button>`
-    : '';
-  node.innerHTML = `<div class="diagnostic-head"><div><span class="eyebrow">Primary diagnostic</span><h4>${esc(diagnostic.title || 'Execution failed')}</h4></div><span class="badge failed">${esc(diagnostic.code || 'failed')}</span></div><p class="diagnostic-reason">${esc(diagnostic.reason || 'No detailed reason was recorded.')}</p>${locations.length ? `<div class="diagnostic-context">${locations.map(row => `<span><b>${esc(row.label)}</b> ${esc(row.value)}</span>`).join('')}</div>` : ''}<div class="diagnostic-toggle-row"><button type="button" class="btn btn--ghost btn--sm" data-diagnostic-toggle aria-expanded="${expanded ? 'true' : 'false'}">${expanded ? 'Hide details' : 'Show details'}</button></div><div class="diagnostic-details" ${expanded ? '' : 'hidden'}><div class="diagnostic-facts">${facts.map(row => {
-    const multiline = String(row.value || '').includes('\n');
-    const value = multiline ? `<pre>${esc(row.value)}</pre>` : `<strong>${esc(row.value)}</strong>`;
-    return `<div><span>${esc(row.label)}</span>${value}</div>`;
-  }).join('')}</div><div class="diagnostic-next"><span>What to do next</span><p>${esc(diagnostic.next_action || 'Review the raw log before retrying.')}</p>${recipeAction}</div></div>`;
+  node.innerHTML = executionDiagnosticHtml(execution, {expanded});
   node.hidden = false;
 }
 
@@ -181,19 +188,28 @@ function preflightFindings(result, workflow = {}) {
   return unique;
 }
 
-function renderPreflightReport(result, workflow) {
-  const node = $('recipePreflight');
-  const content = $('recipePreflightContent');
-  if (!node || !content) return;
+function preflightReportPresentation(result, workflow) {
   const findings = preflightFindings(result, workflow);
   const blockers = findings.filter(row => row.level === 'blocker').length;
   const warnings = findings.filter(row => row.level === 'warning').length;
   const status = blockers ? 'Action required' : warnings ? 'Review warnings' : 'Ready for Build';
   const statusClass = blockers ? 'locked' : warnings ? 'warning' : 'active';
-  $('recipePreflightStatus').className = `settings-badge ${statusClass}`;
-  $('recipePreflightStatus').textContent = status;
-  $('recipePreflightSummary').textContent = `${blockers} blocker${blockers === 1 ? '' : 's'} · ${warnings} warning${warnings === 1 ? '' : 's'} · commands not executed`;
-  content.innerHTML = `<div class="preflight-origin-legend">${insightOrigin('Configured', 'configured')}${insightOrigin('Detected', 'detected')}${insightOrigin('Suggested', 'suggested')}${insightOrigin('Resolved', 'resolved')}${insightOrigin('Prepared', 'prepared')}</div><div class="preflight-grid">${preflightSourceSection(result)}${preflightBuildSection(result, workflow)}${preflightChangesSection(result, workflow)}${preflightDebianSection(result, workflow)}${preflightServiceSection(result, workflow)}</div><section class="preflight-findings"><div class="insight-section-head"><div><span class="eyebrow">Decision</span><h3>Warnings & blockers</h3></div></div><div class="preflight-finding-list">${findings.map(row => `<article class="preflight-finding ${esc(row.level)}"><span>${esc(row.level)}</span><p>${esc(row.text)}</p></article>`).join('')}</div></section>`;
+  return {
+    status, statusClass,
+    summary: `${blockers} blocker${blockers === 1 ? '' : 's'} · ${warnings} warning${warnings === 1 ? '' : 's'} · commands not executed`,
+    content: `<div class="preflight-origin-legend">${insightOrigin('Configured', 'configured')}${insightOrigin('Detected', 'detected')}${insightOrigin('Suggested', 'suggested')}${insightOrigin('Resolved', 'resolved')}${insightOrigin('Prepared', 'prepared')}</div><div class="preflight-grid">${preflightSourceSection(result)}${preflightBuildSection(result, workflow)}${preflightChangesSection(result, workflow)}${preflightDebianSection(result, workflow)}${preflightServiceSection(result, workflow)}</div><section class="preflight-findings"><div class="insight-section-head"><div><span class="eyebrow">Decision</span><h3>Warnings & blockers</h3></div></div><div class="preflight-finding-list">${findings.map(row => `<article class="preflight-finding ${esc(row.level)}"><span>${esc(row.level)}</span><p>${esc(row.text)}</p></article>`).join('')}</div></section>`,
+  };
+}
+
+function renderPreflightReport(result, workflow) {
+  const node = $('recipePreflight');
+  const content = $('recipePreflightContent');
+  if (!node || !content) return;
+  const presentation = preflightReportPresentation(result, workflow);
+  $('recipePreflightStatus').className = `settings-badge ${presentation.statusClass}`;
+  $('recipePreflightStatus').textContent = presentation.status;
+  $('recipePreflightSummary').textContent = presentation.summary;
+  content.innerHTML = presentation.content;
   node.dataset.stale = 'false';
   node.hidden = false;
   node.scrollIntoView?.({behavior:'smooth', block:'start'});

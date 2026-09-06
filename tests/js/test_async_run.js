@@ -32,6 +32,7 @@ function functionSource(source, name, nextName) {
   const app = fs.readFileSync('static/app.js', 'utf8');
   const followed = [];
   const switched = [];
+  const openedTestModals = [];
   const toasts = [];
   let recipePosts = 0;
   const recipeContext = vm.createContext({
@@ -47,6 +48,7 @@ function functionSource(source, name, nextName) {
     loadExecutions: async () => {},
     switchView: view => switched.push(view),
     openExecution: async id => followed.push(id),
+    openTestRunModal: payload => openedTestModals.push(payload),
     showConfirm: async () => true,
     refreshRecipeApplicability: () => {},
   });
@@ -57,8 +59,10 @@ function functionSource(source, name, nextName) {
   );
   await vm.runInContext('Promise.all([dryRun(), dryRun()])', recipeContext);
   await vm.runInContext('buildReal()', recipeContext);
-  assert.deepEqual(followed, ['dry-run-id', 'build-run-id']);
-  assert.deepEqual(switched, ['logs', 'logs']);
+  assert.deepEqual(openedTestModals.map(row => row.runId), ['dry-run-id']);
+  assert.equal(openedTestModals[0].workflow.name, 'demo');
+  assert.deepEqual(followed, ['build-run-id']);
+  assert.deepEqual(switched, ['logs']);
   assert.deepEqual(toasts, ['Test queued: dry-run-id', 'Build queued: build-run-id']);
   assert.equal(recipePosts, 2);
 

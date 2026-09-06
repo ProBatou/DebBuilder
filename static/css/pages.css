@@ -604,6 +604,17 @@
 .recipe-dialog::backdrop { background: rgba(3, 7, 12, .72); }
 .recipe-dialog form { display: grid; gap: var(--space-3); padding: var(--space-4); }
 .recipe-dialog .actions { justify-content: flex-end; }
+.test-run-dialog { width: min(920px, calc(100vw - 24px)); max-width: none; max-height: min(820px, calc(100dvh - 24px)); overflow: hidden; }
+.test-run-dialog form { grid-template-areas: "head" "progress" "body" "actions"; grid-template-rows: auto auto minmax(0, 1fr) auto; max-height: min(820px, calc(100dvh - 24px)); overflow: hidden; }
+.test-run-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
+.test-run-head { grid-area: head; }
+.test-run-head p,.test-run-progress p { margin: 2px 0 0; color: var(--text-muted); font-size: var(--text-help); }
+.test-run-progress { grid-area: progress; display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); border: 1px solid color-mix(in srgb, var(--info) 42%, var(--border)); border-radius: var(--radius-md); background: color-mix(in srgb, var(--info) 7%, var(--surface-2)); padding: var(--space-2) var(--space-3); }
+.test-run-progress strong { color: var(--info-strong); }
+.test-run-live-log { grid-area: body; max-height: 116px; min-height: 42px; margin: 0; overflow: auto; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: #0b1220; padding: var(--space-2); color: var(--text); font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; }
+.test-run-preflight,.test-run-diagnostic { grid-area: body; min-height: 0; margin: 0; overflow: auto; padding: 0 var(--space-1) 0 0; border: 0; border-radius: 0; background: transparent; }
+.test-run-preflight .preflight-head { position: sticky; top: 0; z-index: 1; background: var(--surface-1); padding-bottom: var(--space-2); }
+.test-run-actions { grid-area: actions; margin-top: 0; }
 .source-change-dialog { width: min(820px, calc(100vw - 24px)); }
 .source-change-dialog-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
 .dialog-close { width: 34px; min-width: 34px; min-height: 34px; padding: 0; font-size: 20px; }
@@ -675,6 +686,8 @@
   .recipe-json-dialog form { max-height: calc(100dvh - 12px); padding: var(--space-3); }
   .recipe-json-dialog.has-preview form { grid-template-rows: auto auto 220px auto minmax(0, 280px) auto; }
   .recipe-json-toolbar { align-items: stretch; flex-direction: column; }
+  .test-run-dialog { width: calc(100vw - 12px); max-height: calc(100dvh - 12px); }
+  .test-run-dialog form { max-height: calc(100dvh - 12px); padding: var(--space-3); }
   .recipe-json-toolbar > div { display: flex; }
   .recipe-json-toolbar > div button { flex: 1; }
   .recipe-json-editor { min-height: 180px; height: auto; font-size: 11px; }

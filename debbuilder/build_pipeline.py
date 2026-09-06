@@ -194,8 +194,9 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
         summary = f"{source['repository']} {source['ref'] or source['tag']} → Debian {source['debian_version']}"
         _finish_step(run, store, source_step, source_started, status="success", summary=summary, details=source)
     except (source_acquisition.SourceError, upstream_archive.UpstreamArchiveError) as exc:
-        error = {"stage": "source", "code": exc.code, "message": str(exc)}
-        _finish_step(run, store, source_step, source_started, status="failed", summary=str(exc), error=error)
+        details = getattr(exc, "details", {})
+        error = {"stage": "source", "code": exc.code, "message": str(exc), "details": details}
+        _finish_step(run, store, source_step, source_started, status="failed", summary=str(exc), details=details, error=error)
         run.update({"status": "failed", "error": error})
     if run["status"] != "failed":
         detection_step, detection_started = _start_step(run, store, "detection")

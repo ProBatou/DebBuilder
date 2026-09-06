@@ -31,7 +31,10 @@ def archive_format(name: str) -> str:
 def resolve_release(recipe: dict, *, token: str = "") -> dict:
     source = recipe["source"]
     if source["tracking"] == "latest_release":
-        return upstream_artifact.resolve_release(recipe, token=token)
+        try:
+            return upstream_artifact.resolve_release(recipe, token=token)
+        except upstream_artifact.UpstreamArtifactError as exc:
+            raise UpstreamArchiveError(exc.code, str(exc), details=exc.details) from exc
     if recipe["artifact"].get("archive_source") == "release_asset":
         raise UpstreamArchiveError("unsupported_artifact_tracking", "Release asset archives require latest_release tracking")
     try:

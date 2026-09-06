@@ -6,9 +6,11 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
-from debbuilder import build_pipeline, upstream_archive
+from debbuilder import build_pipeline, upstream_archive, upstream_artifact
 from debbuilder.build_store import BuildStore
+from debbuilder.execution_manager import ExecutionManager
 from debbuilder.recipe_schema import normalize_recipe, validate_recipe_metadata
 
 
@@ -43,6 +45,56 @@ def tar_bytes(entries):
 
 
 class UpstreamArchiveTests(unittest.TestCase):
+    def test_latest_release_artifact_error_is_converted_with_details(self):
+        details = {"status": 403, "repository": "example/demo"}
+        error = upstream_artifact.UpstreamArtifactError(
+            "github_api_error", "GitHub API request failed with HTTP 403", details=details,
+        )
+        with mock.patch.object(upstream_archive.upstream_artifact, "resolve_release", side_effect=error):
+            with self.assertRaises(upstream_archive.UpstreamArchiveError) as caught:
+                upstream_archive.resolve_release(recipe())
+        self.assertEqual(caught.exception.code, error.code)
+        self.assertEqual(str(caught.exception), str(error))
+        self.assertEqual(caught.exception.details, details)
+        self.assertIs(caught.exception.__cause__, error)
+
+    def test_pipeline_records_latest_release_failure_as_source_error(self):
+        details = {"status": 403, "repository": "example/demo"}
+        error = upstream_artifact.UpstreamArtifactError(
+            "github_api_error", "GitHub API request failed with HTTP 403", details=details,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            store = BuildStore(Path(temporary) / "builds")
+            with mock.patch.object(upstream_archive.upstream_artifact, "resolve_release", side_effect=error):
+                result = build_pipeline.run_pipeline(
+                    recipe(), store=store, dry_run=True, acquire=upstream_archive.acquire,
+                )
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error"], {
+            "stage": "source", "code": "github_api_error",
+            "message": "GitHub API request failed with HTTP 403", "details": details,
+        })
+        self.assertNotEqual(result["error"]["code"], "execution_worker_error")
+
+    def test_execution_manager_preserves_latest_release_failure(self):
+        details = {"status": 403}
+        error = upstream_artifact.UpstreamArtifactError(
+            "github_api_error", "GitHub API request failed with HTTP 403", details=details,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            store = BuildStore(Path(temporary) / "builds")
+            run = build_pipeline.create_pipeline_run(recipe(), store=store, dry_run=True)
+            manager = ExecutionManager(store)
+            with mock.patch.object(upstream_archive.upstream_artifact, "resolve_release", side_effect=error):
+                manager.start()
+                manager.submit(run["id"])
+                manager.stop(timeout=3)
+            persisted = store.load(run["id"])
+        self.assertEqual(persisted["status"], "failed")
+        self.assertEqual(persisted["error"]["stage"], "source")
+        self.assertEqual(persisted["error"]["code"], "github_api_error")
+        self.assertNotEqual(persisted["error"]["code"], "execution_worker_error")
+
     def test_exact_and_unique_pattern_selection_and_ambiguity(self):
         assets = [{"name": "demo-linux.tar.gz"}, {"name": "demo-arm64.tar.gz"}, {"name": "notes.txt"}]
         self.assertEqual(upstream_archive.select_asset(release(assets), recipe()["artifact"])["name"], "demo-linux.tar.gz")

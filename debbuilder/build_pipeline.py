@@ -127,17 +127,20 @@ def create_pipeline_run(recipe: dict, *, store: BuildStore, dry_run: bool, recip
     )
 
 
-def execute_pipeline_run(run_id: str, *, store: BuildStore, github_token: str = "", acquire=None, detector=None, dependency_check=None, change_applier=None, upstream_acquirer=None, lifecycle_callback=None) -> dict:
+def execute_pipeline_run(run_id: str, *, store: BuildStore, expected_initial_status: str = "pending", github_token: str = "", acquire=None, detector=None, dependency_check=None, change_applier=None, upstream_acquirer=None, lifecycle_callback=None) -> dict:
     """Execute exactly once from an existing Run's immutable Recipe snapshot."""
+    if expected_initial_status not in {"pending", "queued"}:
+        raise ValueError("expected initial status must be pending or queued")
     if not store.run_dir(run_id).is_dir():
         raise PipelineRunError("build_run_not_found", "Build Run was not found", details={"run_id": run_id})
     with store.locked_run(run_id):
         run = store.load(run_id)
         if not run:
             raise PipelineRunError("build_run_not_found", "Build Run was not found", details={"run_id": run_id})
-        if run.get("status") != "pending":
+        if run.get("status") != expected_initial_status:
+            code = f"build_run_not_{expected_initial_status}"
             raise PipelineRunError(
-                "build_run_not_pending",
+                code,
                 f"Build Run cannot execute from status {run.get('status')}",
                 details={"run_id": run_id, "status": run.get("status")},
             )

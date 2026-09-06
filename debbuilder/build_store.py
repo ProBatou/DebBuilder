@@ -17,6 +17,16 @@ WORKSPACE_DIRECTORIES = ("source", "staging", "artifacts", "logs", "manifests")
 EXECUTION_HISTORY_DELETION_FILE = ".execution-history-deleted.json"
 
 
+class RunStatusTransitionError(RuntimeError):
+    """The persisted Run did not have the state required by a transition."""
+
+    def __init__(self, run_id: str, expected: str, actual: str):
+        super().__init__(f"Build Run {run_id} has status {actual}; expected {expected}")
+        self.run_id = run_id
+        self.expected = expected
+        self.actual = actual
+
+
 def make_run_id() -> str:
     return time.strftime("%Y%m%d-%H%M%S", time.gmtime()) + f"-{time.time_ns() % 1_000_000:06d}-{secrets.token_hex(2)}"
 
@@ -93,6 +103,19 @@ class BuildStore:
             return None
         validate_run(run)
         return run
+
+    def transition_status(self, run_id: str, *, expected: str, status: str) -> dict:
+        """Atomically persist one compare-and-set Run status transition."""
+        with self.locked_run(run_id):
+            run = self.load(run_id)
+            if not run:
+                raise FileNotFoundError(f"Build Run {run_id} was not found")
+            actual = str(run.get("status") or "")
+            if actual != expected:
+                raise RunStatusTransitionError(run_id, expected, actual)
+            run["status"] = status
+            self.save(run)
+            return run
 
     def list(self, limit: int = 50) -> list[dict]:
         if not self.root.exists():

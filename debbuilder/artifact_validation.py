@@ -92,6 +92,66 @@ def _config_paths(run: dict) -> list[str]:
     return [row["destination"] for row in staging.get("configurations", []) if row.get("destination")]
 
 
+def _runtime_dependency_specs(artifact_data: dict, recipe: dict) -> list[dict]:
+    """Return runtime packages from the final Debian control metadata.
+
+    Project detection describes the source build environment. It is not a
+    declaration about what the installed artifact needs. The inspected
+    ``Depends`` field is authoritative; the Recipe is a compatibility fallback
+    for historical runs that predate inspection data.
+    """
+    inspection = artifact_data.get("inspection") if isinstance(artifact_data.get("inspection"), dict) else {}
+    depends = inspection.get("depends")
+    if depends is None:
+        depends = ", ".join(recipe.get("package", {}).get("runtime_dependencies") or [])
+    specs = []
+    for clause in str(depends or "").split(","):
+        for alternative in clause.split("|"):
+            match = re.match(r"\s*([a-z0-9][a-z0-9+.-]*)(?::[a-z0-9-]+)?(?:\s*\((>=|<=|=|<<|>>)\s*([^)]*)\))?", alternative, re.I)
+            if match:
+                specs.append({"package": match.group(1).lower(), "operator": match.group(2) or "", "version": (match.group(3) or "").strip()})
+    return specs
+
+
+def _runtime_version_requirement(spec: dict) -> str:
+    """Translate a simple Debian relation when it is also a Node/Python range."""
+    version = str(spec.get("version") or "")
+    if not re.fullmatch(r"\d+(?:\.\d+){0,2}", version):
+        return ""
+    operator = {"=": "==", "<<": "<", ">>": ">"}.get(str(spec.get("operator") or ""), str(spec.get("operator") or ""))
+    return f"{operator}{version}" if operator else ""
+
+
+def _runtime_checks(specs: list[dict], backend, checks: list[dict], profile: dict) -> None:
+    """Verify interpreters explicitly required by the installed Debian package."""
+    runtimes = (
+        ("nodejs", "runtime_node", "Node.js", ["node", "--version"], node_satisfies),
+        ("python3", "runtime_python", "Python", ["python3", "--version"], python_satisfies),
+    )
+    for package, check_name, display_name, command, satisfies in runtimes:
+        spec = next((row for row in specs if row["package"] == package), None)
+        if not spec:
+            continue
+        requirement = _runtime_version_requirement(spec)
+        result = backend.exec(command, accepted_exit_codes={0})
+        actual = (result.get("stdout") or result.get("stderr") or "").strip()
+        compatible = bool(result.get("accepted")) and bool(re.search(r"\d+\.\d+", actual)) and (not requirement or satisfies(actual, requirement))
+        _check(checks, check_name, compatible, details={"package": package, "required": requirement or "declared runtime package", "actual": actual, "profile": profile["name"]}, error=result.get("stderr") or f"{display_name} is missing or incompatible")
+        if not compatible:
+            expected = requirement or f"the declared {package} runtime"
+            raise ValidationError("validation_runtime_incompatible", f"{display_name} {actual or 'missing'} does not satisfy {expected}", details={"package": package, "required": requirement, "actual": actual})
+
+
+def _capture_systemd_failure(backend, checks: list[dict], service_name: str) -> None:
+    """Attach systemd's service-level explanation to a failed active check."""
+    status = backend.exec(["systemctl", "status", "--no-pager", "--full", service_name], accepted_exit_codes={0, 3, 4})
+    output = (status.get("stdout") or status.get("stderr") or "").strip()
+    if not checks or not output:
+        return
+    checks[-1]["details"]["systemctl_status"] = output
+    checks[-1]["error"] = output
+
+
 def validate_artifact(run_id: str, *, store: BuildStore, previous_artifact: str = "", backend_factory=None, profile: str = "bookworm", allowed_previous_roots: tuple[str | Path, ...] = ()) -> dict:
     if not store.run_dir(run_id).is_dir():
         raise ValidationError("build_run_not_found", "Build Run was not found")
@@ -185,22 +245,6 @@ def _validate_artifact_locked(run_id: str, *, store: BuildStore, previous_artifa
     try:
         result["backend"] = backend.start(validation_id)
         result["backend"]["profile"] = selected_profile["name"]
-        detection = next((step.get("details") or {} for step in run.get("steps", []) if step.get("name") == "detection"), {})
-        if detection.get("project_type") == "python":
-            python_requirement = str(detection.get("python_requirement") or "")
-            python = backend.exec(["python3", "--version"], accepted_exit_codes={0})
-            actual_python = (python.get("stdout") or python.get("stderr") or "").strip()
-            compatible = bool(python.get("accepted")) and bool(re.search(r"\d+\.\d+", actual_python)) and (not python_requirement or python_satisfies(actual_python, python_requirement))
-            _check(checks, "toolchain_python", compatible, details={"required": python_requirement or "declared project requirement unavailable", "actual": actual_python, "profile": selected_profile["name"]}, error=python.get("stderr") or "Python is missing or incompatible")
-            if not compatible:
-                raise ValidationError("validation_toolchain_incompatible", f"Python {actual_python or 'missing'} does not satisfy {python_requirement or 'the detected Python project'}", details={"required": python_requirement, "actual": actual_python})
-        node_requirement = str(detection.get("node_version") or "")
-        if node_requirement:
-            node = backend.exec(["node", "--version"], accepted_exit_codes={0})
-            compatible = bool(node.get("accepted")) and node_satisfies(node.get("stdout", "").strip(), node_requirement)
-            _check(checks, "toolchain_node", compatible, details={"required": node_requirement, "actual": node.get("stdout", "").strip(), "profile": selected_profile["name"]}, error=node.get("stderr") or "Node.js is missing or incompatible")
-            if not compatible:
-                raise ValidationError("validation_toolchain_incompatible", f"Node.js {node.get('stdout', '').strip() or 'missing'} does not satisfy {node_requirement}", details={"required": node_requirement, "actual": node.get("stdout", "").strip()})
         _execute(backend, ["dpkg-deb", "--info", container_artifact], checks, "debian_metadata")
         _execute(backend, ["dpkg-deb", "--contents", container_artifact], checks, "debian_contents")
         if previous_container:
@@ -213,6 +257,7 @@ def _validate_artifact_locked(run_id: str, *, store: BuildStore, previous_artifa
         install = _execute(backend, ["dpkg", conffile_option, "--install", container_artifact], checks, "package_install", timeout=300)
         installed = bool(install.get("accepted"))
         if installed:
+            _runtime_checks(_runtime_dependency_specs(artifact_data, recipe), backend, checks, selected_profile)
             package_status = backend.exec(["dpkg-query", "--show", "--showformat=${Status}\\n", package], accepted_exit_codes={0})
             status_ok = bool(package_status.get("accepted")) and package_status.get("stdout", "").strip() == "install ok installed"
             _check(checks, "package_status_installed", status_ok, details={"status": package_status.get("stdout", "").strip()}, error=package_status.get("stderr") or "Package is not fully installed")
@@ -256,9 +301,13 @@ def _validate_artifact_locked(run_id: str, *, store: BuildStore, previous_artifa
                 _execute(backend, ["systemctl", "cat", service["name"]], checks, f"systemd_unit_present:{service['name']}")
                 if service["enabled"]:
                     _execute(backend, ["systemctl", "is-enabled", "--quiet", service["name"]], checks, "systemd_enabled")
-                    _execute(backend, ["systemctl", "is-active", "--quiet", service["name"]], checks, "systemd_active")
+                    active = _execute(backend, ["systemctl", "is-active", "--quiet", service["name"]], checks, "systemd_active")
+                    if not active.get("accepted"):
+                        _capture_systemd_failure(backend, checks, service["name"])
                     _execute(backend, ["sleep", "2"], checks, "systemd_startup_grace", timeout=10)
-                    _execute(backend, ["systemctl", "is-active", "--quiet", service["name"]], checks, "systemd_active_after_grace")
+                    active_after_grace = _execute(backend, ["systemctl", "is-active", "--quiet", service["name"]], checks, "systemd_active_after_grace")
+                    if not active_after_grace.get("accepted"):
+                        _capture_systemd_failure(backend, checks, service["name"])
             remove = _execute(backend, ["dpkg", "--remove", package], checks, "package_remove", timeout=300)
             if remove.get("accepted"):
                 if not upstream_mode and recipe["install"]["content"]["source"] != "configured_files":

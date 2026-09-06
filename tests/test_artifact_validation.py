@@ -86,6 +86,21 @@ class PythonBackend(FakeBackend):
         return result
 
 
+class MissingNodeServiceBackend(FakeBackend):
+    def exec(self, arguments, **kwargs):
+        result = super().exec(arguments, **kwargs)
+        if arguments[:3] == ["systemctl", "is-active", "--quiet"]:
+            result.update({"exit_code": 3, "status": "failed", "accepted": False})
+        if arguments[:4] == ["systemctl", "status", "--no-pager", "--full"]:
+            result.update({
+                "exit_code": 3,
+                "status": "failed",
+                "accepted": 3 in (kwargs.get("accepted_exit_codes") or {0}),
+                "stdout": "demo.service: Failed at step EXEC spawning /usr/bin/node: No such file or directory\n",
+            })
+        return result
+
+
 class MixedPolicyBackend(FakeBackend):
     def exec(self, arguments, **kwargs):
         result = super().exec(arguments, **kwargs)
@@ -191,24 +206,67 @@ class ArtifactValidationTests(unittest.TestCase):
                 artifact_validation.validate_artifact(run["id"], store=store, backend_factory=FakeBackend, profile="untrusted/image")
             self.assertEqual(raised.exception.code, "validation_profile_unknown")
 
-    def test_node_toolchain_compatible_old_and_missing(self):
+    def test_node_detected_for_build_does_not_create_a_runtime_check(self):
         with tempfile.TemporaryDirectory() as temporary:
             store, run = self.successful_run(temporary)
             persisted = store.load(run["id"])
             next(step for step in persisted["steps"] if step["name"] == "detection")["details"] = {"node_version": "^22.19.0"}
             store.save(persisted)
+            backends = []
+            def backend_factory(**kwargs):
+                backend = FakeBackend(**kwargs)
+                backends.append(backend)
+                return backend
+            good = artifact_validation.validate_artifact(run["id"], store=store, backend_factory=backend_factory)
+            self.assertEqual(good["status"], "success")
+            self.assertNotIn(["node", "--version"], backends[0].arguments)
+            self.assertFalse(any(check["name"] == "runtime_node" for check in good["checks"]))
+
+    def test_declared_node_runtime_is_checked_after_install(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store, run = self.successful_run(temporary)
+            persisted = store.load(run["id"])
+            persisted["artifact"]["inspection"]["depends"] = "nodejs (>= 22.19.0)"
+            store.save(persisted)
             good = artifact_validation.validate_artifact(run["id"], store=store, backend_factory=NodeBackend, profile="bookworm-node22")
             self.assertEqual(good["status"], "success")
+            self.assertEqual(next(check for check in good["checks"] if check["name"] == "runtime_node")["details"]["actual"], "v22.22.1")
             class OldNode(NodeBackend):
                 version = "v18.20.0\n"
             old = artifact_validation.validate_artifact(run["id"], store=store, backend_factory=OldNode, profile="bookworm-node22")
-            self.assertEqual(old["error"]["code"], "validation_toolchain_incompatible")
+            self.assertEqual(old["error"]["code"], "validation_runtime_incompatible")
             class MissingNode(NodeBackend):
                 version = ""
             missing = artifact_validation.validate_artifact(run["id"], store=store, backend_factory=MissingNode, profile="bookworm-node22")
-            self.assertEqual(missing["error"]["code"], "validation_toolchain_incompatible")
+            self.assertEqual(missing["error"]["code"], "validation_runtime_incompatible")
 
-    def test_python_toolchain_requirement_and_common_specifiers(self):
+    def test_service_missing_declared_node_runtime_fails_systemd_validation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            configured = recipe(service=True)
+            configured["service"]["command"] = "/usr/bin/node /opt/demo/dist/index.js"
+            store, run = self.successful_run(temporary, configured)
+            result = artifact_validation.validate_artifact(run["id"], store=store, backend_factory=MissingNodeServiceBackend)
+            self.assertEqual(result["status"], "failed")
+            failed = {check["name"]: check for check in result["checks"] if check["status"] == "failed"}
+            self.assertIn("systemd_active", failed)
+            self.assertIn("systemd_active_after_grace", failed)
+            self.assertIn("/usr/bin/node", failed["systemd_active"]["error"])
+            self.assertEqual(result["error"]["code"], "validation_checks_failed")
+
+    def test_service_with_declared_node_runtime_keeps_runtime_and_systemd_checks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            configured = recipe(service=True)
+            configured["service"]["command"] = "/usr/bin/node /opt/demo/dist/index.js"
+            store, run = self.successful_run(temporary, configured)
+            persisted = store.load(run["id"])
+            persisted["artifact"]["inspection"]["depends"] = "nodejs"
+            store.save(persisted)
+            result = artifact_validation.validate_artifact(run["id"], store=store, backend_factory=NodeBackend, profile="bookworm-node22")
+            self.assertEqual(result["status"], "success")
+            self.assertTrue(any(check["name"] == "runtime_node" for check in result["checks"]))
+            self.assertTrue(any(check["name"] == "systemd_active_after_grace" for check in result["checks"]))
+
+    def test_python_runtime_requirement_and_common_specifiers(self):
         self.assertTrue(python_satisfies("Python 3.11.2", ">=3.10,<4"))
         self.assertTrue(python_satisfies("Python 3.11.2", "^3.11"))
         self.assertTrue(python_satisfies("Python 3.11.2", "3.11"))
@@ -219,14 +277,15 @@ class ArtifactValidationTests(unittest.TestCase):
             store, run = self.successful_run(temporary)
             persisted = store.load(run["id"])
             next(step for step in persisted["steps"] if step["name"] == "detection")["details"] = {"project_type": "python", "python_requirement": ">=3.10"}
+            persisted["artifact"]["inspection"]["depends"] = "python3 (>= 3.10)"
             store.save(persisted)
             good = artifact_validation.validate_artifact(run["id"], store=store, backend_factory=PythonBackend)
             self.assertEqual(good["status"], "success")
-            self.assertEqual(next(check for check in good["checks"] if check["name"] == "toolchain_python")["details"]["actual"], "Python 3.11.2")
+            self.assertEqual(next(check for check in good["checks"] if check["name"] == "runtime_python")["details"]["actual"], "Python 3.11.2")
             class OldPython(PythonBackend):
                 version = "Python 3.9.18\n"
             old = artifact_validation.validate_artifact(run["id"], store=store, backend_factory=OldPython)
-            self.assertEqual(old["error"]["code"], "validation_toolchain_incompatible")
+            self.assertEqual(old["error"]["code"], "validation_runtime_incompatible")
 
     def test_upstream_artifact_uses_opaque_payload_and_detected_systemd_checks(self):
         with tempfile.TemporaryDirectory() as temporary:

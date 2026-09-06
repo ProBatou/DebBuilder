@@ -168,6 +168,11 @@ function wireAdmin() {
     }).catch(() => {});
   });
   $('executionDiagnostic')?.addEventListener('click', event => {
+    const toggle = event.target.closest('[data-diagnostic-toggle]');
+    if (toggle) {
+      setExecutionDiagnosticExpanded(toggle.getAttribute('aria-expanded') !== 'true');
+      return;
+    }
     const button = event.target.closest('[data-diagnostic-recipe]');
     if (!button) return;
     openDiagnosticRecipe(button.dataset.diagnosticRecipe, button.dataset.diagnosticStep).catch(error => showToast(error.message, {type:'error'}));

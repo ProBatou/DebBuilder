@@ -446,12 +446,24 @@ test('Logs explains build, validation, and publication failures', async ({page},
 
   await openFailure('ui-04-build-failed');
   await expect(page.locator('#executionDiagnostic')).toContainText('Build command failed');
+  await expect(page.locator('#executionDiagnostic [data-diagnostic-toggle]')).toHaveText('Show details');
+  await expect(page.locator('#executionDiagnostic .diagnostic-details')).toBeHidden();
+  if (testInfo.project.name === 'desktop') {
+    const [diagnostic, logs] = await Promise.all([
+      page.locator('#executionDiagnostic').boundingBox(),
+      page.locator('#executionDetail').boundingBox(),
+    ]);
+    expect(diagnostic).not.toBeNull();
+    expect(logs).not.toBeNull();
+    expect(logs.height).toBeGreaterThan(250);
+    expect(logs.height).toBeGreaterThan(diagnostic.height);
+  }
+  await page.locator('#executionDiagnostic [data-diagnostic-toggle]').click();
+  await expect(page.locator('#executionDiagnostic [data-diagnostic-toggle]')).toHaveText('Hide details');
+  await expect(page.locator('#executionDiagnostic .diagnostic-details')).toBeVisible();
   await expect(page.locator('#executionDiagnostic')).toContainText('pnpm build --filter');
   await expect(page.locator('#executionDiagnostic')).toContainText('Exit code');
   await expect(page.locator('#executionDiagnostic')).toContainText('What to do next');
-  if (testInfo.project.name === 'desktop') {
-    await expectFullyInViewport(page, page.locator('#executionDiagnostic .diagnostic-next'));
-  }
   await capture(page, testInfo, 'log-build-diagnostic', {fullPage:false});
   await page.locator('#executionDiagnostic [data-diagnostic-recipe]').click();
   await expect(page.locator('#view-recipes')).toHaveClass(/active/);

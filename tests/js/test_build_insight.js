@@ -8,22 +8,30 @@ function element() {
 
 const nodes = Object.fromEntries(['executionDiagnostic','recipePreflight','recipePreflightContent','recipePreflightStatus','recipePreflightSummary'].map(id => [id, element()]));
 const context = vm.createContext({
+  adminState: {selectedExecution: null, diagnosticExpandedRunId: ''},
   $: id => nodes[id] || null,
   esc: value => String(value ?? '').replace(/[&<>"']/g, character => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[character])),
 });
 vm.runInContext(fs.readFileSync('static/js/build_insight.js', 'utf8'), context, {filename:'build_insight.js'});
 
-context.renderExecutionDiagnostic({recipe_id:'demo', diagnostic:{
+const diagnosticExecution = {id:'failed-run', recipe_id:'demo', diagnostic:{
   title:'Build command timed out', code:'build_command_timeout', reason:'Command exceeded its limit',
   where:[{label:'Step', value:'Build'}, {label:'Working directory', value:'/source'}],
   facts:[{label:'Command', value:'npm run a-very-long-build-command-with-many-arguments-and-no-shortcut'}, {label:'Timeout reason', value:'maximum_runtime'}],
   next_action:'Increase the configured maximum runtime.', recipe_step:'build',
-}});
+}};
+context.adminState.selectedExecution = diagnosticExecution;
+context.renderExecutionDiagnostic(diagnosticExecution);
 assert.equal(nodes.executionDiagnostic.hidden, false);
 assert.match(nodes.executionDiagnostic.innerHTML, /Primary diagnostic/);
 assert.match(nodes.executionDiagnostic.innerHTML, /maximum_runtime/);
 assert.match(nodes.executionDiagnostic.innerHTML, /data-diagnostic-step="build"/);
 assert.match(nodes.executionDiagnostic.innerHTML, /a-very-long-build-command/);
+assert.match(nodes.executionDiagnostic.innerHTML, /Show details/);
+assert.match(nodes.executionDiagnostic.innerHTML, /diagnostic-details" hidden/);
+context.setExecutionDiagnosticExpanded(true);
+assert.match(nodes.executionDiagnostic.innerHTML, /Hide details/);
+assert.doesNotMatch(nodes.executionDiagnostic.innerHTML, /diagnostic-details" hidden/);
 
 context.renderExecutionDiagnostic({status:'failed', error:{message:'Old run failed'}});
 assert.equal(nodes.executionDiagnostic.hidden, true);

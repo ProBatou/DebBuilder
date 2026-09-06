@@ -33,16 +33,22 @@ function renderExecutionDiagnostic(execution) {
   }
   const locations = diagnostic.where || [];
   const facts = diagnostic.facts || [];
-  const rows = [...locations, ...facts];
+  const expanded = typeof adminState !== 'undefined' && adminState.diagnosticExpandedRunId === execution?.id;
   const recipeAction = diagnostic.recipe_step && execution.recipe_id
     ? `<button type="button" class="btn btn--ghost btn--sm diagnostic-recipe-action" data-diagnostic-recipe="${esc(execution.recipe_id)}" data-diagnostic-step="${esc(diagnostic.recipe_step)}">Open Recipe · ${esc(diagnostic.recipe_step)}</button>`
     : '';
-  node.innerHTML = `<div class="diagnostic-head"><div><span class="eyebrow">Primary diagnostic</span><h4>${esc(diagnostic.title || 'Execution failed')}</h4></div><span class="badge failed">${esc(diagnostic.code || 'failed')}</span></div><div class="diagnostic-summary"><div><span>Why</span><p>${esc(diagnostic.reason || 'No detailed reason was recorded.')}</p></div>${rows.length ? `<div class="diagnostic-facts">${rows.map(row => {
+  node.innerHTML = `<div class="diagnostic-head"><div><span class="eyebrow">Primary diagnostic</span><h4>${esc(diagnostic.title || 'Execution failed')}</h4></div><span class="badge failed">${esc(diagnostic.code || 'failed')}</span></div><p class="diagnostic-reason">${esc(diagnostic.reason || 'No detailed reason was recorded.')}</p>${locations.length ? `<div class="diagnostic-context">${locations.map(row => `<span><b>${esc(row.label)}</b> ${esc(row.value)}</span>`).join('')}</div>` : ''}<div class="diagnostic-toggle-row"><button type="button" class="btn btn--ghost btn--sm" data-diagnostic-toggle aria-expanded="${expanded ? 'true' : 'false'}">${expanded ? 'Hide details' : 'Show details'}</button></div><div class="diagnostic-details" ${expanded ? '' : 'hidden'}><div class="diagnostic-facts">${facts.map(row => {
     const multiline = String(row.value || '').includes('\n');
     const value = multiline ? `<pre>${esc(row.value)}</pre>` : `<strong>${esc(row.value)}</strong>`;
     return `<div><span>${esc(row.label)}</span>${value}</div>`;
-  }).join('')}</div>` : ''}<div class="diagnostic-next"><span>What to do next</span><p>${esc(diagnostic.next_action || 'Review the raw log before retrying.')}</p>${recipeAction}</div></div>`;
+  }).join('')}</div><div class="diagnostic-next"><span>What to do next</span><p>${esc(diagnostic.next_action || 'Review the raw log before retrying.')}</p>${recipeAction}</div></div>`;
   node.hidden = false;
+}
+
+function setExecutionDiagnosticExpanded(expanded) {
+  if (typeof adminState === 'undefined' || !adminState.selectedExecution) return;
+  adminState.diagnosticExpandedRunId = expanded ? adminState.selectedExecution.id : '';
+  renderExecutionDiagnostic(adminState.selectedExecution);
 }
 
 function preflightSourceSection(result) {

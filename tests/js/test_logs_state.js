@@ -137,10 +137,26 @@ assert.equal(nodes.btnRevalidateExecution.hidden, false);
 assert.equal(nodes.btnPublishExecution.hidden, true);
 
 context.canonical = canonical('validation_failed', {validate: true, publish: false}, 'failed', 'not_run');
+context.canonical.diagnostic = {
+  title: 'Package validation failed', code: 'validation_runtime_incompatible', reason: 'Node.js missing',
+  where: [{label: 'Profile', value: 'bookworm'}, {label: 'Failed checks', value: 'runtime_node'}],
+  facts: [{label: 'Command', value: 'node --version'}], next_action: 'Declare the required runtime.',
+};
 vm.runInContext('applyCanonicalExecution(canonical, {preserveLog: true})', context);
 assert.match(nodes.executionList.innerHTML, /validation_failed/);
 assert.equal(nodes.btnRevalidateExecution.hidden, false);
 assert.equal(nodes.btnPublishExecution.hidden, true);
+assert.match(nodes.executionDiagnostic.innerHTML, /Show details/);
+assert.match(nodes.executionDiagnostic.innerHTML, /diagnostic-details" hidden/);
+vm.runInContext('setExecutionDiagnosticExpanded(true)', context);
+assert.equal(context.adminState.diagnosticExpandedRunId, 'run-one');
+assert.match(nodes.executionDiagnostic.innerHTML, /Hide details/);
+vm.runInContext('applyCanonicalExecution(canonical, {preserveLog: true})', context);
+assert.match(nodes.executionDiagnostic.innerHTML, /Hide details/);
+context.canonical = {...context.canonical, id: 'run-two'};
+vm.runInContext('applyCanonicalExecution(canonical, {preserveLog: true})', context);
+assert.equal(context.adminState.diagnosticExpandedRunId, '');
+assert.match(nodes.executionDiagnostic.innerHTML, /Show details/);
 
 (async () => {
   await context.loadExecutionLog('run-one', {reset: true});

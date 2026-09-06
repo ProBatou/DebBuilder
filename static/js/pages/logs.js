@@ -46,6 +46,7 @@ function syncExecutionListEntry(execution) {
 }
 
 function applyCanonicalExecution(execution, {preserveLog = false} = {}) {
+  if (adminState.selectedExecution?.id !== execution.id) adminState.diagnosticExpandedRunId = '';
   adminState.selectedExecution = execution;
   syncExecutionListEntry(execution);
   renderExecutions();
@@ -238,6 +239,7 @@ function clearOpenExecution() {
   adminState.selectedExecution = null;
   adminState.logOffset = 0;
   adminState.logFollowing = false;
+  adminState.diagnosticExpandedRunId = '';
   setLogAutoScroll(true);
   if ($('executionMeta')) $('executionMeta').textContent = 'Select an execution.';
   if ($('executionMetaMore')) $('executionMetaMore').textContent = '';
@@ -351,7 +353,7 @@ function renderOpenExecution(execution, {preserveLog = false} = {}) {
   if ($('executionMetaMore')) $('executionMetaMore').innerHTML = executionMetaHtml(moreMeta);
   if ($('executionMoreDetails')) $('executionMoreDetails').hidden = false;
   if (validation.profile && $('executionMetaMore')) {
-    const node = (validation.checks || []).find(check => check.name === 'toolchain_node');
+    const node = (validation.checks || []).find(check => check.name === 'runtime_node' || check.name === 'toolchain_node');
     $('executionMetaMore').insertAdjacentHTML('beforeend', executionMetaHtml([['Validation backend', validation.backend?.runtime || '—'], ['Profile', validation.profile.name || '—'], ['Node', node?.details?.actual || 'Not required'], ['Network', validation.backend?.network || 'disabled']]));
   }
   if ($('executionSteps')) $('executionSteps').innerHTML = (execution.steps || []).map(step => `<span class="step-chip ${esc(step.status || 'pending')}">${symbols[step.status] || '○'} ${esc(step.name)} · ${esc(step.status || 'pending')}</span>`).join('');

@@ -71,6 +71,20 @@ def _notify_lifecycle(callback, event: str, **payload) -> None:
         pass
 
 
+def _archive_source_details(source: dict) -> dict:
+    """Keep the runtime file plan out of persisted Run source details."""
+    details = {key: value for key, value in source.items() if key != "archive_payload"}
+    details["archive_payload"] = upstream_archive.payload_plan_summary(source["archive_payload"])
+    return details
+
+
+def _archive_build_details(build: dict) -> dict:
+    """Persist the synthetic archive build step without its resolved file inventory."""
+    output = build["output"]
+    compact_output = {"mode": "archive_payload", "payload": upstream_archive.payload_plan_summary(output["payload"])}
+    return {**build, "plan": {**build["plan"], "output": compact_output}, "output": compact_output}
+
+
 def _finish_run(run: dict, store: BuildStore, started: float, lifecycle_callback=None, recipe: dict | None = None) -> dict:
     run.update({"finished_at": utc_now(), "duration": round(time.monotonic() - started, 6)})
     store.save(run)
@@ -192,7 +206,8 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
         source = acquire(canonical, run["workspace"], token=github_token)
         run["version"] = {"upstream": source["upstream_version"], "debian": source["debian_version"]}
         summary = f"{source['repository']} {source['ref'] or source['tag']} → Debian {source['debian_version']}"
-        _finish_step(run, store, source_step, source_started, status="success", summary=summary, details=source)
+        source_details = _archive_source_details(source) if archive_mode else source
+        _finish_step(run, store, source_step, source_started, status="success", summary=summary, details=source_details)
     except (source_acquisition.SourceError, upstream_archive.UpstreamArchiveError) as exc:
         details = getattr(exc, "details", {})
         error = {"stage": "source", "code": exc.code, "message": str(exc), "details": details}
@@ -202,11 +217,13 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
         detection_step, detection_started = _start_step(run, store, "detection")
         try:
             if archive_mode:
+                payload = upstream_archive.payload_plan_summary(source["archive_payload"])
+                detected_files = payload["include"] if payload["mode"] == "paths" else ["Entire archive"]
                 detection = {
                     "project_type": "upstream_archive", "display_name": "Upstream release artifact · no source build",
-                    "detected_files": [row["relative_path"] for row in source["selected_files"]], "build_dependencies": [],
+                    "detected_files": detected_files, "build_dependencies": [],
                     "system_build_dependencies": [], "build_tools": [], "tool_version_requirements": {},
-                    "proposed_commands": [], "warnings": [], "selected_asset": source["asset"], "selected_files": source["selected_files"],
+                    "proposed_commands": [], "warnings": [], "selected_asset": source["asset"], "archive_payload": payload,
                 }
             else:
                 detection = detector(source["source_directory"], working_directory=canonical["build"]["working_directory"])
@@ -269,10 +286,9 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
     if run["status"] != "failed":
         build_step, build_started = _start_step(run, store, "build")
         if archive_mode:
-            selected_paths = [{"path": row["path"]} for row in source["selected_files"]]
-            output = {"mode": "paths", "paths": selected_paths} if len(selected_paths) > 1 else {"mode": "path", **selected_paths[0]}
+            output = {"mode": "archive_payload", "payload": source["archive_payload"]}
             build = {"executed": False, "reason": "upstream_archive", "plan": {"commands": [], "working_directory": ".", "environment": {}, "output": output}, "commands": [], "output": output}
-            _finish_step(run, store, build_step, build_started, status="skipped", summary="Upstream release artifact · no source build", details=build)
+            _finish_step(run, store, build_step, build_started, status="skipped", summary="Upstream release artifact · no source build", details=_archive_build_details(build))
         else:
             try:
                 def command_completed(result):

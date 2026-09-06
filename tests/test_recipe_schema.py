@@ -47,7 +47,9 @@ class RecipeSchemaTests(unittest.TestCase):
             "install": {"content": {"source": "configured_files"}, "owner": {"user": "root", "group": "root"}, "account": {"user": "demo", "group": "demo", "create_user": True, "create_group": True}, "directories": [{"path": "/var/lib/demo", "owner": "demo", "group": "demo", "mode": "0750"}], "config_files": [{"source": "demo", "destination": "/usr/bin/demo", "policy": "replace", "owner": "root", "group": "root", "mode": "0755"}]},
             "service": {"name": "demo.service", "command": "/usr/bin/demo", "conflicts": ["other.service"], "limit_nofile": "65536", "kill_mode": "process", "syslog_identifier": "demo", "ambient_capabilities": ["CAP_NET_BIND_SERVICE"]},
         })
-        self.assertEqual(recipe["artifact"]["selected_files"], ["demo"])
+        self.assertEqual(recipe["artifact"]["payload"], {
+            "mode": "paths", "include": ["demo"], "exclude": [], "legacy_file_layout": "basename",
+        })
         self.assertEqual(recipe["install"]["config_files"][0]["mode"], "0755")
         self.assertEqual(recipe["install"]["account"]["user"], "demo")
         self.assertEqual(recipe["service"]["ambient_capabilities"], ["CAP_NET_BIND_SERVICE"])
@@ -68,6 +70,100 @@ class RecipeSchemaTests(unittest.TestCase):
         })
         self.assertEqual(legacy_asset["artifact"]["archive_source"], "release_asset")
         self.assertEqual(legacy_asset["artifact"]["asset_selection"], "exact")
+
+    def test_archive_payload_stays_in_schema_v1_and_round_trips_canonically(self):
+        document = {
+            "schema_version": 1,
+            "name": "archive-app",
+            "package": {"name": "archive-app"},
+            "source": {"repository": "owner/archive-app"},
+            "artifact": {
+                "mode": "upstream_archive",
+                "archive_source": "github_source",
+                "payload": {
+                    "mode": "paths",
+                    "include": ["static/js/app.js", "server.py", "static/"],
+                    "exclude": ["static/dev/"],
+                },
+            },
+        }
+        stored = recipe_document_for_storage(document)
+        self.assertEqual(stored["schema_version"], 1)
+        self.assertEqual(stored["artifact"]["payload"], {
+            "mode": "paths", "include": ["server.py", "static/"], "exclude": ["static/dev/"],
+        })
+        self.assertNotIn("selected_files", stored["artifact"])
+        self.assertEqual(recipe_document_for_storage(stored), stored)
+
+    def test_legacy_selected_files_migrate_without_broadening_and_keep_layout_marker(self):
+        legacy = {
+            "schema_version": 1,
+            "name": "legacy-archive",
+            "package": {"name": "legacy-archive"},
+            "source": {"repository": "owner/legacy-archive"},
+            "artifact": {
+                "mode": "upstream_archive", "asset_name": "legacy.tar.gz",
+                "selected_files": [" share/defaults.yml ", "bin/tool"],
+            },
+        }
+        stored = recipe_document_for_storage(legacy)
+        self.assertEqual(stored["schema_version"], 1)
+        self.assertEqual(stored["artifact"]["payload"], {
+            "mode": "paths",
+            "include": ["share/defaults.yml", "bin/tool"],
+            "exclude": [],
+            "legacy_file_layout": "basename",
+        })
+        self.assertTrue(all(not path.endswith("/") for path in stored["artifact"]["payload"]["include"]))
+        self.assertNotIn("selected_files", stored["artifact"])
+        self.assertEqual(recipe_document_for_storage(stored), stored)
+
+    def test_historical_archive_snapshot_without_new_fields_remains_readable(self):
+        historical = {
+            "schema_version": 1,
+            "name": "snapshot",
+            "package": {"name": "snapshot"},
+            "source": {"repository": "owner/snapshot"},
+            "artifact": {
+                "mode": "upstream_archive", "type": "archive",
+                "asset_name": "snapshot.tar.gz", "selected_files": ["snapshot"],
+            },
+            "build": {"timeout": 120, "output": {"mode": "source"}},
+        }
+        loaded = validate_recipe_metadata(historical)
+        self.assertEqual(loaded["schema_version"], 1)
+        self.assertEqual(loaded["build"]["inactivity_timeout"], 120)
+        self.assertEqual(loaded["artifact"]["payload"]["include"], ["snapshot"])
+        self.assertEqual(loaded["artifact"]["payload"]["legacy_file_layout"], "basename")
+
+    def test_legacy_and_canonical_archive_selectors_are_ambiguous(self):
+        document = {
+            "schema_version": 1,
+            "name": "ambiguous",
+            "artifact": {
+                "mode": "upstream_archive",
+                "selected_files": ["server.py"],
+                "payload": {"mode": "paths", "include": ["server.py"], "exclude": []},
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "both selected_files and payload"):
+            validate_recipe_metadata(document)
+        with self.assertRaises(RecipeDocumentError) as raised:
+            recipe_document_for_storage(document)
+        self.assertEqual(raised.exception.code, "invalid_recipe")
+
+    def test_legacy_archive_layout_rejects_recursive_and_entire_archive_payloads(self):
+        payloads = [
+            {"mode": "paths", "include": ["bin/"], "exclude": [], "legacy_file_layout": "basename"},
+            {"mode": "entire_archive", "include": [], "exclude": [], "legacy_file_layout": "basename"},
+        ]
+        for payload in payloads:
+            with self.subTest(payload=payload), self.assertRaisesRegex(ValueError, "legacy archive file layout"):
+                validate_recipe_metadata({
+                    "name": "legacy", "package": {"name": "legacy"},
+                    "source": {"repository": "owner/legacy"},
+                    "artifact": {"mode": "upstream_archive", "archive_source": "github_source", "payload": payload},
+                })
 
     def test_fhs_and_advanced_systemd_validation_rejects_unsafe_values(self):
         cases = [

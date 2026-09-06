@@ -28,11 +28,26 @@ function preflightTechnicalDetails(title, rows) {
 }
 
 function preflightCount(label, count) {
-  return `${count} ${label}${count === 1 ? '' : 's'}`;
+  const plural = label === 'directory' ? 'directories' : `${label}s`;
+  return `${count} ${count === 1 ? label : plural}`;
 }
 
 function stepDetails(result, name) {
   return (result.steps || []).find(step => step.name === name)?.details || {};
+}
+
+function preflightArchivePayload(result, workflow = {}) {
+  if ((workflow.artifact?.mode || '') !== 'upstream_archive') return '';
+  const source = result.source || stepDetails(result, 'source');
+  const detection = result.detection || stepDetails(result, 'detection');
+  const payload = detection.archive_payload || source.archive_payload || {};
+  if (!payload.mode) return '';
+  const configured = payload.mode === 'entire_archive'
+    ? 'Entire archive'
+    : `${preflightCount('directory', Number(payload.selected_directories || 0))} · ${preflightCount('explicit file', Number(payload.explicit_files || 0))}`;
+  const exclusionCount = Number(payload.excluded_directories || 0) + Number(payload.excluded_files || 0);
+  const resolved = `${preflightCount('resolved file', Number(payload.selected_files || 0))}${exclusionCount ? ` · ${preflightCount('exclusion', exclusionCount)}` : ''}`;
+  return `<section class="preflight-archive-payload" aria-label="Archive payload"><div class="preflight-subsection-head"><strong>Archive payload</strong></div><div class="preflight-archive-payload-facts"><span>${esc(configured)}</span><span>${esc(resolved)}</span></div></section>`;
 }
 
 function executionDiagnosticHtml(execution, {expanded = false, includeDetails = true} = {}) {
@@ -82,7 +97,7 @@ function preflightSourceSection(result, workflow = {}) {
     {label:'Source', value:source.strategy || source.archive_source || source.artifact_mode},
     {label:'Project', value:sourceBuildRequired ? detection.display_name || detection.project_type : 'No source build required'},
     {label:'Selected payload', value:selected.name},
-  ])}</div>${preflightTechnicalDetails('Source details', [
+  ])}</div>${preflightArchivePayload(result, workflow)}${preflightTechnicalDetails('Source details', [
     {label:'Ref / tag', value:source.ref || source.tag}, {label:'Archive source', value:source.archive_source || source.source},
     {label:'Detected from', value:detection.detected_files}, {label:'Detected build tools', value:detection.build_tools},
   ])}</section>`;
@@ -171,12 +186,12 @@ function preflightServiceSection(result, workflow) {
   const systemd = staging.systemd || stepDetails(result, 'systemd');
   const service = workflow.service || {};
   if (!systemd.configured && !service.configured && !service.name) return '';
-  return `<details class="preflight-secondary-details"><summary><span>Systemd service</span><small>${esc(service.name || systemd.path || 'configured')}</small></summary>${insightDetails([
+  return `<section class="insight-section insight-section--service"><div class="insight-section-head">${insightSectionHeading('Systemd service', service.name || systemd.path || 'configured')}</div>${insightDetails([
     {label:'Unit', value:service.name || systemd.path}, {label:'ExecStart', value:service.command},
     {label:'User / group', value:[service.user, service.group].filter(Boolean).join(':')}, {label:'WorkingDirectory', value:service.working_directory},
     {label:'Restart', value:service.restart}, {label:'After', value:service.after}, {label:'Wants', value:service.wants},
     {label:'Requires', value:service.requires}, {label:'Environment keys', value:Object.keys(service.environment || {})},
-  ])}${disclosure('Prepared systemd unit', systemd.content || '')}</details>`;
+  ])}<div class="insight-disclosures">${disclosure('Prepared systemd unit', systemd.content || '')}</div></section>`;
 }
 
 function preflightFindings(result, workflow = {}) {

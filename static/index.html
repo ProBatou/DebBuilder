@@ -6,7 +6,7 @@
   <title>DebBuilder</title>
   <link rel="stylesheet" href="/style.css?v=20260906-2" />
   <link rel="stylesheet" href="/css/components.css?v=20260905-4" />
-  <link rel="stylesheet" href="/css/pages.css?v=20260906-4" />
+  <link rel="stylesheet" href="/css/pages.css?v=20260906-10" />
 </head>
 <body>
   <header class="mobile-topbar" aria-label="Mobile navigation">
@@ -85,8 +85,11 @@
                 <label id="recipeAssetSelectionField" hidden><span>Asset selection</span><select id="recipeAssetSelection"><option value="exact">Exact</option><option value="pattern">Pattern</option></select></label>
                 <label id="recipeArtifactPatternField" hidden><span>Release asset pattern</span><input id="recipeArtifactPattern" placeholder="*-linux-x64.deb"></label>
                 <label id="recipeArtifactNameField" hidden><span>Exact release asset</span><input id="recipeArtifactName" placeholder="project-x86_64-linux.tar.gz"></label>
-                <label class="span-12" id="recipeArtifactFilesField" hidden><span>Selected archive files</span><textarea id="recipeArtifactFiles" rows="2" placeholder="Select files after inspection"></textarea></label>
-                <div id="recipeArchiveInspectionField" class="span-12 archive-inspection" hidden><button type="button" class="ghost compact-button" id="btnInspectArchive">Inspect archive</button><div id="recipeArchiveInspection" class="archive-inspection-results muted">No archive inspected.</div></div>
+                <section id="recipeArchivePayloadField" class="span-12 archive-payload" aria-labelledby="recipeArchivePayloadTitle" hidden>
+                  <div class="archive-payload-head"><div><h3 id="recipeArchivePayloadTitle">Archive payload</h3><p>Choose explicit paths or include the entire extracted archive.</p></div><fieldset class="archive-payload-modes"><legend class="sr-only">Selection</legend><span class="archive-payload-modes-title" aria-hidden="true">Selection</span><label><input type="radio" name="recipeArchivePayloadMode" value="paths" checked> Selected paths</label><label><input type="radio" name="recipeArchivePayloadMode" value="entire_archive"> Entire archive</label></fieldset></div>
+                  <div id="recipeArchivePayloadSummary" class="archive-payload-summary" aria-live="polite"></div>
+                  <div id="recipeArchiveInspectionField" class="archive-inspection" hidden><div class="archive-inspection-toolbar"><button type="button" class="ghost compact-button" id="btnInspectArchive">Inspect archive</button><span id="recipeArchiveInspectionStatus" class="muted">Inspect to browse archive contents.</span></div><div id="recipeArchiveInspection" class="archive-inspection-results muted"><p>No archive inspected.</p></div></div>
+                </section>
                 <label><span>Tracking</span><select id="recipeMetaTracking"><option value="latest_release">Latest release</option><option value="tag">Explicit tag</option><option value="manual">Manual ref</option></select></label>
                 <label id="recipeSourceRefField" hidden><span>GitHub ref</span><input id="recipeMetaSourceRef" placeholder="v1.2.3, main, or commit SHA"></label>
                 <label><span>Debian version</span><select id="recipeMetaVersionSource"><option value="tag">From GitHub tag</option><option value="release_name">From release name</option><option value="regex">Custom expression</option><option value="build">Provided by build</option></select></label>
@@ -341,10 +344,11 @@
 
   <script src="/ui_core.js?v=20260906-1"></script>
   <script src="/settings.js?v=20260905-4"></script>
-  <script src="/recipe_serialization.js?v=20260903-2"></script>
-  <script src="/js/build_insight.js?v=20260906-2"></script>
+  <script src="/js/recipe/archive_tree.js?v=20260906-1"></script>
+  <script src="/recipe_serialization.js?v=20260906-2"></script>
+  <script src="/js/build_insight.js?v=20260906-4"></script>
   <script src="/js/recipe/test_run_modal.js?v=20260906-3"></script>
-  <script src="/app.js?v=20260906-1"></script>
+  <script src="/app.js?v=20260906-4"></script>
   <script src="/js/pages/dashboard.js?v=20260905-2"></script>
   <script src="/js/pages/packages.js?v=20260906-3"></script>
   <script src="/js/pages/logs.js?v=20260905-7"></script>

@@ -35,9 +35,23 @@ def migrate_legacy_recipe(workflow: dict) -> dict:
         service.pop("configured", None)
 
     artifact = migrated.get("artifact")
-    if isinstance(artifact, dict) and artifact.get("mode") == "upstream_archive":
-        has_selector = bool(artifact.get("asset_name") or artifact.get("name_pattern"))
-        artifact.setdefault("archive_source", "release_asset" if has_selector else "auto")
-        artifact.setdefault("asset_selection", "exact" if artifact.get("asset_name") else "pattern")
+    if isinstance(artifact, dict):
+        if "selected_files" in artifact and "payload" in artifact:
+            raise ValueError("artifact must not contain both selected_files and payload")
+        if "selected_files" in artifact:
+            selected_files = artifact.pop("selected_files")
+            if artifact.get("mode") == "upstream_archive":
+                if isinstance(selected_files, list):
+                    selected_files = [row.strip() if isinstance(row, str) else row for row in selected_files]
+                artifact["payload"] = {
+                    "mode": "paths", "include": selected_files, "exclude": [],
+                    "legacy_file_layout": "basename",
+                }
+            elif selected_files:
+                raise ValueError("artifact.selected_files is only valid for upstream_archive")
+        if artifact.get("mode") == "upstream_archive":
+            has_selector = bool(artifact.get("asset_name") or artifact.get("name_pattern"))
+            artifact.setdefault("archive_source", "release_asset" if has_selector else "auto")
+            artifact.setdefault("asset_selection", "exact" if artifact.get("asset_name") else "pattern")
 
     return migrated

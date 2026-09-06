@@ -1,4 +1,4 @@
-/* global $ */
+/* global $, ArchiveTree */
 window.recipeSourceChanges = [];
 window.recipeExtraDependencies = [];
 window.recipeAdvancedFields = {};
@@ -6,6 +6,8 @@ window.recipeBuildOutput = {mode:'source', path:'', paths:[]};
 window.recipeSuggestedOutputPaths = [];
 window.recipeInstallMappings = [];
 window.recipeServiceVisible = false;
+window.recipeArchiveState = ArchiveTree.createState();
+window.recipeArchiveInspectionMeta = null;
 
 function lines(value) {
   return String(value || '').split(/\r?\n|,/).map(row => row.trim()).filter(Boolean);
@@ -166,13 +168,17 @@ function collectWorkflow() {
     artifact.archive_source = archiveSource;
     artifact.archive_format = $('recipeArchiveFormat')?.value || 'tar.gz';
     artifact.asset_selection = assetSelection;
-    artifact.selected_files = lines(value('recipeArtifactFiles'));
+    artifact.payload = {
+      mode:window.recipeArchiveState.payload.mode,
+      include:[...window.recipeArchiveState.payload.include],
+      exclude:[...window.recipeArchiveState.payload.exclude],
+      ...(window.recipeArchiveState.payload.legacy_file_layout ? {legacy_file_layout:window.recipeArchiveState.payload.legacy_file_layout} : {}),
+    };
     artifact.asset_name = archiveSource === 'release_asset' && assetSelection === 'exact' ? value('recipeArtifactName') : '';
     artifact.name_pattern = archiveSource === 'release_asset' && assetSelection === 'pattern' ? value('recipeArtifactPattern') : '';
   } else {
     artifact.name_pattern = artifactMode === 'upstream_deb' ? value('recipeArtifactPattern') : '';
     artifact.asset_name = '';
-    artifact.selected_files = [];
   }
   return {
     schema_version: 1,
@@ -282,11 +288,13 @@ function renderWorkflow(wf) {
     window.recipeSuggestedOutputPaths = [];
     setValue('recipeMetaName', wf.name || ''); setValue('recipeMetaPackage', packageData.name || ''); setValue('recipeMetaGithub', source.repository || '');
     setValue('recipeMetaTracking', source.tracking || 'latest_release'); setValue('recipeMetaSourceRef', source.ref || ''); setValue('recipeMetaVersionSource', source.version?.source || 'tag'); setValue('recipePackageVersionRevision', packageData.version_revision ?? '1'); setValue('recipeMetaVersionExpression', source.version?.expression || '');
-    setValue('recipeArtifactMode', artifact.mode || 'source_build'); setValue('recipeArchiveSource', artifact.archive_source || 'auto'); setValue('recipeArchiveFormat', artifact.archive_format || 'tar.gz'); setValue('recipeAssetSelection', artifact.asset_selection || 'pattern'); setValue('recipeArtifactPattern', artifact.name_pattern || ''); setValue('recipeArtifactName', artifact.asset_name || ''); setValue('recipeArtifactFiles', (artifact.selected_files || []).join('\n'));
+    window.recipeArchiveState = ArchiveTree.createState(artifact.payload || {});
+    window.recipeArchiveInspectionMeta = null;
+    setValue('recipeArtifactMode', artifact.mode || 'source_build'); setValue('recipeArchiveSource', artifact.archive_source || 'auto'); setValue('recipeArchiveFormat', artifact.archive_format || 'tar.gz'); setValue('recipeAssetSelection', artifact.asset_selection || 'pattern'); setValue('recipeArtifactPattern', artifact.name_pattern || ''); setValue('recipeArtifactName', artifact.asset_name || '');
     $('recipeMetaActive').checked = wf.active !== false;
     if (typeof renderBuildEnvironment === 'function') renderBuildEnvironment({project_type:build.detected_project || '', detected_files:build.detected_files || [], build_dependencies:build.detected_dependencies || [], system_build_dependencies:build.detected_dependencies || [], build_tools:build.detected_tools || []});
     window.recipeExtraDependencies = [...(build.extra_dependencies || [])]; window.recipeSourceChanges = (build.source_changes || []).map(change => ({...change}));
-    renderDependencyChips(); renderSourceChanges(); renderBuildCommands(build.commands || []);
+    renderDependencyChips(); renderSourceChanges(); renderBuildCommands(build.commands || []); if (typeof renderArchivePayload === 'function') renderArchivePayload();
     if (typeof renderDependencyCheck === 'function') renderDependencyCheck();
     setValue('buildWorkingDirectory', build.working_directory || '.'); setValue('buildInactivityTimeout', window.recipeAdvancedFields.inactivity_timeout); setValue('buildMaximumRuntime', window.recipeAdvancedFields.maximum_runtime); setValue('buildEnvironment', environmentText(build.environment)); renderBuildOutput();
     setValue('installDestination', install.destination || ''); setValue('installContentSource', install.content?.source || 'build_output'); setValue('installDirectoryMode', install.directory_mode || '0755'); setValue('installFileMode', install.file_mode || '0644');

@@ -1,4 +1,4 @@
-/* global $, postJson, collectWorkflow, renderWorkflow, switchView */
+/* global $, postJson, collectWorkflow, renderWorkflow, switchView, ArchiveTree */
 let currentRecipeId = '';
 let renderingWorkflow = false;
 let autosaveTimer = null;
@@ -32,7 +32,7 @@ function refreshRecipeApplicability() {
   if ($('recipeAssetSelectionField')) $('recipeAssetSelectionField').hidden = !releaseAsset;
   if ($('recipeArtifactPatternField')) $('recipeArtifactPatternField').hidden = upstreamArchive ? !(releaseAsset && assetSelection === 'pattern') : !upstreamDeb;
   if ($('recipeArtifactNameField')) $('recipeArtifactNameField').hidden = !(releaseAsset && assetSelection === 'exact');
-  if ($('recipeArtifactFilesField')) $('recipeArtifactFilesField').hidden = !upstreamArchive;
+  if ($('recipeArchivePayloadField')) $('recipeArchivePayloadField').hidden = !upstreamArchive;
   if ($('recipeArchiveInspectionField')) $('recipeArchiveInspectionField').hidden = !upstreamArchive;
   const configuredFiles = $('installContentSource')?.value === 'configured_files';
   if ($('installDestination')) { $('installDestination').disabled = configuredFiles; $('installDestination').closest('label').hidden = configuredFiles; }
@@ -109,21 +109,76 @@ function buildEnvironmentState(detection) {
   return {key:'detected', label:'Detected'};
 }
 
-function addArchiveSelectedFile(path) {
-  const current = lines(value('recipeArtifactFiles'));
-  if (!current.includes(path)) current.push(path);
-  setValue('recipeArtifactFiles', current.join('\n'));
-  scheduleRecipeAutosave();
+function archiveCount(label, count) {
+  const plural = label === 'directory' ? 'directories' : `${label}s`;
+  return `${count} ${count === 1 ? label : plural}`;
+}
+
+function archiveSelectorRows(paths, role) {
+  if (!paths.length) return '<p class="muted">None</p>';
+  return `<div class="archive-selector-list">${paths.map(path => {
+    const directory = path.endsWith('/');
+    return `<div class="archive-selector-row"><code>${esc(path)}</code><span>${directory ? 'Recursive' : 'File'}</span><button type="button" class="ghost compact-button danger-text" data-archive-action="remove-${role}" data-archive-path="${esc(path)}">Remove</button></div>`;
+  }).join('')}</div>`;
+}
+
+function renderArchivePayloadSummary() {
+  const node = $('recipeArchivePayloadSummary');
+  if (!node) return;
+  const state = window.recipeArchiveState;
+  const summary = ArchiveTree.selectionSummary(state);
+  const selectedLabel = summary.mode === 'entire_archive'
+    ? `Entire archive${summary.resolvedFiles === null ? '' : ` · ${archiveCount('file', summary.resolvedFiles)}`}`
+    : `${archiveCount('directory', summary.selectedDirectories)} · ${archiveCount('explicit file', summary.explicitFiles)}${summary.resolvedFiles === null ? '' : ` · ${archiveCount('resolved file', summary.resolvedFiles)}`}`;
+  const exclusions = archiveCount('directory', summary.excludedDirectories) + ` · ${archiveCount('file', summary.excludedFiles)}`;
+  const legacy = state.payload.legacy_file_layout ? '<p class="archive-legacy-note">Existing file placement is preserved until you change this selection.</p>' : '';
+  const missing = summary.missing.length ? `<p class="archive-selector-warning">Missing from inspected archive: ${summary.missing.map(esc).join(', ')}</p>` : '';
+  node.innerHTML = `<section class="archive-summary-card archive-summary-card--selected"><div class="archive-summary-title"><strong>Selected</strong><span>${esc(selectedLabel)}</span></div>${summary.mode === 'paths' ? archiveSelectorRows(state.payload.include, 'include') : ''}</section><section class="archive-summary-card archive-summary-card--excluded"><div class="archive-summary-title"><strong>Excluded</strong><span>${esc(exclusions)}</span></div>${archiveSelectorRows(state.payload.exclude, 'exclude')}</section>${legacy}${missing}`;
+}
+
+function archiveTreeRow(node) {
+  const state = window.recipeArchiveState;
+  const expanded = node.kind === 'directory' && state.expanded.has(node.path);
+  const label = node.path.split('/').filter(Boolean).at(-1) + (node.kind === 'directory' ? '/' : '');
+  const stateLabel = ArchiveTree.entryState(state, node.path);
+  const exactInclude = state.payload.include.includes(node.path);
+  const exactExclude = state.payload.exclude.includes(node.path);
+  const includeAllowed = !state.stale && state.payload.mode === 'paths' && !exactInclude && !state.payload.include.some(path => ArchiveTree.selectorMatches(path, node.path));
+  const excludeAllowed = ArchiveTree.canExclude(state, node.path);
+  const stateTone = stateLabel.startsWith('Excluded') ? ' archive-tree-state--excluded' : stateLabel.startsWith('Included') ? ' archive-tree-state--selected' : '';
+  const stateMarkup = stateLabel ? `<span class="archive-tree-state${stateTone}">${esc(stateLabel)}</span>` : '';
+  const toggle = node.kind === 'directory' ? `<button type="button" class="archive-tree-toggle" data-archive-action="toggle" data-archive-path="${esc(node.path)}" aria-expanded="${expanded}"${state.stale ? ' disabled' : ''}><span aria-hidden="true">${expanded ? '▾' : '▸'}</span><span class="sr-only">${expanded ? 'Collapse' : 'Expand'} ${esc(node.path)}</span></button>` : '<span class="archive-tree-spacer" aria-hidden="true"></span>';
+  const metadata = node.kind === 'directory' ? archiveCount('file', node.descendant_files || 0) : `${Number(node.size || 0).toLocaleString()} bytes`;
+  const includeAction = includeAllowed ? `<button type="button" class="ghost compact-button" data-archive-action="include" data-archive-path="${esc(node.path)}">${node.kind === 'directory' ? 'Include recursively' : 'Include'}</button>` : '';
+  const excludeAction = excludeAllowed ? `<button type="button" class="ghost compact-button" data-archive-action="exclude" data-archive-path="${esc(node.path)}">${node.kind === 'directory' ? 'Exclude recursively' : 'Exclude'}</button>` : '';
+  return `<div class="archive-tree-row" role="treeitem" aria-level="${node.depth + 1}" style="--archive-depth:${node.depth}">${toggle}<code>${esc(label)}</code><span class="archive-tree-meta">${esc(metadata)}</span>${stateMarkup}<span class="archive-tree-actions">${includeAction}${excludeAction}</span></div>`;
+}
+
+function renderArchivePayload() {
+  const state = window.recipeArchiveState;
+  document.querySelectorAll('input[name="recipeArchivePayloadMode"]').forEach(input => { input.checked = input.value === state.payload.mode; });
+  renderArchivePayloadSummary();
+  const node = $('recipeArchiveInspection');
+  if (!node) return;
+  node.classList.remove('has-error');
+  node.classList.remove('is-stale');
+  if (!state.tree) {
+    node.innerHTML = '<p>No archive inspected.</p>';
+  } else {
+    const rows = ArchiveTree.visibleNodes(state.tree, state.expanded);
+    const source = window.recipeArchiveInspectionMeta?.source || {};
+    const sourceLabel = [source.source || 'archive', source.name || ''].filter(Boolean).join(' · ');
+    node.classList.toggle('is-stale', state.stale);
+    node.innerHTML = `<div class="archive-inspection-head"><strong>${esc(sourceLabel)}</strong><span>${archiveCount('file', state.inventory.file_count)} · ${archiveCount('directory', state.inventory.directory_count)}</span></div><div class="archive-tree" role="tree" aria-label="Archive contents">${rows.map(archiveTreeRow).join('')}</div>`;
+  }
+  const status = $('recipeArchiveInspectionStatus');
+  if (status) status.textContent = !state.tree ? 'Inspect to browse archive contents.' : state.stale ? 'Inspection is stale. Inspect again to enable tree actions.' : state.selectionError ? state.selectionError.message : 'Inspection is current.';
 }
 
 function renderArchiveInspection(inspection) {
-  const node = $('recipeArchiveInspection');
-  if (!node) return;
-  const files = inspection?.files || [];
-  const source = inspection?.source || {};
-  node.classList.remove('has-error');
-  node.innerHTML = `<div class="archive-inspection-head"><strong>${esc(source.source || 'archive')} · ${esc(source.name || '')}</strong><span>${files.length} files shown</span></div>` +
-    (files.length ? `<div class="archive-file-list">${files.slice(0, 80).map(row => `<div class="archive-file-row"><code>${esc(row.relative_path)}</code><span>${esc(String(row.size || 0))} bytes</span><button type="button" class="ghost compact-button" data-add-archive-file="${esc(row.relative_path)}">Add</button></div>`).join('')}</div>` : '<p>No regular file found in this archive.</p>');
+  window.recipeArchiveInspectionMeta = {source:inspection.source || {}, release:inspection.release || {}, extraction:inspection.extraction || {}};
+  ArchiveTree.setInventory(window.recipeArchiveState, inspection.inventory, inspection.selection_error || null);
+  renderArchivePayload();
 }
 
 function renderArchiveInspectionError(error) {
@@ -131,23 +186,51 @@ function renderArchiveInspectionError(error) {
   if (!node) return;
   const details = error?.details || {};
   const sources = details.sources || [];
+  if (window.recipeArchiveState?.tree) ArchiveTree.markStale(window.recipeArchiveState);
   node.classList.add('has-error');
   node.innerHTML = `<p>${esc(error?.message || 'Archive inspection failed')}</p>` +
     (sources.length ? `<div class="archive-file-list">${sources.map(row => `<div class="archive-file-row"><code>${esc(row.name)}</code><span>${esc(row.source)} · ${esc(row.archive_format)}</span></div>`).join('')}</div>` : '');
+  if ($('recipeArchiveInspectionStatus')) $('recipeArchiveInspectionStatus').textContent = 'Inspection failed. Configured selections are unchanged.';
+  renderArchivePayloadSummary();
 }
 
 async function inspectArchive() {
   const wf = collectWorkflow();
-  wf.artifact.selected_files = wf.artifact.selected_files || [];
+  const inspectionWorkflow = structuredClone(wf);
+  if (inspectionWorkflow.artifact?.payload?.mode === 'paths' && !inspectionWorkflow.artifact.payload.include.length) {
+    inspectionWorkflow.artifact.payload = {mode:'entire_archive', include:[], exclude:[]};
+  }
   const node = $('recipeArchiveInspection');
   if (node) { node.classList.remove('has-error'); node.textContent = 'Inspecting archive…'; }
-  const response = await fetch('/api/upstream-archive/inspect', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({workflow:wf})});
+  const response = await fetch('/api/upstream-archive/inspect', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({workflow:inspectionWorkflow})});
   const payload = await response.json();
   if (!response.ok) {
     renderArchiveInspectionError(payload.error || {message:payload.error || response.statusText});
     return;
   }
   renderArchiveInspection(payload.inspection);
+}
+
+function markArchiveInspectionStale() {
+  if (!window.recipeArchiveState?.tree || window.recipeArchiveState.stale) return;
+  ArchiveTree.markStale(window.recipeArchiveState);
+  renderArchivePayload();
+}
+
+function mutateArchivePayload(action, path = '') {
+  const state = window.recipeArchiveState;
+  const changed = action === 'include' ? ArchiveTree.includePath(state, path)
+    : action === 'exclude' ? ArchiveTree.excludePath(state, path)
+      : action === 'remove-include' ? ArchiveTree.removeInclude(state, path)
+        : action === 'remove-exclude' ? ArchiveTree.removeExclude(state, path)
+          : action === 'mode' ? ArchiveTree.setMode(state, path) : false;
+  if (action === 'toggle') {
+    if (ArchiveTree.toggleExpanded(state, path)) renderArchivePayload();
+    return;
+  }
+  if (!changed) return;
+  renderArchivePayload();
+  scheduleRecipeAutosave();
 }
 
 function renderBuildEnvironment(detection = {}) {
@@ -322,6 +405,10 @@ async function saveRecipeNow() {
     setRecipeAutosaveState('error', 'Complete build output to save');
     return;
   }
+  if (wf.artifact?.mode === 'upstream_archive' && wf.artifact.payload?.mode === 'paths' && !wf.artifact.payload.include.length) {
+    setRecipeAutosaveState('pending');
+    return;
+  }
   const revision = autosaveRevision;
   autosaveDirty = false;
   autosaveInFlight = true;
@@ -412,13 +499,15 @@ $('btnConfigureService')?.addEventListener('click',configureService);
 $('btnRemoveService')?.addEventListener('click',()=>removeService().catch(error=>showToast(error.message, {type:'error'})));
 $('newRecipeVersionSource')?.addEventListener('change',toggleNewVersionExpression);
 $('newRecipeTracking')?.addEventListener('change',toggleNewVersionExpression);
-['recipeMetaName','recipeMetaPackage','recipeMetaGithub','recipeMetaSourceRef','recipeMetaVersionExpression','recipePackageVersionRevision'].forEach(id => $(id)?.addEventListener('input',scheduleRecipeAutosave));
-['recipeMetaTracking','recipeMetaVersionSource','recipeMetaActive','recipeArtifactMode','recipeArchiveSource','recipeArchiveFormat','recipeAssetSelection'].forEach(id => $(id)?.addEventListener('change',event=>{toggleVersionExpression();refreshRecipeApplicability();scheduleRecipeAutosave(event);}));
-['recipeArtifactPattern','recipeArtifactName','recipeArtifactFiles'].forEach(id => $(id)?.addEventListener('input',scheduleRecipeAutosave));
+['recipeMetaName','recipeMetaPackage','recipeMetaGithub','recipeMetaSourceRef','recipeMetaVersionExpression','recipePackageVersionRevision'].forEach(id => $(id)?.addEventListener('input',event=>{if (['recipeMetaGithub','recipeMetaSourceRef','recipeMetaVersionExpression'].includes(id)) markArchiveInspectionStale();scheduleRecipeAutosave(event);}));
+['recipeMetaTracking','recipeMetaVersionSource','recipeMetaActive','recipeArtifactMode','recipeArchiveSource','recipeArchiveFormat','recipeAssetSelection'].forEach(id => $(id)?.addEventListener('change',event=>{if (['recipeMetaTracking','recipeMetaVersionSource','recipeArtifactMode','recipeArchiveSource','recipeArchiveFormat','recipeAssetSelection'].includes(id)) markArchiveInspectionStale();toggleVersionExpression();refreshRecipeApplicability();scheduleRecipeAutosave(event);}));
+['recipeArtifactPattern','recipeArtifactName'].forEach(id => $(id)?.addEventListener('input',event=>{markArchiveInspectionStale();scheduleRecipeAutosave(event);}));
+$('recipeArchivePayloadField')?.querySelectorAll('input[name="recipeArchivePayloadMode"]').forEach(input => input.addEventListener('change', () => mutateArchivePayload('mode', input.value)));
 $('btnInspectArchive')?.addEventListener('click',()=>inspectArchive().catch(error=>renderArchiveInspectionError({message:error.message})));
 document.addEventListener('click', event => {
-  const path = event.target?.dataset?.addArchiveFile;
-  if (path) addArchiveSelectedFile(path);
+  const control = event.target?.closest?.('[data-archive-action]');
+  const action = control?.dataset.archiveAction;
+  if (action) mutateArchivePayload(action, control.dataset.archivePath || '');
 });
 document.querySelectorAll('.recipe-build-card input, .recipe-build-card textarea, .recipe-build-card select, .recipe-install-card input, .recipe-install-card textarea, .recipe-install-card select, .recipe-service-card input, .recipe-service-card textarea, .recipe-service-card select').forEach(element => {
   element.addEventListener(element.tagName === 'SELECT' ? 'change' : 'input', () => {

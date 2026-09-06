@@ -8,6 +8,7 @@ import shutil
 import stat
 from pathlib import Path
 
+from .archive_payload import parse_archive_path
 from .command_runner import run_command
 from .systemd_unit import generate_unit
 
@@ -75,6 +76,67 @@ def _apply_modes(root: Path, directory_mode: str, file_mode: str) -> None:
             path.chmod(file_bits | (0o111 if executable else 0))
 
 
+def _stage_archive_payload(output: dict, source_root: Path, destination: Path) -> list[str]:
+    plan = output.get("payload")
+    if not isinstance(plan, dict) or not isinstance(plan.get("files"), list):
+        raise PackagingError("invalid_install_content", "Resolved archive payload plan is missing")
+    legacy_layout = bool(plan.get("legacy_layout"))
+    copied = []
+    staged_paths = set()
+    for record in plan["files"]:
+        if not isinstance(record, dict):
+            raise PackagingError("invalid_install_content", "Resolved archive payload contains an invalid file record")
+        relative_value = str(record.get("relative_path") or "")
+        try:
+            parsed = parse_archive_path(relative_value)
+        except ValueError as exc:
+            raise PackagingError(
+                "invalid_install_content", f"Resolved archive payload path is unsafe: {relative_value}",
+                details={"path": relative_value},
+            ) from exc
+        if parsed.is_directory:
+            raise PackagingError(
+                "invalid_install_content", f"Resolved archive payload record is not a file: {relative_value}",
+                details={"path": relative_value},
+            )
+        relative = Path(*parsed.parts)
+        expected = source_root.joinpath(*parsed.parts)
+        current = source_root
+        for part in parsed.parts:
+            current /= part
+            if current.is_symlink():
+                raise PackagingError(
+                    "invalid_install_content", f"Resolved archive payload file contains a symbolic link: {relative_value}",
+                    details={"path": relative_value},
+                )
+        candidate = Path(str(record.get("path") or ""))
+        try:
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(source_root)
+            expected_resolved = expected.resolve(strict=True)
+        except (OSError, ValueError) as exc:
+            raise PackagingError(
+                "invalid_install_content", f"Resolved archive payload file escapes workspace/source: {relative_value}",
+                details={"path": relative_value},
+            ) from exc
+        if candidate.is_symlink() or resolved != expected_resolved or not resolved.is_file():
+            raise PackagingError(
+                "invalid_install_content", f"Resolved archive payload file is invalid: {relative_value}",
+                details={"path": relative_value},
+            )
+        target = destination if legacy_layout else destination.joinpath(*parsed.parts[:-1])
+        staged_relative = Path(resolved.name) if legacy_layout else relative
+        if not legacy_layout and staged_relative in staged_paths:
+            raise PackagingError(
+                "invalid_install_content", f"Resolved archive payload contains a duplicate file: {relative_value}",
+                details={"path": relative_value},
+            )
+        staged_paths.add(staged_relative)
+        copied_rows = _copy_regular_tree(resolved, target, allowed_root=source_root)
+        copied.extend(copied_rows if legacy_layout else [(relative.parent / row).as_posix() for row in copied_rows])
+    return copied
+
+
 def generate_control(recipe: dict, version: str) -> str:
     package = recipe["package"]
     if not package.get("maintainer"):
@@ -133,29 +195,40 @@ def prepare_staging(recipe: dict, build_result: dict, workspace: str | Path, *, 
     if include_output:
         assert destination is not None
         destination.mkdir(parents=True, exist_ok=True)
-    output = build_result["output"]
-    output_rows = output.get("paths") if output.get("mode") == "paths" else [output]
-    content_sources = [Path(row["path"]).resolve() for row in output_rows]
-    for candidate in content_sources:
-        try:
-            candidate.relative_to(workspace / "source")
-        except ValueError as exc:
-            raise PackagingError("invalid_install_content", "Build output is outside workspace/source") from exc
-    content_source = content_sources[0]
     source_root = (workspace / "source").resolve()
-    content_available = all(path.exists() for path in content_sources)
+    try:
+        source_root.relative_to(workspace)
+    except ValueError as exc:
+        raise PackagingError("invalid_install_content", "workspace/source escapes the Build workspace") from exc
+    output = build_result["output"]
+    archive_output = output.get("mode") == "archive_payload"
+    if archive_output:
+        content_sources = [source_root]
+    else:
+        output_rows = output.get("paths") if output.get("mode") == "paths" else [output]
+        content_sources = [Path(row["path"]).resolve() for row in output_rows]
+        for candidate in content_sources:
+            try:
+                candidate.relative_to(source_root)
+            except ValueError as exc:
+                raise PackagingError("invalid_install_content", "Build output is outside workspace/source") from exc
+    content_source = content_sources[0]
+    content_available = source_root.is_dir() if archive_output else all(path.exists() for path in content_sources)
     if not content_available and not preview:
         raise PackagingError("invalid_install_content", "Resolved build output does not exist")
     copied = []
     if content_available and include_output and destination:
-        for candidate in content_sources:
-            relative = candidate.relative_to(workspace / "source")
-            target = destination / relative if output.get("mode") == "paths" and candidate.is_dir() else destination
-            copied_rows = _copy_regular_tree(candidate, target, allowed_root=workspace / "source")
-            if output.get("mode") == "paths" and candidate.is_dir():
-                copied.extend((relative / row).as_posix() for row in copied_rows)
-            else:
-                copied.extend(copied_rows)
+        if archive_output:
+            copied = _stage_archive_payload(output, source_root, destination)
+        else:
+            for candidate in content_sources:
+                relative = candidate.relative_to(source_root)
+                target = destination / relative if output.get("mode") == "paths" and candidate.is_dir() else destination
+                copied_rows = _copy_regular_tree(candidate, target, allowed_root=source_root)
+                if output.get("mode") == "paths" and candidate.is_dir():
+                    copied.extend((relative / row).as_posix() for row in copied_rows)
+                else:
+                    copied.extend(copied_rows)
     preview_warnings = [] if content_available else ["Build output is unavailable because build commands are not executed during dry-run"]
 
     generated: dict[str, list[str]] = {}

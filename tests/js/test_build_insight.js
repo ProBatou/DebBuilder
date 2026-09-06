@@ -76,6 +76,7 @@ assert.match(nodes.recipePreflightContent.innerHTML, /save it in the Recipe befo
 assert.match(nodes.recipePreflightContent.innerHTML, /Source changes/);
 assert.match(nodes.recipePreflightContent.innerHTML, /Debian package plan/);
 assert.match(nodes.recipePreflightContent.innerHTML, /Systemd service/);
+assert.match(nodes.recipePreflightContent.innerHTML, /insight-section--service/);
 assert.match(nodes.recipePreflightContent.innerHTML, /WorkingDirectory/);
 assert.match(nodes.recipePreflightContent.innerHTML, /Lockfile is missing/);
 assert.match(nodes.recipePreflightContent.innerHTML, /blocker/);
@@ -102,6 +103,30 @@ assert.equal(hasBlocker(context.preflightFindings(staticProject, {artifact:{mode
 assert.match(context.preflightBuildSection(staticProject, {artifact:{mode:'source_build'}}), /No build command is required for this source/);
 assert.match(context.preflightBuildSection(staticProject, {artifact:{mode:'source_build'}}), /No additional build requirements were found/);
 assert.match(context.preflightSourceSection(staticProject, {artifact:{mode:'upstream_archive'}}), /No source build required/);
+
+const archivePaths = {
+  ...staticProject,
+  source:{archive_payload:{mode:'paths', selected_directories:2, explicit_files:1, selected_files:184, excluded_directories:1, excluded_files:0}},
+};
+const archivePathsHtml = context.preflightSourceSection(archivePaths, {artifact:{mode:'upstream_archive'}});
+assert.match(archivePathsHtml, /Archive payload/);
+assert.match(archivePathsHtml, /preflight-archive-payload-facts/);
+assert.match(archivePathsHtml, /2 directories · 1 explicit file/);
+assert.match(archivePathsHtml, /184 resolved files · 1 exclusion/);
+assert.doesNotMatch(archivePathsHtml, /relative_path/);
+
+const entireArchive = {
+  ...archivePaths,
+  source:{archive_payload:{mode:'entire_archive', selected_directories:0, explicit_files:0, selected_files:912, excluded_directories:3, excluded_files:0}},
+};
+const entireArchiveHtml = context.preflightSourceSection(entireArchive, {artifact:{mode:'upstream_archive'}});
+assert.match(entireArchiveHtml, /Entire archive/);
+assert.match(entireArchiveHtml, /912 resolved files · 3 exclusions/);
+
+const serviceHtml = context.preflightServiceSection(result, workflow);
+assert.match(serviceHtml, /insight-section--service/);
+assert.match(serviceHtml, /Prepared systemd unit/);
+assert.doesNotMatch(serviceHtml, /preflight-secondary-details/);
 
 const incompleteSource = {
   ...staticProject,

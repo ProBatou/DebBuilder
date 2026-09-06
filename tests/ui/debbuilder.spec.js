@@ -58,6 +58,146 @@ async function expectFullyInViewport(page, locator) {
   expect(box.y + box.height).toBeLessThanOrEqual(page.viewportSize().height + 1);
 }
 
+const archiveFiles = [
+  '.github/workflows/release.yml',
+  'README.md',
+  'bin/archive-agent',
+  'debbuilder/app.py',
+  'debbuilder/runtime.py',
+  'debbuilder/services/execution_service.py',
+  'debbuilder/services/package_service.py',
+  'debbuilder/services/a-very-long-service-module-name-that-must-wrap-safely.py',
+  'server.py',
+  'share/defaults.yml',
+  'static/css/pages.css',
+  'static/index.html',
+  'static/js/app.js',
+  'tests/test_app.py',
+  'tests/test_runtime.py',
+];
+
+function archiveInventory(files) {
+  const directories = new Set();
+  files.forEach(file => {
+    const parts = file.split('/');
+    for (let index = 1; index < parts.length; index += 1) directories.add(`${parts.slice(0, index).join('/')}/`);
+  });
+  const entries = [
+    ...[...directories].map(directory => ({
+      path: directory,
+      kind: 'directory',
+      descendant_files: files.filter(file => file.startsWith(directory)).length,
+    })),
+    ...files.map((file, index) => ({path: file, kind: 'file', size: 128 + index, mode: file === 'bin/archive-agent' ? '0755' : '0644'})),
+  ].sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+  return {
+    entries,
+    file_count: files.length,
+    directory_count: directories.size,
+    entry_count: entries.length,
+    complete: true,
+  };
+}
+
+async function routeArchiveInspection(page, inventory = archiveInventory(archiveFiles)) {
+  await page.route('**/api/upstream-archive/inspect', async route => {
+    const workflow = route.request().postDataJSON().workflow;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({inspection: {
+        source: {name: 'archive-agent-linux-amd64.tar.gz', source: 'release_asset', archive_format: 'tar.gz'},
+        release: {repository: workflow.source.repository, ref: 'v5.0.0', tag: 'v5.0.0', upstream_version: '5.0.0', debian_version: '5.0.0-3'},
+        extraction: {files: inventory.file_count, stripped_root: 'archive-agent-5.0.0'},
+        inventory,
+        payload: null,
+        selection_error: null,
+      }}),
+    });
+  });
+}
+
+async function openArchiveRecipe(page) {
+  await openView(page, 'recipes');
+  await page.locator('#workflowSelect').selectOption('archive-agent');
+  await expect(page.locator('#recipeTitle')).toHaveText('archive-agent');
+  await expect(page.locator('#recipeArchivePayloadField')).toBeVisible();
+}
+
+function archiveAction(page, action, pathValue) {
+  return page.locator(`[data-archive-action="${action}"][data-archive-path="${pathValue}"]`);
+}
+
+async function persistedArchivePayload(page) {
+  const response = await page.request.get('/api/workflows/archive-agent');
+  expect(response.ok()).toBe(true);
+  const payload = (await response.json()).artifact.payload;
+  if (!payload.legacy_file_layout) delete payload.legacy_file_layout;
+  return payload;
+}
+
+async function expectPersistedArchivePayload(page, expected) {
+  await expect.poll(() => persistedArchivePayload(page)).toEqual(expected);
+}
+
+async function restoreArchiveRecipe(page, original) {
+  await page.evaluate(async () => {
+    clearTimeout(autosaveTimer);
+    autosaveDirty = false;
+    autosaveRevision += 1;
+    recipeMutationPaused = true;
+    await waitForAutosaveIdle();
+  });
+  const response = await page.request.post('/api/workflows/archive-agent', {
+    data: {workflow: original, previous_id: 'archive-agent'},
+  });
+  expect(response.ok()).toBe(true);
+}
+
+async function pauseForManualArchiveReview(page) {
+  if (process.env.DEBBUILDER_MANUAL_ARCHIVE_REVIEW === '1') await page.pause();
+}
+
+async function routeArchivePreparedTest(page, facts) {
+  const response = await page.request.get('/api/executions/ui-01-prepared');
+  expect(response.ok()).toBe(true);
+  const execution = structuredClone((await response.json()).execution);
+  execution.id = 'ui-archive-prepared';
+  execution.recipe_id = 'archive-agent';
+  execution.recipe = 'archive-agent';
+  const step = name => execution.steps.find(row => row.name === name);
+  step('source').details = {
+    repository: 'example/archive-agent', strategy: 'latest_release', ref: 'v5.0.0', tag: 'v5.0.0',
+    upstream_version: '5.0.0', debian_version: '5.0.0-3', archive_payload: facts,
+    asset: {name: 'archive-agent-linux-amd64.tar.gz', source: 'release_asset'},
+  };
+  step('detection').details = {
+    project_type: 'upstream_archive', display_name: 'Upstream release artifact · no source build',
+    detected_files: facts.mode === 'entire_archive' ? ['Entire archive'] : facts.include,
+    build_tools: [], system_build_dependencies: [], proposed_commands: [], warnings: [], archive_payload: facts,
+  };
+  step('dependencies').details = {
+    detected: [], manually_added: [], requested: [], available: [], missing: [],
+    tools: [], detected_tools: [], available_tools: [], missing_tools: [], reason: 'upstream_archive',
+  };
+  step('build').details = {
+    executed: false, reason: 'upstream_archive', commands: [],
+    plan: {commands: [], working_directory: '.', environment: {}, output: {mode: 'archive_payload', payload: facts}},
+    output: {mode: 'archive_payload', payload: facts},
+  };
+  step('staging').details = {
+    preview: true, version: '5.0.0-3', install_destination: '/opt/archive-agent', include_output: true,
+    content_available: true, content_file_count: facts.selected_files, configurations: [], directories: [],
+    control: 'Package: archive-agent\nVersion: 5.0.0-3\nArchitecture: amd64\n', maintainer_scripts: {},
+  };
+  await page.route('**/api/run', route => route.fulfill({
+    status: 202, contentType: 'application/json', body: JSON.stringify({run_id: 'ui-archive-prepared', status: 'queued'}),
+  }));
+  await page.route('**/api/executions/ui-archive-prepared', route => route.fulfill({
+    status: 200, contentType: 'application/json', body: JSON.stringify({execution}),
+  }));
+}
+
 test.beforeEach(async ({page}) => {
   page.uiErrors = [];
   page.on('pageerror', error => page.uiErrors.push(`pageerror: ${error.message}`));
@@ -312,6 +452,8 @@ test('Recipe JSON Apply drains an older autosave before persisting JSON', async 
 
     await page.locator('#btnRecipeJson').click();
     const editor = page.locator('#recipeJsonEditor');
+    await expect(page.locator('#recipeJsonDialog')).toBeVisible();
+    await expect(editor).not.toHaveValue('');
     const applied = JSON.parse(await editor.inputValue());
     applied.package.description = `JSON wins after delayed autosave on ${testInfo.project.name}`;
     await page.locator('#btnEditRecipeJson').click();
@@ -484,6 +626,264 @@ test('Logs explains build, validation, and publication failures', async ({page},
   await capture(page, testInfo, 'log-publication-diagnostic', {fullPage:false});
 });
 
+test('Archive Selected paths persists compact recursive selectors and presents them in Test', async ({page}, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'Desktop archive journey');
+  const original = await (await page.request.get('/api/workflows/archive-agent')).json();
+  await routeArchiveInspection(page);
+  try {
+    await openArchiveRecipe(page);
+    await page.locator('.archive-payload-modes label').filter({hasText: 'Entire archive'}).click();
+    await expect(page.locator('input[name="recipeArchivePayloadMode"][value="entire_archive"]')).toBeChecked();
+    await page.locator('.archive-payload-modes label').filter({hasText: 'Selected paths'}).click();
+    await expect(page.locator('input[name="recipeArchivePayloadMode"][value="paths"]')).toBeChecked();
+    await page.locator('#btnInspectArchive').click();
+    await expect(page.locator('#recipeArchiveInspectionStatus')).toHaveText('Inspection is current.');
+    await expect(page.locator('.archive-tree-row')).toHaveCount(8);
+    await expect(archiveAction(page, 'toggle', 'debbuilder/')).toHaveAttribute('aria-expanded', 'false');
+    await captureElement(page, testInfo, 'archive-selected-initial', page.locator('#recipeArchivePayloadField'));
+    await pauseForManualArchiveReview(page);
+
+    await archiveAction(page, 'toggle', 'debbuilder/').click();
+    await expect(archiveAction(page, 'toggle', 'debbuilder/')).toHaveAttribute('aria-expanded', 'true');
+    await archiveAction(page, 'toggle', 'debbuilder/services/').click();
+    await expect(page.locator('.archive-tree')).toContainText('app.py');
+    await expect(page.locator('.archive-tree')).toContainText('runtime.py');
+    await expect(page.locator('.archive-tree')).toContainText('execution_service.py');
+    await archiveAction(page, 'toggle', 'debbuilder/services/').click();
+    await expect(archiveAction(page, 'toggle', 'debbuilder/services/')).toHaveAttribute('aria-expanded', 'false');
+    await archiveAction(page, 'toggle', 'debbuilder/services/').click();
+
+    await archiveAction(page, 'include', 'debbuilder/').click();
+    await archiveAction(page, 'include', 'static/').click();
+    await archiveAction(page, 'include', 'server.py').click();
+    await archiveAction(page, 'exclude', 'debbuilder/services/').click();
+    const expected = {
+      mode: 'paths',
+      include: ['debbuilder/', 'server.py', 'static/'],
+      exclude: ['debbuilder/services/'],
+    };
+    await expect(page.locator('#recipeArchivePayloadSummary')).toContainText('2 directories · 1 explicit file · 6 resolved files');
+    await expect(page.locator('#recipeArchivePayloadSummary')).toContainText('debbuilder/services/');
+    await expect(page.locator('.archive-tree')).not.toContainText('Inside included directory');
+    await expectPersistedArchivePayload(page, expected);
+    await captureElement(page, testInfo, 'archive-selected-expanded', page.locator('#recipeArchivePayloadField'));
+    await captureElement(page, testInfo, 'archive-selected-summary', page.locator('#recipeArchivePayloadSummary'));
+
+    await page.locator('#btnRecipeJson').click();
+    const recipeJson = JSON.parse(await page.locator('#recipeJsonEditor').inputValue());
+    expect(recipeJson.artifact.payload).toEqual(expected);
+    expect(JSON.stringify(recipeJson.artifact.payload)).not.toContain('execution_service.py');
+    expect(recipeJson.artifact).not.toHaveProperty('selected_files');
+    await page.locator('#btnCancelRecipeJson').click();
+
+    await page.reload();
+    await openArchiveRecipe(page);
+    await expect(page.locator('#recipeArchivePayloadSummary')).toContainText('2 directories · 1 explicit file');
+    await expect(page.locator('#recipeArchiveInspectionStatus')).toHaveText('Inspect to browse archive contents.');
+    await expect(page.locator('.archive-tree-row')).toHaveCount(0);
+    await page.locator('#btnInspectArchive').click();
+    await expect(page.locator('#recipeArchivePayloadSummary')).toContainText('6 resolved files');
+    await expect(archiveAction(page, 'toggle', 'debbuilder/')).toBeEnabled();
+
+    await routeArchivePreparedTest(page, {
+      ...expected,
+      selected_directories: 2,
+      explicit_files: 1,
+      selected_files: 6,
+      excluded_directories: 1,
+      excluded_files: 0,
+      excluded_resolved_files: 3,
+      legacy_layout: false,
+    });
+    await page.locator('#btnDryRun').click();
+    await expect(page.locator('#testRunState')).toHaveText('Prepared');
+    await expect(page.locator('#testRunPreflightContent')).toContainText('2 directories · 1 explicit file');
+    await expect(page.locator('#testRunPreflightContent')).toContainText('6 resolved files · 1 exclusion');
+    await captureElement(page, testInfo, 'archive-selected-preflight', page.locator('#testRunDialog'));
+    await page.locator('#btnTestRunClose').click();
+  } finally {
+    await restoreArchiveRecipe(page, original);
+  }
+});
+
+test('Archive Entire archive persists exclusions and remains compact', async ({page}, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'Desktop archive journey');
+  const original = await (await page.request.get('/api/workflows/archive-agent')).json();
+  await routeArchiveInspection(page);
+  try {
+    await openArchiveRecipe(page);
+    await page.locator('input[name="recipeArchivePayloadMode"][value="entire_archive"]').check();
+    expect(await page.evaluate(() => window.recipeArchiveState.payload.include)).toEqual([]);
+    await page.locator('#btnInspectArchive').click();
+    await archiveAction(page, 'exclude', '.github/').click();
+    await archiveAction(page, 'exclude', 'tests/').click();
+    const expected = {mode: 'entire_archive', include: [], exclude: ['.github/', 'tests/']};
+    await expect(page.locator('#recipeArchivePayloadSummary')).toContainText('Entire archive · 12 files');
+    await expect(page.locator('#recipeArchivePayloadSummary')).toContainText('2 directories · 0 files');
+    await expect(page.locator('.archive-tree')).not.toContainText('Included by entire archive');
+    await expectPersistedArchivePayload(page, expected);
+    await captureElement(page, testInfo, 'archive-entire-exclusions', page.locator('#recipeArchivePayloadField'));
+
+    await page.reload();
+    await openArchiveRecipe(page);
+    await expect(page.locator('input[name="recipeArchivePayloadMode"][value="entire_archive"]')).toBeChecked();
+    await expect(page.locator('#recipeArchivePayloadSummary')).toContainText('.github/');
+    await page.locator('#btnInspectArchive').click();
+    await expect(page.locator('#recipeArchivePayloadSummary')).toContainText('Entire archive · 12 files');
+
+    await routeArchivePreparedTest(page, {
+      ...expected,
+      selected_directories: 0,
+      explicit_files: 0,
+      selected_files: 12,
+      excluded_directories: 2,
+      excluded_files: 0,
+      excluded_resolved_files: 3,
+      legacy_layout: false,
+    });
+    await page.locator('#btnDryRun').click();
+    await expect(page.locator('#testRunState')).toHaveText('Prepared');
+    await expect(page.locator('#testRunPreflightContent')).toContainText('Entire archive');
+    await expect(page.locator('#testRunPreflightContent')).toContainText('12 resolved files · 2 exclusions');
+    await captureElement(page, testInfo, 'archive-entire-preflight', page.locator('#testRunDialog'));
+    await page.locator('#btnTestRunClose').click();
+  } finally {
+    await restoreArchiveRecipe(page, original);
+  }
+});
+
+test('Archive selector remains usable without overflow on mobile', async ({page}, testInfo) => {
+  test.skip(testInfo.project.name !== 'mobile', 'Mobile archive journey');
+  const original = await (await page.request.get('/api/workflows/archive-agent')).json();
+  await routeArchiveInspection(page);
+  try {
+    await openArchiveRecipe(page);
+    await page.locator('input[name="recipeArchivePayloadMode"][value="entire_archive"]').check();
+    await page.locator('input[name="recipeArchivePayloadMode"][value="paths"]').check();
+    await page.locator('#btnInspectArchive').click();
+    await capture(page, testInfo, 'archive-mobile-inspected');
+    await pauseForManualArchiveReview(page);
+    await archiveAction(page, 'toggle', 'debbuilder/').click();
+    await archiveAction(page, 'toggle', 'debbuilder/services/').click();
+    await expect(page.locator('.archive-tree')).toContainText('a-very-long-service-module-name-that-must-wrap-safely.py');
+    await archiveAction(page, 'include', 'debbuilder/').click();
+    await archiveAction(page, 'exclude', 'debbuilder/services/').click();
+    await expect(archiveAction(page, 'remove-include', 'debbuilder/')).toBeVisible();
+    await expect(archiveAction(page, 'remove-exclude', 'debbuilder/services/')).toBeVisible();
+    await capture(page, testInfo, 'archive-mobile-expanded');
+    await captureElement(page, testInfo, 'archive-mobile-summary', page.locator('#recipeArchivePayloadSummary'));
+    await expectNoHorizontalOverflow(page);
+    await page.locator('input[name="recipeArchivePayloadMode"][value="entire_archive"]').check();
+    await expect(page.locator('#recipeArchivePayloadSummary')).toContainText('Entire archive');
+    await expect(archiveAction(page, 'exclude', 'tests/')).toBeVisible();
+    await captureElement(page, testInfo, 'archive-mobile-entire', page.locator('#recipeArchivePayloadField'));
+  } finally {
+    await restoreArchiveRecipe(page, original);
+  }
+});
+
+test('Archive large inventory renders only roots and one expanded branch', async ({page}, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'Desktop structural inventory journey');
+  const original = await (await page.request.get('/api/workflows/archive-agent')).json();
+  const largeFiles = Array.from({length: 30}, (_, branch) =>
+    Array.from({length: 100}, (__, file) => `segment-${String(branch).padStart(2, '0')}/file-${String(file).padStart(3, '0')}.dat`)
+  ).flat();
+  await routeArchiveInspection(page, archiveInventory(largeFiles));
+  try {
+    await openArchiveRecipe(page);
+    await page.locator('input[name="recipeArchivePayloadMode"][value="entire_archive"]').check();
+    await page.locator('input[name="recipeArchivePayloadMode"][value="paths"]').check();
+    await page.locator('#btnInspectArchive').click();
+    await expect(page.locator('.archive-tree-row')).toHaveCount(30);
+    await expect(page.locator('#recipeArchiveInspection')).toContainText('3000 files');
+    await archiveAction(page, 'toggle', 'segment-00/').click();
+    await expect(page.locator('.archive-tree-row')).toHaveCount(130);
+    await archiveAction(page, 'include', 'segment-00/').click();
+    await expect(page.locator('#recipeArchivePayloadSummary .archive-selector-row')).toHaveCount(1);
+    const payload = await page.evaluate(() => collectWorkflow().artifact.payload);
+    expect(payload).toEqual({mode: 'paths', include: ['segment-00/'], exclude: []});
+    expect(JSON.stringify(payload)).not.toContain('file-000.dat');
+  } finally {
+    await restoreArchiveRecipe(page, original);
+  }
+});
+
+test('Archive inspection becomes stale only for source-affecting edits', async ({page}, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'Desktop stale lifecycle journey');
+  const original = await (await page.request.get('/api/workflows/archive-agent')).json();
+  await routeArchiveInspection(page);
+  try {
+    await openArchiveRecipe(page);
+    await page.locator('input[name="recipeArchivePayloadMode"][value="entire_archive"]').check();
+    await page.locator('input[name="recipeArchivePayloadMode"][value="paths"]').check();
+    await page.locator('#btnInspectArchive').click();
+    await archiveAction(page, 'include', 'debbuilder/').click();
+    await page.locator('#recipeMetaGithub').fill('example/archive-agent-next');
+    await expect(page.locator('#recipeArchiveInspectionStatus')).toHaveText('Inspection is stale. Inspect again to enable tree actions.');
+    await expect(page.locator('#recipeArchivePayloadSummary')).toContainText('debbuilder/');
+    await expect(page.locator('.archive-tree-toggle').first()).toBeDisabled();
+    await expect(page.locator('[data-archive-action="include"], [data-archive-action="exclude"]')).toHaveCount(0);
+    await expect.poll(() => persistedArchivePayload(page)).toEqual({mode: 'paths', include: ['debbuilder/'], exclude: []});
+
+    await page.locator('#btnInspectArchive').click();
+    await expect(page.locator('#recipeArchiveInspectionStatus')).toHaveText('Inspection is current.');
+    await page.locator('#packageDescription').fill('A non-source archive description edit');
+    await expect(page.locator('#recipeArchiveInspectionStatus')).toHaveText('Inspection is current.');
+    await expect(archiveAction(page, 'toggle', 'debbuilder/')).toBeEnabled();
+  } finally {
+    await restoreArchiveRecipe(page, original);
+  }
+});
+
+test('Legacy archive placement survives passive UI actions and converts on selection mutation', async ({page}, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'Desktop legacy journey');
+  const original = await (await page.request.get('/api/workflows/archive-agent')).json();
+  expect(original.artifact.payload.legacy_file_layout).toBe('basename');
+  await routeArchiveInspection(page);
+  try {
+    await openArchiveRecipe(page);
+    await expect(page.locator('#recipeArchivePayloadSummary')).toContainText('Existing file placement is preserved');
+    await page.locator('#packageDescription').fill('Unrelated legacy autosave');
+    await expect.poll(async () => (await persistedArchivePayload(page)).legacy_file_layout).toBe('basename');
+    await page.locator('#btnInspectArchive').click();
+    await archiveAction(page, 'toggle', 'bin/').click();
+    await expect(archiveAction(page, 'toggle', 'bin/')).toHaveAttribute('aria-expanded', 'true');
+    await archiveAction(page, 'toggle', 'bin/').click();
+
+    await page.locator('#btnRecipeJson').click();
+    let viewed = JSON.parse(await page.locator('#recipeJsonEditor').inputValue());
+    expect(viewed.artifact.payload.legacy_file_layout).toBe('basename');
+    const downloadPromise = page.waitForEvent('download');
+    await page.locator('#btnExportRecipeJson').click();
+    await downloadPromise;
+    await page.locator('#btnCancelRecipeJson').click();
+
+    await routeArchivePreparedTest(page, {
+      mode: 'paths', include: ['bin/archive-agent', 'share/defaults.yml'], exclude: [],
+      selected_directories: 0, explicit_files: 2, selected_files: 2,
+      excluded_directories: 0, excluded_files: 0, excluded_resolved_files: 0, legacy_layout: true,
+    });
+    await page.locator('#btnDryRun').click();
+    await expect(page.locator('#testRunState')).toHaveText('Prepared');
+    await page.locator('#btnTestRunClose').click();
+    expect((await persistedArchivePayload(page)).legacy_file_layout).toBe('basename');
+
+    await page.reload();
+    await openArchiveRecipe(page);
+    expect((await persistedArchivePayload(page)).legacy_file_layout).toBe('basename');
+    await page.locator('#btnInspectArchive').click();
+    await archiveAction(page, 'include', 'README.md').click();
+    await expect.poll(async () => (await persistedArchivePayload(page)).legacy_file_layout || '').toBe('');
+    const converted = await persistedArchivePayload(page);
+    expect(converted).toEqual({mode: 'paths', include: ['README.md', 'bin/archive-agent', 'share/defaults.yml'], exclude: []});
+    viewed = await page.evaluate(() => collectWorkflow());
+    expect(viewed.artifact.payload).toEqual(converted);
+    expect(viewed.artifact).not.toHaveProperty('selected_files');
+  } finally {
+    await restoreArchiveRecipe(page, original);
+  }
+});
+
 test('Test accepts HTTP 202 and follows the returned Run in a Recipe modal', async ({page}, testInfo) => {
   await page.route('**/api/run', route => route.fulfill({status:202, contentType:'application/json', body:JSON.stringify({run_id:'ui-01-prepared', status:'queued'})}));
   await openView(page, 'recipes');
@@ -496,6 +896,9 @@ test('Test accepts HTTP 202 and follows the returned Run in a Recipe modal', asy
   await expect(page.locator('#testRunState')).toHaveText('Prepared');
   await expect(page.locator('#testRunPrepared')).toBeVisible();
   await expect(page.locator('#testRunPreflightContent')).toContainText('Source & project');
+  const serviceSection = page.locator('#testRunPreflightContent .insight-section--service');
+  await expect(serviceSection).toContainText('Systemd service');
+  await expect(serviceSection).toContainText('Prepared systemd unit');
   await expect(page.locator('#btnTestRunBuild')).toBeVisible();
   await expect(page.locator('.toast-region')).toContainText('Test queued: ui-01-prepared');
   await capture(page, testInfo, 'recipe-test-followed-run', {fullPage:false});

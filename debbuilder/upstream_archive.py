@@ -11,6 +11,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 from . import github_client, source_acquisition, upstream_artifact
+from .archive_payload import parse_archive_path, selectors_match
 
 
 class UpstreamArchiveError(RuntimeError):
@@ -200,21 +201,63 @@ def extract_zip_archive(archive: str | Path, destination: str | Path, *, max_mem
         raise UpstreamArchiveError("archive_extract_failed", "Release ZIP extraction failed") from exc
 
 
-def list_extracted_files(source: str | Path, *, limit: int = 2000) -> list[dict]:
+def inspect_inventory(source: str | Path) -> dict:
+    """Return the complete typed logical inventory of an extracted archive."""
     root = Path(source).resolve()
-    rows = []
-    for path in sorted(root.rglob("*")):
-        if len(rows) >= limit:
-            break
-        if path.is_symlink() or not path.is_file():
-            continue
-        resolved = path.resolve(strict=False)
+    entries = []
+    descendant_files: dict[str, int] = {}
+    file_count = 0
+    directory_count = 0
+    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+        relative = path.relative_to(root)
+        logical = relative.as_posix()
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode):
+            raise UpstreamArchiveError("archive_inspection_failed", f"Extracted archive contains a symbolic link: {logical}")
+        if not stat.S_ISDIR(mode) and not stat.S_ISREG(mode):
+            raise UpstreamArchiveError("archive_inspection_failed", f"Extracted archive contains a special entry: {logical}")
+        canonical = logical + "/" if stat.S_ISDIR(mode) else logical
         try:
-            relative = resolved.relative_to(root).as_posix()
+            parse_archive_path(canonical)
         except ValueError as exc:
-            raise UpstreamArchiveError("archive_inspection_failed", "Extracted file escapes archive root") from exc
-        rows.append({"relative_path": relative, "size": path.stat().st_size, "mode": f"{path.stat().st_mode & 0o777:04o}"})
-    return rows
+            raise UpstreamArchiveError("archive_inspection_failed", f"Extracted archive contains an unsafe logical path: {logical}") from exc
+        resolved = path.resolve(strict=True)
+        try:
+            resolved.relative_to(root)
+        except ValueError as exc:
+            raise UpstreamArchiveError("archive_inspection_failed", "Extracted entry escapes archive root") from exc
+        if stat.S_ISDIR(mode):
+            directory_count += 1
+            entries.append({"path": logical + "/", "kind": "directory"})
+            descendant_files[logical + "/"] = 0
+            continue
+        file_count += 1
+        entries.append({"path": logical, "kind": "file", "size": path.stat().st_size, "mode": f"{mode & 0o777:04o}"})
+        parts = relative.parts
+        for depth in range(1, len(parts)):
+            descendant_files[PurePosixPath(*parts[:depth]).as_posix() + "/"] = descendant_files.get(PurePosixPath(*parts[:depth]).as_posix() + "/", 0) + 1
+    for entry in entries:
+        if entry["kind"] == "directory":
+            entry["descendant_files"] = descendant_files.get(entry["path"], 0)
+    entries.sort(key=lambda entry: entry["path"])
+    return {
+        "entries": entries, "file_count": file_count, "directory_count": directory_count,
+        "entry_count": len(entries), "complete": True,
+    }
+
+
+def list_extracted_files(source: str | Path, *, limit: int | None = None) -> list[dict]:
+    """Compatibility view of the complete inventory; explicit truncation is rejected."""
+    inventory = inspect_inventory(source)
+    if limit is not None and limit < inventory["file_count"]:
+        raise UpstreamArchiveError(
+            "archive_inspection_incomplete", "Archive inspection limit would produce an incomplete inventory",
+            details={"limit": limit, "file_count": inventory["file_count"], "complete": False},
+        )
+    return [
+        {"relative_path": entry["path"], "size": entry["size"], "mode": entry["mode"]}
+        for entry in inventory["entries"] if entry["kind"] == "file"
+    ]
 
 
 def _expected_digest(asset: dict) -> str:
@@ -258,24 +301,146 @@ def resolve_and_extract(recipe: dict, workspace: str | Path, *, token: str = "",
     }
 
 
-def selected_file_records(recipe: dict, source_directory: str | Path) -> list[dict]:
-    source = Path(source_directory).resolve()
-    selected_files = []
-    for relative in recipe["artifact"]["selected_files"]:
-        target = (source / relative).resolve(strict=False)
+def _selection_error(code: str, role: str, path: str, expected_kind: str, message: str, **details) -> UpstreamArchiveError:
+    return UpstreamArchiveError(
+        code, message,
+        details={"role": role, "path": path, "expected_kind": expected_kind, **details},
+    )
+
+
+def _selector_target(source: Path, selector: str, role: str) -> Path:
+    parsed = parse_archive_path(selector)
+    expected = "directory" if parsed.is_directory else "file"
+    unresolved = source.joinpath(*parsed.parts)
+    try:
+        mode = unresolved.lstat().st_mode
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        raise _selection_error(
+            "archive_selection_path_not_found", role, selector, expected,
+            f"Archive {role} path was not found: {selector}",
+        ) from exc
+    if stat.S_ISLNK(mode):
+        raise _selection_error(
+            "archive_selection_unsafe_path", role, selector, expected,
+            f"Archive {role} path is a symbolic link: {selector}", actual_kind="symlink",
+        )
+    actual = "directory" if stat.S_ISDIR(mode) else "file" if stat.S_ISREG(mode) else "special"
+    if actual != expected:
+        raise _selection_error(
+            "archive_selection_type_mismatch", role, selector, expected,
+            f"Archive {role} path has the wrong type: {selector}", actual_kind=actual,
+        )
+    target = unresolved.resolve(strict=True)
+    try:
+        target.relative_to(source)
+    except ValueError as exc:
+        raise _selection_error(
+            "archive_selection_unsafe_path", role, selector, expected,
+            f"Archive {role} path escapes the extraction root: {selector}",
+        ) from exc
+    return target
+
+
+def _archive_inventory(source: Path) -> list[tuple[str, Path]]:
+    inventory = []
+    for path in sorted(source.rglob("*"), key=lambda item: item.relative_to(source).as_posix()):
+        relative = path.relative_to(source).as_posix()
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode):
+            raise UpstreamArchiveError(
+                "archive_selection_unsafe_path", f"Extracted archive contains a symbolic link: {relative}",
+                details={"role": "inventory", "path": relative, "expected_kind": "regular entry", "actual_kind": "symlink"},
+            )
+        canonical = relative + "/" if stat.S_ISDIR(mode) else relative
         try:
-            target.relative_to(source)
+            parse_archive_path(canonical)
         except ValueError as exc:
-            raise UpstreamArchiveError("unsafe_selected_file", f"Selected archive file escapes extraction root: {relative}") from exc
-        if target.is_symlink() or not target.is_file():
-            raise UpstreamArchiveError("selected_file_not_found", f"Selected file is missing from release archive: {relative}")
-        selected_files.append({"relative_path": relative, "path": str(target), "size": target.stat().st_size, "mode": f"{target.stat().st_mode & 0o777:04o}"})
-    return selected_files
+            raise UpstreamArchiveError(
+                "archive_selection_unsafe_path", f"Extracted archive contains an unsafe logical path: {relative}",
+                details={"role": "inventory", "path": relative, "expected_kind": "canonical path"},
+            ) from exc
+        if stat.S_ISDIR(mode):
+            continue
+        if not stat.S_ISREG(mode):
+            raise UpstreamArchiveError(
+                "archive_selection_unsafe_path", f"Extracted archive contains a special entry: {relative}",
+                details={"role": "inventory", "path": relative, "expected_kind": "file", "actual_kind": "special"},
+            )
+        resolved = path.resolve(strict=True)
+        try:
+            resolved.relative_to(source)
+        except ValueError as exc:
+            raise UpstreamArchiveError(
+                "archive_selection_unsafe_path", f"Extracted archive file escapes the extraction root: {relative}",
+                details={"role": "inventory", "path": relative, "expected_kind": "file"},
+            ) from exc
+        inventory.append((relative, resolved))
+    return inventory
+
+
+def _file_record(relative: str, target: Path) -> dict:
+    return {
+        "relative_path": relative, "path": str(target), "size": target.stat().st_size,
+        "mode": f"{target.stat().st_mode & 0o777:04o}",
+    }
+
+
+def payload_plan_summary(plan: dict) -> dict:
+    """Return the bounded portion of a resolved payload plan safe for Run details."""
+    return {key: plan[key] for key in (
+        "mode", "include", "exclude", "explicit_files", "selected_directories",
+        "selected_files", "excluded_files", "excluded_directories",
+        "excluded_resolved_files", "legacy_layout",
+    )}
+
+
+def resolve_payload(recipe: dict, source_directory: str | Path) -> dict:
+    """Resolve canonical selectors to deterministic regular files after root stripping."""
+    source = Path(source_directory).resolve(strict=True)
+    payload = recipe["artifact"]["payload"]
+    include = list(payload["include"])
+    exclude = list(payload["exclude"])
+    for selector in include:
+        _selector_target(source, selector, "include")
+    for selector in exclude:
+        _selector_target(source, selector, "exclude")
+
+    inventory = _archive_inventory(source)
+    included = [(relative, target) for relative, target in inventory if payload["mode"] == "entire_archive" or selectors_match(include, relative)]
+    selected = [(relative, target) for relative, target in included if not selectors_match(exclude, relative)]
+    if not selected:
+        raise UpstreamArchiveError(
+            "archive_selection_empty", "Archive payload selection resolved to zero files",
+            details={"role": "payload", "path": "", "expected_kind": "file", "mode": payload["mode"]},
+        )
+
+    legacy_layout = payload.get("legacy_file_layout") == "basename"
+    if legacy_layout:
+        targets = {relative: target for relative, target in selected}
+        selected = [(relative, targets[relative]) for relative in include if relative in targets]
+    files = [_file_record(relative, target) for relative, target in selected]
+    include_paths = [parse_archive_path(selector) for selector in include]
+    exclude_paths = [parse_archive_path(selector) for selector in exclude]
+    return {
+        "mode": payload["mode"], "include": include, "exclude": exclude,
+        "explicit_files": sum(not selector.is_directory for selector in include_paths),
+        "selected_directories": sum(selector.is_directory for selector in include_paths),
+        "selected_files": len(files),
+        "excluded_files": sum(not selector.is_directory for selector in exclude_paths),
+        "excluded_directories": sum(selector.is_directory for selector in exclude_paths),
+        "excluded_resolved_files": len(included) - len(selected),
+        "legacy_layout": legacy_layout, "files": files,
+    }
+
+
+def selected_file_records(recipe: dict, source_directory: str | Path) -> list[dict]:
+    """Compatibility accessor for callers that only need the resolved file records."""
+    return resolve_payload(recipe, source_directory)["files"]
 
 
 def acquire(recipe: dict, workspace: str | Path, *, token: str = "", release_resolver=resolve_release, downloader=github_client.download_archive) -> dict:
     result = resolve_and_extract(recipe, workspace, token=token, release_resolver=release_resolver, downloader=downloader)
-    return {**result, "selected_files": selected_file_records(recipe, result["source_directory"])}
+    return {**result, "archive_payload": resolve_payload(recipe, result["source_directory"])}
 
 
 def inspect(recipe: dict, *, token: str = "", release_resolver=resolve_release, downloader=github_client.download_archive) -> dict:
@@ -287,11 +452,21 @@ def inspect(recipe: dict, *, token: str = "", release_resolver=resolve_release, 
                 release = release_resolver(recipe, token=token)
                 exc.details.setdefault("sources", archive_source_options(release, recipe["artifact"]))
             raise
-        selected = selected_file_records(recipe, result["source_directory"]) if recipe["artifact"].get("selected_files") else []
+        payload = recipe["artifact"]["payload"]
+        plan = None
+        selection_error = None
+        if payload["mode"] == "entire_archive" or payload["include"]:
+            try:
+                plan = resolve_payload(recipe, result["source_directory"])
+            except UpstreamArchiveError as exc:
+                if exc.code not in {"archive_selection_path_not_found", "archive_selection_type_mismatch", "archive_selection_empty"}:
+                    raise
+                selection_error = {"code": exc.code, "message": str(exc), "details": exc.details}
         return {
             "source": result["asset"],
             "release": {key: result.get(key, "") for key in ("repository", "ref", "tag", "release_name", "release_url", "upstream_version", "debian_version")},
             "extraction": result["extraction"],
-            "files": list_extracted_files(result["source_directory"]),
-            "selected_files": selected,
+            "inventory": inspect_inventory(result["source_directory"]),
+            "payload": payload_plan_summary(plan) if plan else None,
+            "selection_error": selection_error,
         }

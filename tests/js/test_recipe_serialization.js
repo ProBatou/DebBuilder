@@ -33,6 +33,8 @@ const context = vm.createContext({
   toggleVersionExpression: () => {},
 });
 
+vm.runInContext(fs.readFileSync('static/js/recipe/archive_tree.js', 'utf8'), context, {filename: 'archive_tree.js'});
+context.ArchiveTree = context.window.ArchiveTree;
 vm.runInContext(fs.readFileSync('static/recipe_serialization.js', 'utf8'), context, {filename: 'recipe_serialization.js'});
 
 nodes.installDirectories.placeholder = '/var/lib/example | example | example | 0750';
@@ -108,3 +110,41 @@ nodes.serviceWorkingDirectory.value = '/opt/legacy-service';
 assert.equal(context.collectWorkflow().service.working_directory, '/opt/legacy-service');
 nodes.serviceWorkingDirectory.value = '';
 assert.equal(context.collectWorkflow().service.working_directory, '');
+
+const archiveRecipe = {
+  name:'archive-demo', package:{name:'archive-demo'}, source:{repository:'owner/archive-demo'},
+  artifact:{mode:'upstream_archive', archive_source:'github_source', payload:{mode:'paths', include:['app/', 'server.py'], exclude:['app/dev/']}},
+  install:{directories:[]},
+};
+context.renderWorkflow(archiveRecipe);
+let archiveCollected = context.collectWorkflow();
+assert.deepEqual(JSON.parse(JSON.stringify(archiveCollected.artifact.payload)), {mode:'paths', include:['app/', 'server.py'], exclude:['app/dev/']});
+assert.equal('selected_files' in archiveCollected.artifact, false);
+
+const entireRecipe = {
+  ...archiveRecipe,
+  artifact:{...archiveRecipe.artifact, payload:{mode:'entire_archive', include:[], exclude:['tests/']}},
+};
+context.renderWorkflow(entireRecipe);
+archiveCollected = context.collectWorkflow();
+assert.deepEqual(JSON.parse(JSON.stringify(archiveCollected.artifact.payload)), {mode:'entire_archive', include:[], exclude:['tests/']});
+
+const legacyArchive = {
+  ...archiveRecipe,
+  artifact:{...archiveRecipe.artifact, payload:{mode:'paths', include:['server.py', 'bin/tool'], exclude:[], legacy_file_layout:'basename'}},
+};
+context.renderWorkflow(legacyArchive);
+assert.deepEqual(JSON.parse(JSON.stringify(context.collectWorkflow().artifact.payload)), legacyArchive.artifact.payload);
+context.ArchiveTree.setInventory(context.window.recipeArchiveState, {
+  complete:true, entries:[
+    {path:'bin/',kind:'directory',descendant_files:1}, {path:'bin/tool',kind:'file',size:1,mode:'0755'},
+    {path:'server.py',kind:'file',size:1,mode:'0644'}, {path:'new.py',kind:'file',size:1,mode:'0644'},
+  ], file_count:3, directory_count:1, entry_count:4,
+});
+context.ArchiveTree.includePath(context.window.recipeArchiveState, 'new.py');
+archiveCollected = context.collectWorkflow();
+assert.equal('legacy_file_layout' in archiveCollected.artifact.payload, false);
+assert.deepEqual(JSON.parse(JSON.stringify(archiveCollected.artifact.payload.include)), ['bin/tool', 'new.py', 'server.py']);
+context.ArchiveTree.setMode(context.window.recipeArchiveState, 'entire_archive');
+context.ArchiveTree.setMode(context.window.recipeArchiveState, 'paths');
+assert.deepEqual(JSON.parse(JSON.stringify(context.collectWorkflow().artifact.payload)), {mode:'paths', include:[], exclude:[]});

@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from debbuilder import deb_inspector, debian_packaging
+from debbuilder import deb_inspector, debian_packaging, upstream_archive
 from debbuilder.recipe_schema import validate_recipe_metadata
 
 
@@ -29,6 +29,17 @@ def packaging_recipe(*, service=True, policy="dpkg_conffile"):
             "after": ["network.target"],
         },
     })
+
+
+def archive_packaging_recipe(payload):
+    configured = packaging_recipe(service=False)
+    configured["artifact"] = {
+        "mode": "upstream_archive", "type": "archive", "archive_source": "github_source",
+        "archive_format": "tar.gz", "payload": payload,
+    }
+    configured["install"]["content"] = {"source": "build_output", "path": ""}
+    configured["install"]["config_files"] = []
+    return validate_recipe_metadata(configured)
 
 
 class DebianPackagingTests(unittest.TestCase):
@@ -158,6 +169,107 @@ class DebianPackagingTests(unittest.TestCase):
             self.assertIn("dist/app.js", result["content_files"])
             self.assertIn("public/index.html", result["content_files"])
             self.assertIn("package.json", result["content_files"])
+
+    def test_legacy_individual_nested_file_keeps_basename_staging_behavior(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = self.make_workspace(temporary)
+            recipe = packaging_recipe(service=False)
+            recipe["install"]["config_files"] = []
+            result = debian_packaging.prepare_staging(
+                recipe,
+                {"output": {"mode": "path", "path": str(workspace / "source/bin/demo")}, "version": "1.0-1"},
+                workspace,
+            )
+            staging = workspace / "staging/opt/demo"
+            self.assertTrue((staging / "demo").is_file())
+            self.assertFalse((staging / "bin/demo").exists())
+            self.assertEqual(result["content_files"], ["demo"])
+
+    def test_archive_payload_staging_preserves_new_file_directory_and_entire_archive_layouts(self):
+        cases = [
+            ({"mode": "paths", "include": ["bin/demo"], "exclude": []}, ["bin/demo"]),
+            ({"mode": "paths", "include": ["bin/", "public/"], "exclude": []}, ["bin/demo", "public/index.html"]),
+            ({"mode": "entire_archive", "include": [], "exclude": []}, ["bin/demo", "etc/demo/demo.conf", "public/index.html"]),
+            ({"mode": "entire_archive", "include": [], "exclude": ["etc/", "public/"]}, ["bin/demo"]),
+        ]
+        for payload, expected in cases:
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as temporary:
+                workspace = self.make_workspace(temporary)
+                (workspace / "source/public").mkdir()
+                (workspace / "source/public/index.html").write_text("index\n")
+                recipe = archive_packaging_recipe(payload)
+                plan = upstream_archive.resolve_payload(recipe, workspace / "source")
+                result = debian_packaging.prepare_staging(
+                    recipe, {"output": {"mode": "archive_payload", "payload": plan}, "version": "1.0-1"}, workspace,
+                )
+                destination = workspace / "staging/opt/demo"
+                self.assertEqual(result["content_files"], expected)
+                self.assertEqual(sorted(path.relative_to(destination).as_posix() for path in destination.rglob("*") if path.is_file()), expected)
+                self.assertEqual(len(result["content_files"]), len(set(result["content_files"])))
+
+    def test_archive_payload_staging_applies_existing_modes_and_ownership_model(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = self.make_workspace(temporary)
+            recipe = archive_packaging_recipe({"mode": "paths", "include": ["bin/"], "exclude": []})
+            plan = upstream_archive.resolve_payload(recipe, workspace / "source")
+            result = debian_packaging.prepare_staging(
+                recipe, {"output": {"mode": "archive_payload", "payload": plan}, "version": "1.0-1"}, workspace,
+            )
+            destination = workspace / "staging/opt/demo"
+            self.assertEqual(destination.stat().st_mode & 0o777, 0o750)
+            self.assertEqual((destination / "bin").stat().st_mode & 0o777, 0o750)
+            self.assertEqual((destination / "bin/demo").stat().st_mode & 0o777, 0o751)
+            self.assertEqual(result["ownership"], {"user": "demo-app", "group": "demo-app", "applied_by": "postinst"})
+            self.assertIn("chown -R demo-app:demo-app /opt/demo", result["maintainer_scripts"]["postinst"])
+
+    def test_archive_payload_legacy_and_new_nested_file_layouts_differ_exactly(self):
+        cases = [
+            ({"mode": "paths", "include": ["bin/demo"], "exclude": []}, "bin/demo", "demo"),
+            ({"mode": "paths", "include": ["bin/demo"], "exclude": [], "legacy_file_layout": "basename"}, "demo", "bin/demo"),
+        ]
+        for payload, present, absent in cases:
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as temporary:
+                workspace = self.make_workspace(temporary)
+                recipe = archive_packaging_recipe(payload)
+                plan = upstream_archive.resolve_payload(recipe, workspace / "source")
+                result = debian_packaging.prepare_staging(
+                    recipe, {"output": {"mode": "archive_payload", "payload": plan}, "version": "1.0-1"}, workspace,
+                )
+                destination = workspace / "staging/opt/demo"
+                self.assertTrue((destination / present).is_file())
+                self.assertFalse((destination / absent).exists())
+                self.assertEqual(result["content_files"], [present])
+
+    def test_archive_exclusion_does_not_override_explicit_configuration_mapping(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = self.make_workspace(temporary)
+            recipe = archive_packaging_recipe({
+                "mode": "entire_archive", "include": [], "exclude": ["etc/demo/demo.conf"],
+            })
+            recipe["install"]["config_files"] = [{
+                "source": "etc/demo/demo.conf", "destination": "/etc/demo/demo.conf", "policy": "replace",
+            }]
+            plan = upstream_archive.resolve_payload(recipe, workspace / "source")
+            self.assertNotIn("etc/demo/demo.conf", [row["relative_path"] for row in plan["files"]])
+            debian_packaging.prepare_staging(
+                recipe, {"output": {"mode": "archive_payload", "payload": plan}, "version": "1.0-1"}, workspace,
+            )
+            self.assertEqual((workspace / "staging/etc/demo/demo.conf").read_text(), "port=8080\n")
+            self.assertFalse((workspace / "staging/opt/demo/etc/demo/demo.conf").exists())
+
+    def test_archive_payload_staging_revalidates_runtime_confinement(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = self.make_workspace(temporary)
+            recipe = archive_packaging_recipe({"mode": "paths", "include": ["bin/demo"], "exclude": []})
+            plan = upstream_archive.resolve_payload(recipe, workspace / "source")
+            outside = workspace / "outside"
+            outside.write_text("outside\n")
+            plan["files"][0]["path"] = str(outside)
+            with self.assertRaises(debian_packaging.PackagingError) as caught:
+                debian_packaging.prepare_staging(
+                    recipe, {"output": {"mode": "archive_payload", "payload": plan}, "version": "1.0-1"}, workspace,
+                )
+            self.assertEqual(caught.exception.code, "invalid_install_content")
 
     def test_configuration_mapping_is_resolved_from_source_not_first_selected_output(self):
         with tempfile.TemporaryDirectory() as temporary:

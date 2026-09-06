@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import re
 
+from .archive_payload import normalize_archive_payload
 from .recipe_migrations import migrate_legacy_recipe
 
 SCHEMA_VERSION = 1
@@ -167,6 +168,7 @@ def normalize_recipe(workflow: dict) -> dict:
     archive_format = str(artifact_in.get("archive_format") or "tar.gz")
     artifact_mode = str(artifact_in.get("mode") or "source_build")
     artifact_type = str(artifact_in.get("type") or ("archive" if artifact_mode == "upstream_archive" else "deb"))
+    payload = normalize_archive_payload(artifact_in.get("payload"), require_include=False)
     recipe = {
         "schema_version": SCHEMA_VERSION,
         "name": name,
@@ -199,7 +201,7 @@ def normalize_recipe(workflow: dict) -> dict:
             "archive_source": archive_source,
             "asset_selection": asset_selection,
             "archive_format": archive_format,
-            "selected_files": _string_list(artifact_in.get("selected_files"), "artifact.selected_files"),
+            "payload": payload,
         },
         "build": {
             "detected_project": build_in.get("detected_project"),
@@ -343,10 +345,10 @@ def validate_recipe_metadata(workflow: dict) -> dict:
                     raise ValueError("release asset archive requires exactly one name_pattern")
         elif artifact["asset_name"] or artifact["name_pattern"]:
             raise ValueError("release asset fields are only valid with release_asset archive source")
-        if not artifact["selected_files"]:
-            raise ValueError("upstream_archive requires selected_files")
-        for selected in artifact["selected_files"]:
-            _safe_relative(selected, "artifact.selected_files entry")
+        if artifact["payload"]["mode"] == "paths" and not artifact["payload"]["include"]:
+            raise ValueError("paths archive payload requires at least one included path")
+    elif artifact["payload"]["mode"] != "paths" or artifact["payload"]["include"] or artifact["payload"]["exclude"] or artifact["payload"]["legacy_file_layout"]:
+        raise ValueError("artifact.payload is only configurable for upstream_archive")
     if not isinstance(artifact["match_package"], bool) or not isinstance(artifact["match_version"], bool):
         raise ValueError("artifact matching flags must be booleans")
     if build["detected_project"] not in {None, "nodejs", "python", "rust", "static"}:
@@ -441,6 +443,10 @@ def recipe_for_storage(workflow: dict) -> dict:
     recipe = validate_recipe_metadata(workflow)
     if recipe["build"]["output"]["mode"] != "path":
         recipe["build"]["output"].pop("path", None)
+    if recipe["artifact"]["mode"] != "upstream_archive":
+        recipe["artifact"].pop("payload", None)
+    elif not recipe["artifact"]["payload"]["legacy_file_layout"]:
+        recipe["artifact"]["payload"].pop("legacy_file_layout")
     recipe["service"].pop("configured", None)
     return recipe
 
@@ -474,8 +480,8 @@ def recipe_document_for_storage(workflow) -> dict:
         raise RecipeDocumentError("invalid_root", "Recipe JSON root must be an object")
     if "name" not in workflow or not isinstance(workflow.get("name"), str) or not workflow["name"].strip():
         raise RecipeDocumentError("missing_id", "Recipe JSON must contain a non-empty string name", path="$.name")
-    migrated = migrate_legacy_recipe(workflow)
     try:
+        migrated = migrate_legacy_recipe(workflow)
         normalized = validate_recipe_metadata(migrated)
     except (TypeError, ValueError, re.error) as exc:
         raise RecipeDocumentError("invalid_recipe", str(exc)) from exc

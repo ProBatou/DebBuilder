@@ -46,7 +46,7 @@ class AsyncExecutionTests(AdminApiCase):
         release = threading.Event()
         finished = threading.Event()
 
-        def execute(run_id, *, store, expected_initial_status):
+        def execute(run_id, *, store, expected_initial_status, cancellation_control=None):
             store.transition_status(run_id, expected=expected_initial_status, status="running")
             started.set()
             if not release.wait(3):

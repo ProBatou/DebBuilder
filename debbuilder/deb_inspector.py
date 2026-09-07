@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 
 from .command_runner import run_command
+from .execution_cancellation import raise_for_cancelled_result
 
 CONTROL_KEYS = ["Package", "Version", "Architecture", "Depends", "Maintainer", "Description", "Homepage", "Section", "Priority"]
 
@@ -24,13 +25,15 @@ def inspection_for_storage(inspection: dict) -> dict:
     return stored
 
 
-def _invoke(arguments: list[str], workspace: Path, runner=run_command) -> dict:
+def _invoke(arguments: list[str], workspace: Path, runner=run_command, *, cancellation_event=None, on_cancel=None) -> dict:
     command = " ".join(shlex.quote(argument) for argument in arguments)
-    return runner(command, workspace=workspace, working_directory=".", environment={"LC_ALL":"C"}, timeout=30)
+    result = runner(command, workspace=workspace, working_directory=".", environment={"LC_ALL":"C"}, timeout=30, cancellation_event=cancellation_event, on_cancel=on_cancel)
+    raise_for_cancelled_result(result)
+    return result
 
 
-def _control_fields(deb: Path, workspace: Path, runner=run_command) -> dict:
-    result = _invoke(["dpkg-deb", "-f", str(deb)], workspace, runner)
+def _control_fields(deb: Path, workspace: Path, runner=run_command, *, cancellation_event=None, on_cancel=None) -> dict:
+    result = _invoke(["dpkg-deb", "-f", str(deb)], workspace, runner, cancellation_event=cancellation_event, on_cancel=on_cancel)
     if result["status"] != "success":
         raise ValueError(result["stderr"].strip() or "dpkg-deb -f failed")
     fields, current = {}, None
@@ -43,8 +46,8 @@ def _control_fields(deb: Path, workspace: Path, runner=run_command) -> dict:
     return fields
 
 
-def _file_list(deb: Path, workspace: Path, runner=run_command) -> list[dict]:
-    result = _invoke(["dpkg-deb", "-c", str(deb)], workspace, runner)
+def _file_list(deb: Path, workspace: Path, runner=run_command, *, cancellation_event=None, on_cancel=None) -> list[dict]:
+    result = _invoke(["dpkg-deb", "-c", str(deb)], workspace, runner, cancellation_event=cancellation_event, on_cancel=on_cancel)
     if result["status"] != "success":
         return []
     files = []
@@ -55,10 +58,10 @@ def _file_list(deb: Path, workspace: Path, runner=run_command) -> list[dict]:
     return files
 
 
-def _control_metadata(deb: Path, workspace: Path, runner=run_command) -> tuple[list[str], list[str]]:
+def _control_metadata(deb: Path, workspace: Path, runner=run_command, *, cancellation_event=None, on_cancel=None) -> tuple[list[str], list[str]]:
     control_dir = workspace / "logs" / "deb-control"
     control_dir.mkdir(parents=True, exist_ok=True)
-    result = _invoke(["dpkg-deb", "--control", str(deb), str(control_dir)], workspace, runner)
+    result = _invoke(["dpkg-deb", "--control", str(deb), str(control_dir)], workspace, runner, cancellation_event=cancellation_event, on_cancel=on_cancel)
     if result["status"] != "success":
         return [], []
     scripts = sorted(name for name in ("preinst", "postinst", "prerm", "postrm") if (control_dir / name).is_file())
@@ -67,17 +70,17 @@ def _control_metadata(deb: Path, workspace: Path, runner=run_command) -> tuple[l
     return scripts, conffiles
 
 
-def inspect_deb(path: str | Path, *, workspace: str | Path | None = None, runner=run_command) -> dict:
+def inspect_deb(path: str | Path, *, workspace: str | Path | None = None, runner=run_command, cancellation_event=None, on_cancel=None) -> dict:
     deb = Path(path).resolve()
     if not deb.exists():
         raise FileNotFoundError(str(deb))
     if workspace is None:
         with tempfile.TemporaryDirectory(prefix="debbuilder-inspect-") as temporary:
-            return inspect_deb(deb, workspace=temporary, runner=runner)
+            return inspect_deb(deb, workspace=temporary, runner=runner, cancellation_event=cancellation_event, on_cancel=on_cancel)
     root = Path(workspace).resolve()
-    fields = _control_fields(deb, root, runner)
-    files = _file_list(deb, root, runner)
-    scripts, conffiles = _control_metadata(deb, root, runner)
+    fields = _control_fields(deb, root, runner, cancellation_event=cancellation_event, on_cancel=on_cancel)
+    files = _file_list(deb, root, runner, cancellation_event=cancellation_event, on_cancel=on_cancel)
+    scripts, conffiles = _control_metadata(deb, root, runner, cancellation_event=cancellation_event, on_cancel=on_cancel)
     warnings = [f"missing {key}" for key in ("Package", "Version", "Architecture") if not fields.get(key)]
     return {
         "ok": not warnings, "path": str(deb), "size": deb.stat().st_size,

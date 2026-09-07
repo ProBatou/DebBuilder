@@ -3,12 +3,14 @@ import os
 import shlex
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from debbuilder.command_runner import controlled_environment, parse_command, resolve_working_directory, run_command
+from debbuilder.execution_cancellation import ExecutionCancelled
 from debbuilder.workspace_cleanup import _require_unused_workspace
 
 
@@ -24,6 +26,7 @@ class CommandRunnerTests(unittest.TestCase):
             "fd=os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)\n"
             "os.write(fd, (str(os.getpid()) + '\\n').encode())\n"
             "os.close(fd)\n"
+            "print('ready', os.getpid(), flush=True)\n"
             "if ignore: signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
             "if level: subprocess.Popen([sys.executable, __file__, str(level-1), marker, sys.argv[3]])\n"
             "while True: time.sleep(0.05)\n"
@@ -46,6 +49,16 @@ class CommandRunnerTests(unittest.TestCase):
             if remaining:
                 time.sleep(0.01)
         self.assertEqual(remaining, set(), f"processes still exist: {sorted(remaining)}")
+
+    def _assert_process_group_gone(self, process_group: int) -> None:
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(process_group, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.01)
+        self.fail(f"process group still exists: {process_group}")
 
     def test_controlled_environment_preserves_source_home_without_workspace_substitution(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -276,6 +289,189 @@ class CommandRunnerTests(unittest.TestCase):
             _require_unused_workspace(workspace)
         self.assertTrue(result["killed"])
         self.assertEqual(result["termination_error"], "")
+
+    def test_cancellation_already_requested_never_starts_process(self):
+        requested = threading.Event()
+        requested.set()
+        observed = []
+        with tempfile.TemporaryDirectory() as temporary:
+            with mock.patch("debbuilder.command_runner.subprocess.Popen") as popen:
+                with self.assertRaises(ExecutionCancelled) as cancelled:
+                    run_command(
+                        "true", workspace=temporary, cancellation_event=requested,
+                        on_cancel=lambda: observed.append("cancelled") or {"stage": "build"},
+                    )
+
+        result = cancelled.exception.command_result
+        popen.assert_not_called()
+        self.assertEqual(observed, ["cancelled"])
+        self.assertEqual(result["status"], "cancelled")
+        self.assertTrue(result["cancelled"])
+        self.assertTrue(result["cancellation_requested"])
+        self.assertFalse(result["timed_out"])
+        self.assertIsNone(result["termination_error"])
+
+    def test_cancellation_terminates_quiet_process_and_retains_termination_output(self):
+        requested = threading.Event()
+        cancellation_callbacks = []
+        chunks = []
+
+        def output(item):
+            chunks.append(item)
+            if "started" in item["text"]:
+                requested.set()
+
+        command = f"{shlex.quote(sys.executable)} -c 'import signal,time; signal.signal(signal.SIGTERM, lambda *_: (print(\"term-output\", flush=True), exit(0))); print(\"started\", flush=True); time.sleep(5)'"
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(ExecutionCancelled) as cancelled:
+                run_command(
+                    command, workspace=temporary, cancellation_event=requested,
+                    on_cancel=lambda: cancellation_callbacks.append("observed") or {"stage": "build"},
+                    on_output=output,
+                )
+
+        result = cancelled.exception.command_result
+        self.assertEqual(cancellation_callbacks, ["observed"])
+        self.assertEqual(result["status"], "cancelled")
+        self.assertIn("started", result["stdout"])
+        self.assertIn("term-output", result["stdout"])
+        self.assertTrue(any("term-output" in item["text"] for item in chunks))
+        self.assertFalse(result["killed"])
+        self.assertIsNone(result["exit_code"])
+        self.assertFalse(result["timed_out"])
+
+    def test_cancellation_terminates_noisy_process_and_retains_partial_output(self):
+        requested = threading.Event()
+        chunks = []
+
+        def output(item):
+            chunks.append(item)
+            if sum(row["text"].count("tick-") for row in chunks) >= 3:
+                requested.set()
+
+        command = (
+            f"{shlex.quote(sys.executable)} -c "
+            "'import time; [(print(f\"tick-{index}\", flush=True), time.sleep(.02)) for index in range(100)]'"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(ExecutionCancelled) as cancelled:
+                run_command(
+                    command, workspace=temporary, cancellation_event=requested,
+                    on_cancel=lambda: {"stage": "build"}, on_output=output,
+                )
+
+        result = cancelled.exception.command_result
+        self.assertEqual(result["status"], "cancelled")
+        self.assertIn("tick-0", result["stdout"])
+        self.assertGreaterEqual(result["stdout"].count("tick-"), 3)
+        self.assertLess(result["stdout"].count("tick-"), 100)
+        self.assertFalse(result["timed_out"])
+
+    def test_cancellation_terminates_child_tree_and_escalates_for_ignored_sigterm(self):
+        for levels, ignore_term, expected_killed in ((1, False, False), (2, True, True)):
+            with self.subTest(levels=levels, ignore_term=ignore_term), tempfile.TemporaryDirectory() as temporary:
+                workspace = Path(temporary)
+                command, marker = self._process_tree_command(workspace, levels, ignore_term=ignore_term)
+                requested = threading.Event()
+                ready = []
+
+                def output(item):
+                    ready.extend(line for line in item["text"].splitlines() if line.startswith("ready "))
+                    if len(ready) >= levels + 1:
+                        requested.set()
+
+                with self.assertRaises(ExecutionCancelled) as cancelled:
+                    run_command(
+                        command, workspace=workspace, cancellation_event=requested,
+                        on_cancel=lambda: {"stage": "build"}, on_output=output,
+                    )
+                pids = [int(row) for row in marker.read_text().splitlines()]
+                self.assertEqual(len(pids), levels + 1)
+                self._assert_processes_gone(pids)
+                self._assert_process_group_gone(pids[0])
+                _require_unused_workspace(workspace)
+                result = cancelled.exception.command_result
+                self.assertEqual(result["status"], "cancelled")
+                self.assertEqual(result["killed"], expected_killed)
+                self.assertIsNone(result["termination_error"])
+
+    def test_cancellation_precedes_timeouts_when_observed_first(self):
+        for timeout in ("inactivity", "maximum_runtime"):
+            with self.subTest(timeout=timeout), tempfile.TemporaryDirectory() as temporary:
+                requested = threading.Event()
+                kwargs = {"inactivity_timeout": 0.5, "maximum_runtime": 0.5}
+                if timeout == "inactivity":
+                    kwargs["maximum_runtime"] = None
+                else:
+                    kwargs["inactivity_timeout"] = None
+                command = f"{shlex.quote(sys.executable)} -c 'import time; print(\"ready\", flush=True); time.sleep(5)'"
+                with self.assertRaises(ExecutionCancelled) as cancelled:
+                    run_command(
+                        command, workspace=temporary, cancellation_event=requested,
+                        on_cancel=lambda: {"stage": "build"},
+                        on_output=lambda item: requested.set() if "ready" in item["text"] else None,
+                        **kwargs,
+                    )
+                result = cancelled.exception.command_result
+                self.assertEqual(result["status"], "cancelled")
+                self.assertFalse(result["timed_out"])
+                self.assertEqual(result["timeout_reason"], "")
+
+    def test_selected_timeout_is_not_retroactively_converted_to_cancellation(self):
+        for timeout in ("inactivity", "maximum_runtime"):
+            with self.subTest(timeout=timeout), tempfile.TemporaryDirectory() as temporary:
+                requested = threading.Event()
+                kwargs = {"inactivity_timeout": 0.5, "maximum_runtime": 0.5}
+                if timeout == "inactivity":
+                    kwargs["maximum_runtime"] = None
+                else:
+                    kwargs["inactivity_timeout"] = None
+                command = (
+                    f"{shlex.quote(sys.executable)} -c "
+                    "'import signal,time; "
+                    "signal.signal(signal.SIGTERM, lambda *_: (print(\"terminating\", flush=True), exit(0))); "
+                    "time.sleep(5)'"
+                )
+                result = run_command(
+                    command, workspace=temporary, cancellation_event=requested,
+                    on_output=lambda item: requested.set() if "terminating" in item["text"] else None,
+                    **kwargs,
+                )
+
+                self.assertTrue(requested.is_set())
+                self.assertEqual(result["status"], "failed")
+                self.assertTrue(result["timed_out"])
+                self.assertEqual(result["timeout_reason"], timeout)
+                self.assertFalse(result["cancellation_requested"])
+
+    def test_ordinary_nonzero_exit_remains_an_ordinary_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            command = f"{shlex.quote(sys.executable)} -c 'import sys; print(\"failed\"); sys.exit(7)'"
+            result = run_command(command, workspace=temporary, cancellation_event=threading.Event())
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["exit_code"], 7)
+        self.assertFalse(result["timed_out"])
+        self.assertFalse(result["cancelled"])
+        self.assertFalse(result["cancellation_requested"])
+
+    def test_cancellation_termination_verification_failure_is_not_successful_cancellation(self):
+        requested = threading.Event()
+        command = f"{shlex.quote(sys.executable)} -c 'import time; print(\"ready\", flush=True); time.sleep(5)'"
+        with tempfile.TemporaryDirectory() as temporary:
+            with mock.patch("debbuilder.command_runner._process_group_exists", return_value=True):
+                with self.assertRaises(ExecutionCancelled) as cancelled:
+                    run_command(
+                        command, workspace=temporary, cancellation_event=requested,
+                        on_cancel=lambda: {"stage": "build"},
+                        on_output=lambda item: requested.set() if "ready" in item["text"] else None,
+                    )
+
+        result = cancelled.exception.command_result
+        self.assertEqual(result["status"], "failed")
+        self.assertFalse(result["cancelled"])
+        self.assertTrue(result["cancellation_requested"])
+        self.assertIn("remained alive", result["termination_error"])
 
 
 if __name__ == "__main__":

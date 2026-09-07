@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .archive_payload import parse_archive_path
 from .command_runner import run_command
+from .execution_cancellation import ExecutionCancelled, raise_for_cancelled_result
 from .systemd_unit import generate_unit
 
 
@@ -180,7 +181,7 @@ def _configured_scripts(recipe: dict, generated: dict[str, list[str]]) -> dict[s
     return scripts
 
 
-def prepare_staging(recipe: dict, build_result: dict, workspace: str | Path, *, preview: bool = False) -> dict:
+def prepare_staging(recipe: dict, build_result: dict, workspace: str | Path, *, preview: bool = False, before_systemd=None, before_metadata=None) -> dict:
     workspace = Path(workspace).resolve()
     staging = (workspace / "staging").resolve()
     staging.mkdir(parents=True, exist_ok=True)
@@ -312,6 +313,8 @@ def prepare_staging(recipe: dict, build_result: dict, workspace: str | Path, *, 
         postinst.append(f"install -d -m {configured['mode']} -o {configured['owner']} -g {configured['group']} {configured['path']}")
         directories.append({**configured, "staged_path": "/" + target.relative_to(staging).as_posix()})
 
+    if callable(before_systemd):
+        before_systemd()
     service = recipe["service"]
     unit_text, unit_path = "", ""
     if service["configured"]:
@@ -332,6 +335,8 @@ def prepare_staging(recipe: dict, build_result: dict, workspace: str | Path, *, 
             generated.setdefault("prerm", []).append(f"if [ \"$1\" = remove ]; then systemctl stop {service['name']} || true; fi")
         generated.setdefault("postrm", []).append("systemctl daemon-reload || true")
 
+    if callable(before_metadata):
+        before_metadata()
     control = generate_control(recipe, build_result["version"])
     (debian / "control").write_text(control)
     if conffiles:
@@ -374,22 +379,27 @@ def validate_staging(staging_result: dict) -> dict:
     return {"valid": True, "required_paths": [str(path) for path in required]}
 
 
-def build_deb(recipe: dict, staging_result: dict, workspace: str | Path, *, runner=run_command, inspector=None) -> dict:
+def build_deb(recipe: dict, staging_result: dict, workspace: str | Path, *, runner=run_command, inspector=None, cancellation_event=None, on_cancel=None, before_inspection=None) -> dict:
     workspace = Path(workspace).resolve()
     validate_staging(staging_result)
     package, version, architecture = recipe["package"]["name"], staging_result["version"], recipe["package"]["architecture"]
     filename = f"{package}_{version}_{architecture}.deb"
     artifact = workspace / "artifacts" / filename
-    result = runner(f"dpkg-deb --build --root-owner-group staging artifacts/{filename}", workspace=workspace, working_directory=".", environment={"LC_ALL":"C"}, timeout=120)
+    result = runner(f"dpkg-deb --build --root-owner-group staging artifacts/{filename}", workspace=workspace, working_directory=".", environment={"LC_ALL":"C"}, timeout=120, cancellation_event=cancellation_event, on_cancel=on_cancel)
+    raise_for_cancelled_result(result)
     if result["status"] != "success" or not artifact.is_file():
         raise PackagingError("deb_build_failed", result["stderr"] or "dpkg-deb failed", details={"command": result})
+    if callable(before_inspection):
+        before_inspection()
     digest = hashlib.sha256()
     with artifact.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     artifact_details = {"name": filename, "path": str(artifact), "size": artifact.stat().st_size, "sha256": digest.hexdigest(), "build_command": result}
     try:
-        inspection = inspector(artifact, workspace=workspace) if inspector else {}
+        inspection = inspector(artifact, workspace=workspace, cancellation_event=cancellation_event, on_cancel=on_cancel) if inspector else {}
+    except ExecutionCancelled:
+        raise
     except (OSError, ValueError) as exc:
         raise PackagingError("deb_inspection_failed", str(exc), details={"artifact": artifact_details}) from exc
     if inspection and not inspection.get("ok"):

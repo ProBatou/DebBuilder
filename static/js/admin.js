@@ -5,6 +5,7 @@ const adminState = {
   selectedPackage: null,
   selectedExecution: null,
   executionAction: null,
+  executionCancellation: null,
   logPollTimer: null,
   logOffset: 0,
   logVerbosity: 'normal',
@@ -142,6 +143,9 @@ function wireAdmin() {
   $('logVerbosity')?.addEventListener('change', event => changeLogVerbosity(event.target.value));
   $('btnDeleteExecutionLog')?.addEventListener('click', () => {
     if (adminState.selectedExecution) deleteExecutionLog(adminState.selectedExecution.id).catch(error => showToast(error.message, {type: 'error'}));
+  });
+  $('btnCancelExecution')?.addEventListener('click', () => {
+    if (adminState.selectedExecution) cancelOpenExecution(adminState.selectedExecution.id).catch(error => showToast(error.message, {type: 'error'}));
   });
   $('btnRevalidateExecution')?.addEventListener('click', () => {
     if (adminState.selectedExecution) validateExecution(adminState.selectedExecution.id).catch(error => showToast(error.message, {type: 'error'}));

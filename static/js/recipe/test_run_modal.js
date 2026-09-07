@@ -2,11 +2,18 @@
 
 const testRunModalState = {
   runId: '', workflow: null, execution: null, pollTimer: null, buildAction: null,
+  cancellationState: '',
 };
 
 function testRunIsActive(execution) {
   if (typeof executionIsLive === 'function') return executionIsLive(execution);
-  return execution?.lifecycle_active === true || ['pending', 'queued', 'running'].includes(execution?.status);
+  if (typeof executionStatusIsActive === 'function') return execution?.lifecycle_active === true || executionStatusIsActive(execution?.status);
+  return execution?.lifecycle_active === true || ['pending', 'queued', 'running', 'cancelling'].includes(execution?.status);
+}
+
+function testRunWithAcceptedCancellation(execution) {
+  if (testRunModalState.cancellationState !== 'accepted' || !['queued', 'running'].includes(execution?.status)) return execution;
+  return {...execution, status: 'cancelling', lifecycle_status: 'cancelling', lifecycle_active: true};
 }
 
 function testRunLabel(execution) {
@@ -38,6 +45,10 @@ function renderTestRunLiveLog(text) {
 }
 
 function renderTestRunModal(execution, logText = '') {
+  if (testRunModalState.cancellationState && !['queued', 'running', 'cancelling'].includes(execution?.status)) {
+    testRunModalState.cancellationState = '';
+  }
+  execution = testRunWithAcceptedCancellation(execution);
   testRunModalState.execution = execution;
   const active = testRunIsActive(execution);
   const status = execution?.status || 'queued';
@@ -51,9 +62,13 @@ function renderTestRunModal(execution, logText = '') {
     statusBadge.textContent = label;
     statusBadge.hidden = true;
   }
-  if (help) help.textContent = active
-    ? 'This Test continues in the background. You can close this window at any time.'
-    : status === 'prepared' ? 'Preflight completed without executing build commands.' : 'The Test finished. Review the diagnostic or full logs.';
+  if (help) help.textContent = status === 'cancelling'
+    ? 'Cancellation was requested. This Test is stopping in the background.'
+    : active
+      ? 'This Test continues in the background. You can close this window at any time.'
+      : status === 'cancelled'
+        ? 'The Test was cancelled before completion.'
+        : status === 'prepared' ? 'Preflight completed without executing build commands.' : 'The Test finished. Review the diagnostic or full logs.';
 
   const liveLog = $('testRunLiveLog');
   if (liveLog) liveLog.hidden = !active;
@@ -62,9 +77,17 @@ function renderTestRunModal(execution, logText = '') {
   const prepared = $('testRunPrepared');
   const failed = $('testRunFailed');
   const build = $('btnTestRunBuild');
+  const cancel = $('btnTestRunCancel');
   if (prepared) prepared.hidden = status !== 'prepared';
   if (failed) failed.hidden = status !== 'failed';
-  if (build) build.hidden = status !== 'prepared';
+  if (build) build.hidden = execution?.ready_for_build !== true;
+  if (cancel) {
+    const pending = testRunModalState.cancellationState === 'pending';
+    const cancelling = status === 'cancelling' || pending || testRunModalState.cancellationState === 'accepted';
+    cancel.hidden = testRunModalState.cancellationState === 'refreshing' || (!['queued', 'running', 'cancelling'].includes(status) && !pending);
+    cancel.disabled = !!testRunModalState.cancellationState || cancelling;
+    cancel.textContent = cancelling ? 'Cancelling…' : 'Cancel';
+  }
 
   if (status === 'prepared') {
     const presentation = preflightReportPresentation(execution, testRunModalState.workflow || {});
@@ -110,11 +133,51 @@ async function pollTestRunModal() {
   }
 }
 
+async function cancelTestRun() {
+  const runId = testRunModalState.runId;
+  const execution = testRunModalState.execution;
+  if (!runId || testRunModalState.cancellationState || !['queued', 'running'].includes(execution?.status)) return;
+  testRunModalState.cancellationState = 'pending';
+  renderTestRunModal(execution);
+  let result;
+  try {
+    result = await cancelExecutionRequest(runId);
+  } catch (error) {
+    testRunModalState.cancellationState = '';
+    renderTestRunModal(execution);
+    showToast(`Test cancellation failed: ${error.message}`, {type: 'error'});
+    scheduleTestRunModalPoll(execution, testRunPollDelay(execution));
+    return;
+  }
+  if (result.outcome === 'cancelling') {
+    testRunModalState.cancellationState = 'accepted';
+    renderTestRunModal(testRunWithAcceptedCancellation(testRunModalState.execution));
+    scheduleTestRunModalPoll(testRunModalState.execution, 0);
+    return;
+  }
+  testRunModalState.cancellationState = result.outcome === 'not_cancellable' ? 'refreshing' : '';
+  if (result.outcome === 'cancelled') {
+    renderTestRunModal({
+      ...execution, status: 'cancelled', lifecycle_status: 'cancelled', lifecycle_active: false,
+      ready_for_build: false, cancellation: {...result.payload, kind: 'cancelled'},
+    });
+  } else {
+    renderTestRunModal(execution);
+  }
+  if (result.outcome === 'not_cancellable') showToast('Run already finished.', {type: 'info'});
+  try {
+    await pollTestRunModal();
+  } catch (error) {
+    // pollTestRunModal owns refresh retries and keeps the response-backed state visible.
+  }
+}
+
 function openTestRunModal({runId, workflow, buildAction = null, subject = 'recipe'}) {
   stopTestRunModalPolling();
   testRunModalState.runId = runId;
   testRunModalState.workflow = workflow;
   testRunModalState.execution = null;
+  testRunModalState.cancellationState = '';
   const packageName = workflow?.package?.name || workflow?.name || 'Recipe';
   $('testRunKind').textContent = subject === 'package' ? 'Test package' : 'Test recipe';
   $('testRunTitle').textContent = packageName;
@@ -142,6 +205,7 @@ function wireTestRunModal() {
   if (!dialog) return;
   ['btnCloseTestRun', 'btnTestRunClose'].forEach(id => $(id)?.addEventListener('click', closeTestRunModal));
   $('btnTestRunLogs')?.addEventListener('click', () => viewTestRunLogs().catch(error => showToast(error.message, {type: 'error'})));
+  $('btnTestRunCancel')?.addEventListener('click', () => cancelTestRun().catch(error => showToast(error.message, {type: 'error'})));
   $('btnTestRunBuild')?.addEventListener('click', () => {
     closeTestRunModal();
     const buildAction = testRunModalState.buildAction || (() => buildReal());

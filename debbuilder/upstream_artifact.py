@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 from . import deb_inspector, github_client
+from .execution_cancellation import ExecutionCancelled
 from .recipe_schema import normalize_github_version
 
 
@@ -62,7 +63,7 @@ def _expected_digest(asset: dict) -> str:
     return digest.split(":", 1)[1].lower() if re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest) else ""
 
 
-def acquire(recipe: dict, workspace: str | Path, *, token: str = "", release_resolver=resolve_release, downloader=github_client.download_archive, inspector=deb_inspector.inspect_deb) -> dict:
+def acquire(recipe: dict, workspace: str | Path, *, token: str = "", release_resolver=resolve_release, downloader=github_client.download_archive, inspector=deb_inspector.inspect_deb, cancellation_event=None, on_cancel=None) -> dict:
     root = Path(workspace).resolve()
     artifacts = (root / "artifacts").resolve()
     artifacts.mkdir(parents=True, exist_ok=True)
@@ -74,9 +75,11 @@ def acquire(recipe: dict, workspace: str | Path, *, token: str = "", release_res
     destination = artifacts / filename
     try:
         downloaded = downloader(selected["url"], destination, token=token)
-        info = inspector(destination, workspace=root)
+        info = inspector(destination, workspace=root, cancellation_event=cancellation_event, on_cancel=on_cancel)
     except github_client.GitHubError as exc:
         raise UpstreamArtifactError(exc.code, str(exc)) from exc
+    except ExecutionCancelled:
+        raise
     except Exception as exc:
         destination.unlink(missing_ok=True)
         raise UpstreamArtifactError("artifact_inspection_failed", f"Downloaded Debian artifact could not be inspected: {exc}") from exc

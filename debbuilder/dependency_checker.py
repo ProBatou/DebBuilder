@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path
 
 from .command_runner import controlled_environment, resolve_working_directory, run_command
+from .execution_cancellation import raise_for_cancelled_result
 
 DEBIAN_PACKAGE_NAME = re.compile(r"^[a-z0-9][a-z0-9+.-]*$")
 TOOL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+-]*$")
@@ -53,7 +54,7 @@ def _version_satisfies(version: str, requirement: str) -> bool | None:
     return True
 
 
-def _tool_check(name: str, requirement: str, *, workspace: str | Path, working_directory: str, environment: dict[str, str] | None, runner) -> dict:
+def _tool_check(name: str, requirement: str, *, workspace: str | Path, working_directory: str, environment: dict[str, str] | None, runner, cancellation_event=None, on_cancel=None) -> dict:
     # Resolution and execution deliberately share command_runner's environment
     # construction. This prevents an interactive shell/check/build PATH split.
     effective_environment = controlled_environment(workspace, environment)
@@ -72,7 +73,9 @@ def _tool_check(name: str, requirement: str, *, workspace: str | Path, working_d
     result = runner(
         f"{shlex.quote(path)} --version", workspace=workspace,
         working_directory=working_directory, environment=environment or {}, timeout=15,
+        cancellation_event=cancellation_event, on_cancel=on_cancel,
     )
+    raise_for_cancelled_result(result)
     output = (result.get("stdout") or result.get("stderr") or "").strip()
     version_output = output.splitlines()[0].strip() if output else ""
     parsed_version = _version_tuple(version_output)
@@ -93,7 +96,7 @@ def _tool_check(name: str, requirement: str, *, workspace: str | Path, working_d
     }
 
 
-def check_dependencies(detected: list[str], manually_added: list[str], *, workspace: str | Path, tools: list[str] | None = None, tool_version_requirements: dict[str, str] | None = None, working_directory: str = ".", environment: dict[str, str] | None = None, runner=run_command) -> dict:
+def check_dependencies(detected: list[str], manually_added: list[str], *, workspace: str | Path, tools: list[str] | None = None, tool_version_requirements: dict[str, str] | None = None, working_directory: str = ".", environment: dict[str, str] | None = None, runner=run_command, cancellation_event=None, on_cancel=None) -> dict:
     """Check tools through PATH and system dependencies through dpkg."""
     detected = _unique(detected)
     manually_added = _unique(manually_added)
@@ -107,7 +110,7 @@ def check_dependencies(detected: list[str], manually_added: list[str], *, worksp
     if invalid_tools:
         raise DependencyError("invalid_build_tool", f"Invalid build tool name: {invalid_tools[0]}")
 
-    tool_checks = [_tool_check(name, requirements.get(name, ""), workspace=workspace, working_directory=working_directory, environment=environment, runner=runner) for name in tools]
+    tool_checks = [_tool_check(name, requirements.get(name, ""), workspace=workspace, working_directory=working_directory, environment=environment, runner=runner, cancellation_event=cancellation_event, on_cancel=on_cancel) for name in tools]
     available_tools = [row["tool"] for row in tool_checks if row["available"]]
     missing_tools = [row["tool"] for row in tool_checks if not row["available"]]
     available, missing, checks = [], [], []
@@ -115,7 +118,9 @@ def check_dependencies(detected: list[str], manually_added: list[str], *, worksp
         result = runner(
             f"dpkg-query --show --showformat=${{db:Status-Abbrev}} {name}", workspace=workspace,
             working_directory=working_directory, environment={**(environment or {}), "LC_ALL": "C"}, timeout=15,
+            cancellation_event=cancellation_event, on_cancel=on_cancel,
         )
+        raise_for_cancelled_result(result)
         installed = result["status"] == "success" and result["stdout"].strip().startswith("ii")
         (available if installed else missing).append(name)
         checks.append({

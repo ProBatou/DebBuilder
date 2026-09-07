@@ -58,6 +58,27 @@ async function expectFullyInViewport(page, locator) {
   expect(box.y + box.height).toBeLessThanOrEqual(page.viewportSize().height + 1);
 }
 
+async function expectWrappedExecutionSteps(page) {
+  const layout = await page.locator('#executionSteps').evaluate(node => {
+    const bounds = node.getBoundingClientRect();
+    const chips = [...node.children];
+    return {
+      clientWidth: node.clientWidth,
+      scrollWidth: node.scrollWidth,
+      overflowX: getComputedStyle(node).overflowX,
+      rows: new Set(chips.map(chip => chip.offsetTop)).size,
+      clipped: chips.some(chip => {
+        const box = chip.getBoundingClientRect();
+        return box.left < bounds.left - 1 || box.right > bounds.right + 1;
+      }),
+    };
+  });
+  expect(layout.overflowX).not.toMatch(/auto|scroll/);
+  expect(layout.scrollWidth).toBeLessThanOrEqual(layout.clientWidth);
+  expect(layout.rows).toBeGreaterThan(1);
+  expect(layout.clipped).toBe(false);
+}
+
 const archiveFiles = [
   '.github/workflows/release.yml',
   'README.md',
@@ -196,6 +217,144 @@ async function routeArchivePreparedTest(page, facts) {
   await page.route('**/api/executions/ui-archive-prepared', route => route.fulfill({
     status: 200, contentType: 'application/json', body: JSON.stringify({execution}),
   }));
+}
+
+async function routeCancellationJourney(page, {
+  runId,
+  mode = 'dry_run',
+  initialStatus = 'running',
+  cancelStatus = 202,
+  terminalStatus = 'cancelled',
+} = {}) {
+  const executionResponse = await page.request.get('/api/executions/ui-01-prepared');
+  expect(executionResponse.ok()).toBe(true);
+  const baseExecution = structuredClone((await executionResponse.json()).execution);
+  const executionsResponse = await page.request.get('/api/executions');
+  expect(executionsResponse.ok()).toBe(true);
+  const baseExecutions = (await executionsResponse.json()).executions;
+  const packagesResponse = await page.request.get('/api/packages');
+  expect(packagesResponse.ok()).toBe(true);
+  const basePackages = (await packagesResponse.json()).packages;
+  const packageResponse = await page.request.get('/api/packages/debbuilder');
+  expect(packageResponse.ok()).toBe(true);
+  const basePackage = (await packageResponse.json()).package;
+  let status = initialStatus;
+  let cancelCalls = 0;
+  let detailCalls = 0;
+  let logCalls = 0;
+  let terminalReleased = false;
+  let cancelResponseReleased = cancelStatus !== 202;
+  let releaseCancelResponse;
+  const cancelResponseGate = new Promise(resolve => { releaseCancelResponse = resolve; });
+
+  const cancellation = () => ({
+    code: 'execution_cancelled', reason: 'user_requested', phase: 'pipeline', stage: 'build',
+    requested_at: '2026-09-07T10:00:00+00:00',
+    ...(status === 'cancelled' ? {completed_at: '2026-09-07T10:00:01+00:00'} : {}),
+    kind: status === 'cancelled' ? 'cancelled' : 'cancelling',
+  });
+  const execution = () => {
+    const row = structuredClone(baseExecution);
+    row.id = runId;
+    row.run_id = runId;
+    row.recipe_id = 'debbuilder';
+    row.recipe = 'debbuilder';
+    row.mode = mode;
+    row.action = mode === 'dry_run' ? 'dry-run' : 'build';
+    row.status = status;
+    row.build_status = status;
+    row.lifecycle_status = status === 'running' ? 'building' : status;
+    row.lifecycle_active = ['queued', 'running', 'cancelling'].includes(status);
+    row.ready_for_build = false;
+    row.allowed_actions = {validate: false, publish: false};
+    row.error = null;
+    row.artifact = null;
+    if (['cancelling', 'cancelled'].includes(status)) row.cancellation = cancellation();
+    else row.cancellation = null;
+    const source = row.steps.find(step => step.name === 'source');
+    const build = row.steps.find(step => step.name === 'build');
+    row.steps.forEach(step => {
+      step.status = 'pending';
+      step.summary = '';
+      step.error = null;
+    });
+    if (status !== 'queued') {
+      source.status = 'success';
+      source.summary = 'Fetched deterministic cancellation fixture';
+      build.status = status === 'cancelled' ? 'cancelled' : 'running';
+      build.summary = status === 'cancelled' ? 'Build cancelled by user' : 'Long-running command active';
+      build.details = {commands: [{
+        index: 1, status: status === 'cancelled' ? 'cancelled' : 'running',
+        command: 'python3 cancellation_worker.py', arguments: ['python3', 'cancellation_worker.py'],
+        stdout: 'worker-ready\ntick-1\ntick-2\n', stderr: 'child-ready\n', cancelled: status === 'cancelled',
+      }]};
+    }
+    return row;
+  };
+  const packageProjection = () => ({
+    ...structuredClone(basePackage),
+    lifecycle_state: 'cancelled', lifecycle_display_status: 'cancelled', status: 'cancelled',
+    allowed_actions: {test: true, build: true, validate: false, publish: false},
+    build: {...basePackage.build, latest_status: 'cancelled', latest_run_id: runId},
+  });
+
+  await page.route('**/api/run', route => route.fulfill({
+    status: 202, contentType: 'application/json', body: JSON.stringify({run_id: runId, status: 'queued'}),
+  }));
+  await page.route(`**/api/executions/${runId}/cancel`, async route => {
+    cancelCalls += 1;
+    if (cancelStatus === 409) {
+      status = terminalStatus;
+      await route.fulfill({
+        status: 409, contentType: 'application/json',
+        body: JSON.stringify({error: {code: 'execution_not_cancellable', message: 'Execution is already terminal', details: {status}}}),
+      });
+      return;
+    }
+    if (cancelStatus === 202) {
+      await cancelResponseGate;
+      cancelResponseReleased = true;
+      status = 'cancelling';
+    } else {
+      status = 'cancelled';
+    }
+    await route.fulfill({
+      status: cancelStatus, contentType: 'application/json',
+      body: JSON.stringify({run_id: runId, status, cancellation: cancellation()}),
+    });
+  });
+  await page.route(`**/api/executions/${runId}`, route => {
+    detailCalls += 1;
+    if (status === 'cancelling' && terminalReleased) status = 'cancelled';
+    return route.fulfill({status: 200, contentType: 'application/json', body: JSON.stringify({execution: execution()})});
+  });
+  await page.route(`**/api/executions/${runId}/logs?**`, route => {
+    logCalls += 1;
+    const text = status === 'queued' ? '' : 'worker-ready\ntick-1\ntick-2\nchild-ready\n';
+    return route.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify({log: {text, offset: text.length, size: text.length, complete: status === 'cancelled', verbosity: 'normal'}}),
+    });
+  });
+  await page.route('**/api/executions', route => route.fulfill({
+    status: 200, contentType: 'application/json',
+    body: JSON.stringify({executions: [execution(), ...baseExecutions.filter(row => row.id !== runId)]}),
+  }));
+  await page.route('**/api/packages', route => route.fulfill({
+    status: 200, contentType: 'application/json',
+    body: JSON.stringify({packages: basePackages.map(row => row.name === 'debbuilder' && status === 'cancelled' ? packageProjection() : row)}),
+  }));
+  await page.route('**/api/packages/debbuilder', route => route.fulfill({
+    status: 200, contentType: 'application/json',
+    body: JSON.stringify({package: status === 'cancelled' ? packageProjection() : basePackage}),
+  }));
+
+  return {
+    releaseCancelResponse() { releaseCancelResponse(); },
+    releaseTerminal() { terminalReleased = true; },
+    setStatus(value) { status = value; },
+    snapshot() { return {status, cancelCalls, detailCalls, logCalls, cancelResponseReleased, terminalReleased}; },
+  };
 }
 
 test.beforeEach(async ({page}) => {
@@ -569,6 +728,7 @@ test('Logs selects an execution and renders lifecycle, steps, and output', async
   await expect(page.locator('#executionMeta')).toContainText('Ready to publish');
   await expect(page.locator('#executionSteps .step-chip')).toHaveCount(10);
   await expect(page.locator('#executionDetail')).toContainText('artifact: success');
+  await expectWrappedExecutionSteps(page);
   if (testInfo.project.name === 'mobile') {
     await expect(page.locator('.logs-detail-card')).toBeVisible();
     await expect(page.locator('.logs-list-card')).toBeHidden();
@@ -584,6 +744,7 @@ test('Logs explains build, validation, and publication failures', async ({page},
     }
     await page.locator(`#executionList [data-execution-id="${id}"]`).click();
     await expect(page.locator('#executionDiagnostic')).toBeVisible();
+    await expectWrappedExecutionSteps(page);
   };
 
   await openFailure('ui-04-build-failed');
@@ -942,6 +1103,144 @@ test('Recipe Test modal keeps running progress compact', async ({page}, testInfo
   await capture(page, testInfo, 'recipe-test-running', {fullPage:false});
   await page.locator('#btnTestRunClose').click();
   await expect(page.locator('#testRunDialog')).not.toBeVisible();
+});
+
+test('queued Test cancellation is immediate, terminal, and retained in Logs', async ({page}, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'Desktop queued cancellation journey');
+  const journey = await routeCancellationJourney(page, {
+    runId: 'ui-cancel-queued-test', initialStatus: 'queued', cancelStatus: 200,
+  });
+  await openView(page, 'recipes');
+  await page.locator('#workflowSelect').selectOption('debbuilder');
+  await page.locator('#btnDryRun').click();
+  await expect(page.locator('#testRunDialog')).toBeVisible();
+  await expect(page.locator('#testRunState')).toHaveText('Queued');
+  await expect(page.locator('#btnTestRunCancel')).toBeVisible();
+  await expect(page.locator('#btnTestRunBuild')).toBeHidden();
+  await capture(page, testInfo, 'cancellation-desktop-queued', {fullPage: false});
+
+  await page.locator('#btnTestRunCancel').click();
+  await expect(page.locator('#testRunState')).toHaveText('Cancelled');
+  await expect(page.locator('#btnTestRunCancel')).toBeHidden();
+  await expect(page.locator('#btnTestRunBuild')).toBeHidden();
+  expect(journey.snapshot().cancelCalls).toBe(1);
+  expect(journey.snapshot().status).toBe('cancelled');
+  await capture(page, testInfo, 'cancellation-desktop-queued-cancelled', {fullPage: false});
+
+  await page.locator('#btnTestRunLogs').click();
+  await expect(page.locator('#view-logs')).toHaveClass(/active/);
+  await expect(page.locator('#executionMeta')).toContainText('#ui-cancel-queued-test');
+  await expect(page.locator('#executionMeta')).toContainText('Cancelled');
+  await expect(page.locator('#executionCancellationSummary')).toContainText('Cancelled');
+  await expect(page.locator('#executionList [data-execution-id="ui-cancel-queued-test"]')).toContainText('Cancelled');
+  await expect(page.locator('#executionList [data-execution-id="ui-02-running"]')).toContainText('Running');
+});
+
+test('running Test cancellation protects repeated clicks and converges canonically', async ({page}, testInfo) => {
+  const journey = await routeCancellationJourney(page, {runId: 'ui-cancel-running-test'});
+  await openView(page, 'recipes');
+  await page.locator('#workflowSelect').selectOption('debbuilder');
+  await page.locator('#btnDryRun').click();
+  await expect(page.locator('#testRunDialog')).toBeVisible();
+  await expect(page.locator('#testRunState')).toHaveText('Running');
+  await expect(page.locator('#testRunLiveLog')).toContainText('tick-2');
+  await expect(page.locator('#btnTestRunCancel')).toBeEnabled();
+  await expect(page.locator('#btnTestRunBuild')).toBeHidden();
+  await capture(page, testInfo, `cancellation-${testInfo.project.name}-test-running`, {fullPage: false});
+
+  const click = page.locator('#btnTestRunCancel').click();
+  await expect(page.locator('#btnTestRunCancel')).toBeDisabled();
+  await expect(page.locator('#btnTestRunCancel')).toHaveText('Cancelling…');
+  await page.locator('#btnTestRunCancel').dispatchEvent('click');
+  await page.locator('#btnTestRunCancel').dispatchEvent('click');
+  expect(journey.snapshot().cancelCalls).toBe(1);
+
+  journey.releaseCancelResponse();
+  await click;
+  await expect(page.locator('#testRunState')).toHaveText('Cancelling…');
+  expect(journey.snapshot().cancelResponseReleased).toBe(true);
+  await capture(page, testInfo, `cancellation-${testInfo.project.name}-test-cancelling`, {fullPage: false});
+  if (testInfo.project.name === 'desktop') {
+    await page.locator('#btnTestRunClose').click();
+    await expect(page.locator('#testRunDialog')).not.toBeVisible();
+    expect(journey.snapshot().status).toBe('cancelling');
+    journey.releaseTerminal();
+    await page.evaluate(async runId => {
+      switchView('logs');
+      await openExecution(runId);
+    }, 'ui-cancel-running-test');
+    await expect(page.locator('#executionMeta')).toContainText('Cancelled');
+    await expect(page.locator('#executionDetail')).toContainText('tick-2');
+    await expect(page.locator('#executionCancellationSummary')).toContainText('Requested by user during Build');
+    await expect(page.locator('#btnCancelExecution')).toBeHidden();
+    await expect(page.locator('#btnRevalidateExecution')).toBeHidden();
+    await expect(page.locator('#btnPublishExecution')).toBeHidden();
+    await expectWrappedExecutionSteps(page);
+    await capture(page, testInfo, 'cancellation-desktop-logs-cancelled-detail', {fullPage: false});
+  } else {
+    journey.releaseTerminal();
+    await expect(page.locator('#testRunState')).toHaveText('Cancelled');
+    await expect(page.locator('#testRunLiveLog')).toBeHidden();
+    await expect(page.locator('#btnTestRunCancel')).toBeHidden();
+    await expect(page.locator('#btnTestRunBuild')).toBeHidden();
+    await capture(page, testInfo, 'cancellation-mobile-test-cancelled', {fullPage: false});
+    await page.locator('#btnTestRunLogs').click();
+    await expect(page.locator('#view-logs')).toHaveClass(/active/);
+    await expectWrappedExecutionSteps(page);
+  }
+});
+
+test('running Build cancellation returns retry actions without validation or publication', async ({page}, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'Desktop real-Build UI journey');
+  const journey = await routeCancellationJourney(page, {runId: 'ui-cancel-running-build', mode: 'build'});
+  await openView(page, 'recipes');
+  await page.locator('#workflowSelect').selectOption('debbuilder');
+  await page.locator('#btnBuildReal').click();
+  await expect(page.locator('#appDialog')).toBeVisible();
+  await page.locator('#appDialogConfirm').click();
+  await expect(page.locator('#view-logs')).toHaveClass(/active/);
+  await expect(page.locator('#executionMeta')).toContainText('Running');
+  await expect(page.locator('#btnCancelExecution')).toBeEnabled();
+  await capture(page, testInfo, 'cancellation-desktop-build-running', {fullPage: false});
+
+  const click = page.locator('#btnCancelExecution').click();
+  await expect(page.locator('#btnCancelExecution')).toBeDisabled();
+  await expect(page.locator('#btnCancelExecution')).toHaveText('Cancelling…');
+  journey.releaseCancelResponse();
+  await click;
+  await expect(page.locator('#executionMeta')).toContainText('Cancelling');
+  await capture(page, testInfo, 'cancellation-desktop-build-cancelling', {fullPage: false});
+  journey.releaseTerminal();
+  await expect(page.locator('#executionMeta')).toContainText('Cancelled');
+  await expect(page.locator('#executionDetail')).toContainText('worker-ready');
+  await expect(page.locator('#btnCancelExecution')).toBeHidden();
+
+  await openView(page, 'packages');
+  await page.locator('[data-package-name="debbuilder"][data-admin-action="open-package"]').click();
+  const actions = page.locator('#packageDetail .package-action-bar');
+  await expect(actions.getByRole('button', {name: 'Test'})).toBeVisible();
+  await expect(actions.getByRole('button', {name: 'Build'})).toBeVisible();
+  await expect(actions.getByRole('button', {name: 'Validate'})).toHaveCount(0);
+  await expect(actions.getByRole('button', {name: 'Publish'})).toHaveCount(0);
+});
+
+test('terminal race refreshes canonical state after an informational 409', async ({page}, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'One shared Logs surface covers the terminal race');
+  const journey = await routeCancellationJourney(page, {
+    runId: 'ui-cancel-terminal-race', mode: 'build', cancelStatus: 409, terminalStatus: 'success',
+  });
+  await page.evaluate(async runId => {
+    switchView('logs');
+    await openExecution(runId);
+  }, 'ui-cancel-terminal-race');
+  await expect(page.locator('#executionMeta')).toContainText('Running');
+  await page.locator('#btnCancelExecution').click();
+  await expect(page.locator('.toast-region')).toContainText('Run already finished.');
+  await expect(page.locator('.toast-region')).not.toContainText('Cancellation failed');
+  await expect(page.locator('#executionMeta')).toContainText('Success');
+  await expect(page.locator('#btnCancelExecution')).toBeHidden();
+  expect(journey.snapshot().cancelCalls).toBe(1);
+  page.uiErrors = page.uiErrors.filter(message => !message.includes('status of 409 (Conflict)'));
 });
 
 test('Recipe Test modal presents a failed diagnostic', async ({page}, testInfo) => {

@@ -13,6 +13,7 @@ from .command_runner import (
     resolve_working_directory,
     run_command,
 )
+from .execution_cancellation import ExecutionCancelled
 
 
 class BuildError(RuntimeError):
@@ -101,7 +102,7 @@ def validate_build_plan(recipe: dict, detection: dict, source_directory: str | P
     }
 
 
-def execute_build(recipe: dict, detection: dict, source_directory: str | Path, *, dry_run: bool, runner=run_command, inactivity_timeout: float | None = None, maximum_runtime: float | None = None, on_result=None, on_output=None) -> dict:
+def execute_build(recipe: dict, detection: dict, source_directory: str | Path, *, dry_run: bool, runner=run_command, inactivity_timeout: float | None = None, maximum_runtime: float | None = None, on_result=None, on_output=None, cancellation_event=None, on_cancel=None) -> dict:
     plan = validate_build_plan(recipe, detection, source_directory, dry_run=dry_run)
     if dry_run:
         return {"executed": False, "reason": "dry_run", "plan": plan, "commands": [], "output": plan["output"]}
@@ -111,6 +112,9 @@ def execute_build(recipe: dict, detection: dict, source_directory: str | Path, *
     maximum_runtime = maximum_runtime if maximum_runtime is not None else recipe["build"].get("maximum_runtime")
     results = []
     for index, command in enumerate(actual_commands, 1):
+        if cancellation_event is not None and cancellation_event.is_set():
+            cancellation = on_cancel() if callable(on_cancel) else {}
+            raise ExecutionCancelled(cancellation)
         kwargs = {
             "workspace": source_directory,
             "working_directory": recipe["build"]["working_directory"],
@@ -122,16 +126,34 @@ def execute_build(recipe: dict, detection: dict, source_directory: str | Path, *
         accepts_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
         if callable(on_output) and ("on_output" in parameters or accepts_kwargs):
             kwargs["on_output"] = lambda item, command_index=index: on_output(command_index, item)
-        result = runner(command, **kwargs)
+        if cancellation_event is not None and ("cancellation_event" in parameters or accepts_kwargs):
+            kwargs["cancellation_event"] = cancellation_event
+        if callable(on_cancel) and ("on_cancel" in parameters or accepts_kwargs):
+            kwargs["on_cancel"] = on_cancel
+        try:
+            result = runner(command, **kwargs)
+        except ExecutionCancelled as exc:
+            if exc.command_result is not None:
+                result = {"index": index, **exc.command_result}
+                results.append(result)
+                if callable(on_result):
+                    on_result(result)
+                exc.command_result = result
+            raise
         result = {"index": index, **result}
         results.append(result)
         if callable(on_result):
             on_result(result)
+        if result.get("cancellation_requested") or result.get("status") == "cancelled":
+            raise ExecutionCancelled(result.get("cancellation"), command_result=result)
         if result["status"] != "success":
             code = "build_command_timeout" if result.get("timed_out") else "build_command_failed"
             timeout_reason = result.get("timeout_reason")
             message = f"Build command {index} timed out ({timeout_reason})" if result.get("timed_out") and timeout_reason else f"Build command {index} timed out" if result.get("timed_out") else f"Build command {index} failed with exit code {result.get('exit_code')}"
             raise BuildError(code, message, details={"plan": plan, "commands": results, "failed_command": result})
+        if cancellation_event is not None and cancellation_event.is_set():
+            cancellation = on_cancel() if callable(on_cancel) else {}
+            raise ExecutionCancelled(cancellation)
     try:
         output = _safe_output(source_directory, recipe["build"]["output"], require_exists=True)
     except BuildError as exc:

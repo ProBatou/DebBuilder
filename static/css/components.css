@@ -215,16 +215,22 @@ button.ghost { border-color: var(--border); background: transparent; color: var(
   color: var(--warning-strong);
 }
 
-.badge.failed,.badge.build_failed,.badge.validation_failed,.badge.publication_failed,.badge.cancelled,.settings-badge.locked {
+.badge.failed,.badge.build_failed,.badge.validation_failed,.badge.publication_failed,.settings-badge.locked {
   border-color: color-mix(in srgb, var(--danger) 44%, transparent);
   background: color-mix(in srgb, var(--danger) 8%, transparent);
   color: var(--danger-strong);
 }
 
-.badge.update_available,.badge.running,.badge.building,.badge.validating,.badge.publishing {
+.badge.update_available,.badge.running,.badge.building,.badge.cancelling,.badge.validating,.badge.publishing {
   border-color: color-mix(in srgb, var(--info) 44%, transparent);
   background: color-mix(in srgb, var(--info) 8%, transparent);
   color: var(--info-strong);
+}
+
+.badge.cancelled {
+  border-color: var(--border);
+  background: color-mix(in srgb, var(--text-muted) 8%, transparent);
+  color: var(--text-muted);
 }
 
 .settings-badge.neutral {

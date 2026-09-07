@@ -9,7 +9,7 @@ from . import apt_repo
 
 BUILDABLE_PACKAGE_STATES = frozenset({
     "update_available", "build_available", "build_required", "not_published",
-    "recipe_missing", "failed", "build_failed", "validation_failed",
+    "recipe_missing", "failed", "build_failed", "validation_failed", "cancelled",
 })
 
 
@@ -55,7 +55,9 @@ def allowed_actions(package_state: str, recipe_id: str, run: dict | None) -> dic
     has_recipe = bool(recipe_id)
     return {
         "test": has_recipe,
-        "build": has_recipe and package_state in BUILDABLE_PACKAGE_STATES,
+        "build": has_recipe and package_state in BUILDABLE_PACKAGE_STATES and not (
+            run.get("mode") == "dry_run" and run.get("status") == "cancelled"
+        ),
         "validate": build_ready and validation_status != "running" and publication_status != "running",
         "publish": build_ready and validation_status == "success" and publication_status not in {"running", "success"},
     }

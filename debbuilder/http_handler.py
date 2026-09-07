@@ -202,6 +202,28 @@ def create_handler(api):
                     api.json_response(self, {"error": str(exc)}, 400)
 
         def _post(self, data: dict):
+            parsed_path = urlparse(self.path).path
+            if parsed_path.startswith("/api/executions/") and parsed_path.endswith("/cancel"):
+                run_id = urllib.parse.unquote(parsed_path[len("/api/executions/"):-len("/cancel")].strip("/"))
+                if not isinstance(data, dict) or data:
+                    api.json_response(self, {"error": {
+                        "code": "invalid_cancellation_request",
+                        "message": "Execution cancellation does not accept request fields",
+                        "details": {"run_id": run_id},
+                    }}, 400)
+                    return
+                try:
+                    result = api.cancel_execution(getattr(self.server, "execution_manager", None), run_id)
+                except ValueError as exc:
+                    api.json_response(self, {"error": {
+                        "code": "invalid_execution_id", "message": str(exc), "details": {},
+                    }}, 400)
+                    return
+                except api.ExecutionCancellationError as exc:
+                    api.json_response(self, {"error": exc.as_dict()}, exc.status)
+                    return
+                api.json_response(self, {"ok": True, "cancellation": result}, 200 if result["status"] == "cancelled" else 202)
+                return
             if self.path == "/api/recipes/validate":
                 recipe = data.get("recipe") if isinstance(data, dict) and "recipe" in data else data
                 try:

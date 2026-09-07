@@ -91,7 +91,7 @@ class AdminApiCase(unittest.TestCase):
     def terminal_executor(self, status: str):
         finished = threading.Event()
 
-        def execute(run_id, *, store, expected_initial_status):
+        def execute(run_id, *, store, expected_initial_status, cancellation_control=None):
             store.transition_status(run_id, expected=expected_initial_status, status="running")
             with store.locked_run(run_id):
                 run = store.load(run_id)

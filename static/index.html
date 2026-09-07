@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>DebBuilder</title>
   <link rel="stylesheet" href="/style.css?v=20260906-2" />
-  <link rel="stylesheet" href="/css/components.css?v=20260905-4" />
-  <link rel="stylesheet" href="/css/pages.css?v=20260906-10" />
+  <link rel="stylesheet" href="/css/components.css?v=20260906-1" />
+  <link rel="stylesheet" href="/css/pages.css?v=20260906-11" />
 </head>
 <body>
   <header class="mobile-topbar" aria-label="Mobile navigation">
@@ -274,7 +274,7 @@
 
       <section class="view page" id="view-logs">
         <div class="page-head page-header"><div><h2>Logs</h2><p>Executions linked to packages when available.</p></div></div>
-        <div class="logs-layout"><section class="card logs-list-card"><div class="section-title section-header"><div><h3>Executions</h3><p>Search and select a run.</p></div></div><div class="log-filters"><label class="field"><span>Search</span><input id="logSearch" type="search" placeholder="Package, recipe or run…" /></label><label class="field"><span>Status</span><select id="logStatus"><option value="all">All statuses</option><option value="success">Success</option><option value="running">Running</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option></select></label></div><div id="executionList" class="list data-list compact-list" role="listbox">Loading…</div></section><section class="card logs-detail-card"><div class="log-detail-head"><div><span class="eyebrow">Selected run</span><h3>Execution detail</h3></div><div class="log-detail-actions"><label class="field"><span>Verbosity</span><select id="logVerbosity"><option value="compact">Compact</option><option value="normal" selected>Normal</option><option value="verbose">Verbose</option><option value="raw">Raw</option></select></label><button type="button" class="btn btn-primary" id="btnRevalidateExecution" hidden>Revalidate</button><button type="button" class="btn btn--success" id="btnPublishExecution" hidden>Publish</button><button type="button" class="btn btn--danger" id="btnDeleteExecutionLog" disabled>Delete log/history</button><button id="btnCloseLogDetail" class="btn btn--ghost mobile-only">Back to runs</button></div></div><section id="executionDiagnostic" class="execution-diagnostic" aria-live="polite" hidden></section><div class="log-context-panel"><div id="executionMeta" class="execution-meta muted">Select an execution.</div><details id="executionMoreDetails" class="execution-more" hidden><summary>More metadata</summary><div id="executionMetaMore" class="execution-meta execution-meta-more muted"></div></details><div id="executionSteps" class="steps"></div></div><div class="log-terminal"><pre id="executionDetail" class="logbox">No log selected.</pre><button type="button" id="btnLogLiveBadge" class="log-live-badge" hidden>● Live</button></div></section></div>
+        <div class="logs-layout"><section class="card logs-list-card"><div class="section-title section-header"><div><h3>Executions</h3><p>Search and select a run.</p></div></div><div class="log-filters"><label class="field"><span>Search</span><input id="logSearch" type="search" placeholder="Package, recipe or run…" /></label><label class="field"><span>Status</span><select id="logStatus"><option value="all">All statuses</option><option value="success">Success</option><option value="running">Running</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option></select></label></div><div id="executionList" class="list data-list compact-list" role="listbox">Loading…</div></section><section class="card logs-detail-card"><div class="log-detail-head"><div><span class="eyebrow">Selected run</span><h3>Execution detail</h3></div><div class="log-detail-actions"><label class="field"><span>Verbosity</span><select id="logVerbosity"><option value="compact">Compact</option><option value="normal" selected>Normal</option><option value="verbose">Verbose</option><option value="raw">Raw</option></select></label><button type="button" class="btn btn--warning" id="btnCancelExecution" hidden>Cancel</button><button type="button" class="btn btn-primary" id="btnRevalidateExecution" hidden>Revalidate</button><button type="button" class="btn btn--success" id="btnPublishExecution" hidden>Publish</button><button type="button" class="btn btn--danger" id="btnDeleteExecutionLog" disabled>Delete log/history</button><button id="btnCloseLogDetail" class="btn btn--ghost mobile-only">Back to runs</button></div></div><section id="executionDiagnostic" class="execution-diagnostic" aria-live="polite" hidden></section><div class="log-context-panel"><div id="executionMeta" class="execution-meta muted">Select an execution.</div><section id="executionCancellationSummary" class="execution-cancellation-summary" aria-live="polite" hidden></section><details id="executionMoreDetails" class="execution-more" hidden><summary>More metadata</summary><div id="executionMetaMore" class="execution-meta execution-meta-more muted"></div></details><div id="executionSteps" class="steps"></div></div><div class="log-terminal"><pre id="executionDetail" class="logbox">No log selected.</pre><button type="button" id="btnLogLiveBadge" class="log-live-badge" hidden>● Live</button></div></section></div>
       </section>
 
       <section class="view page" id="view-settings">
@@ -328,7 +328,7 @@
       <pre id="testRunLiveLog" class="test-run-live-log" aria-label="Recent Test progress">Waiting for progress…</pre>
       <section id="testRunPrepared" class="preflight-report test-run-preflight" hidden><div class="preflight-head"><div><span class="eyebrow">Test report</span><h2>Build preflight</h2><p id="testRunPreflightSummary"></p></div><span id="testRunPreflightStatus" class="settings-badge neutral">Prepared</span></div><div id="testRunPreflightContent"></div></section>
       <section id="testRunFailed" class="execution-diagnostic test-run-diagnostic" aria-live="polite" hidden></section>
-      <div class="actions test-run-actions"><button type="button" class="btn btn--ghost" id="btnTestRunClose">Close</button><button type="button" class="btn btn--ghost" id="btnTestRunLogs">View full logs</button><button type="button" class="btn btn--primary" id="btnTestRunBuild" hidden>Build</button></div>
+      <div class="actions test-run-actions"><button type="button" class="btn btn--ghost" id="btnTestRunClose">Close</button><button type="button" class="btn btn--ghost" id="btnTestRunLogs">View full logs</button><button type="button" class="btn btn--warning" id="btnTestRunCancel" hidden>Cancel</button><button type="button" class="btn btn--primary" id="btnTestRunBuild" hidden>Build</button></div>
     </form>
   </dialog>
 
@@ -342,19 +342,19 @@
   </dialog>
 
 
-  <script src="/ui_core.js?v=20260906-1"></script>
+  <script src="/ui_core.js?v=20260906-2"></script>
   <script src="/settings.js?v=20260905-4"></script>
   <script src="/js/recipe/archive_tree.js?v=20260906-1"></script>
   <script src="/recipe_serialization.js?v=20260906-2"></script>
   <script src="/js/build_insight.js?v=20260906-4"></script>
-  <script src="/js/recipe/test_run_modal.js?v=20260906-3"></script>
+  <script src="/js/recipe/test_run_modal.js?v=20260906-4"></script>
   <script src="/app.js?v=20260906-4"></script>
   <script src="/js/pages/dashboard.js?v=20260905-2"></script>
   <script src="/js/pages/packages.js?v=20260906-3"></script>
-  <script src="/js/pages/logs.js?v=20260905-7"></script>
+  <script src="/js/pages/logs.js?v=20260906-1"></script>
   <script src="/js/recipe/source_changes.js?v=20260904-1"></script>
   <script src="/js/recipe/stepper.js?v=20260905-2"></script>
   <script src="/js/recipe/json_editor.js?v=20260905-1"></script>
-  <script src="/js/admin.js?v=20260905-4"></script>
+  <script src="/js/admin.js?v=20260906-1"></script>
 </body>
 </html>

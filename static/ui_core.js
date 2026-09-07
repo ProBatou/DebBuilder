@@ -24,6 +24,7 @@ const STATUS_LABELS = {
   queued: 'Queued',
   building: 'Running',
   running: 'Running',
+  cancelling: 'Cancelling…',
   failed: 'Error',
   cancelled: 'Cancelled',
   dry_run: 'Dry-run',
@@ -31,6 +32,12 @@ const STATUS_LABELS = {
   unknown: 'Unknown',
 };
 window.STATUS_LABELS = STATUS_LABELS;
+
+const ACTIVE_EXECUTION_STATUSES = new Set(['pending', 'queued', 'running', 'cancelling']);
+
+function executionStatusIsActive(status) {
+  return ACTIVE_EXECUTION_STATUSES.has(status);
+}
 
 function esc(value) {
   return String(value ?? '').replace(/[&<>'"]/g, character => ({
@@ -66,6 +73,33 @@ async function postJson(url, body) {
   const payload = await response.json();
   if (!response.ok) throw new Error(payload.error?.message || payload.error || response.statusText);
   return payload;
+}
+
+async function cancelExecutionRequest(runId) {
+  const response = await fetch(`/api/executions/${encodeURIComponent(runId)}/cancel`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: '{}',
+  });
+  let payload = {};
+  try {
+    payload = await response.json();
+  } catch (error) {
+    payload = {};
+  }
+  const code = payload.error?.code || '';
+  if (response.status === 409 && code === 'execution_not_cancellable') {
+    return {outcome: 'not_cancellable', httpStatus: response.status, payload};
+  }
+  if (!response.ok) {
+    const error = new Error(payload.error?.message || payload.error || response.statusText || 'Cancellation request failed');
+    error.status = response.status;
+    error.code = code || 'request_failed';
+    error.payload = payload;
+    throw error;
+  }
+  const outcome = payload.status === 'cancelled' ? 'cancelled' : payload.status === 'cancelling' ? 'cancelling' : 'accepted';
+  return {outcome, httpStatus: response.status, payload};
 }
 
 function fmtTime(timestamp) {

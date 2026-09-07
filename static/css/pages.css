@@ -164,7 +164,7 @@
 .log-detail-actions { display: flex; align-items: end; flex-wrap: wrap; gap: var(--space-2); }
 .btn.mobile-only { display: none; }
 .log-detail-actions .field { min-width: 128px; }
-.log-context-panel { display: grid; min-height: 0; max-height: 174px; gap: var(--space-2); overflow: auto; }
+.log-context-panel { display: grid; min-width: 0; min-height: 0; gap: var(--space-2); }
 .execution-meta { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-2); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--surface-2); padding: var(--space-2); }
 .meta-cell { min-width: 0; font-size: var(--text-label); line-height: 1.25; }
 .meta-cell > span { display: block; margin-bottom: 2px; color: var(--text-muted); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
@@ -175,10 +175,13 @@
 .execution-more summary { padding: 7px 9px; color: var(--text-muted); font-size: var(--text-help); font-weight: 800; cursor: pointer; }
 .execution-more[open] summary { border-bottom: 1px solid var(--border-subtle); }
 .execution-meta-more { border: 0; border-radius: 0; grid-template-columns: repeat(4, minmax(0, 1fr)); }
-.steps { display: flex; max-height: 58px; flex-wrap: wrap; gap: 6px; overflow: auto; }
-.step-chip { border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--surface-2); padding: 4px 8px; color: var(--success-strong); font-size: var(--text-help); }
+.steps { display: flex; min-width: 0; flex-wrap: wrap; gap: 6px; }
+.step-chip { min-width: 0; max-width: 100%; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--surface-2); padding: 4px 8px; color: var(--success-strong); font-size: var(--text-help); }
 .step-chip.failed { color: var(--danger-strong); }
 .step-chip.running,.step-chip.pending { color: var(--info-strong); }
+.step-chip.cancelled { border-color: var(--border); color: var(--text-muted); }
+.execution-cancellation-summary { display: flex; align-items: center; gap: var(--space-2); border: 1px solid var(--border); border-radius: var(--radius-md); background: color-mix(in srgb, var(--text-muted) 6%, var(--surface-2)); padding: 7px 9px; color: var(--text-muted); font-size: var(--text-help); }
+.execution-cancellation-summary strong { color: var(--text); }
 .log-terminal { position: relative; min-width: 0; min-height: 0; height: 100%; overflow: hidden; }
 .logbox { width: 100%; height: 100%; min-height: 0; margin: 0; border-radius: var(--radius-md); font-size: 12px; line-height: 1.4; white-space: pre; overflow: auto; }
 .log-live-badge { position: absolute; right: var(--space-3); bottom: var(--space-3); z-index: 2; width: auto; min-height: 30px; border-radius: var(--radius-pill); border-color: color-mix(in srgb, var(--success) 44%, transparent); background: color-mix(in srgb, var(--surface-0) 92%, transparent); color: var(--success-strong); font-size: var(--text-help); }

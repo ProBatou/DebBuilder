@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import json
+import inspect
 import time
+from datetime import datetime
 
 from .build_models import utc_now
 from .build_store import BuildStore
+from .execution_cancellation import CancellationControl, ExecutionCancelled
 from . import build_executor, deb_inspector, debian_packaging, dependency_checker, project_detection, source_acquisition, source_changes, upstream_archive, upstream_artifact
 from .recipe_schema import validate_recipe_metadata
 
@@ -41,8 +44,9 @@ def _finish_step(run: dict, store: BuildStore, step: dict, started: float, *, st
 
 def _response(run: dict, store: BuildStore) -> dict:
     error = run.get("error") or {}
+    returncode = 1 if run["status"] == "failed" else 0 if run["status"] in {"success", "prepared"} else None
     return {
-        "run_id": run["id"], "status": run["status"], "returncode": 1 if run["status"] == "failed" else 0,
+        "run_id": run["id"], "status": run["status"], "returncode": returncode,
         "version": (run.get("version") or {}).get("debian", ""), "versions": run.get("version"),
         "stdout": store.log_text(run["id"]), "stderr": error.get("message", "") if isinstance(error, dict) else str(error),
         "error": error or None, "script": "", "workspace": run["workspace"], "steps": run["steps"],
@@ -57,8 +61,10 @@ def _response(run: dict, store: BuildStore) -> dict:
     }
 
 
-def _skip_step(run: dict, store: BuildStore, name: str, reason: str = "upstream_artifact") -> None:
+def _skip_step(run: dict, store: BuildStore, name: str, reason: str = "upstream_artifact", *, control: CancellationControl | None = None) -> None:
     step, started = _start_step(run, store, name)
+    if control is not None:
+        _cancellation_checkpoint(control, run, store, name)
     _finish_step(run, store, step, started, status="skipped", summary=f"Not applicable: {reason}", details={"reason": reason})
 
 
@@ -69,6 +75,107 @@ def _notify_lifecycle(callback, event: str, **payload) -> None:
         callback(event, **payload)
     except Exception:
         pass
+
+
+def _elapsed_from(value: str | None, finished_at: str) -> float:
+    try:
+        return round(max(0.0, (datetime.fromisoformat(finished_at) - datetime.fromisoformat(str(value))).total_seconds()), 6)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _observe_cancellation(control: CancellationControl, run: dict, store: BuildStore, stage: str) -> dict:
+    """Persist the worker-owned running → cancelling observation once."""
+    request = control.request
+    if not control.event.is_set() or not request:
+        return {}
+    if run.get("status") == "running":
+        cancellation = {
+            "code": request["code"],
+            "reason": request["reason"],
+            "phase": "pipeline",
+            "stage": stage,
+            "requested_at": request["requested_at"],
+        }
+        run.update({"status": "cancelling", "cancellation": cancellation})
+        store.append_event(run, f"Cancellation requested during {stage}.")
+    return dict(run.get("cancellation") or request)
+
+
+def _cancellation_checkpoint(control: CancellationControl, run: dict, store: BuildStore, stage: str) -> None:
+    cancellation = _observe_cancellation(control, run, store, stage)
+    if cancellation:
+        raise ExecutionCancelled(cancellation)
+
+
+def _claim_terminal(control: CancellationControl, run: dict, store: BuildStore, stage: str) -> None:
+    """Close cancellation before the first canonical terminal side effect."""
+    if control.owner == "terminal_owned" or control.claim_terminal():
+        return
+    _cancellation_checkpoint(control, run, store, stage)
+    raise RuntimeError("execution terminal ownership could not be settled")
+
+
+def _call_with_cancellation(callback, *args, control: CancellationControl, on_cancel, **kwargs):
+    """Pass cancellation only to callbacks that declare the internal contract."""
+    parameters = inspect.signature(callback).parameters
+    accepts_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+    if "cancellation_event" in parameters or accepts_kwargs:
+        kwargs["cancellation_event"] = control.event
+    if "on_cancel" in parameters or accepts_kwargs:
+        kwargs["on_cancel"] = on_cancel
+    return callback(*args, **kwargs)
+
+
+def _finalize_execution_cancellation(run: dict, store: BuildStore, exc: ExecutionCancelled, lifecycle_callback=None, recipe: dict | None = None) -> dict:
+    completed_at = utc_now()
+    active = next((step for step in run["steps"] if step.get("status") == "running"), None)
+    stage = str((run.get("cancellation") or {}).get("stage") or exc.cancellation.get("stage") or (active or {}).get("name") or "pipeline")
+    cancellation = {
+        "code": exc.cancellation.get("code", "execution_cancelled"),
+        "reason": exc.cancellation.get("reason", "user_requested"),
+        "phase": "pipeline",
+        "stage": stage,
+        "requested_at": exc.cancellation.get("requested_at") or (run.get("cancellation") or {}).get("requested_at") or completed_at,
+        "completed_at": completed_at,
+    }
+    termination_failed = bool(exc.termination_error)
+    error = None
+    if termination_failed:
+        error = {
+            "stage": stage,
+            "code": "execution_cancellation_termination_failed",
+            "message": "Cancellation could not safely terminate the active process group",
+            "details": {"termination_error": exc.termination_error, "stage": stage},
+        }
+    if active:
+        active.update({
+            "status": "failed" if termination_failed else "cancelled",
+            "finished_at": completed_at,
+            "duration": _elapsed_from(active.get("started_at"), completed_at),
+            "summary": error["message"] if error else "Execution cancelled by user",
+            "error": error,
+        })
+    run.update({
+        "status": "failed" if termination_failed else "cancelled",
+        "error": error,
+        "cancellation": cancellation,
+        "finished_at": completed_at,
+        "duration": _elapsed_from(run.get("started_at"), completed_at),
+    })
+    store.append_event(
+        run,
+        error["message"] if error else f"Execution cancelled during {stage}.",
+        level="error" if error else "info",
+    )
+    if termination_failed and run.get("mode") == "build":
+        _notify_lifecycle(lifecycle_callback, "build_failed", run=run, recipe=recipe or {})
+    return _response(run, store)
+
+
+def _finish_terminal_run(run: dict, store: BuildStore, started: float, control: CancellationControl, stage: str, lifecycle_callback=None, recipe: dict | None = None) -> dict:
+    _claim_terminal(control, run, store, stage)
+    return _finish_run(run, store, started, lifecycle_callback, recipe)
 
 
 def _archive_source_details(source: dict) -> dict:
@@ -95,11 +202,13 @@ def _finish_run(run: dict, store: BuildStore, started: float, lifecycle_callback
     return _response(run, store)
 
 
-def _run_upstream_artifact(canonical: dict, run: dict, *, store: BuildStore, dry_run: bool, github_token: str, acquirer=None, lifecycle_callback=None) -> dict:
+def _run_upstream_artifact(canonical: dict, run: dict, *, store: BuildStore, dry_run: bool, github_token: str, control: CancellationControl, acquirer=None, lifecycle_callback=None) -> dict:
     started = time.monotonic()
     source_step, source_started = _start_step(run, store, "source")
     try:
+        _cancellation_checkpoint(control, run, store, "source")
         release = upstream_artifact.resolve_release(canonical, token=github_token)
+        _cancellation_checkpoint(control, run, store, "source")
         source_details = {
             "repository": release["repository"], "ref": release["ref"], "tag": release["tag"],
             "release_url": release.get("url", ""), "upstream_version": release["upstream_version"],
@@ -107,20 +216,32 @@ def _run_upstream_artifact(canonical: dict, run: dict, *, store: BuildStore, dry
         }
         _finish_step(run, store, source_step, source_started, status="success", summary=f"Resolved {release['repository']} {release['tag']}", details=source_details)
         selection_step, selection_started = _start_step(run, store, "detection")
+        _cancellation_checkpoint(control, run, store, "detection")
         selected = upstream_artifact.select_asset(release, canonical["artifact"])
+        _cancellation_checkpoint(control, run, store, "detection")
         _finish_step(run, store, selection_step, selection_started, status="success", summary=f"Selected {selected['name']}", details={"project_type": "upstream_deb", "selected_asset": selected})
         for name in ("dependencies", "source_changes", "build", "staging", "debian_metadata", "systemd", "package"):
-            _skip_step(run, store, name)
+            _skip_step(run, store, name, control=control)
         artifact_step, artifact_started = _start_step(run, store, "artifact")
+        _cancellation_checkpoint(control, run, store, "artifact")
         if dry_run:
             _finish_step(run, store, artifact_step, artifact_started, status="skipped", summary="Dry-run: upstream artifact not downloaded", details={"reason": "dry_run", "selected_asset": selected})
+            _cancellation_checkpoint(control, run, store, "artifact")
+            _claim_terminal(control, run, store, "prepared")
             run.update({"status": "prepared", "version": {"upstream": release["upstream_version"], "debian": ""}})
         else:
-            artifact = (acquirer or upstream_artifact.acquire)(canonical, run["workspace"], token=github_token)
+            acquire_artifact = acquirer or upstream_artifact.acquire
+            artifact = _call_with_cancellation(
+                acquire_artifact, canonical, run["workspace"], token=github_token,
+                control=control, on_cancel=lambda: _observe_cancellation(control, run, store, "artifact"),
+            )
+            _cancellation_checkpoint(control, run, store, "artifact")
             # Re-resolution inside the acquisition is intentional: the selected asset and
             # release are validated immediately before downloading.
             info = artifact["inspection"]
             stored_artifact = store.artifact_details_for_storage(run, artifact)
+            _cancellation_checkpoint(control, run, store, "artifact")
+            _claim_terminal(control, run, store, "artifact")
             run.update({"artifact": stored_artifact, "version": {"upstream": release["upstream_version"], "debian": info["version"]}, "status": "success"})
             _finish_step(run, store, artifact_step, artifact_started, status="success", summary=f"Registered upstream {artifact['name']} · SHA-256 {artifact['sha256']}", details=stored_artifact)
     except upstream_artifact.UpstreamArtifactError as exc:
@@ -128,7 +249,7 @@ def _run_upstream_artifact(canonical: dict, run: dict, *, store: BuildStore, dry
         error = {"stage": active["name"], "code": exc.code, "message": str(exc), "details": exc.details}
         _finish_step(run, store, active, source_started if active is source_step else time.monotonic(), status="failed", summary=str(exc), details=exc.details, error=error)
         run.update({"status": "failed", "error": error})
-    return _finish_run(run, store, started, lifecycle_callback, canonical)
+    return _finish_terminal_run(run, store, started, control, run.get("status", "pipeline"), lifecycle_callback, canonical)
 
 
 def create_pipeline_run(recipe: dict, *, store: BuildStore, dry_run: bool, recipe_id: str = "") -> dict:
@@ -141,7 +262,7 @@ def create_pipeline_run(recipe: dict, *, store: BuildStore, dry_run: bool, recip
     )
 
 
-def execute_pipeline_run(run_id: str, *, store: BuildStore, expected_initial_status: str = "pending", github_token: str = "", acquire=None, detector=None, dependency_check=None, change_applier=None, upstream_acquirer=None, lifecycle_callback=None) -> dict:
+def execute_pipeline_run(run_id: str, *, store: BuildStore, expected_initial_status: str = "pending", github_token: str = "", acquire=None, detector=None, dependency_check=None, change_applier=None, upstream_acquirer=None, lifecycle_callback=None, cancellation_control: CancellationControl | None = None) -> dict:
     """Execute exactly once from an existing Run's immutable Recipe snapshot."""
     if expected_initial_status not in {"pending", "queued"}:
         raise ValueError("expected initial status must be pending or queued")
@@ -168,34 +289,39 @@ def execute_pipeline_run(run_id: str, *, store: BuildStore, expected_initial_sta
                 details={"run_id": run_id},
             ) from exc
         dry_run = run.get("mode") == "dry_run"
-        return _run_pipeline_locked(
-            canonical, run, store=store, dry_run=dry_run, github_token=github_token,
-            acquire=acquire, detector=detector, dependency_check=dependency_check,
-            change_applier=change_applier, upstream_acquirer=upstream_acquirer,
-            lifecycle_callback=lifecycle_callback,
-        )
+        control = cancellation_control or CancellationControl()
+        try:
+            return _run_pipeline_locked(
+                canonical, run, store=store, dry_run=dry_run, github_token=github_token,
+                acquire=acquire, detector=detector, dependency_check=dependency_check,
+                change_applier=change_applier, upstream_acquirer=upstream_acquirer,
+                lifecycle_callback=lifecycle_callback, control=control,
+            )
+        except ExecutionCancelled as exc:
+            return _finalize_execution_cancellation(run, store, exc, lifecycle_callback, canonical)
 
 
-def run_pipeline(recipe: dict, *, store: BuildStore, dry_run: bool, recipe_id: str = "", github_token: str = "", acquire=None, detector=None, dependency_check=None, change_applier=None, upstream_acquirer=None, lifecycle_callback=None) -> dict:
+def run_pipeline(recipe: dict, *, store: BuildStore, dry_run: bool, recipe_id: str = "", github_token: str = "", acquire=None, detector=None, dependency_check=None, change_applier=None, upstream_acquirer=None, lifecycle_callback=None, cancellation_control: CancellationControl | None = None) -> dict:
     """Create and synchronously execute one canonical Build Run."""
     run = create_pipeline_run(recipe, store=store, dry_run=dry_run, recipe_id=recipe_id)
     return execute_pipeline_run(
         run["id"], store=store, github_token=github_token,
         acquire=acquire, detector=detector, dependency_check=dependency_check,
         change_applier=change_applier, upstream_acquirer=upstream_acquirer,
-        lifecycle_callback=lifecycle_callback,
+        lifecycle_callback=lifecycle_callback, cancellation_control=cancellation_control,
     )
 
 
-def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_run: bool, github_token: str, acquire, detector, dependency_check, change_applier, upstream_acquirer, lifecycle_callback) -> dict:
+def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_run: bool, github_token: str, acquire, detector, dependency_check, change_applier, upstream_acquirer, lifecycle_callback, control: CancellationControl) -> dict:
     run_started = time.monotonic()
     run.update({"status": "running", "started_at": utc_now()})
     store.save(run)
+    _cancellation_checkpoint(control, run, store, "source")
     store.append_event(run, "Recipe snapshot created and isolated workspace prepared.")
     if run.get("mode") == "build":
         _notify_lifecycle(lifecycle_callback, "build_started", run=run, recipe=canonical)
     if canonical["artifact"]["mode"] == "upstream_deb":
-        return _run_upstream_artifact(canonical, run, store=store, dry_run=dry_run, github_token=github_token, acquirer=upstream_acquirer, lifecycle_callback=lifecycle_callback)
+        return _run_upstream_artifact(canonical, run, store=store, dry_run=dry_run, github_token=github_token, control=control, acquirer=upstream_acquirer, lifecycle_callback=lifecycle_callback)
     archive_mode = canonical["artifact"]["mode"] == "upstream_archive"
     acquire = acquire or (upstream_archive.acquire if archive_mode else source_acquisition.acquire_source)
     detector = detector or project_detection.detect_project
@@ -203,7 +329,9 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
     change_applier = change_applier or source_changes.apply_changes
     source_step, source_started = _start_step(run, store, "source")
     try:
+        _cancellation_checkpoint(control, run, store, "source")
         source = acquire(canonical, run["workspace"], token=github_token)
+        _cancellation_checkpoint(control, run, store, "source")
         run["version"] = {"upstream": source["upstream_version"], "debian": source["debian_version"]}
         summary = f"{source['repository']} {source['ref'] or source['tag']} → Debian {source['debian_version']}"
         source_details = _archive_source_details(source) if archive_mode else source
@@ -216,6 +344,7 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
     if run["status"] != "failed":
         detection_step, detection_started = _start_step(run, store, "detection")
         try:
+            _cancellation_checkpoint(control, run, store, "detection")
             if archive_mode:
                 payload = upstream_archive.payload_plan_summary(source["archive_payload"])
                 detected_files = payload["include"] if payload["mode"] == "paths" else ["Entire archive"]
@@ -227,6 +356,7 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
                 }
             else:
                 detection = detector(source["source_directory"], working_directory=canonical["build"]["working_directory"])
+            _cancellation_checkpoint(control, run, store, "detection")
             summary = f"{detection['display_name']} from {', '.join(detection['detected_files'])}"
             _finish_step(run, store, detection_step, detection_started, status="success", summary=summary, details=detection)
         except project_detection.DetectionError as exc:
@@ -235,18 +365,22 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
             run.update({"status": "failed", "error": error})
     if run["status"] != "failed":
         dependencies_step, dependencies_started = _start_step(run, store, "dependencies")
+        _cancellation_checkpoint(control, run, store, "dependencies")
         if archive_mode:
             dependencies = {"detected": [], "manually_added": [], "requested": [], "available": [], "missing": []}
             _finish_step(run, store, dependencies_step, dependencies_started, status="skipped", summary="No build dependencies: upstream release artifact", details={**dependencies, "reason": "upstream_archive"})
         else:
             try:
-                dependencies = dependency_check(
+                dependencies = _call_with_cancellation(
+                    dependency_check,
                     detection.get("system_build_dependencies", detection.get("build_dependencies", [])),
                     canonical["build"]["extra_dependencies"], tools=detection.get("build_tools", []),
                     tool_version_requirements=detection.get("tool_version_requirements", {}),
                     workspace=source["source_directory"], working_directory=canonical["build"]["working_directory"],
                     environment=canonical["build"]["environment"],
+                    control=control, on_cancel=lambda: _observe_cancellation(control, run, store, "dependencies"),
                 )
+                _cancellation_checkpoint(control, run, store, "dependencies")
                 store.append_event(run, f"Build tools available: {', '.join(dependencies.get('available_tools', [])) or 'none'}")
                 store.append_event(run, f"Build tools unavailable: {', '.join(dependencies.get('missing_tools', [])) or 'none'}")
                 store.append_event(run, f"Dependencies detected: {', '.join(dependencies['detected']) or 'none'}")
@@ -268,14 +402,20 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
                 run.update({"status": "failed", "error": error})
     if run["status"] != "failed":
         changes_step, changes_started = _start_step(run, store, "source_changes")
+        _cancellation_checkpoint(control, run, store, "source_changes")
         if archive_mode:
             _finish_step(run, store, changes_step, changes_started, status="skipped", summary="No source changes: upstream release artifact", details={"requested": 0, "applied_count": 0, "applied": [], "reason": "upstream_archive"})
         else:
             try:
+                def change_applied(item):
+                    store.append_event(run, f"Source change {item['index']}/{len(canonical['build']['source_changes'])}: {item['path']} {item['operation']} applied")
+                    _cancellation_checkpoint(control, run, store, "source_changes")
+
                 changes = change_applier(
                     source["source_directory"], canonical["build"]["source_changes"],
-                    on_applied=lambda item: store.append_event(run, f"Source change {item['index']}/{len(canonical['build']['source_changes'])}: {item['path']} {item['operation']} applied"),
+                    on_applied=change_applied,
                 )
+                _cancellation_checkpoint(control, run, store, "source_changes")
                 summary = f"{changes['applied_count']}/{changes['requested']} source changes applied"
                 _finish_step(run, store, changes_step, changes_started, status="success", summary=summary, details=changes)
             except source_changes.SourceChangeError as exc:
@@ -285,6 +425,7 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
                 run.update({"status": "failed", "error": error})
     if run["status"] != "failed":
         build_step, build_started = _start_step(run, store, "build")
+        _cancellation_checkpoint(control, run, store, "build")
         if archive_mode:
             output = {"mode": "archive_payload", "payload": source["archive_payload"]}
             build = {"executed": False, "reason": "upstream_archive", "plan": {"commands": [], "working_directory": ".", "environment": {}, "output": output}, "commands": [], "output": output}
@@ -304,7 +445,10 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
                 build = build_executor.execute_build(
                     canonical, detection, source["source_directory"], dry_run=dry_run,
                     on_result=command_completed, on_output=command_output,
+                    cancellation_event=control.event,
+                    on_cancel=lambda: _observe_cancellation(control, run, store, "build"),
                 )
+                _cancellation_checkpoint(control, run, store, "build")
                 if dry_run:
                     _finish_step(run, store, build_step, build_started, status="skipped", summary=f"Dry-run validated {len(build['plan']['commands'])} commands; none executed", details=build)
                 else:
@@ -316,15 +460,25 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
     if run["status"] != "failed":
         staging_step, staging_started = _start_step(run, store, "staging")
         try:
-            staging = debian_packaging.prepare_staging(canonical, {**build, "version": run["version"]["debian"]}, run["workspace"], preview=dry_run)
+            _cancellation_checkpoint(control, run, store, "staging")
+            staging = debian_packaging.prepare_staging(
+                canonical, {**build, "version": run["version"]["debian"]},
+                run["workspace"], preview=dry_run,
+                before_systemd=lambda: _cancellation_checkpoint(control, run, store, "systemd"),
+                before_metadata=lambda: _cancellation_checkpoint(control, run, store, "debian_metadata"),
+            )
+            _cancellation_checkpoint(control, run, store, "staging")
             validation = debian_packaging.validate_staging(staging)
+            _cancellation_checkpoint(control, run, store, "staging")
             staging["validation"] = validation
             content_file_count = len(staging["content_files"])
             stored_staging = store.staging_details_for_storage(run, staging)
             _finish_step(run, store, staging_step, staging_started, status="success", summary=f"Staging prepared with {content_file_count:,} application files", details=stored_staging)
             metadata_step, metadata_started = _start_step(run, store, "debian_metadata")
+            _cancellation_checkpoint(control, run, store, "debian_metadata")
             _finish_step(run, store, metadata_step, metadata_started, status="success", summary="DEBIAN/control and package scripts generated", details={"control":staging["control"],"conffiles":staging["conffiles"],"configurations":staging["configurations"],"maintainer_scripts":staging["maintainer_scripts"]})
             systemd_step, systemd_started = _start_step(run, store, "systemd")
+            _cancellation_checkpoint(control, run, store, "systemd")
             if staging["systemd"]["configured"]:
                 _finish_step(run, store, systemd_step, systemd_started, status="success", summary=f"Generated {staging['systemd']['path']}", details=staging["systemd"])
             else:
@@ -342,20 +496,32 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
             run.update({"status":"failed","error":error})
     if run["status"] != "failed":
         package_step, package_started = _start_step(run, store, "package")
+        _cancellation_checkpoint(control, run, store, "package")
         if dry_run:
             _finish_step(run, store, package_step, package_started, status="skipped", summary="Dry-run: dpkg-deb --build not executed", details={"validated_staging":True})
             artifact_step, artifact_started = _start_step(run, store, "artifact")
+            _cancellation_checkpoint(control, run, store, "artifact")
             _finish_step(run, store, artifact_step, artifact_started, status="skipped", summary="Dry-run: no artifact created", details={})
+            _cancellation_checkpoint(control, run, store, "prepared")
+            _claim_terminal(control, run, store, "prepared")
             run["status"] = "prepared"
         else:
             try:
-                artifact = debian_packaging.build_deb(canonical, staging, run["workspace"], inspector=deb_inspector.inspect_deb)
+                artifact = debian_packaging.build_deb(
+                    canonical, staging, run["workspace"], inspector=deb_inspector.inspect_deb,
+                    cancellation_event=control.event,
+                    on_cancel=lambda: _observe_cancellation(control, run, store, "package"),
+                    before_inspection=lambda: _cancellation_checkpoint(control, run, store, "artifact"),
+                )
+                _cancellation_checkpoint(control, run, store, "artifact")
                 stored_artifact = store.artifact_details_for_storage(run, artifact)
                 _finish_step(run, store, package_step, package_started, status="success", summary=f"Built {artifact['name']}", details={"command":artifact["build_command"]})
                 artifact_step, artifact_started = _start_step(run, store, "artifact")
-                _finish_step(run, store, artifact_step, artifact_started, status="success", summary=f"{artifact['size']} bytes · SHA-256 {artifact['sha256']}", details=stored_artifact)
+                _cancellation_checkpoint(control, run, store, "artifact")
+                _claim_terminal(control, run, store, "artifact")
                 run["artifact"] = stored_artifact
                 run["status"] = "success"
+                _finish_step(run, store, artifact_step, artifact_started, status="success", summary=f"{artifact['size']} bytes · SHA-256 {artifact['sha256']}", details=stored_artifact)
             except debian_packaging.PackagingError as exc:
                 stage = "artifact" if exc.code == "deb_inspection_failed" else "package"
                 error = {"stage":stage,"code":exc.code,"message":str(exc),"details":exc.details}
@@ -367,7 +533,7 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
                 else:
                     _finish_step(run, store, package_step, package_started, status="failed", summary=str(exc), details=exc.details, error=error)
                 run.update({"status":"failed","error":error})
-    return _finish_run(run, store, run_started, lifecycle_callback, canonical)
+    return _finish_terminal_run(run, store, run_started, control, run.get("status", "pipeline"), lifecycle_callback, canonical)
 
 
 def execution_summary(run: dict) -> dict:
@@ -380,7 +546,7 @@ def execution_summary(run: dict) -> dict:
     lifecycle_status = derive_lifecycle_status(build_status, validation_status, publication_status)
     actions = allowed_actions(lifecycle_status, str(run.get("recipe_id") or ""), run)
     return {
-        "id": run["id"], "package": run.get("recipe_id", ""),
+        "id": run["id"], "run_id": run["id"], "package": run.get("recipe_id", ""),
         "action": "dry-run" if run.get("mode") == "dry_run" else "build",
         "version": (run.get("version") or {}).get("debian", ""),
         "status": build_status, "build_status": build_status, "updated": run.get("created_at_epoch"),
@@ -388,6 +554,7 @@ def execution_summary(run: dict) -> dict:
         "validation_count": len(validations), "validation_status": validation_status, "publication_status": publication_status,
         "lifecycle_status": lifecycle_status,
         "lifecycle_active": build_status in {"pending", "queued", "running", "cancelling"} or validation_status == "running" or publication_status == "running",
+        "ready_for_build": run.get("mode") == "dry_run" and build_status == "prepared",
         "allowed_actions": {"validate": actions["validate"], "publish": actions["publish"]},
     }
 

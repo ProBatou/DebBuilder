@@ -181,6 +181,28 @@ def execution_diagnostic(run: dict) -> dict | None:
     }
 
 
+def cancellation_projection(run: dict) -> dict | None:
+    """Return neutral, presentation-safe cancellation detail without a failure diagnostic."""
+    metadata = run.get("cancellation")
+    if not isinstance(metadata, dict) or not metadata:
+        return None
+    status = str(run.get("status") or "")
+    allowed = ("code", "reason", "phase", "stage", "requested_at", "completed_at")
+    if status == "cancelled":
+        kind, title, message = "cancelled", "Run cancelled", "Cancelled by user"
+    elif status == "cancelling":
+        kind, title, message = "cancelling", "Cancellation requested", "Cancellation is in progress"
+    else:
+        kind, title, message = "cancellation_requested", "Cancellation requested", "Cancellation was requested"
+    return {
+        **{key: metadata[key] for key in allowed if metadata.get(key) is not None},
+        "kind": kind,
+        "status": status,
+        "title": title,
+        "message": message,
+    }
+
+
 def list_executions(
     store: BuildStore,
     package_resolver: Callable[[dict], str],
@@ -210,6 +232,7 @@ def get_execution(store: BuildStore, run_id: str) -> dict | None:
         return None
     detail = build_pipeline.execution_detail(run)
     detail["diagnostic"] = execution_diagnostic(run)
+    detail["cancellation"] = cancellation_projection(run)
     return detail
 
 

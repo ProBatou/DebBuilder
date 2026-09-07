@@ -80,6 +80,19 @@ class RunAdmissionError(RuntimeError):
         return {"code": self.code, "message": str(self), "details": self.details}
 
 
+class ExecutionCancellationError(RuntimeError):
+    """Structured application failure while cancelling a Build Run."""
+
+    def __init__(self, code: str, message: str, *, status: int, details: dict | None = None):
+        super().__init__(message)
+        self.code = code
+        self.status = status
+        self.details = details or {}
+
+    def as_dict(self) -> dict:
+        return {"code": self.code, "message": str(self), "details": self.details}
+
+
 def is_public_repo_path(path: str) -> bool:
     return path in PUBLIC_REPO_FILES or path.startswith(PUBLIC_REPO_PREFIXES)
 
@@ -184,7 +197,7 @@ def run_recipe_pipeline_with_automation(workflow: dict, *, dry_run: bool = True)
         cleanup_workspaces()
 
 
-def execute_queued_recipe_run(run_id: str, *, store: BuildStore, expected_initial_status: str) -> dict:
+def execute_queued_recipe_run(run_id: str, *, store: BuildStore, expected_initial_status: str, cancellation_control=None) -> dict:
     """Execute one admitted Run and its existing post-build lifecycle."""
     run = store.load(run_id)
     dry_run = bool(run and run.get("mode") == "dry_run")
@@ -195,6 +208,7 @@ def execute_queued_recipe_run(run_id: str, *, store: BuildStore, expected_initia
             expected_initial_status=expected_initial_status,
             github_token=github_token(DATA),
             lifecycle_callback=notify_lifecycle,
+            cancellation_control=cancellation_control,
         )
         return automation_service.complete_with_automation(
             result,
@@ -311,6 +325,78 @@ def cleanup_workspaces() -> dict:
     except Exception as exc:
         logging.getLogger(__name__).exception("Workspace retention sweep failed")
         return {"cleaned": [], "retained": [], "skipped": [], "errors": [{"error": str(exc)}]}
+
+
+def _cancellation_result(run_id: str, status: str, metadata: dict) -> dict:
+    allowed = ("code", "reason", "phase", "stage", "requested_at", "completed_at")
+    return {
+        "run_id": run_id,
+        "status": status,
+        **{key: metadata[key] for key in allowed if metadata.get(key) is not None},
+    }
+
+
+def cancel_execution(manager: ExecutionManager | None, run_id: str, *, cleanup=None) -> dict:
+    """Delegate cancellation ownership and map it to the public application contract."""
+    require_safe_name(run_id, "execution")
+    if manager is None or not manager.accepting:
+        raise ExecutionCancellationError(
+            "execution_manager_unavailable", "Execution manager is unavailable", status=503,
+            details={"run_id": run_id},
+        )
+    try:
+        result = manager.cancel(run_id)
+    except ExecutionManagerError as exc:
+        if exc.code == "build_run_not_found":
+            raise ExecutionCancellationError(
+                "build_run_not_found", "Build Run was not found", status=404,
+                details={"run_id": run_id},
+            ) from exc
+        if exc.code in {"execution_manager_not_accepting", "execution_manager_stopped"}:
+            raise ExecutionCancellationError(
+                "execution_manager_unavailable", "Execution manager is unavailable", status=503,
+                details={"run_id": run_id},
+            ) from exc
+        raise ExecutionCancellationError(
+            "execution_not_cancellable", "Build Run cannot be cancelled", status=409,
+            details={"run_id": run_id, **exc.details},
+        ) from exc
+    except OSError as exc:
+        raise ExecutionCancellationError(
+            "execution_cancellation_failed", "Build Run cancellation could not be persisted", status=500,
+            details={"run_id": run_id, "exception_type": type(exc).__name__},
+        ) from exc
+
+    outcome = result["outcome"]
+    if outcome == "not_found":
+        raise ExecutionCancellationError(
+            "build_run_not_found", "Build Run was not found", status=404,
+            details={"run_id": run_id},
+        )
+    if outcome == "terminal_not_cancellable":
+        persisted = manager.store.load(run_id)
+        status = str((persisted or {}).get("status") or result.get("status") or "unknown")
+        raise ExecutionCancellationError(
+            "execution_not_cancellable", f"Build Run cannot be cancelled from status {status}", status=409,
+            details={"run_id": run_id, "status": status},
+        )
+    if outcome == "queued_cancelled":
+        sweep = cleanup or cleanup_workspaces
+        try:
+            sweep()
+        except Exception as exc:
+            logging.getLogger(__name__).exception(
+                "Workspace retention sweep failed after queued cancellation of Run %s", run_id,
+            )
+        return _cancellation_result(run_id, "cancelled", result.get("cancellation") or {})
+    if outcome == "active_cancel_requested":
+        return _cancellation_result(run_id, "cancelling", result.get("cancellation") or {})
+    if outcome == "already_cancelled":
+        return _cancellation_result(run_id, "cancelled", result.get("cancellation") or {})
+    raise ExecutionCancellationError(
+        "execution_cancellation_failed", "Execution manager returned an unknown cancellation result", status=500,
+        details={"run_id": run_id},
+    )
 
 
 def workspace_retention_loop(stop: threading.Event) -> None:

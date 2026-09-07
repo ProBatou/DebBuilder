@@ -10,6 +10,8 @@ import subprocess
 import time
 from pathlib import Path
 
+from .execution_cancellation import CANCELLATION_CODE, USER_REQUESTED, ExecutionCancelled
+
 SECRET_KEY = re.compile(r"(?i)(token|secret|password|passwd|api[_-]?key|credential)")
 SECRET_OPTION = re.compile(r"(?i)^--?(?:token|secret|password|passwd|api[_-]?key|credential)(?:=|$)")
 BASE_ENV_KEYS = ("PATH", "LANG", "LC_ALL", "TZ", "HOME")
@@ -239,7 +241,7 @@ def _terminate_process_group(process: subprocess.Popen, process_group: int, sele
     return exit_code, killed, "; ".join(dict.fromkeys(errors))
 
 
-def _stream_process(arguments: list[str], *, cwd: Path, env: dict[str, str], inactivity_timeout: float | None, maximum_runtime: float | None, redaction_environment: dict[str, str], on_output=None) -> dict:
+def _stream_process(arguments: list[str], *, cwd: Path, env: dict[str, str], inactivity_timeout: float | None, maximum_runtime: float | None, redaction_environment: dict[str, str], on_output=None, cancellation_event=None, on_cancel=None) -> dict:
     process = subprocess.Popen(
         arguments, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         shell=False, bufsize=0, start_new_session=True,
@@ -261,6 +263,27 @@ def _stream_process(arguments: list[str], *, cwd: Path, env: dict[str, str], ina
             if not selector.get_map() and not group_alive:
                 break
             now = time.monotonic()
+            # Cancellation wins over a timeout that becomes observable in this
+            # same loop iteration.  Once timeout_reason is selected below, the
+            # outcome is not retroactively converted while termination runs.
+            if cancellation_event is not None and cancellation_event.is_set():
+                cancellation = on_cancel() if callable(on_cancel) else {}
+                exit_code, killed, termination_error = _terminate_process_group(
+                    process, process_group, selector, output, redaction_environment, on_output=on_output,
+                )
+                return {
+                    "exit_code": None,
+                    "stdout": "".join(output["stdout"]),
+                    "stderr": "".join(output["stderr"]),
+                    "timed_out": False,
+                    "timeout_reason": "",
+                    "process_exit_code": exit_code,
+                    "killed": killed,
+                    "termination_error": termination_error or None,
+                    "cancellation_requested": True,
+                    "cancelled": not bool(termination_error),
+                    "cancellation": cancellation or {},
+                }
             if maximum_runtime is not None and now - started >= maximum_runtime:
                 timeout_reason = "maximum_runtime"
                 break
@@ -290,9 +313,9 @@ def _stream_process(arguments: list[str], *, cwd: Path, env: dict[str, str], ina
             output["stderr"].append(("\n" if output["stderr"] else "") + message)
             if termination_error:
                 output["stderr"].append("\nprocess-group termination error: " + termination_error)
-            return {"exit_code": None, "stdout": "".join(output["stdout"]), "stderr": "".join(output["stderr"]), "timed_out": True, "timeout_reason": timeout_reason, "process_exit_code": exit_code, "killed": killed, "termination_error": termination_error}
+            return {"exit_code": None, "stdout": "".join(output["stdout"]), "stderr": "".join(output["stderr"]), "timed_out": True, "timeout_reason": timeout_reason, "process_exit_code": exit_code, "killed": killed, "termination_error": termination_error, "cancellation_requested": False, "cancelled": False}
         exit_code = process.wait()
-        return {"exit_code": exit_code, "stdout": "".join(output["stdout"]), "stderr": "".join(output["stderr"]), "timed_out": False, "timeout_reason": "", "termination_error": ""}
+        return {"exit_code": exit_code, "stdout": "".join(output["stdout"]), "stderr": "".join(output["stderr"]), "timed_out": False, "timeout_reason": "", "termination_error": "", "cancellation_requested": False, "cancelled": False}
     except BaseException:
         _terminate_process_group(process, process_group, selector, output, redaction_environment)
         raise
@@ -308,13 +331,13 @@ def _validated_timeout(value: float | None, what: str) -> float | None:
     return float(value)
 
 
-def run_command(command: str, *, workspace: str | Path, working_directory: str = ".", environment: dict[str, str] | None = None, timeout: float | None = None, inactivity_timeout: float | None = 300, maximum_runtime: float | None = None, on_output=None) -> dict:
+def run_command(command: str, *, workspace: str | Path, working_directory: str = ".", environment: dict[str, str] | None = None, timeout: float | None = None, inactivity_timeout: float | None = 300, maximum_runtime: float | None = None, on_output=None, cancellation_event=None, on_cancel=None) -> dict:
     started = time.monotonic()
     display_cwd = str(working_directory or ".")
     safe_for_redaction = {key: value for key, value in (environment or {}).items() if isinstance(key, str) and isinstance(value, str)}
     if timeout is not None and maximum_runtime is None:
         maximum_runtime = timeout
-    result = {"command": redact_command(command, [], safe_for_redaction), "arguments": [], "working_directory": display_cwd, "configured_working_directory": display_cwd, "status": "failed", "exit_code": None, "process_exit_code": None, "stdout": "", "stderr": "", "duration": 0.0, "timed_out": False, "timeout_reason": "", "killed": False, "termination_error": ""}
+    result = {"command": redact_command(command, [], safe_for_redaction), "arguments": [], "working_directory": display_cwd, "configured_working_directory": display_cwd, "status": "failed", "exit_code": None, "process_exit_code": None, "stdout": "", "stderr": "", "duration": 0.0, "timed_out": False, "timeout_reason": "", "killed": False, "termination_error": "", "cancelled": False, "cancellation_requested": False}
     try:
         inactivity_timeout = _validated_timeout(inactivity_timeout, "inactivity_timeout")
         maximum_runtime = _validated_timeout(maximum_runtime, "maximum_runtime")
@@ -325,8 +348,26 @@ def run_command(command: str, *, workspace: str | Path, working_directory: str =
         cwd = resolve_working_directory(workspace, display_cwd)
         result["working_directory"] = str(cwd)
         result["arguments"] = redact_arguments(arguments, redaction_environment)
-        completed = _stream_process(arguments, cwd=cwd, env=env, inactivity_timeout=inactivity_timeout, maximum_runtime=maximum_runtime, redaction_environment=redaction_environment, on_output=on_output)
-        result.update({"exit_code": completed["exit_code"], "process_exit_code": completed.get("process_exit_code"), "stdout": completed["stdout"], "stderr": completed["stderr"], "timed_out": completed["timed_out"], "timeout_reason": completed.get("timeout_reason", ""), "killed": completed.get("killed", False), "termination_error": completed.get("termination_error", ""), "status": "failed" if completed["timed_out"] else "success" if completed["exit_code"] == 0 else "failed"})
+        if cancellation_event is not None and cancellation_event.is_set():
+            cancellation = on_cancel() if callable(on_cancel) else {}
+            result.update({
+                "status": "cancelled", "cancelled": True, "cancellation_requested": True,
+                "termination_error": None,
+                "cancellation": cancellation or {"code": CANCELLATION_CODE, "reason": USER_REQUESTED},
+            })
+            result["duration"] = round(time.monotonic() - started, 6)
+            raise ExecutionCancelled(result["cancellation"], command_result=result)
+        completed = _stream_process(
+            arguments, cwd=cwd, env=env, inactivity_timeout=inactivity_timeout,
+            maximum_runtime=maximum_runtime, redaction_environment=redaction_environment,
+            on_output=on_output, cancellation_event=cancellation_event, on_cancel=on_cancel,
+        )
+        status = "failed" if completed["timed_out"] or completed.get("termination_error") else "cancelled" if completed.get("cancelled") else "success" if completed["exit_code"] == 0 else "failed"
+        result.update({"exit_code": completed["exit_code"], "process_exit_code": completed.get("process_exit_code"), "stdout": completed["stdout"], "stderr": completed["stderr"], "timed_out": completed["timed_out"], "timeout_reason": completed.get("timeout_reason", ""), "killed": completed.get("killed", False), "termination_error": completed.get("termination_error", ""), "cancelled": completed.get("cancelled", False), "cancellation_requested": completed.get("cancellation_requested", False), "status": status})
+        if completed.get("cancellation_requested"):
+            result["cancellation"] = completed.get("cancellation") or {"code": CANCELLATION_CODE, "reason": USER_REQUESTED}
+            result["duration"] = round(time.monotonic() - started, 6)
+            raise ExecutionCancelled(result["cancellation"], command_result=result)
     except (CommandValidationError, OSError) as exc:
         result["stderr"] = str(exc)
     result["duration"] = round(time.monotonic() - started, 6)

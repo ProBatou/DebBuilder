@@ -79,6 +79,6 @@ def complete_with_automation(
         if automation.get("publication"):
             result["publication"] = automation["publication"]
         result["automation"] = automation
-    if not dry_run:
+    if not dry_run and result.get("status") != "cancelled":
         notify_completion(result)
     return result

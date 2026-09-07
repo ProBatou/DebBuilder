@@ -8,7 +8,7 @@ STEP_NAMES = (
     "source", "detection", "dependencies", "source_changes", "build",
     "staging", "debian_metadata", "systemd", "package", "artifact",
 )
-STEP_STATUSES = frozenset({"pending", "running", "success", "failed", "skipped"})
+STEP_STATUSES = frozenset({"pending", "running", "success", "failed", "skipped", "cancelled"})
 RUN_STATUSES = frozenset({
     "pending", "queued", "running", "cancelling",
     "prepared", "success", "failed", "cancelled",

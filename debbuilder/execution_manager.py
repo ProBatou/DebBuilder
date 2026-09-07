@@ -10,6 +10,7 @@ from datetime import datetime
 from . import build_pipeline
 from .build_models import utc_now
 from .build_store import BuildStore, RunStatusTransitionError
+from .execution_cancellation import CANCELLATION_CODE, USER_REQUESTED, CancellationControl
 
 
 LOGGER = logging.getLogger(__name__)
@@ -55,6 +56,7 @@ class ExecutionManager:
         self._submitting_run_ids: set[str] = set()
         self._worker: threading.Thread | None = None
         self._active_run_id: str | None = None
+        self._active_cancellation_control: CancellationControl | None = None
         self._accepting = False
         self._stopping = False
 
@@ -67,6 +69,12 @@ class ExecutionManager:
     def active_run_id(self) -> str | None:
         with self._condition:
             return self._active_run_id
+
+    @property
+    def active_cancellation_control(self) -> CancellationControl | None:
+        """Return the worker-owned control for internal orchestration only."""
+        with self._condition:
+            return self._active_cancellation_control
 
     @property
     def queued_run_ids(self) -> tuple[str, ...]:
@@ -179,6 +187,92 @@ class ExecutionManager:
                 details={"run_id": run_id, "status": exc.actual},
             ) from exc
 
+    def cancel(self, run_id: str) -> dict:
+        """Cancel queue-owned work or request cancellation from its active control."""
+        # run_dir applies the same safe-name validation used by Run persistence.
+        self.store.run_dir(run_id)
+        with self._condition:
+            if run_id in self._queue:
+                return self._cancel_queued_locked(run_id)
+            if run_id == self._active_run_id:
+                control = self._active_cancellation_control
+                if control is None:
+                    raise RuntimeError("active Run is missing its cancellation control")
+                requested = control.request_cancel()
+                if not requested["accepted"]:
+                    return {
+                        "outcome": "terminal_not_cancellable",
+                        "run_id": run_id,
+                        "status": "active",
+                    }
+                return {
+                    "outcome": "active_cancel_requested",
+                    "run_id": run_id,
+                    "first_request": requested["first_request"],
+                    "cancellation": requested["cancellation"],
+                }
+
+            run = self.store.load(run_id)
+            if not run:
+                return {"outcome": "not_found", "run_id": run_id}
+            if run.get("status") == "cancelled":
+                return {
+                    "outcome": "already_cancelled",
+                    "run_id": run_id,
+                    "status": "cancelled",
+                    "cancellation": dict(run.get("cancellation") or {}),
+                }
+            return {
+                "outcome": "terminal_not_cancellable",
+                "run_id": run_id,
+                "status": str(run.get("status") or ""),
+            }
+
+    def _cancel_queued_locked(self, run_id: str) -> dict:
+        """Persist then remove one queue-owned Run while holding the Condition."""
+        with self.store.locked_run(run_id):
+            run = self.store.load(run_id)
+            if not run:
+                raise ExecutionManagerError(
+                    "build_run_not_found", "Build Run was not found", details={"run_id": run_id},
+                )
+            if run.get("status") != "queued":
+                raise ExecutionManagerError(
+                    "build_run_not_queued",
+                    f"Build Run cannot be cancelled from status {run.get('status')}",
+                    details={"run_id": run_id, "status": run.get("status")},
+                )
+            requested_at = utc_now()
+            completed_at = utc_now()
+            cancellation = {
+                "code": CANCELLATION_CODE,
+                "reason": USER_REQUESTED,
+                "phase": "queue",
+                "stage": "queue",
+                "requested_at": requested_at,
+                "completed_at": completed_at,
+            }
+            run.update({
+                "status": "cancelled",
+                "started_at": None,
+                "finished_at": completed_at,
+                "duration": 0.0,
+                "error": None,
+                "cancellation": cancellation,
+            })
+            self.store.save(run)
+
+        # Persistence is the commit point.  A failed save leaves the deque and
+        # its capacity unchanged so the worker may still execute the Run.
+        self._queue.remove(run_id)
+        self._condition.notify_all()
+        return {
+            "outcome": "queued_cancelled",
+            "run_id": run_id,
+            "status": "cancelled",
+            "cancellation": cancellation,
+        }
+
     def stop(self, timeout: float | None = None) -> None:
         """Revoke unused reservations, drain submitted work, and join the worker."""
         with self._condition:
@@ -204,16 +298,24 @@ class ExecutionManager:
                             return
                         continue
                     run_id = self._queue.popleft()
+                    # Dequeue and active ownership are one Condition-protected
+                    # operation.  Cancellation can never observe an ownership gap.
                     self._active_run_id = run_id
+                    self._active_cancellation_control = CancellationControl()
+                    cancellation_control = self._active_cancellation_control
                 LOGGER.info("Dequeued Build Run %s", run_id)
                 try:
-                    self._execute(run_id, store=self.store, expected_initial_status="queued")
+                    self._execute(
+                        run_id, store=self.store, expected_initial_status="queued",
+                        cancellation_control=cancellation_control,
+                    )
                 except BaseException as exc:
                     LOGGER.error("Execution worker failed for Build Run %s (%s)", run_id, type(exc).__name__)
                     self._finalize_worker_error(run_id, exc)
                 finally:
                     with self._condition:
                         self._active_run_id = None
+                        self._active_cancellation_control = None
                         self._condition.notify_all()
         finally:
             LOGGER.info("Execution worker stopped")
@@ -235,7 +337,7 @@ class ExecutionManager:
         try:
             with self.store.locked_run(run_id):
                 run = self.store.load(run_id)
-                if not run or run.get("status") not in {"queued", "running"}:
+                if not run or run.get("status") not in {"queued", "running", "cancelling"}:
                     return
                 finished_at = utc_now()
                 active_step = next((step for step in run["steps"] if step.get("status") == "running"), None)

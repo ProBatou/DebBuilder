@@ -1,4 +1,4 @@
-/* global $, collectWorkflow, renderWorkflow, refreshWorkflows, loadSelectedWorkflow, showConfirm, showToast, waitForAutosaveIdle, setRecipeAutosaveState */
+/* global $, collectWorkflow, currentRecipeId, currentRecipeManaged, workflowForCurrentRecipe, renderWorkflow, refreshWorkflows, loadSelectedWorkflow, showConfirm, showToast, waitForAutosaveIdle, setRecipeAutosaveState */
 
 const RECIPE_JSON_MAX_BYTES = 2_000_000;
 let recipeJsonState = {context: 'current', baseline: null, validated: null, collision: null};
@@ -59,7 +59,7 @@ async function recipeJsonRequest(url, body) {
 
 function currentRecipeIsWritable() {
   const option = $('workflowSelect')?.selectedOptions?.[0];
-  return !option || option.dataset.writable !== 'false';
+  return !currentRecipeManaged && (!option || option.dataset.writable !== 'false');
 }
 
 function setRecipeJsonError(error) {
@@ -87,6 +87,7 @@ function renderRecipeJsonPreview() {
 }
 
 function setRecipeJsonMode(editing) {
+  if (editing && recipeJsonState.context === 'current' && currentRecipeManaged) editing = false;
   $('recipeJsonEditor').readOnly = !editing;
   $('recipeJsonMode').textContent = editing ? (recipeJsonState.context === 'import' ? 'Import' : 'Edit') : 'View';
   $('btnValidateRecipeJson').hidden = !editing;
@@ -116,10 +117,13 @@ async function validateRecipeObject(recipe) {
 
 async function openCurrentRecipeJson() {
   if (!currentRecipeId) throw new Error('No selected Recipe.');
-  const result = await validateRecipeObject(collectWorkflow());
+  const result = currentRecipeManaged
+    ? {recipe: workflowForCurrentRecipe()}
+    : await validateRecipeObject(collectWorkflow());
   openRecipeJsonDialog({recipe: result.recipe, baseline: result.recipe});
   $('btnEditRecipeJson').disabled = !currentRecipeIsWritable();
-  if (!currentRecipeIsWritable()) $('recipeJsonDescription').textContent += ' This shipped Recipe is read-only.';
+  if (currentRecipeManaged) $('recipeJsonDescription').textContent = 'Effective built-in Recipe, including technical ownership metadata. Export is available; editing is managed through the allowlisted form controls.';
+  else if (!currentRecipeIsWritable()) $('recipeJsonDescription').textContent += ' This shipped Recipe is read-only.';
 }
 
 async function validateRecipeJsonEditor() {

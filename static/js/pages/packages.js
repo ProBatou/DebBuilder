@@ -253,7 +253,10 @@ async function createRecipeFromDialog() {
   }
   const tracking = $('newRecipeTracking').value;
   const versionSource = $('newRecipeVersionSource').value;
-  const workflow = {schema_version: 1, name: packageName, active: true, package: {name: packageName}, source: {provider: 'github', repository: $('newRecipeGithub').value.trim(), tracking, ref: tracking === 'latest_release' ? '' : $('newRecipeSourceRef').value.trim(), version: {source: versionSource, expression: versionSource === 'regex' ? $('newRecipeVersionExpression').value.trim() : ''}}};
+  const workflow = {schema_version: 2, name: packageName, active: true, package: {name: packageName}, source: {provider: 'github', repository: $('newRecipeGithub').value.trim(), tracking, ref: tracking === 'latest_release' ? '' : $('newRecipeSourceRef').value.trim(), version: {source: versionSource, expression: versionSource === 'regex' ? $('newRecipeVersionExpression').value.trim() : ''}}};
+  currentRecipeManaged = false;
+  currentRecipeEditablePaths = [];
+  currentRecipeDocument = workflow;
   currentRecipeId = recipeIdFromPackageName(packageName);
   renderWorkflow(workflow);
   $('recipeTitle').textContent = workflow.name;

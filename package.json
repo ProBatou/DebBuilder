@@ -2,7 +2,7 @@
   "name": "debbuilder-ui-tests",
   "private": true,
   "scripts": {
-    "test:js": "node tests/js/test_archive_tree.js && node tests/js/test_logs_delete.js && node tests/js/test_logs_state.js && node tests/js/test_build_insight.js && node tests/js/test_recipe_navigation.js && node tests/js/test_recipe_serialization.js && node tests/js/test_recipe_json.js && node tests/js/test_recipe_stepper.js && node tests/js/test_async_run.js && node tests/js/test_cancellation_api.js && node tests/js/test_cancellation_ui.js",
+    "test:js": "node tests/js/test_archive_tree.js && node tests/js/test_logs_delete.js && node tests/js/test_logs_state.js && node tests/js/test_build_insight.js && node tests/js/test_recipe_navigation.js && node tests/js/test_recipe_serialization.js && node tests/js/test_recipe_json.js && node tests/js/test_managed_recipe.js && node tests/js/test_recipe_stepper.js && node tests/js/test_async_run.js && node tests/js/test_cancellation_api.js && node tests/js/test_cancellation_ui.js",
     "test:ui": "node tests/ui/run-ui-tests.js"
   },
   "devDependencies": {

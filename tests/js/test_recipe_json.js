@@ -5,6 +5,7 @@ const vm = require('vm');
 function node() {
   return {
     addEventListener: () => {},
+    focus: () => {},
     classList: {toggle: () => {}},
     dataset: {},
     hidden: false,
@@ -21,6 +22,7 @@ const nodes = new Proxy({}, {
 
 const context = vm.createContext({
   window: {},
+  currentRecipeManaged: true,
   document: {createElement: () => node(), execCommand: () => true},
   navigator: {},
   Blob,
@@ -28,6 +30,16 @@ const context = vm.createContext({
   $: id => nodes[id],
 });
 vm.runInContext(fs.readFileSync('static/js/recipe/json_editor.js', 'utf8'), context, {filename: 'json_editor.js'});
+
+context.setRecipeJsonMode(true);
+assert.equal(nodes.recipeJsonEditor.readOnly, true);
+assert.equal(nodes.btnValidateRecipeJson.hidden, true);
+assert.equal(nodes.btnApplyRecipeJson.hidden, true);
+assert.equal(nodes.btnEditRecipeJson.hidden, false);
+context.currentRecipeManaged = false;
+context.setRecipeJsonMode(true);
+assert.equal(nodes.recipeJsonEditor.readOnly, false);
+assert.equal(nodes.btnValidateRecipeJson.hidden, false);
 
 const tools = context.window.recipeJsonTools;
 const recipe = {

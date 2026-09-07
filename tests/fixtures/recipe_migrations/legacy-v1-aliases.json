@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "name": "legacy-v1",
+  "package": {"name": "legacy-v1"},
+  "artifact": {
+    "mode": "upstream_archive",
+    "asset_name": "legacy-v1.tar.gz",
+    "selected_files": [" bin/legacy-v1 "]
+  },
+  "build": {"timeout": 90, "output": {"mode": "source"}},
+  "install": {
+    "content": {"source": "configured_files"},
+    "config_policy": "replace",
+    "config_files": ["/etc/legacy-v1.conf"]
+  },
+  "service": {"configured": false, "enabled": false},
+  "steps": []
+}

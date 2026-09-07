@@ -1,0 +1,132 @@
+{
+  "schema_version": 2,
+  "name": "debbuilder",
+  "active": true,
+  "management": {
+    "owner": "application",
+    "builtin_id": "debbuilder",
+    "definition_version": 1,
+    "operator_overrides": {}
+  },
+  "package": {
+    "name": "debbuilder",
+    "version_revision": "2",
+    "architecture": "all",
+    "section": "misc",
+    "priority": "optional",
+    "maintainer": "DebBuilder maintainers <debbuilder@localhost>",
+    "description": "debbuilder",
+    "runtime_dependencies": [
+      "python3",
+      "python3-dbus"
+    ]
+  },
+  "source": {
+    "provider": "github",
+    "repository": "ProBatou/DebBuilder",
+    "tracking": "latest_release",
+    "ref": "",
+    "version": {
+      "source": "tag",
+      "expression": ""
+    }
+  },
+  "artifact": {
+    "mode": "source_build",
+    "type": "deb",
+    "architecture": "all",
+    "name_pattern": "",
+    "match_package": true,
+    "match_version": true,
+    "asset_name": "",
+    "archive_source": "auto",
+    "asset_selection": "pattern",
+    "archive_format": "tar.gz"
+  },
+  "build": {
+    "detected_project": "python",
+    "detected_files": [],
+    "detected_dependencies": [],
+    "detected_tools": [],
+    "extra_dependencies": [],
+    "source_changes": [],
+    "commands": [],
+    "inactivity_timeout": 300,
+    "maximum_runtime": null,
+    "environment": {},
+    "working_directory": ".",
+    "output": {
+      "mode": "paths",
+      "paths": [
+        "debbuilder",
+        "server.py",
+        "static"
+      ]
+    }
+  },
+  "install": {
+    "destination": "/opt/debbuilder",
+    "content": {
+      "source": "build_output",
+      "path": ""
+    },
+    "owner": {
+      "user": "root",
+      "group": "root",
+      "create_user": false,
+      "create_group": false
+    },
+    "account": {
+      "user": "root",
+      "group": "root",
+      "create_user": false,
+      "create_group": false
+    },
+    "directories": [],
+    "directory_mode": "0755",
+    "file_mode": "0644",
+    "config_files": [
+      {
+        "source": "packaging/debbuilder.env",
+        "destination": "/etc/debbuilder/debbuilder.env",
+        "policy": "create_if_missing"
+      }
+    ],
+    "maintainer_scripts": {
+      "preinst": "install -d -m 0751 -o root -g root /var/lib/debbuilder\ninstall -d -m 0750 -o root -g root /var/lib/debbuilder/workflows /var/lib/debbuilder/builds\ninstall -d -m 0751 -o root -g root /var/lib/debbuilder/repository\ninstall -d -m 0700 -o root -g root /var/lib/debbuilder/.gnupg",
+      "postinst": "",
+      "prerm": "",
+      "postrm": ""
+    }
+  },
+  "service": {
+    "enabled": true,
+    "name": "debbuilder.service",
+    "description": "debbuilder",
+    "type": "simple",
+    "user": "root",
+    "group": "root",
+    "restart": "on-failure",
+    "command": "/usr/bin/python3 /opt/debbuilder/server.py",
+    "environment_files": [],
+    "environment": {},
+    "after": [],
+    "wants": [],
+    "requires": [],
+    "restart_sec": "",
+    "timeout_start_sec": "",
+    "timeout_stop_sec": "",
+    "kill_signal": "",
+    "exec_start_pre": [],
+    "exec_start_post": [],
+    "exec_stop": [],
+    "standard_output": "",
+    "standard_error": "",
+    "working_directory": "",
+    "conflicts": [],
+    "limit_nofile": "",
+    "kill_mode": "",
+    "syslog_identifier": "",
+    "ambient_capabilities": []
+  }
+}

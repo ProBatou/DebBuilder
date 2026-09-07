@@ -39,6 +39,7 @@ function functionSource(source, name, nextName) {
     recipeRunSubmissionInFlight: false,
     assertRecipeVersionRevisionIsValid: () => {},
     collectWorkflow: () => ({name: 'demo', build: {output: {mode: 'all'}}}),
+    workflowForCurrentRecipe: () => ({name: 'demo', build: {output: {mode: 'all'}}}),
     buildOutputIsComplete: () => true,
     postJson: async (_url, body) => {
       recipePosts += 1;

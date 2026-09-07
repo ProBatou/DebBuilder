@@ -93,7 +93,7 @@ class BuildStoreTests(unittest.TestCase):
             for name in ("source", "staging", "artifacts", "logs", "logs/commands"):
                 self.assertTrue((workspace / name).is_dir())
             snapshot = json.loads((workspace / "recipe.json").read_text())
-            self.assertEqual(snapshot["schema_version"], 1)
+            self.assertEqual(snapshot["schema_version"], 2)
             self.assertNotIn("package_name", snapshot)
             source["package"]["name"] = "changed"
             self.assertEqual(json.loads((workspace / "recipe.json").read_text())["package"]["name"], "demo")

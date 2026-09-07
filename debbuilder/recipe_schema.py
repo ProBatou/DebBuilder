@@ -5,9 +5,9 @@ import copy
 import re
 
 from .archive_payload import normalize_archive_payload
-from .recipe_migrations import migrate_legacy_recipe
+from .recipe_migrations import CURRENT_SCHEMA_VERSION, RecipeMigrationError, migrate_recipe_document
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
 SAFE_NAME = re.compile(r"^[a-zA-Z0-9_.+-]+$")
 SAFE_PACKAGE = re.compile(r"^[a-z0-9][a-z0-9+.-]*$")
 SAFE_ARCH = {"all", "amd64", "arm64", "armhf"}
@@ -21,15 +21,30 @@ CONFIG_POLICIES = {"dpkg_conffile", "replace", "create_if_missing"}
 SERVICE_TYPES = {"simple", "exec", "forking", "oneshot", "notify", "dbus"}
 RESTART_POLICIES = {"", "no", "always", "on-success", "on-failure", "on-abnormal", "on-abort", "on-watchdog"}
 SOURCE_CHANGE_FIELDS = {"operation", "path", "search", "content"}
+BUILTIN_RECIPE_ID = "debbuilder"
+MANAGEMENT_FIELDS = {"owner", "builtin_id", "definition_version", "operator_overrides"}
+OPERATOR_OVERRIDE_FIELDS = {"active", "package", "build"}
+OPERATOR_PACKAGE_OVERRIDE_FIELDS = {"maintainer"}
+OPERATOR_BUILD_OVERRIDE_FIELDS = {"environment", "inactivity_timeout", "maximum_runtime"}
 
 
 class RecipeDocumentError(ValueError):
     """Structured validation failure for user-supplied Recipe JSON."""
 
-    def __init__(self, code: str, message: str, *, path: str = "$"):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        path: str = "$",
+        source_version: int | None = None,
+        target_version: int | None = None,
+    ):
         super().__init__(message)
         self.code = code
         self.path = path
+        self.source_version = source_version
+        self.target_version = target_version
 
 
 def require_safe_name(value: str, what: str = "name") -> str:
@@ -92,6 +107,117 @@ def _optional_positive_int(value, what: str) -> int | None:
     return parsed
 
 
+def _management(value, recipe_name: str) -> dict:
+    if not isinstance(value, dict):
+        raise RecipeDocumentError(
+            "builtin_recipe_invalid", "Recipe management metadata must be an object", path="$.management",
+        )
+    unknown = sorted(set(value) - MANAGEMENT_FIELDS)
+    if unknown:
+        raise RecipeDocumentError(
+            "builtin_recipe_upgrade_required",
+            f"Unsupported built-in management field: {unknown[0]}",
+            path=f"$.management.{unknown[0]}",
+        )
+    if value.get("owner") != "application" or value.get("builtin_id") != BUILTIN_RECIPE_ID or recipe_name != BUILTIN_RECIPE_ID:
+        raise RecipeDocumentError(
+            "builtin_recipe_invalid",
+            "Application management metadata is reserved for the DebBuilder built-in Recipe",
+            path="$.management",
+        )
+    definition_version = value.get("definition_version")
+    if isinstance(definition_version, bool) or not isinstance(definition_version, int) or definition_version < 1:
+        raise RecipeDocumentError(
+            "builtin_recipe_invalid",
+            "Built-in definition_version must be a positive integer",
+            path="$.management.definition_version",
+        )
+    overrides = value.get("operator_overrides", {})
+    if not isinstance(overrides, dict):
+        raise RecipeDocumentError(
+            "builtin_recipe_override_invalid",
+            "Built-in operator_overrides must be an object",
+            path="$.management.operator_overrides",
+        )
+    obsolete = sorted(set(overrides) - OPERATOR_OVERRIDE_FIELDS)
+    if obsolete:
+        raise RecipeDocumentError(
+            "builtin_recipe_upgrade_required",
+            f"Unsupported built-in operator override: {obsolete[0]}",
+            path=f"$.management.operator_overrides.{obsolete[0]}",
+        )
+    normalized_overrides = {}
+    if "active" in overrides:
+        if not isinstance(overrides["active"], bool):
+            raise RecipeDocumentError(
+                "builtin_recipe_override_invalid", "active override must be a boolean",
+                path="$.management.operator_overrides.active",
+            )
+        normalized_overrides["active"] = overrides["active"]
+    if "package" in overrides:
+        package = overrides["package"]
+        if not isinstance(package, dict):
+            raise RecipeDocumentError(
+                "builtin_recipe_override_invalid", "package overrides must be an object",
+                path="$.management.operator_overrides.package",
+            )
+        obsolete = sorted(set(package) - OPERATOR_PACKAGE_OVERRIDE_FIELDS)
+        if obsolete:
+            raise RecipeDocumentError(
+                "builtin_recipe_upgrade_required",
+                f"Unsupported built-in package override: {obsolete[0]}",
+                path=f"$.management.operator_overrides.package.{obsolete[0]}",
+            )
+        maintainer = package.get("maintainer")
+        if set(package) != {"maintainer"} or not isinstance(maintainer, str) or not maintainer.strip() or any(character in maintainer for character in "\r\n"):
+            raise RecipeDocumentError(
+                "builtin_recipe_override_invalid", "package.maintainer override must be a non-empty single-line string",
+                path="$.management.operator_overrides.package.maintainer",
+            )
+        normalized_overrides["package"] = {"maintainer": maintainer}
+    if "build" in overrides:
+        build = overrides["build"]
+        if not isinstance(build, dict) or not build:
+            raise RecipeDocumentError(
+                "builtin_recipe_override_invalid", "build overrides must be a non-empty object",
+                path="$.management.operator_overrides.build",
+            )
+        obsolete = sorted(set(build) - OPERATOR_BUILD_OVERRIDE_FIELDS)
+        if obsolete:
+            raise RecipeDocumentError(
+                "builtin_recipe_upgrade_required",
+                f"Unsupported built-in build override: {obsolete[0]}",
+                path=f"$.management.operator_overrides.build.{obsolete[0]}",
+            )
+        normalized_build = {}
+        if "environment" in build:
+            try:
+                normalized_build["environment"] = _environment(build["environment"], "build.environment override")
+            except ValueError as exc:
+                raise RecipeDocumentError(
+                    "builtin_recipe_override_invalid", str(exc),
+                    path="$.management.operator_overrides.build.environment",
+                ) from exc
+        for key, maximum in (("inactivity_timeout", 86400), ("maximum_runtime", 604800)):
+            if key not in build:
+                continue
+            timeout = build[key]
+            if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= maximum):
+                raise RecipeDocumentError(
+                    "builtin_recipe_override_invalid",
+                    f"build.{key} override must be null or an integer between 1 and {maximum}",
+                    path=f"$.management.operator_overrides.build.{key}",
+                )
+            normalized_build[key] = timeout
+        normalized_overrides["build"] = normalized_build
+    return {
+        "owner": "application",
+        "builtin_id": BUILTIN_RECIPE_ID,
+        "definition_version": definition_version,
+        "operator_overrides": normalized_overrides,
+    }
+
+
 def _config_files(value) -> list[dict]:
     rows = _list(value, "install.config_files")
     normalized = []
@@ -124,13 +250,10 @@ def _directories(value) -> list[dict]:
 
 
 def normalize_recipe(workflow: dict) -> dict:
-    """Return a canonical Recipe v1 with defaults applied."""
+    """Return a canonical current-schema Recipe with defaults applied."""
     if not isinstance(workflow, dict):
         raise ValueError("workflow must be an object")
-    workflow = migrate_legacy_recipe(workflow)
-    version = workflow.get("schema_version", SCHEMA_VERSION)
-    if version != SCHEMA_VERSION:
-        raise ValueError(f"unsupported recipe schema version: {version}")
+    workflow = migrate_recipe_document(workflow).document
     package_in = _dict(workflow.get("package"), "package")
     source_in = _dict(workflow.get("source"), "source")
     build_in = _dict(workflow.get("build"), "build")
@@ -173,6 +296,7 @@ def normalize_recipe(workflow: dict) -> dict:
         "schema_version": SCHEMA_VERSION,
         "name": name,
         "active": workflow.get("active", True),
+        **({"management": _management(workflow["management"], name)} if "management" in workflow else {}),
         "package": {
             "name": package_name,
             "version_revision": str(package_in.get("version_revision") or "1"),
@@ -481,8 +605,18 @@ def recipe_document_for_storage(workflow) -> dict:
     if "name" not in workflow or not isinstance(workflow.get("name"), str) or not workflow["name"].strip():
         raise RecipeDocumentError("missing_id", "Recipe JSON must contain a non-empty string name", path="$.name")
     try:
-        migrated = migrate_legacy_recipe(workflow)
+        migrated = migrate_recipe_document(workflow).document
         normalized = validate_recipe_metadata(migrated)
+    except RecipeMigrationError as exc:
+        raise RecipeDocumentError(
+            exc.code,
+            str(exc),
+            path=exc.path,
+            source_version=exc.source_version,
+            target_version=exc.target_version,
+        ) from exc
+    except RecipeDocumentError:
+        raise
     except (TypeError, ValueError, re.error) as exc:
         raise RecipeDocumentError("invalid_recipe", str(exc)) from exc
     unknown = _find_unknown_field(migrated, normalized)

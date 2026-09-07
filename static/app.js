@@ -1,5 +1,8 @@
 /* global $, postJson, collectWorkflow, renderWorkflow, switchView, ArchiveTree */
 let currentRecipeId = '';
+let currentRecipeManaged = false;
+let currentRecipeEditablePaths = [];
+let currentRecipeDocument = null;
 let renderingWorkflow = false;
 let autosaveTimer = null;
 let autosaveInFlight = false;
@@ -54,6 +57,78 @@ function refreshRecipeApplicability() {
     button.title = recipeRunSubmissionInFlight ? 'A Build/Test submission is already in progress.' : recipeEnabled ? '' : 'Enable this Recipe to test or build it.';
   });
   if (typeof scheduleRecipeStepUpdate === 'function') scheduleRecipeStepUpdate();
+  applyRecipeManagementUi();
+}
+
+const MANAGED_RECIPE_CONTROL_BY_PATH = Object.freeze({
+  active: 'recipeMetaActive',
+  'package.maintainer': 'packageMaintainer',
+  'build.environment': 'buildEnvironment',
+  'build.inactivity_timeout': 'buildInactivityTimeout',
+  'build.maximum_runtime': 'buildMaximumRuntime',
+});
+
+function applyRecipeManagementUi() {
+  document.querySelectorAll('.recipe-step-card input, .recipe-step-card textarea, .recipe-step-card select, .recipe-step-card button').forEach(control => {
+    if (currentRecipeManaged) {
+      if (!control.disabled) control.dataset.managedDisabled = 'true';
+      control.disabled = true;
+    } else if (control.dataset.managedDisabled === 'true') {
+      control.disabled = false;
+      delete control.dataset.managedDisabled;
+    }
+  });
+  if (currentRecipeManaged) {
+    currentRecipeEditablePaths.forEach(path => {
+      const control = $(MANAGED_RECIPE_CONTROL_BY_PATH[path]);
+      if (control) control.disabled = false;
+    });
+  }
+  const badge = $('recipeManagedBadge');
+  if (badge) badge.hidden = !currentRecipeManaged;
+  const notice = $('recipeManagedNotice');
+  if (notice) notice.hidden = !currentRecipeManaged;
+  const deleteButton = $('btnDeleteRecipeTop');
+  if (deleteButton) {
+    deleteButton.hidden = currentRecipeManaged;
+    deleteButton.disabled = currentRecipeManaged;
+  }
+}
+
+function renderRecipeLoadErrors(errors = []) {
+  const node = $('recipeLoadErrors');
+  if (!node) return;
+  node.replaceChildren();
+  errors.forEach(row => {
+    const item = document.createElement('p');
+    const detail = row?.error || {};
+    const location = detail.path && detail.path !== '$' ? ` (${detail.path})` : '';
+    item.textContent = `Recipe “${row?.id || 'unknown'}” could not be loaded: ${detail.message || 'invalid Recipe'}${location}`;
+    node.appendChild(item);
+  });
+  node.hidden = errors.length === 0;
+}
+
+function recipePathValue(recipe, path) {
+  return path.split('.').reduce((value, segment) => value?.[segment], recipe);
+}
+
+function setRecipePathValue(recipe, path, value) {
+  const segments = path.split('.');
+  const key = segments.pop();
+  const target = segments.reduce((container, segment) => {
+    if (!container[segment] || typeof container[segment] !== 'object') container[segment] = {};
+    return container[segment];
+  }, recipe);
+  target[key] = structuredClone(value);
+}
+
+function workflowForCurrentRecipe() {
+  const formDocument = collectWorkflow();
+  if (!currentRecipeManaged || !currentRecipeDocument) return formDocument;
+  const effective = structuredClone(currentRecipeDocument);
+  currentRecipeEditablePaths.forEach(path => setRecipePathValue(effective, path, recipePathValue(formDocument, path)));
+  return effective;
 }
 
 function renderAccountProvisioning(owner = {}) {
@@ -195,7 +270,7 @@ function renderArchiveInspectionError(error) {
 }
 
 async function inspectArchive() {
-  const wf = collectWorkflow();
+  const wf = workflowForCurrentRecipe();
   const inspectionWorkflow = structuredClone(wf);
   if (inspectionWorkflow.artifact?.payload?.mode === 'paths' && !inspectionWorkflow.artifact.payload.include.length) {
     inspectionWorkflow.artifact.payload = {mode:'entire_archive', include:[], exclude:[]};
@@ -297,7 +372,7 @@ async function dryRun() {
   refreshRecipeApplicability();
   try {
     assertRecipeVersionRevisionIsValid();
-    const wf = collectWorkflow();
+    const wf = workflowForCurrentRecipe();
     if (!buildOutputIsComplete(wf.build.output)) throw new Error('Build output requires at least one relative path.');
     const data = await postJson('/api/run', {workflow:wf, dry_run:true});
     showToast(`Test queued: ${data.run_id}`, {type:'info'});
@@ -314,7 +389,7 @@ async function buildReal() {
   refreshRecipeApplicability();
   try {
     assertRecipeVersionRevisionIsValid();
-    const wf = collectWorkflow();
+    const wf = workflowForCurrentRecipe();
     if (!buildOutputIsComplete(wf.build.output)) throw new Error('Build output requires at least one relative path.');
     const confirmed = await showConfirm({
       title: `Build ${wf.package?.name || wf.name}?`,
@@ -336,6 +411,7 @@ async function buildReal() {
 async function deleteCurrentRecipe() {
   const id = $('workflowSelect')?.value || currentRecipeId || '';
   if (!id) throw new Error('No selected recipe');
+  if (currentRecipeManaged) throw new Error('The built-in Recipe cannot be deleted.');
   const name = $('recipeMetaName')?.value.trim() || id;
   const confirmed = await showConfirm({
     title: `Delete Recipe “${name}”?`,
@@ -369,7 +445,8 @@ async function deleteCurrentRecipe() {
 
 function reportAutosaveError(error) {
   console.error('Autosave recipe failed:', error);
-  setRecipeAutosaveState('error', `Save failed: ${error.message || error}`);
+  const location = error?.path && error.path !== '$' ? `${error.path}: ` : '';
+  setRecipeAutosaveState('error', `Save failed: ${location}${error.message || error}`);
 }
 
 function setRecipeAutosaveState(state, message = '') {
@@ -396,7 +473,7 @@ function waitForAutosaveIdle() {
 
 async function saveRecipeNow() {
   if (autosaveInFlight || recipeMutationPaused) return;
-  const wf = collectWorkflow();
+  const wf = workflowForCurrentRecipe();
   if (!$('recipeMetaName')?.checkValidity() || !$('recipeMetaPackage')?.checkValidity() || !$('recipeMetaGithub')?.checkValidity() || !$('recipePackageVersionRevision')?.checkValidity()) {
     setRecipeAutosaveState('error', 'Fix invalid fields to save');
     return;
@@ -426,6 +503,7 @@ async function saveRecipeNow() {
         $('workflowSelect').value = id;
       }
       setRecipeAutosaveState('saved');
+      if (currentRecipeManaged) currentRecipeDocument = await getJson('/api/workflows/' + encodeURIComponent(id));
     }
   } finally {
     autosaveInFlight = false;
@@ -446,11 +524,14 @@ async function refreshWorkflows() {
   const select = document.getElementById('workflowSelect');
   const previous = select.value;
   select.innerHTML = '';
+  renderRecipeLoadErrors(data.errors || []);
   (data.workflows || []).forEach(w => {
     const opt = document.createElement('option');
     opt.value = w.id;
     opt.dataset.writable = String(w.writable !== false);
-    opt.textContent = `${w.name} · ${w.source}${w.writable ? '' : ' readonly'}`;
+    opt.dataset.managed = String(w.managed === true);
+    opt.dataset.editablePaths = JSON.stringify(w.editable_paths || []);
+    opt.textContent = w.managed ? `${w.name} · Built-in` : `${w.name} · ${w.source}${w.writable ? '' : ' readonly'}`;
     opt.title = opt.textContent;
     select.appendChild(opt);
   });
@@ -465,9 +546,15 @@ async function loadSelectedWorkflow() {
   clearTimeout(autosaveTimer);
   autosaveRevision += 1;
   autosaveDirty = false;
-  const res = await fetch('/api/workflows/' + encodeURIComponent(id));
-  const wf = await res.json();
-  if (!res.ok) throw new Error(wf.error || res.statusText);
+  const selected = document.getElementById('workflowSelect').selectedOptions[0];
+  const wf = await getJson('/api/workflows/' + encodeURIComponent(id));
+  currentRecipeManaged = selected?.dataset.managed === 'true';
+  try {
+    currentRecipeEditablePaths = JSON.parse(selected?.dataset.editablePaths || '[]');
+  } catch (_error) {
+    currentRecipeEditablePaths = [];
+  }
+  currentRecipeDocument = wf;
   currentRecipeId = id;
   clearPreflightReport();
   renderWorkflow(wf);

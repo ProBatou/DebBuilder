@@ -1,0 +1,10 @@
+{
+  "schema_version": 2,
+  "name": "current-v2",
+  "active": true,
+  "package": {"name": "current-v2"},
+  "source": {"provider": "github", "repository": "example/current-v2"},
+  "build": {"inactivity_timeout": 300, "output": {"mode": "source"}},
+  "install": {"content": {"source": "build_output"}},
+  "service": {"enabled": false}
+}

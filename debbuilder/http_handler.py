@@ -120,7 +120,7 @@ def create_handler(api):
             elif path == "/api/settings":
                 api.json_response(self, {"settings": api.settings_view()})
             elif path == "/api/workflows":
-                api.json_response(self, {"workflows": api.list_workflows()})
+                api.json_response(self, api.workflow_listing())
             elif path.startswith("/api/workflows/"):
                 self._get_workflow(path)
             else:
@@ -239,6 +239,8 @@ def create_handler(api):
                     return
                 try:
                     api.json_response(self, api.import_recipe_json(recipe, replace=replace))
+                except api.builtin_recipe.BuiltinRecipeError as exc:
+                    api.json_response(self, {"ok": False, "error": exc.as_dict()}, 409)
                 except api.RecipeDocumentError as exc:
                     api.json_response(self, {"ok": False, "error": {"code": exc.code, "message": str(exc), "path": exc.path}}, 422)
                 except FileExistsError as exc:
@@ -324,23 +326,21 @@ def create_handler(api):
             workflow_id = api.sanitize_id(self.path.rsplit("/", 1)[-1])
             workflow = data.get("workflow", data)
             workflow["name"] = workflow.get("name") or workflow_id
-            normalized = api.validate_recipe_metadata(workflow)
-            stored = api.recipe_for_storage(normalized)
-            destination = api.workflow_path(workflow_id, for_write=True)
-            assert destination is not None
-            with api.storage.locked_path(destination):
-                existing = api.workflow_path(workflow_id)
-                if existing and existing.resolve().parent != api.USER_WORKFLOWS.resolve():
-                    api.json_response(self, {"error": "shipped recipes are read-only"}, 403)
-                    return
-                api.storage.save_json(destination, stored)
             previous_id = str(data.get("previous_id") or "")
-            if previous_id and previous_id != workflow_id:
-                previous = api.workflow_path(previous_id)
-                if previous and previous.parent.resolve() == api.USER_WORKFLOWS.resolve():
-                    previous.unlink()
-            api.associate_workflow_package(workflow_id, normalized, previous_id)
-            api.json_response(self, {"ok": True, "id": workflow_id, "path": str(destination)})
+            try:
+                result = api.save_workflow_recipe(workflow_id, workflow, previous_id=previous_id)
+            except api.builtin_recipe.BuiltinRecipeError as exc:
+                api.json_response(self, {"error": exc.as_dict()}, 409)
+                return
+            except api.RecipeDocumentError as exc:
+                api.json_response(self, {"error": {
+                    "code": exc.code, "message": str(exc), "path": exc.path,
+                }}, 422)
+                return
+            except PermissionError as exc:
+                api.json_response(self, {"error": str(exc)}, 403)
+                return
+            api.json_response(self, result)
 
         def do_DELETE(self):
             if not self._authorized():
@@ -364,6 +364,9 @@ def create_handler(api):
             workflow_id = urllib.parse.unquote(path.rsplit("/", 1)[-1])
             try:
                 api.delete_workflow(workflow_id)
+            except api.builtin_recipe.BuiltinRecipeError as exc:
+                api.json_response(self, {"error": exc.as_dict()}, 403)
+                return
             except FileNotFoundError:
                 api.json_response(self, {"error": "recipe not found"}, 404)
                 return

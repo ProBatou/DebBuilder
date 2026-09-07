@@ -18,7 +18,7 @@ class AdminApiTests(AdminApiCase):
         status, data = self.request("GET", "/api/packages")
         self.assertEqual(status, 200)
         names = [p["name"] for p in data["packages"]]
-        self.assertEqual(names, ["monitoring-app", "webapp"])
+        self.assertEqual(names, ["debbuilder", "monitoring-app", "webapp"])
         webapp = next(p for p in data["packages"] if p["name"] == "webapp")
         self.assertEqual(webapp["apt_version"], "3.4.1")
         self.assertEqual(webapp["recipe"], "webapp-recipe")
@@ -35,7 +35,7 @@ class AdminApiTests(AdminApiCase):
             {"name":"local-demo","apt_version":"1.0-1","upstream_version":"1.0","recipe":"webapp-recipe","source":{"type":"local"}},
         ])
         summary = server.dashboard_summary()
-        self.assertEqual(summary["packages"], 4)
+        self.assertEqual(summary["packages"], 5)
         self.assertEqual(summary["updates"], 1)
         self.assertEqual(summary["state_counts"]["update_available"], 1)
         self.assertIn("github-demo", [row["name"] for row in summary["package_rows"]])
@@ -203,7 +203,7 @@ class AdminApiTests(AdminApiCase):
 
     def test_recipe_list_logs_execution_detail_and_settings_are_available(self):
         status, recipes = self.request("GET", "/api/recipes")
-        self.assertEqual(recipes["recipes"][0]["id"], "webapp-recipe")
+        self.assertIn("webapp-recipe", [row["id"] for row in recipes["recipes"]])
         status, executions = self.request("GET", "/api/executions")
         self.assertEqual(executions["executions"][0]["id"], "20260822-031400")
         status, detail = self.request("GET", "/api/executions/20260822-031400")
@@ -659,6 +659,121 @@ class AdminApiTests(AdminApiCase):
         self.assertEqual(json.loads(raised.exception.read().decode())["error"]["code"], "readonly_recipe")
         self.assertFalse((server.USER_WORKFLOWS / "webapp-recipe.json").exists())
 
+    def test_reserved_builtin_id_cannot_be_created_imported_deleted_or_renamed(self):
+        recipe = {"name": "debbuilder", "package": {"name": "debbuilder"}}
+        builtin_path = server.USER_WORKFLOWS / "debbuilder.json"
+        original = builtin_path.read_bytes()
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            self.request("POST", "/api/recipes/import", {"recipe": recipe, "replace": True})
+        self.assertEqual(raised.exception.code, 409)
+        self.assertEqual(json.loads(raised.exception.read().decode())["error"]["code"], "builtin_recipe_reserved")
+
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            self.request("POST", "/api/workflows/debbuilder", {"workflow": recipe})
+        self.assertEqual(raised.exception.code, 409)
+        self.assertEqual(json.loads(raised.exception.read().decode())["error"]["code"], "builtin_recipe_managed_field")
+        self.assertEqual(builtin_path.read_bytes(), original)
+
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            self.request("DELETE", "/api/workflows/debbuilder")
+        self.assertEqual(raised.exception.code, 403)
+        self.assertEqual(json.loads(raised.exception.read().decode())["error"]["code"], "builtin_recipe_reserved")
+
+        status, _ = self.request("POST", "/api/workflows/rename-source", {
+            "workflow": {"name": "rename-source", "package": {"name": "rename-source"}},
+        })
+        self.assertEqual(status, 200)
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            self.request("POST", "/api/workflows/renamed", {
+                "workflow": {"name": "renamed", "package": {"name": "renamed"}},
+                "previous_id": "debbuilder",
+            })
+        self.assertEqual(raised.exception.code, 409)
+        self.assertEqual(json.loads(raised.exception.read().decode())["error"]["code"], "builtin_recipe_reserved")
+
+    def test_workflow_url_identity_must_match_document_identity(self):
+        builtin_path = server.USER_WORKFLOWS / "debbuilder.json"
+        original = builtin_path.read_bytes()
+        _, builtin = self.request("GET", "/api/workflows/debbuilder")
+
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            self.request("POST", "/api/workflows/alias", {"workflow": builtin})
+
+        self.assertEqual(raised.exception.code, 422)
+        error = json.loads(raised.exception.read().decode())["error"]
+        self.assertEqual(error["code"], "recipe_identity_mismatch")
+        self.assertEqual(error["path"], "$.name")
+        self.assertFalse((server.USER_WORKFLOWS / "alias.json").exists())
+        self.assertEqual(builtin_path.read_bytes(), original)
+
+        ordinary = {"name": "matching", "package": {"name": "matching"}}
+        status, result = self.request("POST", "/api/workflows/matching", {"workflow": ordinary})
+        self.assertEqual(status, 200)
+        self.assertEqual(result["id"], "matching")
+        persisted = server.recipe_store.load_recipe(server.USER_WORKFLOWS / "matching.json", write_back=False)
+        self.assertEqual(persisted["name"], "matching")
+        self.assertNotIn("management", persisted)
+
+    def test_managed_builtin_api_allows_policy_override_and_rejects_managed_edit(self):
+        server.builtin_recipe.reconcile_builtin_recipe(server.USER_WORKFLOWS)
+        status, listing = self.request("GET", "/api/workflows")
+        self.assertEqual(status, 200)
+        listed = next(row for row in listing["workflows"] if row["id"] == "debbuilder")
+        self.assertEqual(listed["source"], "builtin")
+        self.assertTrue(listed["managed"])
+        self.assertEqual(listed["editable_paths"], list(server.builtin_recipe.OPERATOR_OVERRIDE_PATHS))
+        ordinary = next(row for row in listing["workflows"] if row["id"] == "webapp-recipe")
+        self.assertEqual(ordinary["source"], "example")
+        self.assertNotIn("managed", ordinary)
+        self.assertNotIn("editable_paths", ordinary)
+        status, viewed = self.request("GET", "/api/workflows/debbuilder")
+        self.assertEqual(status, 200)
+        viewed["active"] = False
+        viewed["build"]["environment"] = {"HTTP_PROXY": "http://proxy.example.test"}
+        status, _ = self.request("POST", "/api/workflows/debbuilder", {
+            "workflow": viewed, "previous_id": "debbuilder",
+        })
+        self.assertEqual(status, 200)
+        persisted = server.recipe_store.load_recipe(server.USER_WORKFLOWS / "debbuilder.json", write_back=False)
+        self.assertEqual(persisted["management"]["operator_overrides"], {
+            "active": False,
+            "build": {"environment": {"HTTP_PROXY": "http://proxy.example.test"}},
+        })
+
+        original = (server.USER_WORKFLOWS / "debbuilder.json").read_bytes()
+        _, viewed = self.request("GET", "/api/workflows/debbuilder")
+        viewed["source"]["repository"] = "attacker/fork"
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            self.request("POST", "/api/workflows/debbuilder", {
+                "workflow": viewed, "previous_id": "debbuilder",
+            })
+        self.assertEqual(raised.exception.code, 409)
+        error = json.loads(raised.exception.read().decode())["error"]
+        self.assertEqual(error["code"], "builtin_recipe_managed_field")
+        self.assertEqual(error["path"], "$.source.repository")
+        self.assertEqual((server.USER_WORKFLOWS / "debbuilder.json").read_bytes(), original)
+
+        status, validation = self.request("POST", "/api/recipes/validate", {"recipe": viewed})
+        self.assertEqual(status, 200)
+        self.assertEqual(validation["collision"], {
+            "exists": True, "source": "builtin", "replaceable": False,
+        })
+
+    def test_workflow_listing_reports_corrupt_recipe_without_hiding_valid_entries(self):
+        (server.USER_WORKFLOWS / "broken.json").write_text('{"schema_version": 2,')
+
+        status, listing = self.request("GET", "/api/workflows")
+
+        self.assertEqual(status, 200)
+        self.assertIn("webapp-recipe", [row["id"] for row in listing["workflows"]])
+        self.assertEqual(len(listing["errors"]), 1)
+        failure = listing["errors"][0]
+        self.assertEqual(failure["id"], "broken")
+        self.assertEqual(failure["source"], "user")
+        self.assertEqual(failure["error"]["code"], "invalid_recipe_json")
+        self.assertEqual(failure["error"]["path"], "$")
+        self.assertNotIn(str(server.USER_WORKFLOWS), json.dumps(failure))
+
     def test_shipped_recipe_cannot_be_modified_through_workflow_api(self):
         status, viewed = self.request("GET", "/api/workflows/webapp-recipe")
         self.assertEqual(status, 200)
@@ -673,16 +788,17 @@ class AdminApiTests(AdminApiCase):
         )
 
     def test_recipe_json_payload_limit_is_enforced_by_server(self):
-        request = urllib.request.Request(
-            self.base_url + "/api/recipes/validate",
-            data=b"{" + (b" " * 2_000_000),
-            method="POST",
-            headers={"Content-Type": "application/json"},
-        )
-        with self.assertRaises(urllib.error.HTTPError) as raised:
-            urllib.request.urlopen(request, timeout=5)
-        self.assertEqual(raised.exception.code, 400)
-        error = json.loads(raised.exception.read().decode())["error"]
+        connection = http.client.HTTPConnection("127.0.0.1", self.httpd.server_address[1], timeout=5)
+        try:
+            connection.putrequest("POST", "/api/recipes/validate")
+            connection.putheader("Content-Type", "application/json")
+            connection.putheader("Content-Length", "2000001")
+            connection.endheaders()
+            response = connection.getresponse()
+            self.assertEqual(response.status, 400)
+            error = json.loads(response.read().decode())["error"]
+        finally:
+            connection.close()
         self.assertEqual(error["code"], "invalid_request")
         self.assertIn("body too large", error["message"])
 
@@ -812,7 +928,7 @@ class AdminApiTests(AdminApiCase):
         status, _ = self.request("POST", "/api/workflows/v1-demo", {"workflow": recipe})
         self.assertEqual(status, 200)
         stored = json.loads((server.USER_WORKFLOWS / "v1-demo.json").read_text())
-        self.assertEqual(stored["schema_version"], 1)
+        self.assertEqual(stored["schema_version"], 2)
         self.assertNotIn("package_name", stored)
         self.assertNotIn("github_repository", stored)
         self.assertNotIn("config_policy", stored["install"])
@@ -823,6 +939,24 @@ class AdminApiTests(AdminApiCase):
         self.assertEqual(loaded["install"]["owner"]["user"], "root")
         self.assertEqual(loaded["service"]["user"], "v1-demo")
         self.assertTrue(loaded["service"]["configured"])
+
+    def test_existing_user_recipe_is_migrated_durably_when_loaded(self):
+        path = server.USER_WORKFLOWS / "loaded-legacy.json"
+        path.write_text(json.dumps({
+            "schema_version": 1,
+            "name": "loaded-legacy",
+            "build": {"timeout": 45, "output": {"mode": "source"}},
+            "steps": [],
+        }))
+
+        status, loaded = self.request("GET", "/api/workflows/loaded-legacy")
+        stored = json.loads(path.read_text())
+
+        self.assertEqual(status, 200)
+        self.assertEqual(loaded["schema_version"], 2)
+        self.assertEqual(stored["schema_version"], 2)
+        self.assertEqual(stored["build"]["inactivity_timeout"], 45)
+        self.assertNotIn("steps", stored)
 
     def test_readonly_recipe_cannot_be_deleted(self):
         with self.assertRaises(urllib.error.HTTPError) as ctx:

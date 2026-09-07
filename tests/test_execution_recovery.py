@@ -427,8 +427,12 @@ class StartupRecoveryTests(unittest.TestCase):
             release.wait(2)
             return StartupRecoveryResult()
 
+        migration = mock.Mock()
+        migration.as_dict.return_value = {"ok": True}
+        reconciliation = mock.Mock(action="current", definition_version=1, previous_definition_version=1)
         starter = threading.Thread(target=app.start_execution_manager, args=(HttpServer(), manager))
-        with mock.patch("debbuilder.app.execution_recovery.recover_startup", side_effect=recover):
+        with mock.patch("debbuilder.app.prepare_recipes_for_startup", return_value=(migration, reconciliation)), \
+                mock.patch("debbuilder.app.execution_recovery.recover_startup", side_effect=recover):
             starter.start()
             self.assertTrue(entered.wait(1))
             self.assertFalse(manager.accepting)

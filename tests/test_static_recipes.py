@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from debbuilder import debian_packaging
+from debbuilder import builtin_recipe, debian_packaging
 from debbuilder.recipe_schema import recipe_for_storage, validate_recipe_metadata
 
 
@@ -12,6 +12,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class StaticRecipeTests(unittest.TestCase):
     def load(self, name):
+        if name == "debbuilder":
+            return validate_recipe_metadata(builtin_recipe.load_builtin_definition())
         path = ROOT / "tests" / "fixtures" / "recipes" / f"{name}.json"
         return validate_recipe_metadata(json.loads(path.read_text()))
 

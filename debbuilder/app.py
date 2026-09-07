@@ -23,7 +23,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import artifact_publication, artifact_validation, auth_service, automation_service, build_pipeline, deb_inspector, execution_recovery, execution_service, notifications, package_service, release_cache, settings_service, storage, upstream_archive, workspace_cleanup
+from . import artifact_publication, artifact_validation, auth_service, automation_service, build_pipeline, builtin_recipe, deb_inspector, execution_recovery, execution_service, notifications, package_service, recipe_store, release_cache, settings_service, storage, upstream_archive, workspace_cleanup
 from .build_models import utc_now
 from .build_store import BuildStore
 from .execution_manager import ExecutionManager, ExecutionManagerError
@@ -33,6 +33,7 @@ from .settings_store import cookie_secret, github_token, oidc_client_secret
 from .runtime import RuntimeConfig
 
 ROOT = Path(__file__).resolve().parents[1]
+LOGGER = logging.getLogger(__name__)
 
 
 def application_data_dir(root: Path, environ: dict[str, str] | None = None) -> Path:
@@ -78,6 +79,58 @@ class RunAdmissionError(RuntimeError):
 
     def as_dict(self) -> dict:
         return {"code": self.code, "message": str(self), "details": self.details}
+
+
+class RecipeStartupError(RuntimeError):
+    """Fail-closed startup refusal when persisted Recipes are not all usable."""
+
+    def __init__(self, report: recipe_store.RecipeDirectoryMigrationReport):
+        super().__init__("Recipe migration failed; Build/Test admission remains closed")
+        self.code = "recipe_migration_failed"
+        self.report = report
+
+    def as_dict(self) -> dict:
+        return {"code": self.code, "message": str(self), "migration": self.report.as_dict()}
+
+
+def _bounded_startup_value(value, *, limit: int) -> str:
+    bounded = str(value or "").replace("\r", " ").replace("\n", " ")
+    bounded = re.sub(r"/[^\s'\"]+", "<path>", bounded)
+    return bounded[:limit]
+
+
+def recipe_startup_diagnostic(exc: Exception) -> dict:
+    """Return operator-useful Recipe startup details without paths or contents."""
+    failures: list[dict] = []
+    if isinstance(exc, RecipeStartupError):
+        for row in exc.report.files:
+            if row.status != "failed" or not row.error:
+                continue
+            failures.append({
+                "recipe": _bounded_startup_value(Path(row.file).name, limit=128),
+                "code": _bounded_startup_value(row.error.get("code"), limit=80),
+                "path": _bounded_startup_value(row.error.get("path") or "$", limit=160),
+                "message": _bounded_startup_value(row.error.get("message"), limit=240),
+            })
+    elif isinstance(exc, recipe_store.RecipeStoreError):
+        failures.append({
+            "recipe": _bounded_startup_value(exc.file.name, limit=128),
+            "code": _bounded_startup_value(exc.code, limit=80),
+            "path": _bounded_startup_value(exc.path, limit=160),
+            "message": _bounded_startup_value(exc, limit=240),
+        })
+    elif isinstance(exc, builtin_recipe.BuiltinRecipeError):
+        failures.append({
+            "recipe": builtin_recipe.BUILTIN_RECIPE_ID,
+            "code": _bounded_startup_value(exc.code, limit=80),
+            "path": _bounded_startup_value(exc.path, limit=160),
+            "message": _bounded_startup_value(exc, limit=240),
+        })
+    return {
+        "code": "recipe_startup_failed",
+        "failures": failures[:20],
+        "omitted_failures": max(0, len(failures) - 20),
+    }
 
 
 class ExecutionCancellationError(RuntimeError):
@@ -228,13 +281,39 @@ def create_execution_manager(*, store: BuildStore | None = None, queue_capacity:
     return ExecutionManager(store or BuildStore(DATA / "builds"), queue_capacity=queue_capacity, execute=callback)
 
 
+def prepare_application_directories() -> None:
+    """Ensure the mutable Recipe directory exists before startup orchestration."""
+    USER_WORKFLOWS.mkdir(parents=True, exist_ok=True)
+
+
+def prepare_recipes_for_startup():
+    """Eagerly migrate user Recipes, then reconcile the managed built-in."""
+    migration = recipe_store.migrate_recipe_directory(USER_WORKFLOWS)
+    if not migration.ok:
+        raise RecipeStartupError(migration)
+    reconciliation = builtin_recipe.reconcile_builtin_recipe(USER_WORKFLOWS)
+    return migration, reconciliation
+
+
 def start_execution_manager(http_server, manager: ExecutionManager | None = None) -> ExecutionManager:
-    """Recover persisted Runs, then attach/start one admission-gated manager."""
+    """Recover Runs, prepare Recipes, then attach/start one gated manager."""
     if getattr(http_server, "execution_manager", None) is not None:
         raise RuntimeError("HTTP server already has an execution manager")
+    prepare_application_directories()
     selected = manager or create_execution_manager()
     recovery = execution_recovery.recover_startup(selected.store)
+    try:
+        migration, reconciliation = prepare_recipes_for_startup()
+    except (RecipeStartupError, recipe_store.RecipeStoreError, builtin_recipe.BuiltinRecipeError) as exc:
+        LOGGER.error("Recipe startup failure: %s", json.dumps(recipe_startup_diagnostic(exc), sort_keys=True))
+        raise
     selected.start(admission_blocker=recovery.admission_blocker)
+    http_server.recipe_migration = migration.as_dict()
+    http_server.builtin_recipe_reconciliation = {
+        "action": reconciliation.action,
+        "definition_version": reconciliation.definition_version,
+        "previous_definition_version": reconciliation.previous_definition_version,
+    }
     http_server.execution_recovery = recovery.as_dict()
     http_server.execution_manager = selected
     return selected
@@ -448,8 +527,8 @@ def reconcile_build_publication(run_id: str, payload: dict | None = None) -> dic
 
 
 def read_workflow_file(path: Path) -> dict:
-    data = json.loads(path.read_text())
-    return validate_recipe_metadata(data)
+    write_back = path.parent.resolve() == USER_WORKFLOWS.resolve()
+    return validate_recipe_metadata(recipe_store.load_recipe(path, write_back=write_back))
 
 
 def recipe_json_validation(recipe) -> dict:
@@ -458,10 +537,11 @@ def recipe_json_validation(recipe) -> dict:
     existing = workflow_path(canonical["name"])
     collision = None
     if existing:
+        builtin = builtin_recipe.is_builtin_recipe_id(canonical["name"])
         collision = {
             "exists": True,
-            "source": "user" if existing.resolve().parent == USER_WORKFLOWS.resolve() else "example",
-            "replaceable": existing.resolve().parent == USER_WORKFLOWS.resolve(),
+            "source": "builtin" if builtin else "user" if existing.resolve().parent == USER_WORKFLOWS.resolve() else "example",
+            "replaceable": not builtin and existing.resolve().parent == USER_WORKFLOWS.resolve(),
         }
     return {"ok": True, "recipe": canonical, "id": canonical["name"], "collision": collision}
 
@@ -470,6 +550,7 @@ def import_recipe_json(recipe, *, replace: bool = False) -> dict:
     """Create or explicitly replace a user Recipe from canonical JSON."""
     preflight = recipe_document_for_storage(recipe)
     workflow_id = preflight["name"]
+    builtin_recipe.require_user_recipe_id(workflow_id)
     destination = workflow_path(workflow_id, for_write=True)
     assert destination is not None
     with storage.locked_path(destination):
@@ -481,14 +562,95 @@ def import_recipe_json(recipe, *, replace: bool = False) -> dict:
                 raise PermissionError("shipped recipes are read-only and cannot be replaced")
             if not replace:
                 raise FileExistsError("recipe id already exists; explicit replacement is required")
-        storage.save_json(destination, canonical)
+        canonical = recipe_store.save_recipe(destination, canonical)
     associate_workflow_package(workflow_id, canonical)
     return {"ok": True, "id": workflow_id, "recipe": canonical, "created": existing is None, "replaced": existing is not None}
 
 
-def list_workflows() -> list[dict]:
+def save_workflow_recipe(workflow_id: str, workflow: dict, *, previous_id: str = "") -> dict:
+    """Persist a normal Recipe or an allowlisted edit to the managed built-in."""
+    require_safe_name(workflow_id, "workflow id")
+    if previous_id:
+        require_safe_name(previous_id, "previous workflow id")
+    canonical = recipe_document_for_storage(workflow)
+    if canonical["name"] != workflow_id:
+        raise RecipeDocumentError(
+            "recipe_identity_mismatch",
+            "Recipe name must match the requested workflow ID",
+            path="$.name",
+        )
+    if builtin_recipe.is_builtin_recipe_id(previous_id) and previous_id != workflow_id:
+        raise builtin_recipe.BuiltinRecipeError(
+            "builtin_recipe_reserved", "The application-managed DebBuilder Recipe cannot be renamed",
+            path="$.previous_id",
+        )
+    destination = workflow_path(workflow_id, for_write=True)
+    assert destination is not None
+    if builtin_recipe.is_builtin_recipe_id(workflow_id):
+        stored = builtin_recipe.update_builtin_recipe(destination, canonical)
+        normalized = validate_recipe_metadata(stored)
+    else:
+        normalized = validate_recipe_metadata(canonical)
+        stored = recipe_for_storage(normalized)
+        with storage.locked_path(destination):
+            existing = workflow_path(workflow_id)
+            if existing and existing.resolve().parent != USER_WORKFLOWS.resolve():
+                raise PermissionError("shipped recipes are read-only")
+            stored = recipe_store.save_recipe(destination, stored)
+    if previous_id and previous_id != workflow_id:
+        previous = workflow_path(previous_id)
+        if previous and previous.parent.resolve() == USER_WORKFLOWS.resolve():
+            previous.unlink()
+    associate_workflow_package(workflow_id, normalized, previous_id)
+    return {"ok": True, "id": workflow_id, "path": str(destination)}
+
+
+def workflow_listing() -> dict:
+    """List usable Recipes while reporting individual unreadable entries."""
     sources = (("user", USER_WORKFLOWS, True), ("example", EXAMPLES, False))
-    return storage.list_workflows(sources, read_workflow_file)
+    items: list[dict] = []
+    errors: list[dict] = []
+    seen: set[str] = set()
+    for source, folder, writable in sources:
+        if not folder.exists():
+            continue
+        for path in sorted(folder.glob("*.json")):
+            if path.stem in seen:
+                continue
+            try:
+                workflow = read_workflow_file(path)
+                updated = path.stat().st_mtime
+            except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                detail = exc.as_dict() if isinstance(exc, recipe_store.RecipeStoreError) else {
+                    "code": "recipe_load_failed",
+                    "message": "Recipe could not be loaded",
+                    "path": "$",
+                }
+                errors.append({
+                    "id": path.stem,
+                    "source": source,
+                    "error": {
+                        "code": str(detail.get("code") or "recipe_load_failed"),
+                        "message": str(detail.get("message") or "Recipe could not be loaded")[:240],
+                        "path": str(detail.get("path") or "$"),
+                    },
+                })
+                continue
+            seen.add(path.stem)
+            item = {
+                "id": path.stem,
+                "name": workflow.get("name", path.stem),
+                "source": source,
+                "writable": writable,
+                "updated": updated,
+            }
+            item.update(builtin_recipe.ui_projection(workflow))
+            items.append(item)
+    return {"workflows": items, "errors": errors}
+
+
+def list_workflows() -> list[dict]:
+    return workflow_listing()["workflows"]
 
 
 def workflow_path(wid: str, for_write: bool = False) -> Path | None:
@@ -503,6 +665,7 @@ def workflow_path(wid: str, for_write: bool = False) -> Path | None:
 
 def delete_workflow(wid: str) -> None:
     """Delete only a user-owned recipe and clear local package associations."""
+    builtin_recipe.require_user_recipe_id(wid)
     path = workflow_path(wid)
     if not path:
         raise FileNotFoundError("recipe not found")

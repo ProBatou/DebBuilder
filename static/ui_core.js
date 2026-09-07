@@ -57,7 +57,10 @@ async function getJson(url) {
   const response = await fetch(url);
   const payload = await response.json();
   if (!response.ok) {
-    const error = new Error(payload.error?.message || payload.error || response.statusText);
+    const detail = payload.error;
+    const error = new Error(detail?.message || detail || response.statusText);
+    error.code = detail?.code || 'request_failed';
+    error.path = detail?.path || '$';
     error.status = response.status;
     throw error;
   }
@@ -71,7 +74,14 @@ async function postJson(url, body) {
     body: JSON.stringify(body),
   });
   const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error?.message || payload.error || response.statusText);
+  if (!response.ok) {
+    const detail = payload.error;
+    const error = new Error(detail?.message || detail || response.statusText);
+    error.code = detail?.code || 'request_failed';
+    error.path = detail?.path || '$';
+    error.status = response.status;
+    throw error;
+  }
   return payload;
 }
 

@@ -53,13 +53,15 @@
         <div class="recipe-workspace recipe-blank-workspace">
           <section class="recipe-main recipe-blank-main">
             <div class="recipe-toolbar recipe-simple-toolbar toolbar">
-              <label class="recipe-picker field"><span>Recipe</span><select id="workflowSelect"></select></label>
+              <label class="recipe-picker field"><span>Recipe <span id="recipeManagedBadge" class="settings-badge neutral" hidden>Built-in</span></span><select id="workflowSelect"></select></label>
               <div class="recipe-action-group recipe-data-actions"><button class="btn btn--ghost" id="btnNewRecipe">+ New</button><button class="btn btn--ghost" id="btnRecipeJson">JSON</button><button class="btn btn--ghost" id="btnImportRecipe">Import</button><button class="btn btn--ghost" id="btnRuns">Runs</button></div>
               <div class="recipe-action-group recipe-run-actions"><button class="btn btn--warning" id="btnDryRun">Test</button><button class="btn btn--primary" id="btnBuildReal">Build</button></div>
               <button class="btn btn--danger recipe-delete-action" id="btnDeleteRecipeTop">Delete</button>
               <input id="workflowName" type="hidden" />
               <input id="recipeImportFile" type="file" accept="application/json,.json" hidden />
             </div>
+            <div id="recipeLoadErrors" class="recipe-load-errors" role="alert" hidden></div>
+            <p id="recipeManagedNotice" class="recipe-managed-notice" hidden>Built-in Recipe fields are maintained by DebBuilder. Only operational overrides remain editable.</p>
 
             <section id="recipePreflight" class="card preflight-report" aria-live="polite" hidden>
               <div class="preflight-head"><div><span class="eyebrow">Test report</span><h2>Build preflight</h2><p id="recipePreflightSummary">Resolved and prepared without executing build commands.</p></div><span id="recipePreflightStatus" class="settings-badge neutral">Prepared</span></div>
@@ -106,7 +108,7 @@
                   <h2>Build</h2>
                   <p>Prepares the source project before creating the Debian package.</p>
                 </div>
-                <span class="step-note">Recipe v1</span>
+                <span class="step-note">Recipe v2</span>
               </div>
               <div class="build-layout">
                 <section class="build-section"><div class="build-section-head"><h3>Build environment</h3><span class="detection-badge not-detected" id="buildDetectionBadge"><span></span><strong>Not detected</strong></span></div><div class="build-environment-summary"><strong class="build-environment-project" id="buildDetectedProject">Not detected</strong><p class="build-environment-line" id="buildToolsSummary" hidden><span>Detected tools:</span><strong id="buildDetectedTools">None</strong></p><p class="build-environment-line" id="buildDependenciesSummary" hidden><span>Dependencies:</span><strong id="buildDetectedDependencies">None</strong></p><p class="build-environment-line"><span>Detected from:</span><strong id="buildDetectedFiles">No source inspected yet</strong></p></div><div class="dependency-row"><div><small>Manually added system dependencies</small><div class="dependency-chips" id="buildDependencyChips"></div></div><button type="button" class="ghost compact-button" id="btnAddBuildDependency">+ Add dependency</button></div><div class="build-dependency-state" id="buildDependencyState"><p class="dependency-check-pending" id="buildDependencyPending"><span>Status:</span><strong>Not checked</strong></p><div class="dependency-check-results" id="buildDependencyResults" hidden><span>Detected tools: <strong id="buildAvailableTools">None</strong></span><span>Unavailable tools: <strong id="buildMissingTools">None</strong></span><span>System dependencies available: <strong id="buildAvailableDependencies">None</strong></span><span>System dependencies missing: <strong id="buildMissingDependencies">None</strong></span><div id="buildToolDetails"></div></div></div></section>
@@ -125,7 +127,7 @@
                   <h2>Debian installation</h2>
                   <p>Where should the build result be installed in the Debian package?</p>
                 </div>
-                <span class="step-note">Recipe v1</span>
+                <span class="step-note">Recipe v2</span>
               </div>
               <div class="recipe-form-stack">
                 <div class="recipe-form-group install-package-group">

@@ -47,7 +47,8 @@ def showcase_recipes() -> dict[str, dict]:
         "mode": "upstream_archive", "type": "archive", "architecture": "amd64",
         "archive_source": "release_asset", "asset_selection": "pattern",
         "name_pattern": "archive-agent-linux-amd64\\.tar\\.gz", "asset_name": "",
-        "archive_format": "tar.gz", "selected_files": ["bin/archive-agent", "share/defaults.yml"],
+        "archive_format": "tar.gz",
+        "payload": {"mode": "paths", "include": ["bin/archive-agent", "share/defaults.yml"], "exclude": []},
         "match_package": True, "match_version": True,
     }
     archive["install"].update({

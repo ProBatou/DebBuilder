@@ -1,0 +1,6 @@
+{
+  "name": "legacy-v0",
+  "package": {"name": "legacy-v0"},
+  "build": {"timeout": 120, "output": {"mode": "source"}},
+  "steps": []
+}

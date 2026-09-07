@@ -82,6 +82,7 @@ const roundTrip = {
 };
 context.renderWorkflow(roundTrip);
 const collected = context.collectWorkflow();
+assert.equal(collected.schema_version, 2);
 assert.equal(collected.active, false);
 assert.equal(collected.package.version_revision, '1+b1');
 assert.equal(collected.package.description, roundTrip.package.description);

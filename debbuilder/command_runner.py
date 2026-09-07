@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import re
+import secrets
 import selectors
 import shlex
 import signal
@@ -10,6 +11,8 @@ import subprocess
 import time
 from pathlib import Path
 
+from .command_containment import ContainmentError, SystemdCommandContainment, containment_capability
+from .command_identity import COMMAND_ID_ENV, RUN_ID_ENV, CommandIdentityError, VerificationStatus, capture_identity, current_recorder, verify_identity
 from .execution_cancellation import CANCELLATION_CODE, USER_REQUESTED, ExecutionCancelled
 
 SECRET_KEY = re.compile(r"(?i)(token|secret|password|passwd|api[_-]?key|credential)")
@@ -171,28 +174,38 @@ def _signal_process_group(process_group: int, requested_signal: int) -> bool:
     return True
 
 
-def _terminate_process_group(process: subprocess.Popen, process_group: int, selector, output: dict[str, list[str]], redaction_environment: dict[str, str], *, on_output=None, grace: float = TERMINATION_GRACE) -> tuple[int | None, bool, str]:
-    """Stop the whole command session and reap its direct child."""
+def terminate_process_group(process_group: int, *, grace: float = TERMINATION_GRACE, reap_timeout: float = TERMINATION_REAP_TIMEOUT, on_wait=None, authorize_signal=None) -> tuple[bool, bool, str]:
+    """Apply the canonical TERM/grace/KILL policy to one process group."""
     errors = []
     killed = False
+
+    def wait(deadline: float) -> None:
+        delay = min(0.02, max(0.0, deadline - time.monotonic()))
+        if callable(on_wait):
+            on_wait(delay)
+        elif delay:
+            time.sleep(delay)
+
+    def signal_group(requested_signal: int) -> bool:
+        if callable(authorize_signal) and not authorize_signal(requested_signal):
+            errors.append(f"process identity could not be verified before {signal.Signals(requested_signal).name}")
+            return False
+        return _signal_process_group(process_group, requested_signal)
+
     try:
-        _signal_process_group(process_group, signal.SIGTERM)
+        signal_group(signal.SIGTERM)
     except OSError as exc:
         errors.append(f"could not terminate process group {process_group}: {exc}")
 
     grace_deadline = time.monotonic() + grace
     while time.monotonic() < grace_deadline:
-        process.poll()
         try:
             if not _process_group_exists(process_group):
                 break
         except OSError as exc:
             errors.append(f"could not inspect process group {process_group}: {exc}")
             break
-        _read_process_output(
-            selector, output, redaction_environment,
-            wait=min(0.02, max(0.0, grace_deadline - time.monotonic())), on_output=on_output,
-        )
+        wait(grace_deadline)
 
     try:
         group_alive = _process_group_exists(process_group)
@@ -201,37 +214,53 @@ def _terminate_process_group(process: subprocess.Popen, process_group: int, sele
         errors.append(f"could not inspect process group {process_group}: {exc}")
     if group_alive:
         try:
-            killed = _signal_process_group(process_group, signal.SIGKILL)
+            killed = signal_group(signal.SIGKILL)
         except OSError as exc:
             errors.append(f"could not kill process group {process_group}: {exc}")
 
-    reap_deadline = time.monotonic() + TERMINATION_REAP_TIMEOUT
+    reap_deadline = time.monotonic() + reap_timeout
     while time.monotonic() < reap_deadline:
-        process.poll()
-        _read_process_output(
-            selector, output, redaction_environment,
-            wait=min(0.02, max(0.0, reap_deadline - time.monotonic())), on_output=on_output,
-        )
         try:
             if not _process_group_exists(process_group):
                 break
         except OSError as exc:
             errors.append(f"could not inspect process group {process_group}: {exc}")
             break
-    else:
-        errors.append(f"process group {process_group} remained alive after SIGKILL")
-
-    remaining = max(0.0, reap_deadline - time.monotonic())
+        wait(reap_deadline)
     try:
-        exit_code = process.wait(timeout=remaining)
+        group_gone = not _process_group_exists(process_group)
+    except OSError as exc:
+        group_gone = False
+        errors.append(f"could not inspect process group {process_group}: {exc}")
+    if not group_gone:
+        errors.append(f"process group {process_group} remained alive after SIGKILL")
+    return killed, group_gone, "; ".join(dict.fromkeys(errors))
+
+
+def _terminate_process_group(process: subprocess.Popen, process_group: int, selector, output: dict[str, list[str]], redaction_environment: dict[str, str], *, on_output=None, grace: float = TERMINATION_GRACE, authorize_signal=None) -> tuple[int | None, bool, str]:
+    """Stop the whole command session and reap its direct child."""
+    def drain(wait: float) -> None:
+        process.poll()
+        _read_process_output(
+            selector, output, redaction_environment,
+            wait=wait, on_output=on_output,
+        )
+    killed, _group_gone, error = terminate_process_group(
+        process_group, grace=grace, on_wait=drain, authorize_signal=authorize_signal,
+    )
+    errors = [error] if error else []
+
+    try:
+        exit_code = process.wait(timeout=TERMINATION_REAP_TIMEOUT)
     except subprocess.TimeoutExpired:
         exit_code = None
         errors.append(f"process {process.pid} could not be reaped")
 
-    while selector.get_map() and time.monotonic() < reap_deadline:
+    drain_deadline = time.monotonic() + TERMINATION_REAP_TIMEOUT
+    while selector.get_map() and time.monotonic() < drain_deadline:
         _read_process_output(
             selector, output, redaction_environment,
-            wait=min(0.02, max(0.0, reap_deadline - time.monotonic())), on_output=on_output,
+            wait=min(0.02, max(0.0, drain_deadline - time.monotonic())), on_output=on_output,
         )
     if selector.get_map():
         errors.append("command output pipes remained open after process-group termination")
@@ -241,22 +270,65 @@ def _terminate_process_group(process: subprocess.Popen, process_group: int, sele
     return exit_code, killed, "; ".join(dict.fromkeys(errors))
 
 
-def _stream_process(arguments: list[str], *, cwd: Path, env: dict[str, str], inactivity_timeout: float | None, maximum_runtime: float | None, redaction_environment: dict[str, str], on_output=None, cancellation_event=None, on_cancel=None) -> dict:
-    process = subprocess.Popen(
-        arguments, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        shell=False, bufsize=0, start_new_session=True,
-    )
-    process_group = process.pid
+def _stream_process_group(arguments: list[str], *, cwd: Path, env: dict[str, str], inactivity_timeout: float | None, maximum_runtime: float | None, redaction_environment: dict[str, str], on_output=None, cancellation_event=None, on_cancel=None, identity_recorder=None) -> dict:
+    command_id = secrets.token_hex(16) if identity_recorder is not None else ""
+    process_environment = dict(env)
+    if identity_recorder is not None:
+        process_environment.update({
+            RUN_ID_ENV: identity_recorder.run_id,
+            COMMAND_ID_ENV: command_id,
+        })
     selector = selectors.DefaultSelector()
-    if process.stdout:
-        selector.register(process.stdout, selectors.EVENT_READ, "stdout")
-    if process.stderr:
-        selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+    try:
+        process = subprocess.Popen(
+            arguments, cwd=cwd, env=process_environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            shell=False, bufsize=0, start_new_session=True,
+        )
+    except BaseException:
+        selector.close()
+        raise
+    process_group = process.pid
     output = {"stdout": [], "stderr": []}
     started = time.monotonic()
     last_activity = started
     timeout_reason = None
+    identity = None
+
+    def authorize_signal(_requested_signal: int) -> bool:
+        if identity_recorder is None:
+            # Commands outside a persisted Build Run retain the pre-existing
+            # direct-child/session ownership model and have no recovery record.
+            return True
+        if identity is None:
+            # Before durable capture, the unreleased Popen child and the fresh
+            # start_new_session boundary are the only available ownership proof.
+            return process.returncode is None
+        checked = verify_identity(identity, expected_run_id=identity_recorder.run_id)
+        return checked.status is VerificationStatus.MATCH
+
     try:
+        if process.stdout:
+            selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+        if process.stderr:
+            selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+        if identity_recorder is not None:
+            try:
+                identity = capture_identity(
+                    process.pid,
+                    run_id=identity_recorder.run_id,
+                    command_id=command_id,
+                    process_exited=lambda: process.poll() is not None,
+                )
+            except (CommandIdentityError, OSError):
+                # A very short command can exit while its several /proc fields
+                # are being captured.  Any capture failure is safe to consume
+                # only when both the direct child and its original process
+                # group have already disappeared.
+                process.poll()
+                if process.returncode is None or _process_group_exists(process_group):
+                    raise
+            if identity is not None:
+                identity_recorder.record(identity)
         while True:
             process.poll()
             group_alive = _process_group_exists(process_group)
@@ -269,7 +341,8 @@ def _stream_process(arguments: list[str], *, cwd: Path, env: dict[str, str], ina
             if cancellation_event is not None and cancellation_event.is_set():
                 cancellation = on_cancel() if callable(on_cancel) else {}
                 exit_code, killed, termination_error = _terminate_process_group(
-                    process, process_group, selector, output, redaction_environment, on_output=on_output,
+                    process, process_group, selector, output, redaction_environment,
+                    on_output=on_output, authorize_signal=authorize_signal,
                 )
                 return {
                     "exit_code": None,
@@ -304,7 +377,8 @@ def _stream_process(arguments: list[str], *, cwd: Path, env: dict[str, str], ina
                 last_activity = time.monotonic()
         if timeout_reason:
             exit_code, killed, termination_error = _terminate_process_group(
-                process, process_group, selector, output, redaction_environment, on_output=on_output,
+                process, process_group, selector, output, redaction_environment,
+                on_output=on_output, authorize_signal=authorize_signal,
             )
             if timeout_reason == "inactivity":
                 message = f"command stopped after {inactivity_timeout:g} seconds without stdout/stderr activity"
@@ -317,10 +391,171 @@ def _stream_process(arguments: list[str], *, cwd: Path, env: dict[str, str], ina
         exit_code = process.wait()
         return {"exit_code": exit_code, "stdout": "".join(output["stdout"]), "stderr": "".join(output["stderr"]), "timed_out": False, "timeout_reason": "", "termination_error": "", "cancellation_requested": False, "cancelled": False}
     except BaseException:
-        _terminate_process_group(process, process_group, selector, output, redaction_environment)
+        _terminate_process_group(
+            process, process_group, selector, output, redaction_environment,
+            authorize_signal=authorize_signal,
+        )
+        raise
+    finally:
+        try:
+            if identity is not None:
+                try:
+                    group_gone = not _process_group_exists(process_group)
+                except OSError:
+                    group_gone = False
+                if group_gone:
+                    if identity_recorder.clear(identity) is not True:
+                        raise CommandIdentityError("active command identity could not be cleared exactly")
+        finally:
+            selector.close()
+            for stream in (process.stdout, process.stderr):
+                if stream is not None and not stream.closed:
+                    stream.close()
+
+
+def _stream_systemd_cgroup(arguments: list[str], *, cwd: Path, env: dict[str, str], inactivity_timeout: float | None, maximum_runtime: float | None, redaction_environment: dict[str, str], on_output=None, cancellation_event=None, on_cancel=None, identity_recorder) -> dict:
+    """Stream one command spawned directly by PID 1 in its transient cgroup."""
+    command_id = secrets.token_hex(16)
+    selector = selectors.DefaultSelector()
+    try:
+        containment = SystemdCommandContainment.start(
+            arguments, cwd=cwd, environment=env,
+            recorder=identity_recorder, command_id=command_id,
+        )
+    except BaseException:
+        selector.close()
+        raise
+    output = {"stdout": [], "stderr": []}
+    started = time.monotonic()
+    last_activity = started
+    timeout_reason = None
+
+    def drain(wait: float, *, emit=True) -> None:
+        if selector.get_map():
+            _read_process_output(
+                selector, output, redaction_environment, wait=wait,
+                on_output=on_output if emit else None,
+            )
+
+    def drain_remaining(*, emit=True) -> None:
+        deadline = time.monotonic() + TERMINATION_REAP_TIMEOUT
+        while selector.get_map() and time.monotonic() < deadline:
+            drain(min(0.02, max(0.0, deadline - time.monotonic())), emit=emit)
+
+    try:
+        selector.register(containment.stdout, selectors.EVENT_READ, "stdout")
+        selector.register(containment.stderr, selectors.EVENT_READ, "stderr")
+        process_exit_code = None
+        while True:
+            completed = containment.poll()
+            if completed is not None:
+                process_exit_code = completed
+                # PID 1 retains its copies of the passed output descriptors for
+                # a retained unit.  Completion proves the cgroup empty; remove
+                # the unit below to close those copies and produce pipe EOF.
+                break
+            now = time.monotonic()
+            if cancellation_event is not None and cancellation_event.is_set():
+                cancellation = on_cancel() if callable(on_cancel) else {}
+                terminated = containment.terminate(on_wait=drain)
+                terminated = containment.clear_after_termination(terminated)
+                drain_remaining()
+                return {
+                    "exit_code": None,
+                    "stdout": "".join(output["stdout"]),
+                    "stderr": "".join(output["stderr"]),
+                    "timed_out": False,
+                    "timeout_reason": "",
+                    "process_exit_code": terminated.process_exit_code,
+                    "killed": terminated.killed,
+                    "termination_error": terminated.error or None,
+                    "cancellation_requested": True,
+                    "cancelled": terminated.gone and not bool(terminated.error),
+                    "cancellation": cancellation or {},
+                }
+            if maximum_runtime is not None and now - started >= maximum_runtime:
+                timeout_reason = "maximum_runtime"
+                break
+            if inactivity_timeout is not None and now - last_activity >= inactivity_timeout:
+                timeout_reason = "inactivity"
+                break
+            waits = [0.1]
+            if maximum_runtime is not None:
+                waits.append(max(0.0, maximum_runtime - (now - started)))
+            if inactivity_timeout is not None:
+                waits.append(max(0.0, inactivity_timeout - (now - last_activity)))
+            before = sum(len(parts) for parts in output.values())
+            if selector.get_map():
+                drain(min(waits))
+            else:
+                time.sleep(min(waits))
+            if sum(len(parts) for parts in output.values()) != before:
+                last_activity = time.monotonic()
+
+        if timeout_reason:
+            terminated = containment.terminate(on_wait=drain)
+            terminated = containment.clear_after_termination(terminated)
+            drain_remaining()
+            if timeout_reason == "inactivity":
+                message = f"command stopped after {inactivity_timeout:g} seconds without stdout/stderr activity"
+            else:
+                message = f"command stopped after maximum runtime of {maximum_runtime:g} seconds"
+            output["stderr"].append(("\n" if output["stderr"] else "") + message)
+            if terminated.error:
+                output["stderr"].append("\ncontainment termination error: " + terminated.error)
+            return {
+                "exit_code": None,
+                "stdout": "".join(output["stdout"]),
+                "stderr": "".join(output["stderr"]),
+                "timed_out": True,
+                "timeout_reason": timeout_reason,
+                "process_exit_code": terminated.process_exit_code,
+                "killed": terminated.killed,
+                "termination_error": terminated.error,
+                "cancellation_requested": False,
+                "cancelled": False,
+            }
+
+        finished = containment.finish(on_wait=drain)
+        drain_remaining()
+        if not finished.gone or finished.error:
+            return {
+                "exit_code": process_exit_code,
+                "stdout": "".join(output["stdout"]),
+                "stderr": "".join(output["stderr"]),
+                "timed_out": False,
+                "timeout_reason": "",
+                "process_exit_code": process_exit_code,
+                "killed": finished.killed,
+                "termination_error": finished.error or "transient containment disappearance was not proved",
+                "cancellation_requested": False,
+                "cancelled": False,
+            }
+        return {
+            "exit_code": process_exit_code,
+            "stdout": "".join(output["stdout"]),
+            "stderr": "".join(output["stderr"]),
+            "timed_out": False,
+            "timeout_reason": "",
+            "termination_error": "",
+            "cancellation_requested": False,
+            "cancelled": False,
+        }
+    except BaseException as original:
+        try:
+            terminated = containment.terminate(on_wait=lambda wait: drain(wait, emit=False))
+            terminated = containment.clear_after_termination(terminated)
+            drain_remaining(emit=False)
+        except BaseException as cleanup:
+            raise ContainmentError(f"command callback failed and containment cleanup also failed: {cleanup}") from original
+        if not terminated.gone or terminated.error:
+            raise ContainmentError(
+                f"command callback failed and containment cleanup could not be proved: {terminated.error or 'unit remains'}"
+            ) from original
         raise
     finally:
         selector.close()
+        containment.close()
 
 
 def _validated_timeout(value: float | None, what: str) -> float | None:
@@ -357,10 +592,14 @@ def run_command(command: str, *, workspace: str | Path, working_directory: str =
             })
             result["duration"] = round(time.monotonic() - started, 6)
             raise ExecutionCancelled(result["cancellation"], command_result=result)
-        completed = _stream_process(
+        identity_recorder = current_recorder()
+        capability = containment_capability() if identity_recorder is not None and identity_recorder.update is not None else None
+        stream = _stream_systemd_cgroup if capability is not None and capability.available else _stream_process_group
+        completed = stream(
             arguments, cwd=cwd, env=env, inactivity_timeout=inactivity_timeout,
             maximum_runtime=maximum_runtime, redaction_environment=redaction_environment,
             on_output=on_output, cancellation_event=cancellation_event, on_cancel=on_cancel,
+            identity_recorder=identity_recorder,
         )
         status = "failed" if completed["timed_out"] or completed.get("termination_error") else "cancelled" if completed.get("cancelled") else "success" if completed["exit_code"] == 0 else "failed"
         result.update({"exit_code": completed["exit_code"], "process_exit_code": completed.get("process_exit_code"), "stdout": completed["stdout"], "stderr": completed["stderr"], "timed_out": completed["timed_out"], "timeout_reason": completed.get("timeout_reason", ""), "killed": completed.get("killed", False), "termination_error": completed.get("termination_error", ""), "cancelled": completed.get("cancelled", False), "cancellation_requested": completed.get("cancellation_requested", False), "status": status})
@@ -368,7 +607,7 @@ def run_command(command: str, *, workspace: str | Path, working_directory: str =
             result["cancellation"] = completed.get("cancellation") or {"code": CANCELLATION_CODE, "reason": USER_REQUESTED}
             result["duration"] = round(time.monotonic() - started, 6)
             raise ExecutionCancelled(result["cancellation"], command_result=result)
-    except (CommandValidationError, OSError) as exc:
+    except (CommandValidationError, ContainmentError, CommandIdentityError, OSError) as exc:
         result["stderr"] = str(exc)
     result["duration"] = round(time.monotonic() - started, 6)
     return result

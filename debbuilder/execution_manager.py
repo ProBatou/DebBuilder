@@ -59,11 +59,17 @@ class ExecutionManager:
         self._active_cancellation_control: CancellationControl | None = None
         self._accepting = False
         self._stopping = False
+        self._admission_blocker: dict | None = None
 
     @property
     def accepting(self) -> bool:
         with self._condition:
             return self._accepting
+
+    @property
+    def admission_blocker(self) -> dict | None:
+        with self._condition:
+            return dict(self._admission_blocker) if self._admission_blocker else None
 
     @property
     def active_run_id(self) -> str | None:
@@ -86,20 +92,27 @@ class ExecutionManager:
         with self._condition:
             return self._worker
 
-    def start(self) -> None:
-        """Start the single non-daemon worker and begin accepting Runs."""
+    def start(self, *, admission_blocker: dict | None = None) -> None:
+        """Start the worker, opening admission only after startup recovery."""
         with self._condition:
             if self._worker is not None:
                 if self._worker.is_alive():
                     return
                 raise ExecutionManagerError("execution_manager_stopped", "Execution manager cannot be restarted")
-            self._accepting = True
+            self._admission_blocker = dict(admission_blocker) if admission_blocker else None
+            self._accepting = self._admission_blocker is None
             self._stopping = False
             self._worker = threading.Thread(target=self._worker_main, name="debbuilder-execution", daemon=False)
             self._worker.start()
 
     def _require_accepting(self) -> None:
         if not self._accepting:
+            if self._admission_blocker:
+                raise ExecutionManagerError(
+                    str(self._admission_blocker.get("code") or "execution_recovery_blocked"),
+                    str(self._admission_blocker.get("message") or "Execution admission is blocked by startup recovery"),
+                    details=dict(self._admission_blocker.get("details") or {}),
+                )
             raise ExecutionManagerError("execution_manager_not_accepting", "Execution manager is not accepting Runs")
 
     def _require_capacity(self) -> None:

@@ -131,10 +131,26 @@ the build/lifecycle result. Before removal, Linux `/proc` is checked for process
 whose working directory, executable or open descriptors use the Run workspace;
 such a Run is kept even if its metadata says failed. Inaccessible process data
 also defers cleanup. Runs still marked active after a crash are preserved until
-their state is resolved. Commands run in dedicated process sessions; inactivity
-and optional maximum-runtime expiry terminate the complete process group before
-the runner returns, so cleanup remains a final safety check rather than process
-management.
+their state is resolved. On Linux hosts with a reachable system systemd manager
+and unified cgroup v2, each Run command is spawned directly by PID 1 in a unique
+transient service. DebBuilder receives stdout/stderr through command-scoped file
+descriptors and terminates the complete service cgroup on cancellation or
+timeout. Capability probing is behavioral; unavailable strong containment uses
+the explicitly weaker dedicated-process-group fallback. The strong backend uses
+Debian's `python3-dbus`, which packaged deployment Recipes should declare in
+their `package.runtime_dependencies`; its absence safely selects the fallback.
+This containment prevents accidental orphan leakage, but root build code can
+escape it and it is not a security sandbox.
+
+At server startup, persisted `pending`, `queued`, `running`, and `cancelling`
+Runs are reconciled before the execution worker opens admission. Interrupted
+Runs are marked failed only after workload absence is authoritative. If an old
+workload cannot be safely identified or proven absent, DebBuilder remains
+available for browsing and history inspection but returns a deterministic 503
+for new Build/Test submissions until a later startup can resolve the blocker.
+Current-boot process-group fallback records remain blocked because escaped
+descendants cannot be excluded; a host reboot provides an authoritative boot
+boundary.
 
 ## Python projects
 

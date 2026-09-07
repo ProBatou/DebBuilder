@@ -23,7 +23,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import artifact_publication, artifact_validation, auth_service, automation_service, build_pipeline, deb_inspector, execution_service, notifications, package_service, release_cache, settings_service, storage, upstream_archive, workspace_cleanup
+from . import artifact_publication, artifact_validation, auth_service, automation_service, build_pipeline, deb_inspector, execution_recovery, execution_service, notifications, package_service, release_cache, settings_service, storage, upstream_archive, workspace_cleanup
 from .build_models import utc_now
 from .build_store import BuildStore
 from .execution_manager import ExecutionManager, ExecutionManagerError
@@ -229,11 +229,13 @@ def create_execution_manager(*, store: BuildStore | None = None, queue_capacity:
 
 
 def start_execution_manager(http_server, manager: ExecutionManager | None = None) -> ExecutionManager:
-    """Attach and explicitly start one manager before HTTP serving begins."""
+    """Recover persisted Runs, then attach/start one admission-gated manager."""
     if getattr(http_server, "execution_manager", None) is not None:
         raise RuntimeError("HTTP server already has an execution manager")
     selected = manager or create_execution_manager()
-    selected.start()
+    recovery = execution_recovery.recover_startup(selected.store)
+    selected.start(admission_blocker=recovery.admission_blocker)
+    http_server.execution_recovery = recovery.as_dict()
     http_server.execution_manager = selected
     return selected
 
@@ -306,6 +308,13 @@ def enqueue_recipe_run(manager: ExecutionManager | None, workflow: dict, *, dry_
         if exc.code == "execution_queue_full":
             raise RunAdmissionError(
                 exc.code, "The Build/Test queue is full; try again later", status=429, details=exc.details,
+            ) from exc
+        if exc.code == execution_recovery.BLOCKER_CODE:
+            raise RunAdmissionError(
+                exc.code,
+                "Build/Test admission is blocked until interrupted workload recovery is resolved",
+                status=503,
+                details=exc.details,
             ) from exc
         raise RunAdmissionError(
             "execution_manager_unavailable", "Execution manager is unavailable", status=503,

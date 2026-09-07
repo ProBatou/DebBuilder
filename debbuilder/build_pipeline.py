@@ -8,6 +8,7 @@ from datetime import datetime
 
 from .build_models import utc_now
 from .build_store import BuildStore
+from .command_identity import clear_identity, persist_identity, recording_identities, update_identity
 from .execution_cancellation import CancellationControl, ExecutionCancelled
 from . import build_executor, deb_inspector, debian_packaging, dependency_checker, project_detection, source_acquisition, source_changes, upstream_archive, upstream_artifact
 from .recipe_schema import validate_recipe_metadata
@@ -268,7 +269,7 @@ def execute_pipeline_run(run_id: str, *, store: BuildStore, expected_initial_sta
         raise ValueError("expected initial status must be pending or queued")
     if not store.run_dir(run_id).is_dir():
         raise PipelineRunError("build_run_not_found", "Build Run was not found", details={"run_id": run_id})
-    with store.locked_run(run_id):
+    with store.locked_run(run_id) as workspace_fd:
         run = store.load(run_id)
         if not run:
             raise PipelineRunError("build_run_not_found", "Build Run was not found", details={"run_id": run_id})
@@ -290,15 +291,21 @@ def execute_pipeline_run(run_id: str, *, store: BuildStore, expected_initial_sta
             ) from exc
         dry_run = run.get("mode") == "dry_run"
         control = cancellation_control or CancellationControl()
-        try:
-            return _run_pipeline_locked(
-                canonical, run, store=store, dry_run=dry_run, github_token=github_token,
-                acquire=acquire, detector=detector, dependency_check=dependency_check,
-                change_applier=change_applier, upstream_acquirer=upstream_acquirer,
-                lifecycle_callback=lifecycle_callback, control=control,
-            )
-        except ExecutionCancelled as exc:
-            return _finalize_execution_cancellation(run, store, exc, lifecycle_callback, canonical)
+        with recording_identities(
+            run_id,
+            record=lambda identity: persist_identity(workspace_fd, identity),
+            clear=lambda identity: clear_identity(workspace_fd, identity),
+            update=lambda expected, updated: update_identity(workspace_fd, expected, updated),
+        ):
+            try:
+                return _run_pipeline_locked(
+                    canonical, run, store=store, dry_run=dry_run, github_token=github_token,
+                    acquire=acquire, detector=detector, dependency_check=dependency_check,
+                    change_applier=change_applier, upstream_acquirer=upstream_acquirer,
+                    lifecycle_callback=lifecycle_callback, control=control,
+                )
+            except ExecutionCancelled as exc:
+                return _finalize_execution_cancellation(run, store, exc, lifecycle_callback, canonical)
 
 
 def run_pipeline(recipe: dict, *, store: BuildStore, dry_run: bool, recipe_id: str = "", github_token: str = "", acquire=None, detector=None, dependency_check=None, change_applier=None, upstream_acquirer=None, lifecycle_callback=None, cancellation_control: CancellationControl | None = None) -> dict:

@@ -186,7 +186,18 @@ def _require_unused_workspace(workspace: Path) -> None:
 
 
 def _clean_locked(fd: int, run: dict, *, reason: str) -> dict:
+    # A terminal Run can still retain command ownership metadata after a
+    # containment failure.  Startup recovery must prove workload absence and
+    # clear that exact record before workspace data may be destroyed.
+    from .command_identity import CommandIdentityError, read_persisted_identity
+
     require_finished(run)
+    try:
+        identity = read_persisted_identity(fd)
+    except (CommandIdentityError, OSError) as exc:
+        raise WorkspaceBusyError("Active command recovery is unverifiable; cleanup refused") from exc
+    if identity is not None:
+        raise WorkspaceBusyError("Active command recovery is unresolved; cleanup refused")
     _check_artifact(run)
     _check_targets(fd, DISPOSABLE_DIRECTORIES, DISPOSABLE_FILES)
     _require_unused_workspace(Path(run["workspace"]))

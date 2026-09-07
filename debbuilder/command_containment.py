@@ -632,7 +632,7 @@ class SystemdCommandContainment:
                     snapshot is not None
                     and verification.status is VerificationStatus.MATCH
                     and snapshot.invocation_id
-                    and snapshot.control_group
+                    and (snapshot.control_group or snapshot.command_complete)
                 ):
                     break
                 if verification.status is not VerificationStatus.NOT_RUNNING:
@@ -642,13 +642,17 @@ class SystemdCommandContainment:
             if snapshot is None or verification is None or verification.status is not VerificationStatus.MATCH:
                 reason = verification.reason if verification else "transient unit activation was not observable"
                 raise ContainmentError(reason)
-            if not snapshot.invocation_id or not snapshot.control_group:
+            if not snapshot.invocation_id or not (snapshot.control_group or snapshot.command_complete):
                 raise ContainmentError("transient unit activation identity is incomplete")
             active = {
                 **intent,
                 "containment_state": "active",
                 "invocation_id": snapshot.invocation_id,
-                "control_group": snapshot.control_group,
+                # A fast command can empty its cgroup before the first
+                # snapshot.  The canonical path is deterministic from the
+                # already-authenticated exact unit name and is still required
+                # for disappearance proof and persisted recovery.
+                "control_group": snapshot.control_group or expected_control_group(intent["unit_name"]),
             }
             if recorder.update(intent, active) is not True:
                 raise ContainmentError("activated containment metadata could not replace its exact starting intent")

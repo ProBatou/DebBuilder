@@ -343,6 +343,60 @@ class CommandIdentityTests(unittest.TestCase):
         self.assertEqual(identity["start_time_ticks"], 456)
         self.assertEqual(identity["command_id"], command_id)
 
+    def test_capture_preserves_owned_identity_when_environment_vanishes_after_stat(self):
+        command_id = "a" * 32
+        with (
+            mock.patch("debbuilder.command_identity._read_proc_stat", return_value=(123, 456)),
+            mock.patch(
+                "debbuilder.command_identity._read_proc_identity_environment",
+                side_effect=ProcessLookupError(3, "process exited"),
+            ),
+            mock.patch("debbuilder.command_identity._read_boot_id", return_value="b" * 32),
+        ):
+            with self.assertRaises(ProcessLookupError):
+                capture_identity(123, run_id="short-run", command_id=command_id)
+            identity = capture_identity(
+                123,
+                run_id="short-run",
+                command_id=command_id,
+                allow_vanished_environment=True,
+            )
+        self.assertEqual(identity["pid"], 123)
+        self.assertEqual(identity["pgid"], 123)
+        self.assertEqual(identity["start_time_ticks"], 456)
+
+    def test_capture_accepts_empty_markers_only_for_a_terminal_owned_child(self):
+        command_id = "a" * 32
+        with (
+            mock.patch("debbuilder.command_identity._read_proc_stat", return_value=(123, 456)),
+            mock.patch("debbuilder.command_identity._read_proc_identity_environment", return_value=("", "")),
+            mock.patch("debbuilder.command_identity._read_boot_id", return_value="b" * 32),
+            mock.patch("debbuilder.command_identity._process_is_terminal", return_value=False),
+        ):
+            with self.assertRaises(CommandIdentityError):
+                capture_identity(
+                    123,
+                    run_id="short-run",
+                    command_id=command_id,
+                    process_exited=lambda: False,
+                    allow_vanished_environment=True,
+                )
+        with (
+            mock.patch("debbuilder.command_identity._read_proc_stat", return_value=(123, 456)),
+            mock.patch("debbuilder.command_identity._read_proc_identity_environment", return_value=("", "")),
+            mock.patch("debbuilder.command_identity._read_boot_id", return_value="b" * 32),
+            mock.patch("debbuilder.command_identity._process_is_terminal", return_value=True),
+        ):
+            identity = capture_identity(
+                123,
+                run_id="short-run",
+                command_id=command_id,
+                process_exited=lambda: False,
+                allow_vanished_environment=True,
+            )
+        self.assertEqual(identity["pid"], 123)
+        self.assertEqual(identity["start_time_ticks"], 456)
+
     def test_spawn_failure_does_not_create_active_identity(self):
         store = BuildStore(self.root / "spawn-failure-builds")
         run = store.create(recipe("spawn-failure"), mode="build")

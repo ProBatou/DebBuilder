@@ -1,6 +1,7 @@
 """Single secure subprocess boundary for the future build engine."""
 from __future__ import annotations
 
+import errno
 import os
 import re
 import secrets
@@ -318,13 +319,20 @@ def _stream_process_group(arguments: list[str], *, cwd: Path, env: dict[str, str
                     run_id=identity_recorder.run_id,
                     command_id=command_id,
                     process_exited=lambda: process.poll() is not None,
+                    allow_vanished_environment=True,
                 )
-            except (CommandIdentityError, OSError):
+            except (CommandIdentityError, OSError) as exc:
                 # A very short command can exit while its several /proc fields
                 # are being captured.  Any capture failure is safe to consume
                 # only when both the direct child and its original process
                 # group have already disappeared.
-                process.poll()
+                if isinstance(exc, OSError) and exc.errno in {errno.ENOENT, errno.ESRCH}:
+                    # Synchronize with the directly-owned child instead of
+                    # sampling a transient kernel exit state.  This is result
+                    # collection, not a timing retry.
+                    process.wait()
+                else:
+                    process.poll()
                 if process.returncode is None or _process_group_exists(process_group):
                     raise
             if identity is not None:

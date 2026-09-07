@@ -1,6 +1,7 @@
 """Durable Linux identity for one active command in a Build Run."""
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -128,6 +129,20 @@ def _read_proc_stat(pid: int, proc_root: Path = PROC_ROOT) -> tuple[int, int]:
     return pgid, start_time_ticks
 
 
+def _process_is_terminal(pid: int, proc_root: Path = PROC_ROOT) -> bool:
+    """Return whether a directly-owned task has reached a terminal kernel state."""
+    text = (proc_root / str(pid) / "stat").read_text(encoding="utf-8")
+    opening = text.find("(")
+    closing = text.rfind(")")
+    if opening <= 0 or closing <= opening or text[closing + 1:closing + 2] != " ":
+        raise CommandIdentityError("Linux process stat is malformed")
+    try:
+        state = text[closing + 2:].split()[0]
+    except IndexError as exc:
+        raise CommandIdentityError("Linux process stat is malformed") from exc
+    return state in {"Z", "X", "x"}
+
+
 def _read_proc_identity_environment(pid: int, proc_root: Path = PROC_ROOT) -> tuple[str, str]:
     path = proc_root / str(pid) / "environ"
     with path.open("rb") as handle:
@@ -147,13 +162,21 @@ def _read_proc_identity_environment(pid: int, proc_root: Path = PROC_ROOT) -> tu
     return values.get(RUN_ID_ENV, ""), values.get(COMMAND_ID_ENV, "")
 
 
-def capture_identity(pid: int, *, run_id: str, command_id: str, process_exited=None) -> dict:
+def capture_identity(
+    pid: int,
+    *,
+    run_id: str,
+    command_id: str,
+    process_exited=None,
+    allow_vanished_environment: bool = False,
+) -> dict:
     """Capture the durable identity of a freshly spawned process-group leader.
 
-    Linux exposes an empty ``/proc/PID/environ`` once a very short-lived child
-    becomes a zombie.  The caller may therefore confirm that its unreaped
-    ``Popen`` child has exited after the stat fields were captured.  This does
-    not authorize a signal: a later verification still requires the markers.
+    Linux can remove or empty ``/proc/PID/environ`` while a very short-lived
+    child enters a terminal kernel state.  A caller that directly owns the
+    unreaped ``Popen`` child may allow that state after the stat fields were
+    captured.  This does not authorize a signal: every later verification
+    still requires the environment markers.
     """
     require_safe_name(run_id, "build run id")
     if not isinstance(command_id, str) or not COMMAND_ID.fullmatch(command_id):
@@ -161,10 +184,26 @@ def capture_identity(pid: int, *, run_id: str, command_id: str, process_exited=N
     pgid, start_time_ticks = _read_proc_stat(pid)
     if pgid != pid:
         raise CommandIdentityError("active command is not its process-group leader")
-    process_run_id, process_command_id = _read_proc_identity_environment(pid)
-    markers_match = (process_run_id, process_command_id) == (run_id, command_id)
-    if not markers_match and not (callable(process_exited) and process_exited()):
-        raise CommandIdentityError("active command process markers do not match")
+    try:
+        process_run_id, process_command_id = _read_proc_identity_environment(pid)
+    except OSError as exc:
+        # The kernel can tear down a task's mm (and therefore environ) after
+        # stat was read but before waitpid reports the directly-owned child as
+        # exited.  The captured PID/PGID/starttime remain safe to persist: live
+        # verification still requires the markers before authorizing a signal.
+        if not allow_vanished_environment or exc.errno not in {errno.ENOENT, errno.ESRCH}:
+            raise
+    else:
+        markers_match = (process_run_id, process_command_id) == (run_id, command_id)
+        if not markers_match:
+            terminal = bool(callable(process_exited) and process_exited())
+            if not terminal and allow_vanished_environment:
+                try:
+                    terminal = _process_is_terminal(pid)
+                except FileNotFoundError:
+                    terminal = True
+            if not terminal:
+                raise CommandIdentityError("active command process markers do not match")
     return {
         "schema_version": IDENTITY_SCHEMA_VERSION,
         "backend": "process_group",

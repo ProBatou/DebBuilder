@@ -18,6 +18,7 @@ from debbuilder.build_store import BuildStore
 from debbuilder.command_containment import (
     ContainmentCapability,
     SystemdCommandContainment,
+    UnitSnapshot,
     _SystemdConnection,
     command_unit_name,
     containment_capability,
@@ -202,9 +203,11 @@ class SystemdCommandContainmentTests(unittest.TestCase):
     def test_leader_exit_does_not_complete_before_descendant(self):
         run = self.create_run("leader-first")
         marker = Path(run["workspace"]) / "leader-child"
+        temporary_marker = marker.with_suffix(".tmp")
         source = (
             "import os,subprocess,time; "
-            f"c=subprocess.Popen(['/usr/bin/sleep','.5']); open({str(marker)!r},'w').write(f'{{os.getpid()}} {{c.pid}}'); "
+            f"c=subprocess.Popen(['/usr/bin/sleep','.5']); f=open({str(temporary_marker)!r},'w'); "
+            f"f.write(f'{{os.getpid()}} {{c.pid}}'); f.close(); os.replace({str(temporary_marker)!r},{str(marker)!r}); "
             "print('spawned',flush=True)"
         )
         holder = {}
@@ -557,6 +560,76 @@ with store.locked_run(run_id) as fd:
 
 
 class ContainmentFallbackTests(unittest.TestCase):
+    def test_completed_systemd_command_promotes_without_a_live_cgroup_snapshot(self):
+        command_id = "a" * 32
+        run_id = "completed-before-snapshot"
+        unit_name = command_unit_name(run_id, command_id)
+        snapshot = UnitSnapshot(
+            unit_name=unit_name,
+            description=unit_description(run_id, command_id),
+            transient=True,
+            invocation_id="b" * 32,
+            control_group="",
+            active_state="active",
+            sub_state="exited",
+            service_type="exec",
+            exit_type="cgroup",
+            kill_mode="control-group",
+            result="success",
+            main_pid=0,
+            exec_main_code=1,
+            exec_main_status=0,
+        )
+
+        class CompletedConnection:
+            def __init__(self):
+                self.stopped = False
+
+            def start_transient(self, *_args, **_kwargs):
+                return None
+
+            def snapshot(self, requested_unit):
+                if requested_unit != unit_name:
+                    raise AssertionError(f"unexpected unit: {requested_unit}")
+                return None if self.stopped else snapshot
+
+            def stop(self, requested_unit):
+                if requested_unit != unit_name:
+                    raise AssertionError(f"unexpected unit: {requested_unit}")
+                self.stopped = True
+
+            def close(self):
+                return None
+
+        transitions = []
+        cleared = []
+        recorder = IdentityRecorder(
+            run_id,
+            transitions.append,
+            lambda value: cleared.append(value) or True,
+            lambda expected, active: transitions.append(active) or True,
+        )
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            mock.patch.object(containment_module, "_SystemdConnection", CompletedConnection),
+        ):
+            command = SystemdCommandContainment.start(
+                ["/usr/bin/true"],
+                cwd=Path(temporary),
+                environment={"PATH": "/usr/bin:/bin"},
+                recorder=recorder,
+                command_id=command_id,
+            )
+            try:
+                self.assertEqual(command.poll(), 0)
+                self.assertEqual(command.metadata["invocation_id"], snapshot.invocation_id)
+                self.assertEqual(command.metadata["control_group"], expected_control_group(unit_name))
+                finished = command.finish()
+                self.assertTrue(finished.gone, finished.error)
+                self.assertEqual(cleared, [command.metadata])
+            finally:
+                command.close()
+
     def test_cgroup_absence_permission_error_is_not_absence(self):
         unit = "debbuilder-command-" + "a" * 16 + "-" + "b" * 32 + ".service"
         with mock.patch("debbuilder.command_containment.os.stat", side_effect=PermissionError("denied")):
@@ -645,6 +718,22 @@ class ContainmentFallbackTests(unittest.TestCase):
             ):
                 for _index in range(25):
                     self.assertEqual(run_command("true", workspace=temporary)["status"], "success")
+
+    def test_fallback_collects_result_when_process_disappears_before_stat_capture(self):
+        recorder = IdentityRecorder("vanished-fallback", lambda _value: None, lambda _value: True)
+        unavailable = ContainmentCapability("process_group", False, "injected unavailable")
+        with tempfile.TemporaryDirectory() as temporary:
+            with (
+                mock.patch("debbuilder.command_runner.current_recorder", return_value=recorder),
+                mock.patch("debbuilder.command_runner.containment_capability", return_value=unavailable),
+                mock.patch(
+                    "debbuilder.command_runner.capture_identity",
+                    side_effect=ProcessLookupError(3, "process exited before stat capture"),
+                ),
+            ):
+                result = run_command("true", workspace=temporary)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["exit_code"], 0)
 
     def test_capability_failure_keeps_process_group_backend_explicit(self):
         recorded = []

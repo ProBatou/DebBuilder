@@ -298,7 +298,7 @@ def build_release_artifacts(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tag", required=True, help="Release tag, for example v0.2.1")
+    parser.add_argument("--tag", required=True, help="Release tag, for example v0.2.2")
     parser.add_argument("--source-root", default=".", help="Checked-out tagged source tree")
     parser.add_argument("--output-dir", default="release-assets", help="New directory for the .deb and SHA256SUMS")
     arguments = parser.parse_args(argv)

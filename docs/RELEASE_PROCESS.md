@@ -10,7 +10,7 @@ From the source revision being released, run:
 
 ```sh
 python3 -m debbuilder.release_build \
-  --tag v0.2.1 \
+  --tag v0.2.2 \
   --source-root . \
   --output-dir release-assets
 ```

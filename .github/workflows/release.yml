@@ -12,57 +12,178 @@ name: GitHub Release
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
-    name: Create GitHub Release
+  build:
+    name: Build and check official Debian asset
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release_tag.outputs.tag }}
+      deb_name: ${{ steps.release_result.outputs.deb_name }}
 
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
       - name: Resolve release tag
         id: release_tag
         shell: bash
+        env:
+          RELEASE_EVENT_NAME: ${{ github.event_name }}
+          RELEASE_PUSH_TAG: ${{ github.ref_name }}
+          RELEASE_INPUT_TAG: ${{ inputs.tag }}
         run: |
-          if [[ "${{ github.event_name }}" == "push" ]]; then
-            tag="${GITHUB_REF_NAME}"
+          if [[ "$RELEASE_EVENT_NAME" == "push" ]]; then
+            tag="$RELEASE_PUSH_TAG"
           else
-            tag="${{ inputs.tag }}"
+            tag="$RELEASE_INPUT_TAG"
           fi
-
-          if [[ ! "$tag" =~ ^v[0-9A-Za-z._-]+$ ]]; then
-            echo "Release tag must start with v and contain only letters, digits, dots, underscores, or hyphens: $tag" >&2
+          if [[ ! "$tag" =~ ^v[0-9][0-9A-Za-z.+~_-]*$ ]]; then
+            echo "Release tag must be v followed by a Debian-compatible version" >&2
             exit 1
           fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-          version="$(python3 -c 'from debbuilder import __version__; print(__version__)')"
-          tag_version="${tag#v}"
-          if [[ "$tag_version" != "$version" ]]; then
-            echo "Release tag version $tag_version does not match debbuilder.__version__ $version" >&2
+      - name: Check out the exact release tag
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ steps.release_tag.outputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify tagged checkout
+        shell: bash
+        env:
+          RELEASE_EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ steps.release_tag.outputs.tag }}
+        run: |
+          tag_commit="$(git rev-parse --verify "${RELEASE_TAG}^{commit}")"
+          head_commit="$(git rev-parse --verify HEAD)"
+          if [[ "$tag_commit" != "$head_commit" ]]; then
+            echo "Checked-out commit does not match $RELEASE_TAG" >&2
             exit 1
           fi
+          if [[ "$RELEASE_EVENT_NAME" == "push" ]]; then
+            event_commit="$(git rev-parse --verify "${GITHUB_SHA}^{commit}")"
+            if [[ "$tag_commit" != "$event_commit" ]]; then
+              echo "Checked-out tag does not match the triggering commit" >&2
+              exit 1
+            fi
+          fi
 
-          git fetch --force --tags origin "refs/tags/$tag:refs/tags/$tag"
-          git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null
+      - name: Verify tag, application version, and canonical Recipe
+        env:
+          RELEASE_TAG: ${{ steps.release_tag.outputs.tag }}
+        run: |
+          python3 - <<'PY'
+          import os
 
-          {
-            echo "tag=$tag"
-            echo "title=DebBuilder $tag"
-          } >> "$GITHUB_OUTPUT"
+          from debbuilder.release_build import release_plan
 
-      - name: Create GitHub Release
+          plan = release_plan(os.environ["RELEASE_TAG"])
+          print(
+              f"{plan['tag']} -> {plan['filename']} "
+              f"(built-in definition {plan['definition_version']})"
+          )
+          PY
+
+      - name: Verify packaging tools
+        run: dpkg-deb --version
+
+      - name: Run release and packaging tests
+        run: |
+          python3 -m py_compile server.py debbuilder/*.py
+          python3 -m unittest -v \
+            tests.test_builtin_recipe \
+            tests.test_debian_packaging \
+            tests.test_release_build \
+            tests.test_runtime_storage \
+            tests.test_source_acquisition \
+            tests.test_systemd_unit
+
+      - name: Build and inspect official assets
+        id: release_result
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.release_tag.outputs.tag }}
+        run: |
+          python3 -m debbuilder.release_build \
+            --tag "$RELEASE_TAG" \
+            --source-root "$GITHUB_WORKSPACE" \
+            --output-dir "$GITHUB_WORKSPACE/release-assets" \
+            > release-build.json
+          (
+            cd release-assets
+            sha256sum --check --strict SHA256SUMS
+          )
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+
+          with open("release-build.json", encoding="utf-8") as handle:
+              name = json.load(handle)["artifact"]["name"]
+          if not re.fullmatch(r"[a-z0-9][a-z0-9+.-]*_[0-9A-Za-z.+~_-]+_[a-z0-9]+\.deb", name):
+              raise SystemExit("release helper returned an unsafe artifact name")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"deb_name={name}\n")
+          PY
+
+      - name: Preserve checked assets for Release creation
+        uses: actions/upload-artifact@v4
+        with:
+          name: debbuilder-release-${{ steps.release_tag.outputs.tag }}
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download checked assets
+        uses: actions/download-artifact@v4
+        with:
+          name: debbuilder-release-${{ needs.build.outputs.tag }}
+          path: release-assets
+
+      - name: Recheck downloaded assets
+        shell: bash
+        env:
+          DEB_NAME: ${{ needs.build.outputs.deb_name }}
+        run: |
+          test -f "release-assets/$DEB_NAME"
+          test -f release-assets/SHA256SUMS
+          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 2
+          (
+            cd release-assets
+            sha256sum --check --strict SHA256SUMS
+          )
+
+      - name: Create draft, verify assets, and publish Release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.release_tag.outputs.tag }}
-          TITLE: ${{ steps.release_tag.outputs.title }}
+          TAG: ${{ needs.build.outputs.tag }}
+          DEB_NAME: ${{ needs.build.outputs.deb_name }}
         run: |
           gh release create "$TAG" \
+            "release-assets/$DEB_NAME" \
+            release-assets/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
-            --title "$TITLE" \
+            --title "DebBuilder $TAG" \
             --generate-notes \
+            --draft
+          printf '%s\n' "$DEB_NAME" SHA256SUMS | sort > expected-assets.txt
+          gh release view "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json assets \
+            --jq '.assets[].name' | sort > uploaded-assets.txt
+          diff --unified expected-assets.txt uploaded-assets.txt
+          gh release edit "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false \
             --latest

@@ -5,7 +5,7 @@
   "management": {
     "owner": "application",
     "builtin_id": "debbuilder",
-    "definition_version": 2,
+    "definition_version": 3,
     "operator_overrides": {}
   },
   "package": {
@@ -108,7 +108,9 @@
     "group": "root",
     "restart": "on-failure",
     "command": "/usr/bin/python3 /opt/debbuilder/server.py",
-    "environment_files": [],
+    "environment_files": [
+      "/etc/debbuilder/debbuilder.env"
+    ],
     "environment": {},
     "after": [],
     "wants": [],

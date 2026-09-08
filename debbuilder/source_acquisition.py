@@ -20,7 +20,8 @@ class SourceError(RuntimeError):
         return {"code": self.code, "message": str(self)}
 
 
-def _version_from_resolution(recipe: dict, resolved: dict) -> tuple[str, str]:
+def version_from_resolution(recipe: dict, resolved: dict) -> tuple[str, str]:
+    """Derive canonical upstream and Debian versions from resolved source metadata."""
     version_config = recipe["source"]["version"]
     mode = version_config["source"]
     if mode == "build":
@@ -56,7 +57,7 @@ def resolve_source(recipe: dict, *, token: str = "") -> dict:
             resolved = github_client.resolve_ref(repository, source["ref"], kind="manual", token=token)
     except github_client.GitHubError as exc:
         raise SourceError(exc.code, str(exc)) from exc
-    upstream, debian = _version_from_resolution(recipe, resolved)
+    upstream, debian = version_from_resolution(recipe, resolved)
     archive_url = str(resolved.get("archive_url") or "")
     try:
         github_client.validate_download_url(archive_url)

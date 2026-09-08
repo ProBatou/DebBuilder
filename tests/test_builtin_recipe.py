@@ -8,6 +8,8 @@ from unittest import mock
 
 from debbuilder import builtin_recipe, debian_packaging, recipe_store
 from debbuilder.recipe_schema import recipe_document_for_storage, validate_recipe_metadata
+from debbuilder.runtime import RuntimeConfig
+from debbuilder.systemd_unit import generate_unit
 
 HISTORICAL_DEBBUILDER_FIXTURE = Path(__file__).parent / "fixtures" / "recipes" / "debbuilder.json"
 
@@ -41,7 +43,7 @@ class BuiltinRecipeTests(unittest.TestCase):
         self.assertEqual(canonical["name"], "debbuilder")
         self.assertEqual(canonical["management"], {
             "owner": "application", "builtin_id": "debbuilder",
-            "definition_version": 2, "operator_overrides": {},
+            "definition_version": 3, "operator_overrides": {},
         })
         self.assertEqual(builtin_recipe.OPERATOR_OVERRIDE_PATHS, (
             "active",
@@ -51,6 +53,12 @@ class BuiltinRecipeTests(unittest.TestCase):
             "build.maximum_runtime",
         ))
         self.assertEqual(canonical["package"]["runtime_dependencies"], ["python3", "python3-dbus"])
+        self.assertEqual(canonical["install"]["config_files"], [{
+            "source": "packaging/debbuilder.env",
+            "destination": "/etc/debbuilder/debbuilder.env",
+            "policy": "create_if_missing",
+        }])
+        self.assertEqual(canonical["service"]["environment_files"], ["/etc/debbuilder/debbuilder.env"])
         self.assertEqual(builtin_recipe.ui_projection(canonical), {
             "source": "builtin",
             "managed": True,
@@ -154,19 +162,19 @@ class BuiltinRecipeTests(unittest.TestCase):
         builtin_recipe.update_builtin_recipe(self.path, edited)
 
         upgraded_definition = self.definition()
-        upgraded_definition["management"]["definition_version"] = 3
-        upgraded_definition["package"]["description"] = "DebBuilder managed definition v3"
+        upgraded_definition["management"]["definition_version"] = 4
+        upgraded_definition["package"]["description"] = "DebBuilder managed definition v4"
         upgraded_definition["package"]["runtime_dependencies"].append("curl")
-        definition_path = Path(self.temporary.name) / "definition-v3.json"
+        definition_path = Path(self.temporary.name) / "definition-v4.json"
         definition_path.write_text(json.dumps(upgraded_definition))
 
         result = builtin_recipe.reconcile_builtin_recipe(self.workflows, definition_path=definition_path)
 
         self.assertEqual(result.action, "upgraded")
-        self.assertEqual(result.previous_definition_version, 2)
-        self.assertEqual(result.definition_version, 3)
+        self.assertEqual(result.previous_definition_version, 3)
+        self.assertEqual(result.definition_version, 4)
         self.assertFalse(result.recipe["active"])
-        self.assertEqual(result.recipe["package"]["description"], "DebBuilder managed definition v3")
+        self.assertEqual(result.recipe["package"]["description"], "DebBuilder managed definition v4")
         self.assertIn("curl", result.recipe["package"]["runtime_dependencies"])
         self.assertEqual(result.recipe["management"]["operator_overrides"], {"active": False})
 
@@ -185,11 +193,40 @@ class BuiltinRecipeTests(unittest.TestCase):
 
         self.assertEqual(result.action, "upgraded")
         self.assertEqual(result.previous_definition_version, 1)
-        self.assertEqual(result.definition_version, 2)
+        self.assertEqual(result.definition_version, 3)
         self.assertEqual(result.recipe["service"]["restart_sec"], "3s")
         self.assertEqual(result.recipe["service"]["timeout_stop_sec"], "20s")
         self.assertEqual(result.recipe["service"]["kill_signal"], "SIGTERM")
         self.assertEqual(result.recipe["service"]["kill_mode"], "control-group")
+
+    def test_definition_v2_upgrade_adds_environment_file_and_preserves_overrides(self):
+        previous = self.definition()
+        previous["management"] = {
+            "owner": "application",
+            "builtin_id": "debbuilder",
+            "definition_version": 2,
+            "operator_overrides": {
+                "active": False,
+                "package": {"maintainer": "Operator <operator@example.test>"},
+                "build": {"maximum_runtime": 1200},
+            },
+        }
+        previous["active"] = False
+        previous["package"]["maintainer"] = "Operator <operator@example.test>"
+        previous["build"]["maximum_runtime"] = 1200
+        previous["service"]["environment_files"] = []
+        self.write(previous)
+
+        result = builtin_recipe.reconcile_builtin_recipe(self.workflows)
+
+        self.assertEqual(result.action, "upgraded")
+        self.assertEqual(result.previous_definition_version, 2)
+        self.assertEqual(result.definition_version, 3)
+        self.assertEqual(result.recipe["service"]["environment_files"], ["/etc/debbuilder/debbuilder.env"])
+        self.assertFalse(result.recipe["active"])
+        self.assertEqual(result.recipe["package"]["maintainer"], "Operator <operator@example.test>")
+        self.assertEqual(result.recipe["build"]["maximum_runtime"], 1200)
+        self.assertEqual(result.recipe["management"]["operator_overrides"], previous["management"]["operator_overrides"])
 
     def test_newer_persisted_definition_requires_review_without_rewrite(self):
         managed = self.definition()
@@ -241,6 +278,8 @@ class BuiltinRecipeTests(unittest.TestCase):
         normal = recipe_store.save_recipe(self.workflows / "operator-recipe.json", {"name": "operator-recipe"})
         self.assertNotIn("management", normal)
         self.assertEqual(validate_recipe_metadata(normal)["name"], "operator-recipe")
+        unit = generate_unit(validate_recipe_metadata(normal)["service"])
+        self.assertNotIn("EnvironmentFile=/etc/debbuilder/debbuilder.env", unit)
 
     def test_self_build_definition_keeps_required_source_install_and_service_contract(self):
         recipe = validate_recipe_metadata(self.definition())
@@ -255,6 +294,7 @@ class BuiltinRecipeTests(unittest.TestCase):
         self.assertEqual(recipe["install"]["destination"], "/opt/debbuilder")
         self.assertEqual(recipe["install"]["config_files"][0]["policy"], "create_if_missing")
         self.assertEqual(recipe["service"]["command"], "/usr/bin/python3 /opt/debbuilder/server.py")
+        self.assertEqual(recipe["service"]["environment_files"], ["/etc/debbuilder/debbuilder.env"])
         self.assertTrue(recipe["service"]["enabled"])
         self.assertEqual(recipe["service"]["timeout_stop_sec"], "20s")
         self.assertEqual(recipe["service"]["kill_mode"], "control-group")
@@ -271,7 +311,8 @@ class BuiltinRecipeTests(unittest.TestCase):
             (workspace / "source/debbuilder/__init__.py").write_text('"""package"""\n')
             (workspace / "source/server.py").write_text("#!/usr/bin/python3\n")
             (workspace / "source/static/index.html").write_text("DebBuilder\n")
-            (workspace / "source/packaging/debbuilder.env").write_text("DEBBUILDER_PORT=8099\n")
+            environment_source = Path(__file__).resolve().parents[1] / "packaging" / "debbuilder.env"
+            (workspace / "source/packaging/debbuilder.env").write_text(environment_source.read_text())
             output = {
                 "mode": "paths",
                 "paths": [
@@ -292,11 +333,23 @@ class BuiltinRecipeTests(unittest.TestCase):
             self.assertTrue((staging / "usr/share/debbuilder/config-templates/etc/debbuilder/debbuilder.env").is_file())
             self.assertIn("Depends: python3, python3-dbus", result["control"])
             self.assertIn("ExecStart=/usr/bin/python3 /opt/debbuilder/server.py", result["systemd"]["content"])
+            self.assertEqual(
+                [line for line in result["systemd"]["content"].splitlines() if line.startswith("EnvironmentFile=")],
+                ["EnvironmentFile=/etc/debbuilder/debbuilder.env"],
+            )
             self.assertIn("TimeoutStopSec=20s", result["systemd"]["content"])
             self.assertIn("KillMode=control-group", result["systemd"]["content"])
             self.assertIn("KillSignal=SIGTERM", result["systemd"]["content"])
             self.assertIn("Restart=on-failure", result["systemd"]["content"])
             self.assertIn("RestartSec=3s", result["systemd"]["content"])
+            environment = {}
+            for line in environment_source.read_text().splitlines():
+                if line and not line.startswith("#"):
+                    key, value = line.split("=", 1)
+                    environment[key] = value
+            runtime = RuntimeConfig.from_environment(Path("/opt/debbuilder"), environment)
+            self.assertEqual(runtime.data, Path("/var/lib/debbuilder"))
+            self.assertNotEqual(runtime.data, Path("/opt/debbuilder/data"))
 
 
 if __name__ == "__main__":

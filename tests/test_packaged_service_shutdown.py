@@ -126,6 +126,9 @@ class RealSystemdPackagedServiceTests(unittest.TestCase):
             "name": self.unit_name,
             "command": shlex.join(command),
             "working_directory": str(REPOSITORY_ROOT),
+            # Keep the disposable service independent from the host's packaged
+            # environment; its isolated values are declared immediately below.
+            "environment_files": [],
             "environment": {
                 "PYTHONUNBUFFERED": "1",
                 "DEBBUILDER_DATA_DIR": str(self.data),

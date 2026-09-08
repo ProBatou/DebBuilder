@@ -8,16 +8,22 @@ from pathlib import Path
 from typing import Callable
 
 from . import github_client, storage
+from .lifecycle import MutationGateClosed
 
 
 class GitHubReleaseCache:
-    def __init__(self, data_dir: Path, token_provider: Callable[[], str], *, workers: int = 4):
+    def __init__(
+        self, data_dir: Path, token_provider: Callable[[], str], *, workers: int = 4,
+        mutation_gate=None,
+    ):
         self.data_dir = Path(data_dir)
         self.token_provider = token_provider
         self.entries: dict[str, tuple[float, dict]] = {}
         self._loaded = False
         self._refreshing: set[str] = set()
         self._lock = threading.Lock()
+        self.mutation_gate = mutation_gate
+        self._closed = False
         self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="github-refresh")
 
     @property
@@ -36,12 +42,16 @@ class GitHubReleaseCache:
 
     def _refresh(self, repository: str, ttl: int) -> None:
         try:
-            release = github_client.latest_release(repository, token=self.token_provider())
-            with self._lock:
-                self.entries[repository] = (time.time() + ttl, release)
-                snapshot = dict(self.entries)
-            rows = {name: {"expires_at": expires_at, "release": value} for name, (expires_at, value) in snapshot.items()}
-            storage.save_json(self.path, rows)
+            lease = self.mutation_gate.lease() if self.mutation_gate is not None else _NullLease()
+            with lease:
+                release = github_client.latest_release(repository, token=self.token_provider())
+                with self._lock:
+                    self.entries[repository] = (time.time() + ttl, release)
+                    snapshot = dict(self.entries)
+                rows = {name: {"expires_at": expires_at, "release": value} for name, (expires_at, value) in snapshot.items()}
+                storage.save_json(self.path, rows)
+        except MutationGateClosed:
+            pass
         finally:
             with self._lock:
                 self._refreshing.discard(repository)
@@ -52,7 +62,21 @@ class GitHubReleaseCache:
         with self._lock:
             cached = self.entries.get(repository)
             stale = not cached or cached[0] <= time.time()
-            if stale and repository not in self._refreshing:
+            if stale and not self._closed and repository not in self._refreshing:
                 self._refreshing.add(repository)
                 self._executor.submit(self._refresh, repository, ttl)
             return cached[1] if cached else None
+
+    def close(self) -> None:
+        """Stop refresh submission and join already-scheduled cache work."""
+        with self._lock:
+            self._closed = True
+        self._executor.shutdown(wait=True)
+
+
+class _NullLease:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False

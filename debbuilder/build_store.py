@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
+import shutil
 import time
 from contextlib import contextmanager
 from copy import deepcopy
@@ -39,6 +40,21 @@ class BuildStore:
         require_safe_name(run_id, "build run id")
         return self.root / run_id
 
+    @staticmethod
+    def allocate_run_id() -> str:
+        """Allocate durable Run identity before its first filesystem mutation."""
+        return make_run_id()
+
+    def discard_incomplete_creation(self, run_id: str) -> bool:
+        """Remove only a newly-owned workspace that never committed run.json."""
+        folder = self.run_dir(run_id)
+        if not folder.exists():
+            return True
+        if folder.is_symlink() or not folder.is_dir() or (folder / "run.json").exists():
+            return False
+        shutil.rmtree(folder)
+        return not folder.exists()
+
     def execution_history_deletion_path(self, run_id: str) -> Path:
         return self.run_dir(run_id) / EXECUTION_HISTORY_DELETION_FILE
 
@@ -47,7 +63,6 @@ class BuildStore:
         if self.execution_history_deletion_path(run_id).is_file():
             return True
         if run and run.get("log_deleted"):
-            self._record_execution_history_deletion(run_id)
             return True
         return False
 

@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
 from . import __version__
+from .lifecycle import MutationGateClosed, is_durable_mutation_route
 
 
 def create_handler(api):
@@ -25,8 +26,22 @@ def create_handler(api):
             sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
         def _authorized(self) -> bool:
-            if api.is_request_authorized(self.headers):
-                return True
+            try:
+                if api.is_request_authorized(self.headers):
+                    return True
+            except api.SessionSecretError:
+                if self.command == "HEAD":
+                    self.send_response(503)
+                    self.end_headers()
+                elif self.path.startswith("/api/"):
+                    api.json_response(self, {"error": {
+                        "code": "authentication_unavailable",
+                        "message": "Authentication is unavailable",
+                        "details": {},
+                    }}, 503)
+                else:
+                    api.text_response(self, "Authentication is unavailable", 503)
+                return False
             if api.effective_security()["auth_mode"] == "oidc" and self.command == "GET" and not self.path.startswith("/api/"):
                 try:
                     url, _state = api.oidc_authorize_url(self.path or "/")
@@ -76,6 +91,9 @@ def create_handler(api):
                 return
             try:
                 cookie = api.create_session(api.exchange_oidc_code(code, pending.get("nonce", ""), pending.get("code_verifier", "")))
+            except api.SessionSecretError:
+                api.text_response(self, "OIDC login failed: authentication is unavailable", 503)
+                return
             except Exception as exc:
                 api.text_response(self, f"OIDC login failed: {exc}", 500)
                 return
@@ -86,7 +104,11 @@ def create_handler(api):
 
         def _logout(self):
             cookies = api.parse_cookies(api._header_value(self.headers, "Cookie"))
-            session_id = api.unsign_value(cookies.get("debbuilder_session", ""))
+            try:
+                session_id = api.unsign_value(cookies.get("debbuilder_session", ""))
+            except api.SessionSecretError:
+                api.text_response(self, "Authentication is unavailable", 503)
+                return
             if session_id:
                 api.SESSIONS.pop(session_id, None)
             self.send_response(302)
@@ -101,7 +123,11 @@ def create_handler(api):
                 security = api.effective_security()
                 api.json_response(self, {"ok": True, "repo_default": apt["repository"], "suite_default": apt["distribution"], "component_default": apt["component"], "arch_default": apt["architecture"], "notification_type": api.app_settings()["notifications"].get("type", "none"), "auth_mode": security["auth_mode"], "workflow_dirs": {"examples": str(api.EXAMPLES), "user": str(api.USER_WORKFLOWS)}})
             elif path == "/api/auth/status":
-                api.json_response(self, {"ok": True, "auth_mode": api.effective_security()["auth_mode"], "user": self.headers.get(api.AUTH_HEADER, "") or api.oidc_session_user(self.headers)})
+                security = api.effective_security()
+                user = self.headers.get(api.AUTH_HEADER, "")
+                if not user and security["auth_mode"] == "oidc":
+                    user = api.oidc_session_user(self.headers)
+                api.json_response(self, {"ok": True, "auth_mode": security["auth_mode"], "user": user})
             elif path == "/api/dashboard":
                 api.json_response(self, {"dashboard": api.dashboard_summary()})
             elif path == "/api/packages":
@@ -188,8 +214,19 @@ def create_handler(api):
             if not self._authorized():
                 return
             try:
-                data = api.read_body(self)
-                self._post(data)
+                gate = getattr(self.server, "mutation_gate", None)
+                lease = gate.lease() if gate is not None and is_durable_mutation_route(
+                    "POST", urlparse(self.path).path,
+                ) else _NullLease()
+                with lease:
+                    data = api.read_body(self)
+                    self._post(data)
+            except MutationGateClosed as exc:
+                api.json_response(self, {"error": {
+                    "code": exc.code,
+                    "message": str(exc),
+                    "details": {},
+                }}, 503)
             except json.JSONDecodeError as exc:
                 if self.path in {"/api/recipes/validate", "/api/recipes/import"}:
                     api.json_response(self, {"ok": False, "error": {"code": "invalid_json", "message": f"JSON syntax error at line {exc.lineno}, column {exc.colno}", "path": "$"}}, 400)
@@ -347,16 +384,27 @@ def create_handler(api):
                 return
             parsed = urlparse(self.path)
             try:
-                if parsed.path.startswith("/api/workflows/"):
-                    self._delete_workflow(parsed.path)
-                    return
-                if parsed.path.startswith("/api/executions/") and parsed.path.endswith("/logs"):
-                    self._delete_execution_log(parsed.path)
-                    return
-                if parsed.path.startswith("/api/packages/"):
-                    self._delete_package(parsed)
-                    return
-                api.json_response(self, {"error": "not found"}, 404)
+                gate = getattr(self.server, "mutation_gate", None)
+                lease = gate.lease() if gate is not None and is_durable_mutation_route(
+                    "DELETE", parsed.path,
+                ) else _NullLease()
+                with lease:
+                    if parsed.path.startswith("/api/workflows/"):
+                        self._delete_workflow(parsed.path)
+                        return
+                    if parsed.path.startswith("/api/executions/") and parsed.path.endswith("/logs"):
+                        self._delete_execution_log(parsed.path)
+                        return
+                    if parsed.path.startswith("/api/packages/"):
+                        self._delete_package(parsed)
+                        return
+                    api.json_response(self, {"error": "not found"}, 404)
+            except MutationGateClosed as exc:
+                api.json_response(self, {"error": {
+                    "code": exc.code,
+                    "message": str(exc),
+                    "details": {},
+                }}, 503)
             except Exception as exc:
                 api.json_response(self, {"error": str(exc)}, 400)
 
@@ -393,3 +441,11 @@ def create_handler(api):
                 api.json_response(self, {"error": str(exc), "code": "execution_active"}, 409)
 
     return Handler
+
+
+class _NullLease:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False

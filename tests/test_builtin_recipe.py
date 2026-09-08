@@ -41,7 +41,7 @@ class BuiltinRecipeTests(unittest.TestCase):
         self.assertEqual(canonical["name"], "debbuilder")
         self.assertEqual(canonical["management"], {
             "owner": "application", "builtin_id": "debbuilder",
-            "definition_version": 1, "operator_overrides": {},
+            "definition_version": 2, "operator_overrides": {},
         })
         self.assertEqual(builtin_recipe.OPERATOR_OVERRIDE_PATHS, (
             "active",
@@ -154,21 +154,42 @@ class BuiltinRecipeTests(unittest.TestCase):
         builtin_recipe.update_builtin_recipe(self.path, edited)
 
         upgraded_definition = self.definition()
-        upgraded_definition["management"]["definition_version"] = 2
-        upgraded_definition["package"]["description"] = "DebBuilder managed definition v2"
+        upgraded_definition["management"]["definition_version"] = 3
+        upgraded_definition["package"]["description"] = "DebBuilder managed definition v3"
         upgraded_definition["package"]["runtime_dependencies"].append("curl")
-        definition_path = Path(self.temporary.name) / "definition-v2.json"
+        definition_path = Path(self.temporary.name) / "definition-v3.json"
         definition_path.write_text(json.dumps(upgraded_definition))
 
         result = builtin_recipe.reconcile_builtin_recipe(self.workflows, definition_path=definition_path)
 
         self.assertEqual(result.action, "upgraded")
-        self.assertEqual(result.previous_definition_version, 1)
-        self.assertEqual(result.definition_version, 2)
+        self.assertEqual(result.previous_definition_version, 2)
+        self.assertEqual(result.definition_version, 3)
         self.assertFalse(result.recipe["active"])
-        self.assertEqual(result.recipe["package"]["description"], "DebBuilder managed definition v2")
+        self.assertEqual(result.recipe["package"]["description"], "DebBuilder managed definition v3")
         self.assertIn("curl", result.recipe["package"]["runtime_dependencies"])
         self.assertEqual(result.recipe["management"]["operator_overrides"], {"active": False})
+
+    def test_cp3_definition_upgrade_installs_packaged_shutdown_policy(self):
+        previous = self.definition()
+        previous["management"]["definition_version"] = 1
+        previous["service"].update({
+            "restart_sec": "",
+            "timeout_stop_sec": "",
+            "kill_signal": "",
+            "kill_mode": "",
+        })
+        self.write(previous)
+
+        result = builtin_recipe.reconcile_builtin_recipe(self.workflows)
+
+        self.assertEqual(result.action, "upgraded")
+        self.assertEqual(result.previous_definition_version, 1)
+        self.assertEqual(result.definition_version, 2)
+        self.assertEqual(result.recipe["service"]["restart_sec"], "3s")
+        self.assertEqual(result.recipe["service"]["timeout_stop_sec"], "20s")
+        self.assertEqual(result.recipe["service"]["kill_signal"], "SIGTERM")
+        self.assertEqual(result.recipe["service"]["kill_mode"], "control-group")
 
     def test_newer_persisted_definition_requires_review_without_rewrite(self):
         managed = self.definition()
@@ -235,6 +256,11 @@ class BuiltinRecipeTests(unittest.TestCase):
         self.assertEqual(recipe["install"]["config_files"][0]["policy"], "create_if_missing")
         self.assertEqual(recipe["service"]["command"], "/usr/bin/python3 /opt/debbuilder/server.py")
         self.assertTrue(recipe["service"]["enabled"])
+        self.assertEqual(recipe["service"]["timeout_stop_sec"], "20s")
+        self.assertEqual(recipe["service"]["kill_mode"], "control-group")
+        self.assertEqual(recipe["service"]["kill_signal"], "SIGTERM")
+        self.assertEqual(recipe["service"]["restart"], "on-failure")
+        self.assertEqual(recipe["service"]["restart_sec"], "3s")
 
     def test_self_build_definition_prepares_complete_package_layout(self):
         recipe = validate_recipe_metadata(self.definition())
@@ -266,6 +292,11 @@ class BuiltinRecipeTests(unittest.TestCase):
             self.assertTrue((staging / "usr/share/debbuilder/config-templates/etc/debbuilder/debbuilder.env").is_file())
             self.assertIn("Depends: python3, python3-dbus", result["control"])
             self.assertIn("ExecStart=/usr/bin/python3 /opt/debbuilder/server.py", result["systemd"]["content"])
+            self.assertIn("TimeoutStopSec=20s", result["systemd"]["content"])
+            self.assertIn("KillMode=control-group", result["systemd"]["content"])
+            self.assertIn("KillSignal=SIGTERM", result["systemd"]["content"])
+            self.assertIn("Restart=on-failure", result["systemd"]["content"])
+            self.assertIn("RestartSec=3s", result["systemd"]["content"])
 
 
 if __name__ == "__main__":

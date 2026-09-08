@@ -14,6 +14,11 @@ from .workspace_cleanup import DEFAULT_POLICY, validate_policy
 _SECRET_WORDS = re.compile(r"(?i)(token|secret|password|passwd|apikey|api_key|client_secret)")
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 _ARCHES = {"all", "amd64", "arm64", "armhf", "i386"}
+_MIN_COOKIE_SECRET_LENGTH = 40
+
+
+class SessionSecretError(RuntimeError):
+    """The session signing secret is unavailable or invalid."""
 
 
 def default_settings(repo_url: str, suite: str, component: str, architecture: str = "amd64", public_url: str = "", *, security: dict | None = None) -> dict:
@@ -161,16 +166,58 @@ def save_oidc_client_secret(data_dir: Path, value: str) -> None:
         _save_secret(data_dir, "oidc", "client_secret", value)
 
 
+def _validate_cookie_secret(value: str) -> str:
+    value = str(value or "").strip()
+    if len(value) < _MIN_COOKIE_SECRET_LENGTH:
+        raise SessionSecretError("Session cookie secret is unavailable or invalid")
+    return value
+
+
+def _load_cookie_secret_document(data_dir: Path) -> dict:
+    path = secrets_path(data_dir)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+    except Exception as exc:
+        raise SessionSecretError("Session cookie secret is unavailable or invalid") from exc
+    if not isinstance(data, dict):
+        raise SessionSecretError("Session cookie secret is unavailable or invalid")
+    return data
+
+
 def cookie_secret(data_dir: Path) -> str:
+    """Read the prepared cookie secret without mutating persistent state."""
     env = os.environ.get("DEBBUILDER_COOKIE_SECRET", "").strip()
     if env:
-        return env
-    section = load_secrets(data_dir).get("session")
+        return _validate_cookie_secret(env)
+    section = _load_cookie_secret_document(data_dir).get("session")
     value = str(section.get("cookie_secret") or "") if isinstance(section, dict) else ""
-    if not value:
+    return _validate_cookie_secret(value)
+
+
+def prepare_cookie_secret(data_dir: Path) -> str:
+    """Create or validate session signing state during owned startup/mutation."""
+    env = os.environ.get("DEBBUILDER_COOKIE_SECRET", "").strip()
+    if env:
+        return _validate_cookie_secret(env)
+    data_dir = Path(data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    path = secrets_path(data_dir)
+    with storage.locked_path(path):
+        data = _load_cookie_secret_document(data_dir)
+        section = data.get("session")
+        value = str(section.get("cookie_secret") or "") if isinstance(section, dict) else ""
+        if value:
+            value = _validate_cookie_secret(value)
+            if path.stat().st_mode & 0o777 != 0o600:
+                path.chmod(0o600)
+            return value
         value = secrets.token_urlsafe(48)
-        _save_secret(data_dir, "session", "cookie_secret", value)
-    return value
+        data.setdefault("session", {})["cookie_secret"] = value
+        storage.atomic_write_text(path, json.dumps(data, indent=2, sort_keys=True) + "\n")
+        path.chmod(0o600)
+        return _validate_cookie_secret(value)
 
 
 def _validate_url(value: str, field: str, *, allow_empty: bool = False) -> str:

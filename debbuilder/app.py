@@ -13,8 +13,10 @@ import base64
 import hashlib
 import json
 import logging
+import math
 import os
 import re
+import signal
 import sys
 import time
 import threading
@@ -26,10 +28,11 @@ from pathlib import Path
 from . import artifact_publication, artifact_validation, auth_service, automation_service, build_pipeline, builtin_recipe, deb_inspector, execution_recovery, execution_service, notifications, package_service, recipe_store, release_cache, settings_service, storage, upstream_archive, workspace_cleanup
 from .build_models import utc_now
 from .build_store import BuildStore
-from .execution_manager import ExecutionManager, ExecutionManagerError
+from .execution_manager import DEFAULT_SHUTDOWN_TIMEOUT, ExecutionManager, ExecutionManagerError
 from .http_handler import create_handler
+from .lifecycle import MutationGate
 from .recipe_schema import RecipeDocumentError, normalize_recipe, recipe_document_for_storage, recipe_for_storage, require_safe_name, validate_recipe_metadata
-from .settings_store import cookie_secret, github_token, oidc_client_secret
+from .settings_store import SessionSecretError, cookie_secret, github_token, oidc_client_secret, prepare_cookie_secret
 from .runtime import RuntimeConfig
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -59,13 +62,12 @@ OIDC_CLIENT_ID = RUNTIME.oidc_client_id
 OIDC_REDIRECT_URI = RUNTIME.oidc_redirect_uri
 SESSIONS: dict[str, dict] = {}
 
-RUNTIME.prepare_data_directories()
-
 PUBLIC_REPO_PREFIXES = ("/dists/", "/pool/")
 PUBLIC_REPO_FILES = {"/repository.gpg", "/install.sh"}
 
 NOTIFICATION_SERVICE = None
 GITHUB_RELEASE_CACHE_SERVICE = None
+APPLICATION_MUTATION_GATE = None
 
 
 class RunAdmissionError(RuntimeError):
@@ -282,32 +284,60 @@ def create_execution_manager(*, store: BuildStore | None = None, queue_capacity:
 
 
 def prepare_application_directories() -> None:
-    """Ensure the mutable Recipe directory exists before startup orchestration."""
-    USER_WORKFLOWS.mkdir(parents=True, exist_ok=True)
+    """Prepare mutable application data through the one startup-owned path."""
+    RUNTIME.prepare_data_directories()
 
 
-def prepare_recipes_for_startup():
+def prepare_recipes_for_startup(*, shutdown_check=None):
     """Eagerly migrate user Recipes, then reconcile the managed built-in."""
     migration = recipe_store.migrate_recipe_directory(USER_WORKFLOWS)
     if not migration.ok:
         raise RecipeStartupError(migration)
+    if shutdown_check is not None:
+        shutdown_check()
     reconciliation = builtin_recipe.reconcile_builtin_recipe(USER_WORKFLOWS)
+    if shutdown_check is not None:
+        shutdown_check()
     return migration, reconciliation
 
 
-def start_execution_manager(http_server, manager: ExecutionManager | None = None) -> ExecutionManager:
+def prepare_authentication_for_startup() -> None:
+    """Prepare OIDC signing state after recovery and before HTTP serving."""
+    if effective_security().get("auth_mode") == "oidc":
+        prepare_cookie_secret(DATA)
+
+
+def start_execution_manager(
+    http_server,
+    manager: ExecutionManager | None = None,
+    *,
+    prepare_directories: bool = True,
+    shutdown_check=None,
+) -> ExecutionManager:
     """Recover Runs, prepare Recipes, then attach/start one gated manager."""
     if getattr(http_server, "execution_manager", None) is not None:
         raise RuntimeError("HTTP server already has an execution manager")
-    prepare_application_directories()
+    if getattr(http_server, "mutation_gate", None) is None:
+        http_server.mutation_gate = MutationGate()
+    if prepare_directories:
+        prepare_application_directories()
+        if shutdown_check is not None:
+            shutdown_check()
     selected = manager or create_execution_manager()
     recovery = execution_recovery.recover_startup(selected.store)
+    if shutdown_check is not None:
+        shutdown_check()
+    prepare_authentication_for_startup()
+    if shutdown_check is not None:
+        shutdown_check()
     try:
-        migration, reconciliation = prepare_recipes_for_startup()
+        migration, reconciliation = prepare_recipes_for_startup(shutdown_check=shutdown_check)
     except (RecipeStartupError, recipe_store.RecipeStoreError, builtin_recipe.BuiltinRecipeError) as exc:
         LOGGER.error("Recipe startup failure: %s", json.dumps(recipe_startup_diagnostic(exc), sort_keys=True))
         raise
     selected.start(admission_blocker=recovery.admission_blocker)
+    if shutdown_check is not None:
+        shutdown_check()
     http_server.recipe_migration = migration.as_dict()
     http_server.builtin_recipe_reconciliation = {
         "action": reconciliation.action,
@@ -321,14 +351,23 @@ def start_execution_manager(http_server, manager: ExecutionManager | None = None
 
 def stop_execution_manager(http_server, *, timeout: float | None = None) -> None:
     """Stop and detach the HTTP server's manager after submitted work drains."""
+    mutation_gate = getattr(http_server, "mutation_gate", None)
+    if mutation_gate is not None:
+        mutation_gate.begin_shutdown()
+        result = mutation_gate.wait_for_quiescence(timeout)
+        if not result["complete"]:
+            raise TimeoutError("Durable HTTP mutations did not stop before the timeout")
     manager = getattr(http_server, "execution_manager", None)
     if manager is None:
         return
     manager.stop(timeout=timeout)
     http_server.execution_manager = None
+    # This helper stops only the replaceable manager, not the shared server
+    # lifecycle.  A later manager start therefore receives a fresh open gate.
+    http_server.mutation_gate = MutationGate()
 
 
-def _enqueue_failure_details(exc: Exception, run_id: str) -> dict:
+def _enqueue_failure_details(exc: BaseException, run_id: str) -> dict:
     details = {"run_id": run_id, "exception_type": type(exc).__name__}
     if isinstance(exc, ExecutionManagerError):
         details["manager_code"] = exc.code
@@ -362,16 +401,46 @@ def enqueue_recipe_run(manager: ExecutionManager | None, workflow: dict, *, dry_
         )
     try:
         with manager.reserve() as reservation:
-            run = build_pipeline.create_pipeline_run(
-                workflow,
-                store=manager.store,
-                dry_run=dry_run,
-                recipe_id=str(workflow.get("name") or "recipe"),
-            )
+            run_id = manager.store.allocate_run_id()
+            reservation.track(run_id)
             try:
-                reservation.submit(str(run["id"]))
+                run = build_pipeline.create_pipeline_run(
+                    workflow,
+                    store=manager.store,
+                    dry_run=dry_run,
+                    recipe_id=str(workflow.get("name") or "recipe"),
+                    run_id=run_id,
+                )
+            except BaseException as exc:
+                failure = {
+                    "code": "execution_creation_persistence_unresolved",
+                    "message": "Build Run creation failed after durable state may have changed",
+                    "ownership_phase": "creation",
+                    **_enqueue_failure_details(exc, run_id),
+                }
+                resolved = reservation.confirm_terminal(run_id) or reservation.confirm_absent(run_id)
+                if not resolved:
+                    resolved = reservation.resolve_failed_creation(run_id, failure)
+                if not resolved:
+                    reservation.transfer_unresolved(run_id, failure)
+                raise
+            try:
+                reservation.submit(run_id)
             except Exception as exc:
-                _mark_enqueue_failed(manager.store, str(run["id"]), exc)
+                terminalization_error = None
+                try:
+                    _mark_enqueue_failed(manager.store, run_id, exc)
+                except BaseException as failure:
+                    terminalization_error = failure
+                if not reservation.confirm_terminal(run_id):
+                    failure_details = _enqueue_failure_details(exc, run_id)
+                    if terminalization_error is not None:
+                        failure_details["terminalization_exception_type"] = type(terminalization_error).__name__
+                    reservation.transfer_unresolved(run_id, {
+                        "code": "execution_enqueue_persistence_unresolved",
+                        "message": "Build Run admission failure remains non-terminal",
+                        **failure_details,
+                    })
                 if isinstance(exc, ExecutionManagerError) and exc.code in {
                     "execution_manager_not_accepting", "execution_manager_stopped", "execution_reservation_inactive",
                 }:
@@ -527,8 +596,9 @@ def reconcile_build_publication(run_id: str, payload: dict | None = None) -> dic
 
 
 def read_workflow_file(path: Path) -> dict:
-    write_back = path.parent.resolve() == USER_WORKFLOWS.resolve()
-    return validate_recipe_metadata(recipe_store.load_recipe(path, write_back=write_back))
+    # Startup owns durable Recipe migration before HTTP serving.  GET paths
+    # canonicalize in memory only, so they remain lifecycle-read-only.
+    return validate_recipe_metadata(recipe_store.load_recipe(path, write_back=False))
 
 
 def recipe_json_validation(recipe) -> dict:
@@ -677,8 +747,17 @@ def delete_workflow(wid: str) -> None:
 
 def github_release_cache():
     global GITHUB_RELEASE_CACHE_SERVICE
-    if GITHUB_RELEASE_CACHE_SERVICE is None or GITHUB_RELEASE_CACHE_SERVICE.data_dir.resolve() != DATA.resolve():
-        GITHUB_RELEASE_CACHE_SERVICE = release_cache.GitHubReleaseCache(DATA, lambda: github_token(DATA))
+    current = GITHUB_RELEASE_CACHE_SERVICE
+    if (
+        current is None
+        or current.data_dir.resolve() != DATA.resolve()
+        or getattr(current, "mutation_gate", None) is not APPLICATION_MUTATION_GATE
+    ):
+        if current is not None:
+            current.close()
+        GITHUB_RELEASE_CACHE_SERVICE = release_cache.GitHubReleaseCache(
+            DATA, lambda: github_token(DATA), mutation_gate=APPLICATION_MUTATION_GATE,
+        )
     return GITHUB_RELEASE_CACHE_SERVICE
 
 
@@ -863,6 +942,9 @@ def settings_view() -> dict:
 
 
 def update_settings(payload: dict) -> dict:
+    security = payload.get("security") if isinstance(payload, dict) else None
+    if isinstance(security, dict) and str(security.get("auth_mode") or "").lower() == "oidc":
+        prepare_cookie_secret(DATA)
     notification_settings = payload.get("notifications") if isinstance(payload, dict) else None
     if isinstance(notification_settings, dict) and notification_settings.get("token"):
         notifications.save_ntfy_token(DATA, str(notification_settings["token"]))
@@ -935,20 +1017,282 @@ def create_session(userinfo: dict) -> str:
 Handler = create_handler(sys.modules[__name__])
 
 
-def main():
-    print(f"DebBuilder Repo UI listening on http://{RUNTIME.host}:{RUNTIME.port}")
-    with ThreadingHTTPServer((RUNTIME.host, RUNTIME.port), Handler) as server:
-        start_execution_manager(server)
-        stop = threading.Event()
-        retention = threading.Thread(target=workspace_retention_loop, args=(stop,), name="workspace-retention", daemon=True)
-        retention.start()
+def _install_shutdown_signal_handlers(wakeup_fd: int, *, requested_state=None):
+    """Install handlers that only wake the lifecycle shutdown coordinator."""
+    previous = {signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT)}
+
+    def request_shutdown(signum, _frame):
+        if requested_state is not None:
+            requested_state[0] = True
         try:
-            server.serve_forever()
-        finally:
-            stop.set()
-            retention.join()
-            stop_execution_manager(server)
+            os.write(wakeup_fd, bytes((signum,)))
+        except BlockingIOError:
+            pass
+
+    installed = []
+    try:
+        for signum in previous:
+            signal.signal(signum, request_shutdown)
+            installed.append(signum)
+    except BaseException:
+        for signum in installed:
+            signal.signal(signum, previous[signum])
+        raise
+
+    def restore():
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+    return restore
+
+
+class _LifecycleShutdownRequested(Exception):
+    """Internal control flow for a signal observed at a startup boundary."""
+
+
+def _graceful_shutdown_timeout(timeout: float) -> float:
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        raise ValueError("shutdown timeout must be a finite non-negative number")
+    value = float(timeout)
+    if not math.isfinite(value) or value < 0:
+        raise ValueError("shutdown timeout must be a finite non-negative number")
+    return value
+
+
+def _remaining_shutdown_time(deadline: float) -> float:
+    return max(0.0, deadline - time.monotonic())
+
+
+def serve_application(
+    handler_class,
+    *,
+    server_factory=ThreadingHTTPServer,
+    manager_factory=create_execution_manager,
+    retention_target=workspace_retention_loop,
+    install_signal_handlers=True,
+    shutdown_timeout=DEFAULT_SHUTDOWN_TIMEOUT,
+) -> int:
+    """Own startup, serving, and shutdown under one diagnostic target."""
+    global APPLICATION_MUTATION_GATE, GITHUB_RELEASE_CACHE_SERVICE
+    graceful_timeout = _graceful_shutdown_timeout(shutdown_timeout)
+    http_server = None
+    manager = None
+    retention_stop = threading.Event()
+    retention = None
+    cleanup_started = threading.Event()
+    shutdown_requested = threading.Event()
+    signal_requested_state = [False]
+    lifecycle_condition = threading.Condition()
+    serving_started = False
+    signal_read_fd = None
+    signal_write_fd = None
+    signal_coordinator = None
+    restore_signals = None
+    primary_failure = None
+    cleanup_failures = []
+    shutdown_result = None
+    mutation_gate = MutationGate()
+    mutation_result = None
+    previous_mutation_gate = APPLICATION_MUTATION_GATE
+    APPLICATION_MUTATION_GATE = mutation_gate
+
+    try:
+        if install_signal_handlers:
+            signal_read_fd, signal_write_fd = os.pipe()
+            os.set_blocking(signal_write_fd, False)
+            restore_signals = _install_shutdown_signal_handlers(
+                signal_write_fd,
+                requested_state=signal_requested_state,
+            )
+
+            def coordinate_signal_shutdown():
+                nonlocal serving_started
+                try:
+                    os.read(signal_read_fd, 1)
+                except BaseException as exc:
+                    cleanup_failures.append(("signal shutdown coordination", exc))
+                    return
+                shutdown_requested.set()
+                mutation_gate.begin_shutdown()
+                retention_stop.set()
+                selected_manager = manager
+                if selected_manager is not None and selected_manager.worker is not None:
+                    try:
+                        selected_manager.begin_shutdown()
+                    except BaseException as exc:
+                        cleanup_failures.append(("execution admission shutdown", exc))
+                with lifecycle_condition:
+                    while not serving_started and not cleanup_started.is_set():
+                        lifecycle_condition.wait()
+                    should_stop_server = serving_started and not cleanup_started.is_set()
+                    selected_server = http_server
+                if should_stop_server and selected_server is not None:
+                    try:
+                        selected_server.shutdown()
+                    except BaseException as exc:
+                        cleanup_failures.append(("signal shutdown coordination", exc))
+
+            signal_coordinator = threading.Thread(
+                target=coordinate_signal_shutdown,
+                name="signal-shutdown-coordinator",
+                daemon=False,
+            )
+            signal_coordinator.start()
+
+        def check_shutdown_requested():
+            if signal_requested_state[0] or shutdown_requested.is_set():
+                raise _LifecycleShutdownRequested()
+
+        prepare_application_directories()
+        check_shutdown_requested()
+        manager = manager_factory()
+        check_shutdown_requested()
+        http_server = server_factory((RUNTIME.host, RUNTIME.port), handler_class)
+        http_server.mutation_gate = mutation_gate
+        check_shutdown_requested()
+        start_execution_manager(
+            http_server,
+            manager,
+            prepare_directories=False,
+            shutdown_check=check_shutdown_requested,
+        )
+        check_shutdown_requested()
+        if manager.accepting and retention_target is not None:
+            retention = threading.Thread(
+                target=retention_target,
+                args=(retention_stop,),
+                name="workspace-retention",
+                daemon=False,
+            )
+            retention.start()
+            check_shutdown_requested()
+        print(f"DebBuilder Repo UI listening on http://{RUNTIME.host}:{RUNTIME.port}")
+        with lifecycle_condition:
+            check_shutdown_requested()
+            serving_started = True
+            lifecycle_condition.notify_all()
+        try:
+            http_server.serve_forever()
+        except BaseException as exc:
+            primary_failure = exc
+    except _LifecycleShutdownRequested:
+        pass
+    except BaseException as exc:
+        primary_failure = exc
+    finally:
+        mutation_gate.begin_shutdown()
+        graceful_deadline = time.monotonic() + graceful_timeout
+        cleanup_started.set()
+        with lifecycle_condition:
+            lifecycle_condition.notify_all()
+        if signal_write_fd is not None:
+            try:
+                os.write(signal_write_fd, b"\0")
+            except (BlockingIOError, OSError):
+                pass
+        manager_started = manager is not None and manager.worker is not None
+        retention_stop.set()
+        if manager_started:
+            try:
+                manager.begin_shutdown()
+            except BaseException as exc:
+                cleanup_failures.append(("execution admission shutdown", exc))
+        if retention is not None and retention.is_alive():
+            retention.join(_remaining_shutdown_time(graceful_deadline))
+            if retention.is_alive():
+                failure = TimeoutError(
+                    "workspace retention did not quiesce within the graceful shutdown target"
+                )
+                cleanup_failures.append(("workspace retention shutdown", failure))
+                LOGGER.error("Incomplete workspace retention shutdown: %s", failure)
+                retention.join()
+        try:
+            mutation_result = mutation_gate.wait_for_quiescence(
+                _remaining_shutdown_time(graceful_deadline)
+            )
+            if not mutation_result["complete"]:
+                failure = TimeoutError(
+                    "durable HTTP mutations did not quiesce within the graceful shutdown target"
+                )
+                cleanup_failures.append(("HTTP mutation shutdown", failure))
+                LOGGER.error("Incomplete HTTP mutation shutdown: %s", failure)
+                mutation_result = mutation_gate.wait_for_quiescence(None)
+        except BaseException as exc:
+            cleanup_failures.append(("HTTP mutation shutdown", exc))
+            mutation_result = mutation_gate.wait_for_quiescence(None)
+        release_service = GITHUB_RELEASE_CACHE_SERVICE
+        if release_service is not None and getattr(release_service, "mutation_gate", None) is mutation_gate:
+            try:
+                release_service.close()
+            except BaseException as exc:
+                cleanup_failures.append(("release cache shutdown", exc))
+            finally:
+                GITHUB_RELEASE_CACHE_SERVICE = None
+        if manager_started:
+            try:
+                shutdown_result = manager.shutdown(timeout=_remaining_shutdown_time(graceful_deadline))
+                if shutdown_result.get("timed_out") or not shutdown_result["complete"]:
+                    failure = RuntimeError(json.dumps(shutdown_result, sort_keys=True))
+                    cleanup_failures.append(("execution manager shutdown", failure))
+                    LOGGER.error("Incomplete execution manager shutdown: %s", failure)
+                if not shutdown_result["complete"]:
+                    shutdown_result = manager.shutdown(timeout=None)
+                    if not shutdown_result["complete"]:
+                        cleanup_failures.append((
+                            "execution manager ownership continuation",
+                            RuntimeError(json.dumps(shutdown_result, sort_keys=True)),
+                        ))
+            except BaseException as exc:
+                cleanup_failures.append(("execution manager shutdown", exc))
+                try:
+                    shutdown_result = manager.shutdown(timeout=None)
+                except BaseException as continuation_exc:
+                    cleanup_failures.append(("execution manager ownership continuation", continuation_exc))
+            worker = manager.worker
+            if worker is not None and getattr(worker, "is_alive", lambda: False)():
+                worker.join()
+        if http_server is not None:
+            try:
+                http_server.server_close()
+            except BaseException as exc:
+                cleanup_failures.append(("HTTP server close", exc))
+        if signal_coordinator is not None and signal_coordinator.is_alive():
+            signal_coordinator.join(_remaining_shutdown_time(graceful_deadline))
+            if signal_coordinator.is_alive():
+                failure = TimeoutError(
+                    "signal shutdown coordinator did not stop within the graceful shutdown target"
+                )
+                cleanup_failures.append(("signal shutdown coordination", failure))
+                LOGGER.error("Incomplete signal shutdown coordination: %s", failure)
+                signal_coordinator.join()
+        if restore_signals is not None:
+            try:
+                restore_signals()
+            except BaseException as exc:
+                cleanup_failures.append(("signal handler restoration", exc))
+        for descriptor in (signal_write_fd, signal_read_fd):
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError as exc:
+                    cleanup_failures.append(("signal wakeup pipe close", exc))
+        APPLICATION_MUTATION_GATE = previous_mutation_gate
+
+    for component, failure in cleanup_failures:
+        LOGGER.error("Incomplete %s: %s", component, failure)
+    if primary_failure is not None:
+        for component, failure in cleanup_failures:
+            try:
+                primary_failure.add_note(f"Cleanup also failed during {component}: {failure}")
+            except (AttributeError, TypeError):
+                pass
+        raise primary_failure
+    return 1 if cleanup_failures else 0
+
+
+def main() -> int:
+    return serve_application(Handler)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

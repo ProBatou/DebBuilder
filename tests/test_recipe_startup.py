@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from debbuilder import app, build_pipeline, builtin_recipe, recipe_store
+from debbuilder import app, build_pipeline, builtin_recipe, recipe_store, settings_store
 from debbuilder.build_store import BuildStore
 from debbuilder.execution_recovery import StartupRecoveryResult
 
@@ -51,6 +51,7 @@ class RecipeStartupTests(unittest.TestCase):
 
         with mock.patch("debbuilder.app.prepare_application_directories", side_effect=lambda: events.append("directories")), \
                 mock.patch("debbuilder.app.create_execution_manager", side_effect=lambda: events.append("construct") or manager), \
+                mock.patch("debbuilder.app.prepare_authentication_for_startup", side_effect=lambda: events.append("authentication")), \
                 mock.patch("debbuilder.app.recipe_store.migrate_recipe_directory", side_effect=lambda _path: events.append("migration") or migration), \
                 mock.patch("debbuilder.app.builtin_recipe.reconcile_builtin_recipe", side_effect=lambda _path: events.append("builtin") or reconciliation), \
                 mock.patch("debbuilder.app.execution_recovery.recover_startup", side_effect=lambda _store: events.append("recovery") or StartupRecoveryResult()):
@@ -59,7 +60,7 @@ class RecipeStartupTests(unittest.TestCase):
             selected = app.start_execution_manager(http_server)
 
         self.assertIs(selected, manager)
-        self.assertEqual(events, ["directories", "construct", "recovery", "migration", "builtin", "manager"])
+        self.assertEqual(events, ["directories", "construct", "recovery", "authentication", "migration", "builtin", "manager"])
         manager.start.assert_called_once_with(admission_blocker=None)
         self.assertIs(http_server.execution_manager, manager)
         self.assertTrue(http_server.recipe_migration["ok"])
@@ -84,6 +85,81 @@ class RecipeStartupTests(unittest.TestCase):
         self.assertIsNone(manager.worker)
         self.assertFalse(manager.accepting)
         self.assertFalse(hasattr(http_server, "execution_manager"))
+
+    def test_authentication_failure_occurs_after_recovery_and_before_recipe_preparation(self):
+        events = []
+        manager = mock.Mock(store=object(), worker=None, accepting=False)
+        with mock.patch(
+            "debbuilder.app.execution_recovery.recover_startup",
+            side_effect=lambda _store: events.append("recovery") or StartupRecoveryResult(),
+        ) as recover, mock.patch(
+            "debbuilder.app.prepare_authentication_for_startup",
+            side_effect=lambda: events.append("authentication") or (_ for _ in ()).throw(
+                app.SessionSecretError("session signing state is invalid")
+            ),
+        ), mock.patch("debbuilder.app.recipe_store.migrate_recipe_directory") as migrate:
+            with self.assertRaises(app.SessionSecretError):
+                app.start_execution_manager(self.server(), manager, prepare_directories=False)
+
+        self.assertEqual(events, ["recovery", "authentication"])
+        recover.assert_called_once_with(manager.store)
+        migrate.assert_not_called()
+        manager.start.assert_not_called()
+
+    def test_oidc_startup_creates_session_secret_once_and_reuses_it(self):
+        data = Path(self.temporary.name) / "data"
+        managers = [mock.Mock(store=object()), mock.Mock(store=object())]
+        oidc = {
+            "auth_mode": "oidc",
+            "oidc_issuer": "https://id.example.test",
+            "oidc_client_id": "debbuilder",
+            "oidc_redirect_uri": "https://apt.example.test/auth/callback",
+        }
+        original_atomic_write = settings_store.storage.atomic_write_text
+
+        with mock.patch.object(app, "DATA", data), \
+                mock.patch.object(app, "effective_security", return_value=oidc), \
+                mock.patch("debbuilder.app.execution_recovery.recover_startup", return_value=StartupRecoveryResult()), \
+                mock.patch("debbuilder.settings_store.storage.atomic_write_text", wraps=original_atomic_write) as writes:
+            app.start_execution_manager(self.server(), managers[0], prepare_directories=False)
+            first = (data / "secrets.json").read_bytes()
+            (data / "secrets.json").chmod(0o644)
+            app.start_execution_manager(self.server(), managers[1], prepare_directories=False)
+            second = (data / "secrets.json").read_bytes()
+            loaded = app.cookie_secret(data)
+
+        self.assertEqual(first, second)
+        self.assertGreaterEqual(len(loaded), 40)
+        self.assertEqual(writes.call_count, 1)
+        self.assertEqual((data / "secrets.json").stat().st_mode & 0o777, 0o600)
+
+    def test_oidc_startup_rejects_corrupt_session_secret_after_recovery_without_repair(self):
+        data = Path(self.temporary.name) / "corrupt-data"
+        data.mkdir()
+        secret_path = data / "secrets.json"
+        corrupt = b'{"session":{"cookie_secret":"PRIVATE_TEST_VALUE"}'
+        secret_path.write_bytes(corrupt)
+        manager = mock.Mock(store=object(), worker=None, accepting=False)
+        oidc = {
+            "auth_mode": "oidc",
+            "oidc_issuer": "https://id.example.test",
+            "oidc_client_id": "debbuilder",
+            "oidc_redirect_uri": "https://apt.example.test/auth/callback",
+        }
+
+        with mock.patch.object(app, "DATA", data), \
+                mock.patch.object(app, "effective_security", return_value=oidc), \
+                mock.patch("debbuilder.app.execution_recovery.recover_startup", return_value=StartupRecoveryResult()) as recover, \
+                mock.patch("debbuilder.app.recipe_store.migrate_recipe_directory") as migrate:
+            with self.assertRaisesRegex(app.SessionSecretError, "unavailable or invalid") as raised:
+                app.start_execution_manager(self.server(), manager, prepare_directories=False)
+
+        recover.assert_called_once_with(manager.store)
+        migrate.assert_not_called()
+        manager.start.assert_not_called()
+        self.assertEqual(secret_path.read_bytes(), corrupt)
+        self.assertNotIn("PRIVATE_TEST_VALUE", str(raised.exception))
+        self.assertNotIn(str(secret_path), str(raised.exception))
 
     def test_builtin_failure_still_runs_recovery_then_keeps_worker_stopped(self):
         events = []

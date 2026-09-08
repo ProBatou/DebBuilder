@@ -42,14 +42,10 @@ class Handler(app.Handler):
 
 
 def main():
-    print(f"DebBuilder Repo UI listening on http://{app.RUNTIME.host}:{app.RUNTIME.port}")
-    with app.ThreadingHTTPServer((app.RUNTIME.host, app.RUNTIME.port), Handler) as http_server:
-        app.start_execution_manager(http_server)
-        try:
-            http_server.serve_forever()
-        finally:
-            app.stop_execution_manager(http_server)
+    # The repository-serving entrypoint did not previously run periodic
+    # retention; shared lifecycle ownership must not expand that policy here.
+    return app.serve_application(Handler, retention_target=None)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

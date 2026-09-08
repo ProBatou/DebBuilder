@@ -32,6 +32,7 @@ from debbuilder.command_identity import (
     current_boot_id,
     persist_identity,
 )
+from debbuilder.execution_cancellation import SERVER_SHUTDOWN
 from debbuilder.execution_manager import ExecutionManager, ExecutionManagerError
 from debbuilder.execution_recovery import BLOCKER_CODE, RECOVERY_ERROR_CODE, recover_startup
 from debbuilder.execution_recovery import StartupRecoveryResult
@@ -142,7 +143,7 @@ class StartupRecoveryTests(unittest.TestCase):
         run["steps"][0].update({"status": "success", "finished_at": run["created_at"], "duration": 0.1})
         run["steps"][1].update({"status": "running", "started_at": run["created_at"]})
         run["cancellation"] = {
-            "code": "execution_cancelled", "reason": "user_requested",
+            "code": "execution_cancelled", "reason": SERVER_SHUTDOWN,
             "phase": "execution", "stage": "detection", "requested_at": run["created_at"],
         }
         self.store.save(run)

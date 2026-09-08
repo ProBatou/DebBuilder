@@ -9,7 +9,7 @@ from datetime import datetime
 from .build_models import utc_now
 from .build_store import BuildStore
 from .command_identity import clear_identity, persist_identity, recording_identities, update_identity
-from .execution_cancellation import CancellationControl, ExecutionCancelled
+from .execution_cancellation import SERVER_SHUTDOWN, CancellationControl, ExecutionCancelled
 from . import build_executor, deb_inspector, debian_packaging, dependency_checker, project_detection, source_acquisition, source_changes, upstream_archive, upstream_artifact
 from .recipe_schema import validate_recipe_metadata
 
@@ -141,6 +141,8 @@ def _finalize_execution_cancellation(run: dict, store: BuildStore, exc: Executio
         "completed_at": completed_at,
     }
     termination_failed = bool(exc.termination_error)
+    shutdown = cancellation["reason"] == SERVER_SHUTDOWN
+    cancellation_summary = "Execution cancelled during server shutdown" if shutdown else "Execution cancelled by user"
     error = None
     if termination_failed:
         error = {
@@ -154,7 +156,7 @@ def _finalize_execution_cancellation(run: dict, store: BuildStore, exc: Executio
             "status": "failed" if termination_failed else "cancelled",
             "finished_at": completed_at,
             "duration": _elapsed_from(active.get("started_at"), completed_at),
-            "summary": error["message"] if error else "Execution cancelled by user",
+            "summary": error["message"] if error else cancellation_summary,
             "error": error,
         })
     run.update({
@@ -166,7 +168,7 @@ def _finalize_execution_cancellation(run: dict, store: BuildStore, exc: Executio
     })
     store.append_event(
         run,
-        error["message"] if error else f"Execution cancelled during {stage}.",
+        error["message"] if error else f"{cancellation_summary} during {stage}.",
         level="error" if error else "info",
     )
     if termination_failed and run.get("mode") == "build":
@@ -253,13 +255,16 @@ def _run_upstream_artifact(canonical: dict, run: dict, *, store: BuildStore, dry
     return _finish_terminal_run(run, store, started, control, run.get("status", "pipeline"), lifecycle_callback, canonical)
 
 
-def create_pipeline_run(recipe: dict, *, store: BuildStore, dry_run: bool, recipe_id: str = "") -> dict:
+def create_pipeline_run(
+    recipe: dict, *, store: BuildStore, dry_run: bool, recipe_id: str = "", run_id: str | None = None,
+) -> dict:
     """Validate a Recipe and persist an isolated pending Run without executing it."""
     canonical = validate_recipe_metadata(recipe)
     return store.create(
         canonical,
         recipe_id=recipe_id or canonical["name"],
         mode="dry_run" if dry_run else "build",
+        run_id=run_id,
     )
 
 

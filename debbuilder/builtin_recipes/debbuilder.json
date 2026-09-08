@@ -5,7 +5,7 @@
   "management": {
     "owner": "application",
     "builtin_id": "debbuilder",
-    "definition_version": 1,
+    "definition_version": 2,
     "operator_overrides": {}
   },
   "package": {
@@ -113,10 +113,10 @@
     "after": [],
     "wants": [],
     "requires": [],
-    "restart_sec": "",
+    "restart_sec": "3s",
     "timeout_start_sec": "",
-    "timeout_stop_sec": "",
-    "kill_signal": "",
+    "timeout_stop_sec": "20s",
+    "kill_signal": "SIGTERM",
     "exec_start_pre": [],
     "exec_start_post": [],
     "exec_stop": [],
@@ -125,7 +125,7 @@
     "working_directory": "",
     "conflicts": [],
     "limit_nofile": "",
-    "kill_mode": "",
+    "kill_mode": "control-group",
     "syslog_identifier": "",
     "ambient_capabilities": []
   }

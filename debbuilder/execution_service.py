@@ -188,8 +188,13 @@ def cancellation_projection(run: dict) -> dict | None:
         return None
     status = str(run.get("status") or "")
     allowed = ("code", "reason", "phase", "stage", "requested_at", "completed_at")
+    reason = str(metadata.get("reason") or "")
     if status == "cancelled":
-        kind, title, message = "cancelled", "Run cancelled", "Cancelled by user"
+        messages = {
+            "user_requested": "Cancelled by user",
+            "server_shutdown": "Cancelled during server shutdown",
+        }
+        kind, title, message = "cancelled", "Run cancelled", messages.get(reason, "Execution cancelled")
     elif status == "cancelling":
         kind, title, message = "cancelling", "Cancellation requested", "Cancellation is in progress"
     else:

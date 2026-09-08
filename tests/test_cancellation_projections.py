@@ -79,10 +79,28 @@ class CancellationProjectionTests(unittest.TestCase):
         self.assertEqual(detail["steps"][4]["status"], "cancelled")
         self.assertEqual(detail["cancellation"]["kind"], "cancelled")
         self.assertEqual(detail["cancellation"]["title"], "Run cancelled")
+        self.assertEqual(detail["cancellation"]["message"], "Cancelled by user")
         self.assertIsNone(detail["diagnostic"])
         self.assertTrue(log["complete"])
         self.assertIn("partial output", log["text"])
         self.assertIn("termination output", log["text"])
+
+    def test_server_shutdown_and_unknown_reasons_have_neutral_distinct_messages(self):
+        run = self.store.create(recipe("shutdown-projection"), mode="build")
+        run.update({
+            "status": "cancelled",
+            "cancellation": {**self.cancellation(completed=True), "reason": "server_shutdown"},
+        })
+        self.store.save(run)
+        shutdown = execution_service.get_execution(self.store, run["id"])
+        self.assertEqual(
+            shutdown["cancellation"]["message"], "Cancelled during server shutdown",
+        )
+
+        run["cancellation"]["reason"] = "future_reason"
+        self.store.save(run)
+        unknown = execution_service.get_execution(self.store, run["id"])
+        self.assertEqual(unknown["cancellation"]["message"], "Execution cancelled")
 
     def test_termination_failure_remains_a_failure_diagnostic(self):
         run = self.store.create(recipe(), mode="build")

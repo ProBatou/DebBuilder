@@ -11,7 +11,7 @@ from unittest import mock
 
 from debbuilder import automation_service, build_pipeline, deb_inspector, debian_packaging, dependency_checker, upstream_artifact
 from debbuilder.build_store import BuildStore
-from debbuilder.execution_cancellation import CancellationControl, ExecutionCancelled
+from debbuilder.execution_cancellation import SERVER_SHUTDOWN, CancellationControl, ExecutionCancelled
 from debbuilder.execution_manager import ExecutionManager
 from debbuilder.recipe_schema import validate_recipe_metadata
 from debbuilder.workspace_cleanup import _require_unused_workspace
@@ -272,6 +272,48 @@ class RunningCancellationTests(unittest.TestCase):
         self.assertFalse(commands_recorded[1]["killed"])
         self.assertIsNone(commands_recorded[1]["termination_error"])
         self.assertFalse(third_marker.exists())
+
+    def test_manager_shutdown_reuses_running_command_cancellation(self):
+        command_ready = threading.Event()
+        original_log = self.store.append_log_line
+        command = (
+            f"{shlex.quote(sys.executable)} -c 'import signal,time; "
+            "signal.signal(signal.SIGTERM, lambda *_: (print(\"shutdown-stopping\", flush=True), exit(0))); "
+            "print(\"shutdown-ready\", flush=True); time.sleep(10)'"
+        )
+
+        def observe_log(run_id, message, **kwargs):
+            original_log(run_id, message, **kwargs)
+            if "shutdown-ready" in message:
+                command_ready.set()
+
+        def execute(run_id, *, cancellation_control, **kwargs):
+            return build_pipeline.execute_pipeline_run(
+                run_id, cancellation_control=cancellation_control,
+                acquire=self.acquire_source, dependency_check=available_dependencies, **kwargs,
+            )
+
+        run = build_pipeline.create_pipeline_run(
+            source_recipe(name="shutdown-command", commands=[command]), store=self.store, dry_run=False,
+        )
+        manager = self.manager(execute)
+        # Exercise the deterministic process-group backend here; strong
+        # containment has its own conditional real-systemd coverage.
+        with mock.patch.object(self.store, "append_log_line", side_effect=observe_log), \
+                mock.patch("debbuilder.command_runner.containment_capability", return_value=mock.Mock(available=False)):
+            manager.start()
+            manager.submit(run["id"])
+            self.assertTrue(command_ready.wait(4))
+            shutdown = manager.shutdown(timeout=5)
+
+        persisted = self.store.load(run["id"])
+        command_record = json.loads(next((Path(run["workspace"]) / "logs/commands").glob("*.json")).read_text())
+        self.assertTrue(shutdown["complete"])
+        self.assertEqual(persisted["status"], "cancelled")
+        self.assertEqual(persisted["cancellation"]["reason"], SERVER_SHUTDOWN)
+        self.assertEqual(command_record["status"], "cancelled")
+        self.assertIn("shutdown-stopping", command_record["stdout"])
+        self.assertIn("server shutdown", self.store.log_text(run["id"]))
 
     def test_cancelled_run_force_kills_parent_child_grandchild_without_orphans(self):
         workspace = Path(self.temporary.name)

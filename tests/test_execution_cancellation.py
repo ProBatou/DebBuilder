@@ -5,6 +5,7 @@ from unittest import mock
 from debbuilder.build_models import STEP_STATUSES, new_run, validate_run
 from debbuilder.execution_cancellation import (
     CANCELLATION_CODE,
+    SERVER_SHUTDOWN,
     USER_REQUESTED,
     CancellationControl,
 )
@@ -44,6 +45,32 @@ class CancellationControlTests(unittest.TestCase):
 
         self.assertFalse(rejected["accepted"])
         self.assertEqual(rejected["owner"], "terminal_owned")
+        self.assertFalse(control.event.is_set())
+
+    def test_first_cancellation_reason_wins(self):
+        for first_reason, later_reason in (
+            (USER_REQUESTED, SERVER_SHUTDOWN),
+            (SERVER_SHUTDOWN, USER_REQUESTED),
+        ):
+            with self.subTest(first_reason=first_reason):
+                control = CancellationControl()
+
+                first = control.request_cancel(reason=first_reason)
+                later = control.request_cancel(reason=later_reason)
+
+                self.assertTrue(first["first_request"])
+                self.assertFalse(later["first_request"])
+                self.assertEqual(later["cancellation"], first["cancellation"])
+                self.assertEqual(control.request["reason"], first_reason)
+
+    def test_invalid_cancellation_reason_is_rejected_without_claiming_ownership(self):
+        control = CancellationControl()
+
+        for reason in ("", None, 1):
+            with self.subTest(reason=reason), self.assertRaises(ValueError):
+                control.request_cancel(reason=reason)
+
+        self.assertEqual(control.owner, "open")
         self.assertFalse(control.event.is_set())
 
     def test_cancellation_wins_before_terminal_claim(self):

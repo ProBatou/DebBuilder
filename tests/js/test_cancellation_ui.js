@@ -159,6 +159,10 @@ function packageActionHarness() {
   assert.equal(logs.nodes.btnCancelExecution.hidden, true);
   assert.match(logs.nodes.executionCancellationSummary.innerHTML, /Requested by user during Build/);
   assert.match(logs.nodes.executionSteps.innerHTML, /step-chip cancelled/);
+  logs.context.applyCanonicalExecution(run('logs-shutdown', 'cancelled', {
+    cancellation: {kind: 'cancelled', reason: 'server_shutdown', stage: 'build'},
+  }));
+  assert.match(logs.nodes.executionCancellationSummary.innerHTML, /Server shutdown requested cancellation during Build/);
 
   logs.context.applyCanonicalExecution(run('logs-run', 'running'));
   const pendingLogs = deferred();

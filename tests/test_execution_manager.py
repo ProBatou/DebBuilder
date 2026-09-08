@@ -52,7 +52,7 @@ class ExecutionManagerTests(unittest.TestCase):
             run["status"] = status
             self.store.save(run)
 
-    def test_worker_lifecycle_is_explicit_and_non_daemon(self):
+    def test_worker_lifecycle_is_explicit_non_daemon_and_joins_cleanly(self):
         manager = self.manager(execute=lambda *_args, **_kwargs: None)
         self.assertIsNone(manager.worker)
         self.assertFalse(manager.accepting)

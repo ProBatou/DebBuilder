@@ -8,6 +8,7 @@ from .build_models import utc_now
 
 CANCELLATION_CODE = "execution_cancelled"
 USER_REQUESTED = "user_requested"
+SERVER_SHUTDOWN = "server_shutdown"
 
 
 class ExecutionCancelled(RuntimeError):
@@ -54,8 +55,10 @@ class CancellationControl:
         with self._lock:
             return dict(self._request) if self._request else None
 
-    def request_cancel(self) -> dict:
+    def request_cancel(self, *, reason: str = USER_REQUESTED) -> dict:
         """Claim cancellation ownership, or report that terminalization won."""
+        if not isinstance(reason, str) or not reason:
+            raise ValueError("cancellation reason must be a non-empty string")
         with self._lock:
             if self._owner == "terminal_owned":
                 return {
@@ -69,7 +72,7 @@ class CancellationControl:
                 self._owner = "cancellation_owned"
                 self._request = {
                     "code": CANCELLATION_CODE,
-                    "reason": USER_REQUESTED,
+                    "reason": reason,
                     "requested_at": utc_now(),
                 }
                 self.event.set()

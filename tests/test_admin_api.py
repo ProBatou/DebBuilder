@@ -940,7 +940,7 @@ class AdminApiTests(AdminApiCase):
         self.assertEqual(loaded["service"]["user"], "v1-demo")
         self.assertTrue(loaded["service"]["configured"])
 
-    def test_existing_user_recipe_is_migrated_durably_when_loaded(self):
+    def test_existing_user_recipe_get_canonicalizes_without_durable_mutation(self):
         path = server.USER_WORKFLOWS / "loaded-legacy.json"
         path.write_text(json.dumps({
             "schema_version": 1,
@@ -954,9 +954,9 @@ class AdminApiTests(AdminApiCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(loaded["schema_version"], 2)
-        self.assertEqual(stored["schema_version"], 2)
-        self.assertEqual(stored["build"]["inactivity_timeout"], 45)
-        self.assertNotIn("steps", stored)
+        self.assertEqual(stored["schema_version"], 1)
+        self.assertEqual(stored["build"]["timeout"], 45)
+        self.assertIn("steps", stored)
 
     def test_readonly_recipe_cannot_be_deleted(self):
         with self.assertRaises(urllib.error.HTTPError) as ctx:
@@ -1139,11 +1139,63 @@ class AdminApiTests(AdminApiCase):
 
     def test_cookie_secret_is_generated_once_and_persisted(self):
         with mock.patch.dict(os.environ, {"DEBBUILDER_COOKIE_SECRET": ""}):
+            prepared = server.prepare_cookie_secret(server.DATA)
             first = server.cookie_secret(server.DATA)
+            server.prepare_cookie_secret(server.DATA)
             second = server.cookie_secret(server.DATA)
+        self.assertEqual(prepared, first)
         self.assertEqual(first, second)
         self.assertGreaterEqual(len(first), 40)
         self.assertEqual((server.DATA / "secrets.json").stat().st_mode & 0o777, 0o600)
+
+    def test_oidc_get_and_head_do_not_create_missing_session_secret(self):
+        secret_path = server.DATA / "secrets.json"
+        secret_path.unlink(missing_ok=True)
+        oidc = {
+            "auth_mode": "oidc",
+            "oidc_issuer": "https://id.example.test",
+            "oidc_client_id": "debbuilder",
+            "oidc_redirect_uri": "https://apt.example.test/auth/callback",
+        }
+
+        with mock.patch.object(server, "effective_security", return_value=oidc):
+            for method, path in (("GET", "/api/settings"), ("HEAD", "/")):
+                with self.subTest(method=method):
+                    conn = http.client.HTTPConnection(
+                        "127.0.0.1", self.httpd.server_address[1], timeout=5,
+                    )
+                    conn.request(method, path)
+                    response = conn.getresponse()
+                    body = response.read().decode()
+                    conn.close()
+                    self.assertEqual(response.status, 503)
+                    self.assertNotIn("secret", body.lower())
+                    self.assertFalse(secret_path.exists())
+
+    def test_oidc_request_time_corrupt_session_secret_fails_closed_without_repair(self):
+        secret_path = server.DATA / "secrets.json"
+        corrupt = b'{"session":{"cookie_secret":"PRIVATE_TEST_VALUE"}'
+        secret_path.write_bytes(corrupt)
+        oidc = {
+            "auth_mode": "oidc",
+            "oidc_issuer": "https://id.example.test",
+            "oidc_client_id": "debbuilder",
+            "oidc_redirect_uri": "https://apt.example.test/auth/callback",
+        }
+
+        with mock.patch.object(server, "effective_security", return_value=oidc):
+            conn = http.client.HTTPConnection(
+                "127.0.0.1", self.httpd.server_address[1], timeout=5,
+            )
+            conn.request("GET", "/api/settings")
+            response = conn.getresponse()
+            body = response.read().decode()
+            conn.close()
+
+        self.assertEqual(response.status, 503)
+        self.assertEqual(secret_path.read_bytes(), corrupt)
+        self.assertNotIn("PRIVATE_TEST_VALUE", body)
+        self.assertNotIn(str(secret_path), body)
 
     def test_oidc_protects_admin_but_public_repository_paths_are_exempt(self):
         server.update_settings({"security": {"auth_mode": "oidc", "oidc_issuer": "https://id.example.test", "oidc_client_id": "deb", "oidc_redirect_uri": "https://apt.example.test/auth/callback", "oidc_client_secret": "test-only-client-secret"}})

@@ -197,7 +197,8 @@ function renderExecutionCancellation(execution) {
   const cancelled = (cancellation.kind || execution.status) === 'cancelled';
   const stage = String(cancellation.stage || cancellation.phase || 'run').replaceAll('_', ' ');
   const stageLabel = stage.charAt(0).toUpperCase() + stage.slice(1);
-  node.innerHTML = `<strong>${cancelled ? 'Cancelled' : 'Cancellation requested'}</strong><span>Requested by user during ${esc(stageLabel)}</span>`;
+  const requestLabel = cancellation.reason === 'server_shutdown' ? 'Server shutdown requested cancellation' : 'Requested by user';
+  node.innerHTML = `<strong>${cancelled ? 'Cancelled' : 'Cancellation requested'}</strong><span>${requestLabel} during ${esc(stageLabel)}</span>`;
   node.hidden = false;
 }
 

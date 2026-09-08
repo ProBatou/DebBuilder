@@ -110,6 +110,19 @@ class MixedPolicyBackend(FakeBackend):
 
 
 class ArtifactValidationTests(unittest.TestCase):
+    def test_bookworm_image_satisfies_builtin_debbuilder_runtime_dependencies(self):
+        root = Path(__file__).resolve().parents[1]
+        dockerfile = (root / "validation/Dockerfile").read_text()
+        install_clause = dockerfile.split(
+            "apt-get install -y --no-install-recommends", 1,
+        )[1].split("&& apt-get clean", 1)[0]
+        image_packages = set(install_clause.replace("\\", " ").split())
+        builtin = json.loads((root / "debbuilder/builtin_recipes/debbuilder.json").read_text())
+        runtime_dependencies = set(builtin["package"]["runtime_dependencies"])
+
+        self.assertEqual(runtime_dependencies, {"python3", "python3-dbus"})
+        self.assertLessEqual(runtime_dependencies, image_packages)
+
     def test_validation_after_workspace_cleanup_preserves_artifact_and_holds_lease(self):
         with tempfile.TemporaryDirectory() as temporary:
             store, run = self.successful_run(temporary)

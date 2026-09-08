@@ -8,6 +8,13 @@ docker build -t debbuilder-validation:bookworm -f validation/Dockerfile validati
 podman build -t debbuilder-validation:bookworm -f validation/Dockerfile validation
 ```
 
+Validation profiles provide a curated baseline of Debian runtime packages for
+offline lifecycle tests. The Bookworm profile includes `python3` and
+`python3-dbus`, which satisfy the managed DebBuilder package. Validation uses
+`dpkg --install` inside a network-disabled container; it does not fetch
+arbitrary packages declared in `Depends`. A package requiring capabilities
+outside a profile must use or add an explicitly reviewed validation profile.
+
 The controlled allowlist also contains `bookworm-node22`. Build it with:
 
 ```sh

@@ -200,6 +200,34 @@ Desktop and mobile captures are written to `.ui-artifacts/desktop/` and
 `.ui-artifacts/mobile/`. The local HTML report and failure traces are kept below
 `.ui-artifacts/` as well; the whole directory is ignored by Git.
 
+### DEV Behavior Lab
+
+List the available isolated DEV scenarios:
+
+```bash
+python3 -m tests.ui.behavior_lab --list-scenarios
+```
+
+Launch the static UI showcase on a LAN-accessible DEV port:
+
+```bash
+python3 -m tests.ui.behavior_lab --scenario showcase --host 0.0.0.0 --port 8765
+```
+
+The default bind is the safer `127.0.0.1`; when using `0.0.0.0`, open the Repo
+VM hostname/IP from another machine. The Lab uses disposable temporary data and
+repository directories, and removes them when stopped. Press Ctrl-C to stop the
+Behavior Lab.
+
+- `showcase` — static Runs, packages, and Recipes for UI review.
+- `cancellation-running` — a live local process tree that can be cancelled.
+- `queued-cancellable` — a Run queued behind a local blocker; cancel it before start.
+- `build-failure` — a harmless failing command with stdout and stderr.
+- `prepared-test` — static prepared Test and staging-preview state.
+- `graceful-shutdown` — active and queued Runs; Ctrl-C exercises normal shutdown.
+- `recovery` — an old-boot interrupted Run is terminalized at startup.
+- `recovery-blocked` — unresolved recovery keeps admission fail-closed.
+
 ## Repository access command
 
 The sidebar displays an install command derived from `DEBBUILDER_REPO_URL`:

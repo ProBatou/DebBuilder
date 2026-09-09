@@ -87,6 +87,80 @@ class WorkspaceCleanupTests(unittest.TestCase):
         self.assertEqual(result["cleaned"], [])
         self.assertEqual(execution_service.delete_logs(self.store, all_runs=True, dry_run=True)["count"], 0)
 
+    def test_non_latest_running_validation_or_publication_denies_cleanup(self):
+        for records_key in ("validations", "publications"):
+            with self.subTest(records_key=records_key):
+                run, root = self.make_run(f"historical-{records_key}")
+                run[records_key] = [{"status": "running"}, {"status": "failed"}]
+                self.store.save(run)
+
+                with self.assertRaises(workspace_cleanup.WorkspaceBusyError):
+                    workspace_cleanup.clean_workspace(self.store, run["id"])
+
+                self.assertTrue((root / "source/large-data").is_file())
+
+    def test_terminal_recovery_blocker_preserves_disposable_workspace(self):
+        run, root = self.make_run("recovery-blocked", status="failed")
+        run["recovery"] = {
+            "status": "blocked",
+            "code": "execution_recovery_unresolved",
+            "reason": "workload absence is not proven",
+        }
+        self.store.save(run)
+        self.assertFalse((root / ".active-command.json").exists())
+
+        with self.assertRaisesRegex(workspace_cleanup.WorkspaceBusyError, "recovery is unresolved"):
+            workspace_cleanup.clean_workspace(self.store, run["id"])
+        result = workspace_cleanup.apply_retention(
+            self.store, {"failed_workspaces_to_retain": 0},
+        )
+
+        self.assertIn(run["id"], result["skipped"])
+        self.assertTrue((root / "source/large-data").is_file())
+
+    def test_global_recovery_blocker_denies_every_destructive_entrypoint(self):
+        run, root = self.make_run("globally-blocked", status="success")
+        authorization = workspace_cleanup.CleanupAuthorization({
+            "code": "execution_recovery_unresolved",
+            "message": "global recovery remains unresolved",
+        })
+
+        with self.assertRaisesRegex(workspace_cleanup.WorkspaceBusyError, "global recovery"):
+            workspace_cleanup.clean_workspace(
+                self.store, run["id"], authorization=authorization,
+            )
+        with self.assertRaisesRegex(workspace_cleanup.WorkspaceBusyError, "global recovery"):
+            execution_service.delete_log(
+                self.store, run["id"], authorization=authorization,
+            )
+        result = workspace_cleanup.apply_retention(
+            self.store,
+            {"failed_workspaces_to_retain": 0},
+            authorization=authorization,
+        )
+
+        self.assertEqual(result["blocked"]["scope"], "global")
+        self.assertTrue((root / "source/large-data").is_file())
+        self.assertTrue((root / "logs/pipeline.log").is_file())
+
+    def test_resolved_recovered_failed_run_is_eligible(self):
+        run, root = self.make_run("recovery-resolved", status="failed")
+        run["recovery"] = {
+            "status": "resolved",
+            "code": "execution_interrupted",
+            "backend": "systemd_cgroup",
+            "reason": "previous boot identity is gone",
+            "resolved_at": "2026-09-05T12:00:00+00:00",
+        }
+        self.store.save(run)
+
+        result = workspace_cleanup.apply_retention(
+            self.store, {"failed_workspaces_to_retain": 0},
+        )
+
+        self.assertEqual([row["id"] for row in result["cleaned"]], [run["id"]])
+        self.assertFalse((root / "source").exists())
+
     def test_precreated_run_workspace_is_not_cleaned_as_terminal(self):
         run = build_pipeline.create_pipeline_run(recipe(), store=self.store, dry_run=False)
         workspace = Path(run["workspace"])

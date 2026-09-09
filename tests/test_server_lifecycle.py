@@ -63,7 +63,7 @@ class ServerLifecycleTests(unittest.TestCase):
         events = []
         retention_started = threading.Event()
         manager = FakeManager(events, accepting=accepting, shutdown_result=shutdown_result)
-        server = FakeServer(events, serve, retention_started=retention_started if accepting else None)
+        server = FakeServer(events, serve, retention_started=retention_started)
 
         def start(http_server, selected, *, prepare_directories, shutdown_check):
             self.assertIs(http_server, server)
@@ -102,13 +102,13 @@ class ServerLifecycleTests(unittest.TestCase):
             "retention_started", "serve",
         ])
         self.assertLess(events.index("admission_closed"), events.index("manager_shutdown"))
-        self.assertLess(events.index("retention_stopped"), events.index("manager_shutdown"))
+        self.assertLess(events.index("manager_shutdown"), events.index("retention_stopped"))
         self.assertLess(events.index("manager_shutdown"), events.index("listener_closed"))
         self.assertEqual(len(manager.shutdown_timeouts), 1)
         self.assertGreaterEqual(manager.shutdown_timeouts[0], 0)
         self.assertLessEqual(manager.shutdown_timeouts[0], 7)
         self.assertTrue(server.closed)
-        self.assertFalse(any(thread.name == "workspace-retention" for thread in threading.enumerate()))
+        self.assertFalse(any(thread.name == "storage-maintenance" for thread in threading.enumerate()))
 
     def test_unexpected_server_exception_is_preserved_when_cleanup_also_incomplete(self):
         failure = RuntimeError("server loop failed")
@@ -136,16 +136,12 @@ class ServerLifecycleTests(unittest.TestCase):
             outcome, _events, _manager, _server = self.lifecycle(shutdown_result=incomplete)
         self.assertEqual(outcome, 1)
 
-    def test_recovery_blocked_manager_does_not_start_retention(self):
-        retention = mock.Mock()
-        outcome, events, _manager, _server = self.lifecycle(
-            accepting=False,
-            retention_target=retention,
-        )
+    def test_recovery_blocked_manager_still_starts_read_only_maintenance(self):
+        outcome, events, _manager, _server = self.lifecycle(accepting=False)
 
         self.assertEqual(outcome, 0)
-        retention.assert_not_called()
-        self.assertNotIn("retention_started", events)
+        self.assertIn("retention_started", events)
+        self.assertIn("retention_stopped", events)
 
     def test_server_bind_failure_never_starts_or_shutdowns_manager(self):
         manager = FakeManager([])
@@ -203,7 +199,7 @@ class ServerLifecycleTests(unittest.TestCase):
 
         self.assertEqual(events, ["manager_started", "admission_closed", "manager_shutdown", "listener_closed"])
 
-    def test_retention_quiesces_before_run_shutdown_even_after_target_expires(self):
+    def test_maintenance_quiesces_after_run_shutdown_even_after_target_expires(self):
         events = []
         manager = FakeManager(events)
         retention_started = threading.Event()
@@ -231,7 +227,7 @@ class ServerLifecycleTests(unittest.TestCase):
 
         def thread_factory(*args, **kwargs):
             selected = real_thread(*args, **kwargs)
-            if kwargs.get("name") == "workspace-retention":
+            if kwargs.get("name") == "storage-maintenance":
                 original_join = selected.join
 
                 def join(timeout=None):
@@ -264,14 +260,14 @@ class ServerLifecycleTests(unittest.TestCase):
                 self.assertTrue(retention_stop_requested.wait(2))
                 self.assertTrue(retention_join_attempted.wait(2))
                 self.assertTrue(retention_ownership_continued.wait(2))
-                self.assertNotIn("manager_shutdown", events)
+                self.assertIn("manager_shutdown", events)
                 self.assertTrue(lifecycle_thread.is_alive())
                 release_retention.set()
                 lifecycle_thread.join(3)
 
         self.assertEqual(errors, [])
         self.assertEqual(outcome["value"], 1)
-        self.assertLess(events.index("retention_stopped"), events.index("manager_shutdown"))
+        self.assertLess(events.index("manager_shutdown"), events.index("retention_stopped"))
         if lifecycle_thread.is_alive():
             release_retention.set()
             lifecycle_thread.join(2)
@@ -451,7 +447,7 @@ class ServerLifecycleTests(unittest.TestCase):
             serve.assert_called_once_with(app.Handler)
         with mock.patch("debbuilder.app.serve_application", return_value=9) as serve:
             self.assertEqual(server_entrypoint.main(), 9)
-            serve.assert_called_once_with(server_entrypoint.Handler, retention_target=None)
+            serve.assert_called_once_with(server_entrypoint.Handler)
 
 
 if __name__ == "__main__":

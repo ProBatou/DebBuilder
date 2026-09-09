@@ -1,4 +1,5 @@
 let currentSettings = null;
+let currentStorage = null;
 let settingsDirty = false;
 let settingsSaving = false;
 let settingsSaveTimer = null;
@@ -38,10 +39,75 @@ function markSettingsDirty(delay = 500){
 
 async function loadSettings(){
   if (settingsSaveTimer) { clearTimeout(settingsSaveTimer); settingsSaveTimer = null; }
-  currentSettings = (await getJson('/api/settings')).settings;
+  const [settingsResult, storageResult] = await Promise.allSettled([
+    getJson('/api/settings'),
+    getJson('/api/storage'),
+  ]);
+  if (settingsResult.status === 'rejected') throw settingsResult.reason;
+  currentSettings = settingsResult.value.settings;
+  currentStorage = storageResult.status === 'fulfilled' ? storageResult.value.storage : {
+    state:'error', partial:true, measured_at:null,
+    diagnostics:[storageResult.reason?.message || 'Storage information is unavailable'],
+    bytes:{}, categories:{}, runs:{},
+  };
   settingsDirty = false;
   settingsRevision = 0;
   renderSettingsPage();
+}
+
+function formatStorageBytes(value){
+  if (value === null || value === undefined) return '—';
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return '—';
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  const units = ['KiB','MiB','GiB','TiB'];
+  let amount = bytes;
+  let unit = -1;
+  do { amount /= 1024; unit += 1; } while (amount >= 1024 && unit < units.length - 1);
+  return `${amount >= 10 ? amount.toFixed(1) : amount.toFixed(2)} ${units[unit]}`;
+}
+
+function storageMeasurementAge(measuredAt){
+  if (!measuredAt) return 'No completed measurement yet';
+  const measured = new Date(measuredAt).getTime();
+  if (!Number.isFinite(measured)) return 'Measurement time unavailable';
+  const seconds = Math.max(0, Math.round((Date.now() - measured) / 1000));
+  if (seconds < 60) return `Measured ${seconds}s ago`;
+  if (seconds < 3600) return `Measured ${Math.floor(seconds / 60)}m ago`;
+  return `Measured ${Math.floor(seconds / 3600)}h ago`;
+}
+
+function storageMetric(value, label, detail='', tone=''){
+  return `<article class="stat-card storage-stat ${tone}"><strong>${esc(value)}</strong><span>${esc(label)}</span>${detail ? `<em>${esc(detail)}</em>` : ''}</article>`;
+}
+
+function renderStorageSummary(storage = currentStorage){
+  const state = storage?.state || 'collecting';
+  const bytes = storage?.bytes || {};
+  const categories = storage?.categories || {};
+  const runs = storage?.runs || {};
+  const badgeTone = state === 'ready' ? 'active' : state === 'error' ? 'danger' : 'warning';
+  const diagnostics = (storage?.diagnostics || []).filter(Boolean);
+  const hasRunMeasurement = runs.count !== null && runs.count !== undefined;
+  const note = state === 'error'
+    ? (diagnostics[0] || 'Storage information is unavailable.')
+    : state === 'partial'
+      ? 'Some paths changed or could not be measured; shown totals are partial.'
+      : state === 'stale'
+        ? 'Showing the last completed measurement while refresh is pending.'
+        : state === 'collecting'
+          ? 'Collecting storage information in the background.'
+          : 'Read-only totals from the last background measurement.';
+  return `<div class="storage-summary" id="storageSummary">
+    <div class="storage-summary-head"><div><h4>Storage</h4><p class="muted">${esc(note)}</p></div>${statusBadge(state.toUpperCase(), badgeTone)}</div>
+    <div class="stat-grid storage-stat-grid">
+      ${storageMetric(formatStorageBytes(bytes.managed_total), 'Managed storage', storageMeasurementAge(storage?.measured_at))}
+      ${storageMetric(hasRunMeasurement ? String(runs.count) : '—', 'Runs', hasRunMeasurement ? `${runs.failed_count || 0} failed · ${runs.test_count || 0} Test` : 'Awaiting measurement')}
+      ${storageMetric(formatStorageBytes(bytes.repository), 'APT repository', storage?.roots?.repository_within_data ? 'Included in data root' : 'External root')}
+      ${storageMetric(formatStorageBytes(categories.disposable), 'Disposable workspace', 'Sources, staging and downloads')}
+      ${storageMetric(formatStorageBytes(runs.artifact_bytes), 'Artifacts', hasRunMeasurement ? `${runs.artifact_count || 0} final .deb` : 'Awaiting measurement')}
+    </div>
+  </div>`;
 }
 
 function settingsPayload(){
@@ -183,6 +249,7 @@ function renderSettingsPage(){
 
       <section class="settings-section settings-card card maintenance-settings-card">
         <header class="settings-section-head section-header"><div><h3>Maintenance</h3><p class="muted">Remove visible execution history and detailed logs without changing recipes, packages, APT publications, artifacts, manifests, validations, or publications. Active executions are excluded.</p></div></header>
+        ${renderStorageSummary()}
         <div class="settings-form-grid settings-grid-two">
           <label class="settings-check setting-toggle"><span>Automatic workspace cleanup</span><input type="checkbox" id="settingWorkspaceCleanupEnabled" ${cleanup.enabled?'checked':''}></label>
           ${fieldInput('settingFailedWorkspacesToRetain','Failed workspaces to retain',cleanup.failed_workspaces_to_retain,'type="number" min="0" max="1000" step="1" required')}

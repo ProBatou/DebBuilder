@@ -123,6 +123,19 @@ class StaticUiTests(unittest.TestCase):
         self.assertIn('expectedAbsentIds', settings)
         self.assertNotRegex(settings, r"status\.textContent\s*=\s*`?Cleared")
 
+    def test_settings_maintenance_has_cached_storage_observability(self):
+        settings = self.read("static/settings.js")
+        pages = self.read("static/css/pages.css")
+        self.assertIn("getJson('/api/storage')", settings)
+        for label in (
+            "Managed storage", "Runs", "APT repository", "Disposable workspace", "Artifacts",
+        ):
+            self.assertIn(label, settings)
+        for state in ("collecting", "ready", "partial", "stale", "error"):
+            self.assertIn(state, settings)
+        self.assertIn("storage-stat-grid", pages)
+        self.assertNotIn("delete artifact", settings.lower())
+
     def test_settings_page_exposes_lifecycle_automation(self):
         settings = self.read("static/settings.js")
         self.assertIn('id="settingAutoValidateAfterBuild"', settings)
@@ -547,12 +560,12 @@ class StaticUiTests(unittest.TestCase):
         self.assertIn('<svg viewBox="0 0 24 24" aria-hidden="true">', html)
         self.assertIn('/style.css?v=20260905-1', html)
         self.assertIn('/css/components.css?v=20260905-4', html)
-        self.assertIn('/css/pages.css?v=20260905-7', html)
+        self.assertIn('/css/pages.css?v=20260908-1', html)
         self.assertNotIn('/css/logs.css', html)
         for script in ("/js/pages/dashboard.js", "/js/pages/packages.js", "/js/pages/logs.js", "/js/recipe/source_changes.js", "/js/admin.js"):
             self.assertIn(script, html)
         self.assertIn('/ui_core.js?v=20260906-1', html)
-        self.assertIn('/settings.js?v=20260905-4', html)
+        self.assertIn('/settings.js?v=20260908-1', html)
         self.assertIn('/js/pages/dashboard.js?v=20260905-2', html)
         self.assertIn('/js/pages/logs.js?v=20260905-7', html)
         self.assertIn('/js/admin.js?v=20260905-4', html)
@@ -572,7 +585,7 @@ class StaticUiTests(unittest.TestCase):
         pages = self.read("static/css/pages.css")
         self.assertIn('/style.css?v=20260905-1', html)
         self.assertIn('/css/components.css?v=20260905-4', html)
-        self.assertIn('/css/pages.css?v=20260905-7', html)
+        self.assertIn('/css/pages.css?v=20260908-1', html)
         self.assertNotIn('/css/logs.css', html)
         self.assertFalse((ROOT / "static" / "css" / "logs.css").exists())
         self.assertNotRegex(self.styles(), r"nth-(?:child|of-type)\s*\(")

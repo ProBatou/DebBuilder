@@ -302,19 +302,30 @@ def get_log(store: BuildStore, run_id: str, *, verbosity: str = "normal", after:
     return {"text": rendered[start:], "offset": len(rendered), "size": len(rendered), "complete": lifecycle_complete, "verbosity": verbosity}
 
 
-def delete_log(store: BuildStore, run_id: str) -> dict:
+def delete_log(store: BuildStore, run_id: str, *, authorization=None) -> dict:
     require_safe_name(run_id, "execution")
-    return {**store.clear_log_history(run_id), "history_deleted": True, "visible": False}
+    return {
+        **store.clear_log_history(run_id, authorization=authorization),
+        "history_deleted": True,
+        "visible": False,
+    }
 
 
-def delete_logs(store: BuildStore, run_ids: list[str] | None = None, *, all_runs: bool = False, dry_run: bool = False) -> dict:
+def delete_logs(
+    store: BuildStore,
+    run_ids: list[str] | None = None,
+    *,
+    all_runs: bool = False,
+    dry_run: bool = False,
+    authorization=None,
+) -> dict:
     selected = workspace_cleanup.completed_history_ids(store) if all_runs else list(run_ids or [])
     if dry_run:
         return {"count": len(selected), "ids": selected}
     deleted, errors = [], []
     for run_id in selected:
         try:
-            deleted.append(delete_log(store, str(run_id)))
+            deleted.append(delete_log(store, str(run_id), authorization=authorization))
         except Exception as exc:
             errors.append({"id": str(run_id), "error": str(exc)})
     return {"deleted": deleted, "errors": errors}

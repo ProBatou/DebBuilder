@@ -160,7 +160,7 @@ def main() -> int:
 
     def retention_target(stop):
         phase_barrier("retention")
-        return app.workspace_retention_loop(stop)
+        stop.wait()
 
     server_holder = []
 
@@ -183,7 +183,7 @@ def main() -> int:
         "lifecycle_threads": sorted(
             thread.name for thread in threading.enumerate()
             if thread.name in {
-                "debbuilder-execution", "workspace-retention", "signal-shutdown-coordinator",
+                "debbuilder-execution", "storage-maintenance", "signal-shutdown-coordinator",
             }
         ),
     }), flush=True)

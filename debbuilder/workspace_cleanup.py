@@ -8,6 +8,7 @@ import re
 import secrets
 import shutil
 import stat
+import threading
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -24,6 +25,47 @@ CLEANUP_MARKER = ".workspace-cleanup.json"
 
 class WorkspaceBusyError(RuntimeError):
     """The execution owns its workspace or has not finished."""
+
+
+class CleanupAuthorization:
+    """Explicit global and per-Run authorization for destructive cleanup."""
+
+    def __init__(self, global_blocker: dict | None = None):
+        self._lock = threading.Lock()
+        self._global_blocker = dict(global_blocker) if global_blocker else None
+
+    def update_global_blocker(self, blocker: dict | None) -> None:
+        with self._lock:
+            self._global_blocker = dict(blocker) if blocker else None
+
+    def global_blocker(self) -> dict | None:
+        with self._lock:
+            return dict(self._global_blocker) if self._global_blocker else None
+
+    def require_global(self) -> None:
+        blocker = self.global_blocker()
+        if blocker is not None:
+            raise WorkspaceBusyError(
+                str(blocker.get("message") or "Startup recovery is unresolved; destructive cleanup refused")
+            )
+
+    def require_run(self, run: dict) -> None:
+        self.require_global()
+        recovery = run.get("recovery")
+        if recovery is not None:
+            resolved = (
+                isinstance(recovery, dict)
+                and recovery.get("status") == "resolved"
+                and recovery.get("code") == "execution_interrupted"
+                and bool(recovery.get("backend"))
+                and bool(recovery.get("reason"))
+                and bool(recovery.get("resolved_at"))
+            )
+            if not resolved:
+                raise WorkspaceBusyError("Run recovery is unresolved; destructive cleanup refused")
+
+
+OPEN_CLEANUP_AUTHORIZATION = CleanupAuthorization()
 
 
 @contextmanager
@@ -110,7 +152,16 @@ def read_run(fd: int, root: Path, run_id: str) -> dict:
 
 def require_finished(run: dict) -> None:
     from .build_pipeline import execution_summary
-    if execution_summary(run)["lifecycle_active"] or any(step.get("status") == "running" for step in run["steps"]):
+    auxiliary_active = any(
+        isinstance(record, dict) and record.get("status") == "running"
+        for key in ("validations", "publications")
+        for record in (run.get(key) or [])
+    )
+    if (
+        execution_summary(run)["lifecycle_active"]
+        or any(step.get("status") == "running" for step in run["steps"])
+        or auxiliary_active
+    ):
         raise WorkspaceBusyError("Execution is active; deletion/cleanup is not cancellation")
 
 
@@ -185,12 +236,19 @@ def _require_unused_workspace(workspace: Path) -> None:
             raise WorkspaceBusyError("Cannot verify whether a process still uses the workspace") from exc
 
 
-def _clean_locked(fd: int, run: dict, *, reason: str) -> dict:
+def _clean_locked(
+    fd: int,
+    run: dict,
+    *,
+    reason: str,
+    authorization: CleanupAuthorization = OPEN_CLEANUP_AUTHORIZATION,
+) -> dict:
     # A terminal Run can still retain command ownership metadata after a
     # containment failure.  Startup recovery must prove workload absence and
     # clear that exact record before workspace data may be destroyed.
     from .command_identity import CommandIdentityError, read_persisted_identity
 
+    authorization.require_run(run)
     require_finished(run)
     try:
         identity = read_persisted_identity(fd)
@@ -208,10 +266,17 @@ def _clean_locked(fd: int, run: dict, *, reason: str) -> dict:
     return result
 
 
-def clean_workspace(store, run_id: str, *, reason: str = "manual") -> dict:
+def clean_workspace(
+    store,
+    run_id: str,
+    *,
+    reason: str = "manual",
+    authorization: CleanupAuthorization = OPEN_CLEANUP_AUTHORIZATION,
+) -> dict:
+    authorization.require_global()
     with store.locked_run(run_id, blocking=False) as fd:
         run = read_run(fd, store.root, run_id)
-        return _clean_locked(fd, run, reason=reason)
+        return _clean_locked(fd, run, reason=reason, authorization=authorization)
 
 
 def _clear_output(value) -> None:
@@ -226,9 +291,16 @@ def _clear_output(value) -> None:
             _clear_output(child)
 
 
-def delete_history(store, run_id: str) -> dict:
+def delete_history(
+    store,
+    run_id: str,
+    *,
+    authorization: CleanupAuthorization = OPEN_CLEANUP_AUTHORIZATION,
+) -> dict:
+    authorization.require_global()
     with store.locked_run(run_id, blocking=False) as fd:
         run = read_run(fd, store.root, run_id)
+        authorization.require_run(run)
         require_finished(run)
         marker = read_json(fd, HISTORY_MARKER)
         already_deleted = bool(marker or run.get("log_deleted"))
@@ -250,7 +322,9 @@ def delete_history(store, run_id: str) -> dict:
                 finally:
                     os.close(validation_fd)
             _check_artifact(run, extra_directories=("logs",) + tuple(f"validation/{name}/commands" for name, _child in validation_fds))
-            cleanup = _clean_locked(fd, run, reason="history_deleted")
+            cleanup = _clean_locked(
+                fd, run, reason="history_deleted", authorization=authorization,
+            )
             removed = _remove_targets(fd, ("logs",))
             for name, child in validation_fds:
                 removed.extend(f"validation/{name}/{target}" for target in _remove_targets(child, ("commands",)))
@@ -312,10 +386,20 @@ def _completion_time(run: dict) -> float:
     return max(datetime.fromisoformat(date).timestamp() for date in dates if date)
 
 
-def apply_retention(store, policy: dict | None = None) -> dict:
+def apply_retention(
+    store,
+    policy: dict | None = None,
+    *,
+    authorization: CleanupAuthorization = OPEN_CLEANUP_AUTHORIZATION,
+) -> dict:
     policy = validate_policy(DEFAULT_POLICY if policy is None else policy)
     result = {"cleaned": [], "retained": [], "skipped": [], "errors": []}
     if not policy["enabled"]:
+        return result
+    try:
+        authorization.require_global()
+    except WorkspaceBusyError as exc:
+        result["blocked"] = {"scope": "global", "reason": str(exc)}
         return result
     try:
         with directory_fd(store.root) as fd:
@@ -327,6 +411,7 @@ def apply_retention(store, policy: dict | None = None) -> dict:
         try:
             with store.locked_run(run_id, blocking=False) as fd:
                 run = read_run(fd, store.root, run_id)
+                authorization.require_run(run)
                 require_finished(run)
                 entries = set(os.listdir(fd))
                 if not entries.intersection(DISPOSABLE_DIRECTORIES + DISPOSABLE_FILES):
@@ -352,6 +437,7 @@ def apply_retention(store, policy: dict | None = None) -> dict:
             # since the scan. The snapshot is never used to authorize deletion.
             with store.locked_run(run_id, blocking=False) as fd:
                 run = read_run(fd, store.root, run_id)
+                authorization.require_run(run)
                 require_finished(run)
                 if os.stat("run.json", dir_fd=fd, follow_symlinks=False).st_mtime_ns != revision:
                     result["skipped"].append(run_id)
@@ -360,7 +446,9 @@ def apply_retention(store, policy: dict | None = None) -> dict:
                 if current_failed != failed:
                     result["skipped"].append(run_id)
                     continue
-                cleanup = _clean_locked(fd, run, reason="retention")
+                cleanup = _clean_locked(
+                    fd, run, reason="retention", authorization=authorization,
+                )
                 if cleanup["removed"]:
                     result["cleaned"].append(cleanup)
         except (WorkspaceBusyError, FileNotFoundError):

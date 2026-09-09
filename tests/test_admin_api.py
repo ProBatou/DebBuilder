@@ -456,7 +456,7 @@ class AdminApiTests(AdminApiCase):
         _, visible = self.request("GET", "/api/executions")
         self.assertIn(run["id"], [row["id"] for row in visible["executions"]])
 
-    def test_workspace_policy_round_trip_and_cleanup_after_automation(self):
+    def test_workspace_policy_round_trip_and_automation_requests_cleanup(self):
         store, run, artifact = self.successful_build_run("cleanup-automation")
         source = Path(run["workspace"]) / "source/large-output"
         source.write_text("temporary")
@@ -464,20 +464,26 @@ class AdminApiTests(AdminApiCase):
         self.assertEqual(settings["settings"]["workspace_cleanup"], {"enabled": True, "failed_workspaces_to_retain": 5})
         _, saved = self.request("POST", "/api/settings", {"workspace_cleanup": {"enabled": False, "failed_workspaces_to_retain": 2}})
         self.assertEqual(saved["settings"]["workspace_cleanup"], {"enabled": False, "failed_workspaces_to_retain": 2})
-        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": run["id"], "status": "success"}):
+        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": run["id"], "status": "success"}), \
+                mock.patch("debbuilder.app.request_maintenance") as request:
             server.run_recipe_pipeline_with_automation({}, dry_run=False)
+        request.assert_called_once_with(cleanup=True)
         self.assertTrue(source.exists())
         self.request("POST", "/api/settings", {"workspace_cleanup": {"enabled": True}})
-        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": run["id"], "status": "success"}):
+        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": run["id"], "status": "success"}), \
+                mock.patch("debbuilder.app.request_maintenance") as request:
             result = server.run_recipe_pipeline_with_automation({}, dry_run=False)
         self.assertEqual(result["status"], "success")
+        request.assert_called_once_with(cleanup=True)
+        self.assertTrue(source.exists())
+        server.cleanup_workspaces(authorization=self.httpd.cleanup_authorization)
         self.assertFalse(source.exists())
         self.assertTrue(artifact.exists())
         self.assertIsNotNone(server.get_execution(run["id"]))
         _, loaded = self.request("GET", "/api/settings")
         self.assertEqual(loaded["settings"]["workspace_cleanup"]["failed_workspaces_to_retain"], 2)
 
-    def test_workspace_sweep_uses_current_data_and_worker_stops_cleanly(self):
+    def test_requested_maintenance_uses_current_data_and_stops_cleanly(self):
         store, run, _artifact = self.successful_build_run("sweep-run")
         source = Path(run["workspace"]) / "source"
         alternate = server.DATA / "other-data"
@@ -485,13 +491,16 @@ class AdminApiTests(AdminApiCase):
         with mock.patch.object(server, "DATA", alternate):
             self.assertEqual(server.cleanup_workspaces()["cleaned"], [])
         self.assertTrue(source.exists())
-        stop = mock.Mock()
-        stop.is_set.side_effect = [False, True]
-        with mock.patch("debbuilder.app.cleanup_workspaces", wraps=server.cleanup_workspaces) as sweep:
-            server.workspace_retention_loop(stop)
-        sweep.assert_called_once_with()
-        stop.wait.assert_called_once_with(300)
+        service = server.create_maintenance_service(self.httpd)
+        service.start()
+        service.request(cleanup=True)
+        deadline = time.monotonic() + 2
+        while source.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        service.stop()
+        service.join(2)
         self.assertFalse(source.exists())
+        self.assertFalse(service.is_alive())
 
     def test_all_safe_settings_sections_can_be_updated(self):
         body = {

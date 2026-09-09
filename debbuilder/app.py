@@ -25,7 +25,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import artifact_publication, artifact_validation, auth_service, automation_service, build_pipeline, builtin_recipe, deb_inspector, execution_recovery, execution_service, notifications, package_service, recipe_store, release_cache, settings_service, storage, upstream_archive, workspace_cleanup
+from . import artifact_publication, artifact_validation, auth_service, automation_service, build_pipeline, builtin_recipe, deb_inspector, execution_recovery, execution_service, maintenance, notifications, package_service, recipe_store, release_cache, settings_service, storage, storage_inventory, upstream_archive, workspace_cleanup
 from .build_models import utc_now
 from .build_store import BuildStore
 from .execution_manager import DEFAULT_SHUTDOWN_TIMEOUT, ExecutionManager, ExecutionManagerError
@@ -68,6 +68,7 @@ PUBLIC_REPO_FILES = {"/repository.gpg", "/install.sh"}
 NOTIFICATION_SERVICE = None
 GITHUB_RELEASE_CACHE_SERVICE = None
 APPLICATION_MUTATION_GATE = None
+APPLICATION_MAINTENANCE_SERVICE = None
 
 
 class RunAdmissionError(RuntimeError):
@@ -249,7 +250,7 @@ def run_recipe_pipeline_with_automation(workflow: dict, *, dry_run: bool = True)
             notify_completion=lambda result: notification_service().notify_automatic_completion(result),
         )
     finally:
-        cleanup_workspaces()
+        request_maintenance(cleanup=True)
 
 
 def execute_queued_recipe_run(run_id: str, *, store: BuildStore, expected_initial_status: str, cancellation_control=None) -> dict:
@@ -274,7 +275,7 @@ def execute_queued_recipe_run(run_id: str, *, store: BuildStore, expected_initia
             notify_completion=lambda completed: notification_service().notify_automatic_completion(completed),
         )
     finally:
-        cleanup_workspaces()
+        request_maintenance(cleanup=True)
 
 
 def create_execution_manager(*, store: BuildStore | None = None, queue_capacity: int = 8, execute=None) -> ExecutionManager:
@@ -325,6 +326,13 @@ def start_execution_manager(
             shutdown_check()
     selected = manager or create_execution_manager()
     recovery = execution_recovery.recover_startup(selected.store)
+    authorization = getattr(http_server, "cleanup_authorization", None)
+    if authorization is None:
+        authorization = workspace_cleanup.CleanupAuthorization()
+        http_server.cleanup_authorization = authorization
+    authorization.update_global_blocker(recovery.admission_blocker)
+    if getattr(http_server, "storage_inventory", None) is None:
+        http_server.storage_inventory = create_storage_inventory()
     if shutdown_check is not None:
         shutdown_check()
     prepare_authentication_for_startup()
@@ -470,11 +478,12 @@ def enqueue_recipe_run(manager: ExecutionManager | None, workflow: dict, *, dry_
     return {"run_id": run["id"], "status": "queued"}
 
 
-def cleanup_workspaces() -> dict:
+def cleanup_workspaces(*, authorization=None) -> dict:
     """Use the current DATA/settings; cleanup failures never change a Run result."""
     try:
         result = workspace_cleanup.apply_retention(
             BuildStore(DATA / "builds"), app_settings().get("workspace_cleanup"),
+            authorization=authorization or workspace_cleanup.OPEN_CLEANUP_AUTHORIZATION,
         )
         for error in result["errors"]:
             logging.getLogger(__name__).warning("Workspace cleanup: %s", error)
@@ -493,7 +502,7 @@ def _cancellation_result(run_id: str, status: str, metadata: dict) -> dict:
     }
 
 
-def cancel_execution(manager: ExecutionManager | None, run_id: str, *, cleanup=None) -> dict:
+def cancel_execution(manager: ExecutionManager | None, run_id: str, *, maintenance_request=None) -> dict:
     """Delegate cancellation ownership and map it to the public application contract."""
     require_safe_name(run_id, "execution")
     if manager is None or not manager.accepting:
@@ -538,13 +547,12 @@ def cancel_execution(manager: ExecutionManager | None, run_id: str, *, cleanup=N
             details={"run_id": run_id, "status": status},
         )
     if outcome == "queued_cancelled":
-        sweep = cleanup or cleanup_workspaces
         try:
-            sweep()
-        except Exception as exc:
-            logging.getLogger(__name__).exception(
-                "Workspace retention sweep failed after queued cancellation of Run %s", run_id,
-            )
+            (maintenance_request or request_maintenance)(cleanup=True)
+        except Exception:
+            # Cancellation is already durable.  A broken notification boundary
+            # must not turn that successful state transition into an HTTP error.
+            LOGGER.exception("Maintenance request failed after queued cancellation")
         return _cancellation_result(run_id, "cancelled", result.get("cancellation") or {})
     if outcome == "active_cancel_requested":
         return _cancellation_result(run_id, "cancelling", result.get("cancellation") or {})
@@ -556,10 +564,27 @@ def cancel_execution(manager: ExecutionManager | None, run_id: str, *, cleanup=N
     )
 
 
-def workspace_retention_loop(stop: threading.Event) -> None:
-    while not stop.is_set():
-        cleanup_workspaces()
-        stop.wait(300)
+def request_maintenance(*, refresh: bool = True, cleanup: bool = False) -> None:
+    """Signal the one application-owned worker without waiting for filesystem work."""
+    service = APPLICATION_MAINTENANCE_SERVICE
+    if service is not None:
+        service.request(refresh=refresh, cleanup=cleanup)
+
+
+def create_maintenance_service(http_server):
+    authorization = http_server.cleanup_authorization
+    return maintenance.MaintenanceService(
+        http_server.storage_inventory,
+        cleanup=lambda: cleanup_workspaces(authorization=authorization),
+    )
+
+
+def create_storage_inventory():
+    return storage_inventory.StorageInventory(
+        DATA,
+        REPOSITORY_ROOT,
+        policy_provider=lambda: app_settings().get("workspace_cleanup", {}),
+    )
 
 
 def validate_build_artifact(run_id: str, payload: dict | None = None) -> dict:
@@ -572,6 +597,7 @@ def validate_build_artifact(run_id: str, payload: dict | None = None) -> dict:
         allowed_previous_roots=(REPOSITORY_ROOT / "pool",),
     )
     notification_service().notify_validation_result(result)
+    request_maintenance(refresh=True)
     return result
 
 
@@ -584,6 +610,7 @@ def publish_build_artifact(run_id: str, payload: dict | None = None) -> dict:
         confirm=str(payload.get("confirm") or ""),
     )
     notification_service().notify_publication_result(result)
+    request_maintenance(refresh=True)
     return result
 
 
@@ -860,17 +887,39 @@ def get_execution_log(run_id: str, *, verbosity: str = "normal", after: int = 0)
     return execution_service.get_log(BuildStore(DATA / "builds"), run_id, verbosity=verbosity, after=after)
 
 
-def delete_execution_log(run_id: str) -> dict:
-    return execution_service.delete_log(BuildStore(DATA / "builds"), run_id)
+def delete_execution_log(run_id: str, *, authorization=None) -> dict:
+    result = execution_service.delete_log(
+        BuildStore(DATA / "builds"), run_id, authorization=authorization,
+    )
+    request_maintenance(refresh=True)
+    return result
 
 
-def delete_execution_logs(run_ids: list[str] | None = None, *, all_runs: bool = False, dry_run: bool = False) -> dict:
-    return execution_service.delete_logs(
+def delete_execution_logs(
+    run_ids: list[str] | None = None,
+    *,
+    all_runs: bool = False,
+    dry_run: bool = False,
+    authorization=None,
+) -> dict:
+    result = execution_service.delete_logs(
         BuildStore(DATA / "builds"),
         run_ids,
         all_runs=all_runs,
         dry_run=dry_run,
+        authorization=authorization,
     )
+    if not dry_run:
+        request_maintenance(refresh=True)
+    return result
+
+
+def storage_snapshot(inventory=None) -> dict:
+    """Return cached observer state; this path never performs collection."""
+    selected = inventory
+    if selected is None:
+        return storage_inventory.StorageInventory(DATA, REPOSITORY_ROOT).snapshot()
+    return selected.snapshot()
 
 
 def dashboard_summary() -> dict:
@@ -949,6 +998,7 @@ def update_settings(payload: dict) -> dict:
     if isinstance(notification_settings, dict) and notification_settings.get("token"):
         notifications.save_ntfy_token(DATA, str(notification_settings["token"]))
     settings_service.update_settings(DATA, payload, app_settings(), settings_view)
+    request_maintenance(refresh=True)
     return settings_view()
 
 
@@ -1068,17 +1118,17 @@ def serve_application(
     *,
     server_factory=ThreadingHTTPServer,
     manager_factory=create_execution_manager,
-    retention_target=workspace_retention_loop,
+    maintenance_factory=create_maintenance_service,
+    retention_target=None,
     install_signal_handlers=True,
     shutdown_timeout=DEFAULT_SHUTDOWN_TIMEOUT,
 ) -> int:
     """Own startup, serving, and shutdown under one diagnostic target."""
-    global APPLICATION_MUTATION_GATE, GITHUB_RELEASE_CACHE_SERVICE
+    global APPLICATION_MAINTENANCE_SERVICE, APPLICATION_MUTATION_GATE, GITHUB_RELEASE_CACHE_SERVICE
     graceful_timeout = _graceful_shutdown_timeout(shutdown_timeout)
     http_server = None
     manager = None
-    retention_stop = threading.Event()
-    retention = None
+    maintenance_service = None
     cleanup_started = threading.Event()
     shutdown_requested = threading.Event()
     signal_requested_state = [False]
@@ -1094,6 +1144,7 @@ def serve_application(
     mutation_gate = MutationGate()
     mutation_result = None
     previous_mutation_gate = APPLICATION_MUTATION_GATE
+    previous_maintenance_service = APPLICATION_MAINTENANCE_SERVICE
     APPLICATION_MUTATION_GATE = mutation_gate
 
     try:
@@ -1114,7 +1165,6 @@ def serve_application(
                     return
                 shutdown_requested.set()
                 mutation_gate.begin_shutdown()
-                retention_stop.set()
                 selected_manager = manager
                 if selected_manager is not None and selected_manager.worker is not None:
                     try:
@@ -1149,6 +1199,8 @@ def serve_application(
         check_shutdown_requested()
         http_server = server_factory((RUNTIME.host, RUNTIME.port), handler_class)
         http_server.mutation_gate = mutation_gate
+        http_server.cleanup_authorization = workspace_cleanup.CleanupAuthorization()
+        http_server.storage_inventory = create_storage_inventory()
         check_shutdown_requested()
         start_execution_manager(
             http_server,
@@ -1157,15 +1209,15 @@ def serve_application(
             shutdown_check=check_shutdown_requested,
         )
         check_shutdown_requested()
-        if manager.accepting and retention_target is not None:
-            retention = threading.Thread(
-                target=retention_target,
-                args=(retention_stop,),
-                name="workspace-retention",
-                daemon=False,
-            )
-            retention.start()
-            check_shutdown_requested()
+        maintenance_service = (
+            maintenance.TargetMaintenanceService(retention_target)
+            if retention_target is not None
+            else maintenance_factory(http_server)
+        )
+        http_server.maintenance_service = maintenance_service
+        APPLICATION_MAINTENANCE_SERVICE = maintenance_service
+        maintenance_service.start()
+        check_shutdown_requested()
         print(f"DebBuilder Repo UI listening on http://{RUNTIME.host}:{RUNTIME.port}")
         with lifecycle_condition:
             check_shutdown_requested()
@@ -1191,21 +1243,11 @@ def serve_application(
             except (BlockingIOError, OSError):
                 pass
         manager_started = manager is not None and manager.worker is not None
-        retention_stop.set()
         if manager_started:
             try:
                 manager.begin_shutdown()
             except BaseException as exc:
                 cleanup_failures.append(("execution admission shutdown", exc))
-        if retention is not None and retention.is_alive():
-            retention.join(_remaining_shutdown_time(graceful_deadline))
-            if retention.is_alive():
-                failure = TimeoutError(
-                    "workspace retention did not quiesce within the graceful shutdown target"
-                )
-                cleanup_failures.append(("workspace retention shutdown", failure))
-                LOGGER.error("Incomplete workspace retention shutdown: %s", failure)
-                retention.join()
         try:
             mutation_result = mutation_gate.wait_for_quiescence(
                 _remaining_shutdown_time(graceful_deadline)
@@ -1251,6 +1293,17 @@ def serve_application(
             worker = manager.worker
             if worker is not None and getattr(worker, "is_alive", lambda: False)():
                 worker.join()
+        if maintenance_service is not None:
+            maintenance_service.stop(drain=True)
+            if maintenance_service.is_alive():
+                maintenance_service.join(_remaining_shutdown_time(graceful_deadline))
+                if maintenance_service.is_alive():
+                    failure = TimeoutError(
+                        "storage maintenance did not quiesce within the graceful shutdown target"
+                    )
+                    cleanup_failures.append(("storage maintenance shutdown", failure))
+                    LOGGER.error("Incomplete storage maintenance shutdown: %s", failure)
+                    maintenance_service.join()
         if http_server is not None:
             try:
                 http_server.server_close()
@@ -1277,6 +1330,7 @@ def serve_application(
                 except OSError as exc:
                     cleanup_failures.append(("signal wakeup pipe close", exc))
         APPLICATION_MUTATION_GATE = previous_mutation_gate
+        APPLICATION_MAINTENANCE_SERVICE = previous_maintenance_service
 
     for component, failure in cleanup_failures:
         LOGGER.error("Incomplete %s: %s", component, failure)

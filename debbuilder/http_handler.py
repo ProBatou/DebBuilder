@@ -145,6 +145,10 @@ def create_handler(api):
                 self._get_execution(path)
             elif path == "/api/settings":
                 api.json_response(self, {"settings": api.settings_view()})
+            elif path == "/api/storage":
+                api.json_response(self, {"storage": api.storage_snapshot(
+                    getattr(self.server, "storage_inventory", None),
+                )})
             elif path == "/api/workflows":
                 api.json_response(self, api.workflow_listing())
             elif path.startswith("/api/workflows/"):
@@ -250,7 +254,12 @@ def create_handler(api):
                     }}, 400)
                     return
                 try:
-                    result = api.cancel_execution(getattr(self.server, "execution_manager", None), run_id)
+                    service = getattr(self.server, "maintenance_service", None)
+                    result = api.cancel_execution(
+                        getattr(self.server, "execution_manager", None),
+                        run_id,
+                        maintenance_request=service.request if service is not None else None,
+                    )
                 except ValueError as exc:
                     api.json_response(self, {"error": {
                         "code": "invalid_execution_id", "message": str(exc), "details": {},
@@ -336,7 +345,12 @@ def create_handler(api):
                 api.json_response(self, {"ok": True, "settings": api.update_settings(data)})
                 return
             if self.path == "/api/executions/delete-logs":
-                api.json_response(self, api.delete_execution_logs(data.get("ids") or [], all_runs=bool(data.get("all")), dry_run=bool(data.get("dry_run"))))
+                api.json_response(self, api.delete_execution_logs(
+                    data.get("ids") or [],
+                    all_runs=bool(data.get("all")),
+                    dry_run=bool(data.get("dry_run")),
+                    authorization=getattr(self.server, "cleanup_authorization", None),
+                ))
                 return
             if self.path == "/api/packages":
                 api.json_response(self, {"ok": True, "package": api.create_or_update_package(data)})
@@ -434,7 +448,10 @@ def create_handler(api):
         def _delete_execution_log(self, path: str):
             run_id = urllib.parse.unquote(path[len("/api/executions/"):-len("/logs")].strip("/"))
             try:
-                api.json_response(self, {"ok": True, "deletion": api.delete_execution_log(run_id)})
+                api.json_response(self, {"ok": True, "deletion": api.delete_execution_log(
+                    run_id,
+                    authorization=getattr(self.server, "cleanup_authorization", None),
+                )})
             except FileNotFoundError:
                 api.json_response(self, {"error": "execution not found"}, 404)
             except api.workspace_cleanup.WorkspaceBusyError as exc:

@@ -42,9 +42,7 @@ class Handler(app.Handler):
 
 
 def main():
-    # The repository-serving entrypoint did not previously run periodic
-    # retention; shared lifecycle ownership must not expand that policy here.
-    return app.serve_application(Handler, retention_target=None)
+    return app.serve_application(Handler)
 
 
 if __name__ == "__main__":

@@ -184,9 +184,11 @@ class BuildStore:
         path.chmod(0o600)
         return path
 
-    def clear_log_history(self, run_id: str) -> dict:
+    def clear_log_history(self, run_id: str, *, authorization=None) -> dict:
         from .workspace_cleanup import delete_history
-        return delete_history(self, run_id)
+        if authorization is None:
+            return delete_history(self, run_id)
+        return delete_history(self, run_id, authorization=authorization)
 
     def _manifest_path(self, run_id: str, relative_path: str) -> Path:
         """Resolve a manifest reference without allowing it outside its Run."""

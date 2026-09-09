@@ -797,6 +797,11 @@ class RecoveryAdmissionApiTests(AdminApiCase):
         stale["status"] = "running"
         stale["started_at"] = stale["created_at"]
         store.save(stale)
+        terminal = store.create(recipe("api-terminal"), mode="build", run_id="api-terminal")
+        terminal["status"] = "success"
+        store.save(terminal)
+        protected_source = Path(terminal["workspace"]) / "source/protected"
+        protected_source.write_text("keep")
         before = set(path.name for path in store.root.iterdir())
         with mock.patch("debbuilder.execution_recovery.loaded_command_units", return_value=set()):
             self.execution_manager = app.start_execution_manager(self.httpd)
@@ -812,6 +817,14 @@ class RecoveryAdmissionApiTests(AdminApiCase):
         status, response = self.request("GET", f"/api/executions/{stale['id']}")
         self.assertEqual(status, 200)
         self.assertEqual(response["execution"]["recovery"]["status"], "blocked")
+        status, storage = self.request("GET", "/api/storage")
+        self.assertEqual(status, 200)
+        self.assertEqual(storage["storage"]["state"], "collecting")
+        status, deletion = self.error_response(
+            "DELETE", f"/api/executions/{terminal['id']}/logs", None,
+        )
+        self.assertEqual(status, 409)
+        self.assertTrue(protected_source.is_file())
 
 
 if __name__ == "__main__":

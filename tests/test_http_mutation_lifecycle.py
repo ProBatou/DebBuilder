@@ -78,39 +78,27 @@ class HttpMutationLifecycleTests(AdminApiCase):
             with self.subTest(path=path):
                 self.assert_route_lease(method, path, body, target, result)
 
-    def test_queued_cancellation_retention_stays_owned_until_cleanup_finishes(self):
+    def test_queued_cancellation_releases_http_lease_after_bounded_request(self):
         gate = MutationGate()
         self.httpd.mutation_gate = gate
-        entered = threading.Event()
-        release = threading.Event()
-        completed = threading.Event()
+        requested = threading.Event()
         cancellation = {
             "outcome": "queued_cancelled",
             "cancellation": {"code": "execution_cancelled", "reason": "user_requested"},
         }
+        maintenance_service = mock.Mock()
+        maintenance_service.request.side_effect = lambda **_kwargs: requested.set()
+        self.httpd.maintenance_service = maintenance_service
 
-        def cleanup():
-            entered.set()
-            self.assertTrue(release.wait(3))
-            completed.set()
+        with mock.patch.object(self.execution_manager, "cancel", return_value=cancellation):
+            status, _payload = self.request(
+                "POST", "/api/executions/20260822-031400/cancel", {},
+            )
 
-        response = {}
-        with mock.patch.object(self.execution_manager, "cancel", return_value=cancellation), \
-                mock.patch.object(server, "cleanup_workspaces", side_effect=cleanup):
-            thread = threading.Thread(target=lambda: response.update(
-                value=self.request("POST", "/api/executions/20260822-031400/cancel", {}),
-            ))
-            thread.start()
-            self.assertTrue(entered.wait(2))
-            gate.begin_shutdown()
-            self.assertFalse(gate.wait_for_quiescence(0)["complete"])
-            release.set()
-            thread.join(3)
-
-        self.assertTrue(completed.is_set())
-        self.assertFalse(thread.is_alive())
-        self.assertEqual(response["value"][0], 200)
-        self.assertTrue(gate.wait_for_quiescence(1)["complete"])
+        self.assertEqual(status, 200)
+        self.assertTrue(requested.is_set())
+        maintenance_service.request.assert_called_once_with(cleanup=True)
+        self.assertTrue(gate.wait_for_quiescence(0)["complete"])
 
     def test_new_mutator_is_rejected_but_read_only_request_is_excluded(self):
         gate = MutationGate()

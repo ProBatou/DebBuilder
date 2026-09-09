@@ -404,7 +404,7 @@ class AsyncExecutionTests(AdminApiCase):
         self.assertEqual(persisted["status"], "cancelled")
         self.assertEqual(persisted["cancellation"]["reason"], "server_shutdown")
 
-    def test_worker_runs_build_automation_completion_notification_and_cleanup(self):
+    def test_worker_runs_build_automation_and_only_requests_async_maintenance(self):
         completed = threading.Event()
 
         def pipeline(run_id, *, store, expected_initial_status, **_kwargs):
@@ -420,7 +420,8 @@ class AsyncExecutionTests(AdminApiCase):
         with mock.patch.object(server.build_pipeline, "execute_pipeline_run", side_effect=pipeline), \
                 mock.patch.object(server, "run_post_build_automation", return_value=automation) as automate, \
                 mock.patch.object(server, "notification_service", return_value=notification), \
-                mock.patch.object(server, "cleanup_workspaces", side_effect=lambda: completed.set()) as cleanup:
+                mock.patch.object(server, "request_maintenance", side_effect=lambda **_kwargs: completed.set()) as request, \
+                mock.patch.object(server.workspace_cleanup, "apply_retention") as cleanup:
             status, response = self.request(
                 "POST", "/api/run", {"workflow": recipe("automated"), "dry_run": False},
             )
@@ -428,7 +429,8 @@ class AsyncExecutionTests(AdminApiCase):
             self.assertTrue(completed.wait(2))
         automate.assert_called_once_with(response["run_id"], dry_run=False, store=self.execution_manager.store)
         notification.notify_automatic_completion.assert_called_once()
-        cleanup.assert_called_once_with()
+        request.assert_called_once_with(cleanup=True)
+        cleanup.assert_not_called()
 
     def test_server_manager_lifecycle_is_explicit_and_joins_worker(self):
         class HttpServer:

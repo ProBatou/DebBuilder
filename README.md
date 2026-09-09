@@ -97,14 +97,25 @@ Settings → Maintenance exposes `workspace_cleanup.enabled` (default `true`) an
 These are application settings, also available through GET/POST `/api/settings`;
 existing settings files receive the defaults without a Recipe migration.
 
-Cleanup runs after a build/dry-run request and its configured automation finish,
-and in a background sweep at server startup and every five minutes. Completed
-successful/prepared runs are eligible immediately, even if manual validation or
-publication will happen later. The five most recent failed/cancelled workspaces
-are kept globally across all Recipes, ordered by the latest lifecycle completion
-time; older failures are cleaned. Failed dry-runs follow the same rule. Already
-cleaned workspaces do not consume retention slots. There is no age limit or
-automatic deletion of final artifacts/history in this policy.
+Build/dry-run completion and queued cancellation request cleanup from the
+application-owned maintenance worker; execution does not synchronously scan all
+historical Runs before dequeuing the next one. The worker also refreshes a
+read-only storage inventory at startup, every five minutes and after relevant
+lifecycle changes. Broader startup/periodic destructive retention remains
+deferred to the dedicated cleanup-lifecycle work; the observer's periodic timer
+does not itself request deletion. Completed successful/prepared runs are eligible
+when cleanup is requested, even if manual validation or publication will happen
+later. The five most recent failed/cancelled workspaces are kept globally across
+all Recipes, ordered by the latest lifecycle completion time; older failures are
+cleaned. Failed dry-runs follow the same rule. Already cleaned workspaces do not
+consume retention slots. There is no age limit or automatic deletion of final
+artifacts/history in this policy.
+
+GET `/api/storage` returns only the maintenance worker's cached snapshot; it does
+not walk or mutate the filesystem. Settings → Maintenance shows compact totals
+for managed data, Runs, disposable workspace data, final artifacts and the APT
+repository. Partial, stale, collecting and error states are explicit. Repository
+storage nested under the data root is counted once in the managed total.
 
 “Delete log/history” and “Clear execution history” remove completed execution
 history and detailed output, and also reclaim disposable workspace data even
@@ -113,7 +124,8 @@ are unaffected. A separate `.execution-history-deleted.json` tombstone keeps the
 Run absent from Logs despite later metadata rewrites/restarts. List APIs omit
 deleted history, detail/log APIs return 404, and repeated deletion is idempotent.
 DELETE returns the `workspace_cleanup` result alongside the history deletion.
-Active or leased executions return HTTP 409 (`execution_active`); clear-all
+Active, recovery-blocked or leased executions return HTTP 409
+(`execution_active`); clear-all
 excludes them and reports per-execution failures if a state changes after its
 preview. Deletion never cancels a build, validation or publication.
 
@@ -130,8 +142,11 @@ Cleanup errors are reported and retried by subsequent sweeps without changing
 the build/lifecycle result. Before removal, Linux `/proc` is checked for processes
 whose working directory, executable or open descriptors use the Run workspace;
 such a Run is kept even if its metadata says failed. Inaccessible process data
-also defers cleanup. Runs still marked active after a crash are preserved until
-their state is resolved. On Linux hosts with a reachable system systemd manager
+also defers cleanup. A Run with unresolved recovery is preserved even when its
+top-level status looks terminal, and any unresolved global startup-recovery
+blocker disables all destructive cleanup while leaving storage observation
+available. Runs still marked active after a crash are preserved until their state
+is resolved. On Linux hosts with a reachable system systemd manager
 and unified cgroup v2, each Run command is spawned directly by PID 1 in a unique
 transient service. DebBuilder receives stdout/stderr through command-scoped file
 descriptors and terminates the complete service cgroup on cancellation or

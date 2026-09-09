@@ -92,7 +92,7 @@ class CancellationApiTests(AdminApiCase):
 
         return execute, entered, release, finished
 
-    def test_queued_cancel_returns_200_and_runs_cleanup_outside_manager_lock(self):
+    def test_queued_cancel_returns_200_and_requests_maintenance_outside_manager_lock(self):
         execute, entered, release, _finished = self.blocking_executor()
         manager = self.replace_manager(execute)
         active = self.create_run("queued-cleanup-active")
@@ -101,14 +101,15 @@ class CancellationApiTests(AdminApiCase):
         self.assertTrue(entered.wait(2))
         manager.submit(queued["id"])
         lock_observations = []
+        maintenance_service = mock.Mock()
+        maintenance_service.request.side_effect = (
+            lambda **_kwargs: lock_observations.append(manager._condition._is_owned())
+        )
+        self.httpd.maintenance_service = maintenance_service
 
         try:
-            with mock.patch.object(
-                server, "cleanup_workspaces",
-                side_effect=lambda: lock_observations.append(manager._condition._is_owned()) or {},
-            ) as cleanup:
-                status, response = self.request("POST", f"/api/executions/{queued['id']}/cancel")
-                repeated_status, repeated = self.request("POST", f"/api/executions/{queued['id']}/cancel", {})
+            status, response = self.request("POST", f"/api/executions/{queued['id']}/cancel")
+            repeated_status, repeated = self.request("POST", f"/api/executions/{queued['id']}/cancel", {})
             self.assertEqual(status, 200)
             self.assertEqual(repeated_status, 200)
             self.assertEqual(response["cancellation"]["status"], "cancelled")
@@ -117,11 +118,11 @@ class CancellationApiTests(AdminApiCase):
             self.assertTrue(response["cancellation"]["completed_at"])
             self.assertEqual(manager.store.load(queued["id"])["status"], "cancelled")
             self.assertEqual(lock_observations, [False])
-            cleanup.assert_called_once_with()
+            maintenance_service.request.assert_called_once_with(cleanup=True)
         finally:
             release.set()
 
-    def test_cleanup_exception_does_not_undo_queued_cancellation(self):
+    def test_maintenance_request_exception_does_not_undo_queued_cancellation(self):
         execute, entered, release, _finished = self.blocking_executor()
         manager = self.replace_manager(execute)
         active = self.create_run("cleanup-error-active")
@@ -129,10 +130,12 @@ class CancellationApiTests(AdminApiCase):
         manager.submit(active["id"])
         self.assertTrue(entered.wait(2))
         manager.submit(queued["id"])
+        maintenance_service = mock.Mock()
+        maintenance_service.request.side_effect = RuntimeError("maintenance request failed")
+        self.httpd.maintenance_service = maintenance_service
         try:
-            with mock.patch.object(server, "cleanup_workspaces", side_effect=RuntimeError("cleanup failed")):
-                with self.assertLogs("debbuilder.app", level="ERROR"):
-                    status, response = self.request("POST", f"/api/executions/{queued['id']}/cancel", {})
+            with self.assertLogs("debbuilder.app", level="ERROR"):
+                status, response = self.request("POST", f"/api/executions/{queued['id']}/cancel", {})
             self.assertEqual(status, 200)
             self.assertEqual(response["cancellation"]["status"], "cancelled")
             self.assertEqual(manager.store.load(queued["id"])["status"], "cancelled")
@@ -150,11 +153,16 @@ class CancellationApiTests(AdminApiCase):
         self.assertTrue(entered.wait(2))
         manager.submit(queued["id"])
         server.update_settings({"workspace_cleanup": {"enabled": True, "failed_workspaces_to_retain": 0}})
+        maintenance_service = mock.Mock()
+        self.httpd.maintenance_service = maintenance_service
 
         try:
             status, response = self.request("POST", f"/api/executions/{queued['id']}/cancel", {})
             self.assertEqual(status, 200)
             self.assertEqual(response["cancellation"]["status"], "cancelled")
+            maintenance_service.request.assert_called_once_with(cleanup=True)
+            self.assertTrue((workspace / "source").exists())
+            server.cleanup_workspaces(authorization=self.httpd.cleanup_authorization)
             self.assertFalse((workspace / "source").exists())
             self.assertTrue((workspace / "run.json").is_file())
             self.assertTrue((workspace / "recipe.json").is_file())

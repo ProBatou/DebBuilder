@@ -129,6 +129,25 @@ Active, recovery-blocked or leased executions return HTTP 409
 excludes them and reports per-execution failures if a state changes after its
 preview. Deletion never cancels a build, validation or publication.
 
+APT publication and exact reconciliation additionally use a fail-fast,
+repository-root-scoped filesystem lease. The canonical acquisition order is
+application `MutationGate`, then Run workspace lock, then repository lease; a
+Run lock cannot be acquired while the repository lease is held. The lease pins
+the repository directory and is inherited by the `reprepro` child, so a second
+thread or process cannot enter a publication while that child is alive.
+
+A publication becomes successful only after one exact database entry, one
+exported `Packages` entry, and its safely opened `pool/` file agree with the
+retained source artifact on distribution, component, package, version,
+architecture, size, and SHA-256. That bounded result is stored as a versioned
+publication proof. Historical success records without such a proof remain
+unverified until explicit reconciliation succeeds. DebBuilder supports the
+standard repository layout under the configured root and rejects path
+redirections that prevent safe proof; administrator-managed reprepro signing
+and hook configuration remains trusted configuration, not a sandbox boundary.
+Public APT downloads remain lock-free and stream a pinned, no-follow file
+descriptor rather than holding the mutation lease for a client connection.
+
 Build, validation, publication, reconciliation and cleanup share a per-Run
 filesystem lock, including across server processes. Cleanup takes this lock
 without waiting and re-reads canonical metadata before deleting. It opens the

@@ -28,6 +28,45 @@ from .workspace_cleanup import WorkspaceBusyError, directory_fd, read_run
 NON_TERMINAL_STATUSES = frozenset({"pending", "queued", "running", "cancelling"})
 RECOVERY_ERROR_CODE = "execution_interrupted"
 BLOCKER_CODE = "execution_recovery_unresolved"
+PUBLICATION_INTERRUPTED_CODE = "publication_interrupted"
+
+
+def _recover_interrupted_publications(store: BuildStore, run: dict) -> bool:
+    """Terminalize orphaned auxiliary publication attempts without repository I/O."""
+    recovered: list[str] = []
+    finished_at = utc_now()
+    for attempt in run.get("publications") or []:
+        if not isinstance(attempt, dict) or attempt.get("status") != "running":
+            continue
+        duration = None
+        try:
+            started = datetime.fromisoformat(str(attempt.get("requested_at") or ""))
+            finished = datetime.fromisoformat(finished_at)
+            duration = round(max(0.0, (finished - started).total_seconds()), 6)
+        except (TypeError, ValueError):
+            pass
+        attempt.update({
+            "status": "failed", "finished_at": finished_at, "duration": duration,
+            "error": {
+                "code": PUBLICATION_INTERRUPTED_CODE,
+                "message": "Publication was interrupted before a durable exact proof was recorded",
+                "details": {},
+            },
+        })
+        recovered.append(str(attempt.get("id") or ""))
+    if not recovered:
+        return False
+    compact_rows = (run.get("artifact") or {}).get("publications") or []
+    for compact in compact_rows:
+        if not isinstance(compact, dict) or str(compact.get("id") or "") not in recovered:
+            continue
+        compact.update({"status": "failed", "finished_at": finished_at, "published_version": ""})
+    store.append_event(
+        run,
+        f"Recovered {len(recovered)} interrupted publication attempt(s)",
+        level="error",
+    )
+    return True
 
 
 @dataclass
@@ -332,6 +371,7 @@ def recover_startup(store: BuildStore) -> StartupRecoveryResult:
                 status = str(run.get("status") or "")
                 if status not in RUN_STATUSES:
                     raise ValueError(f"invalid run status: {status}")
+                _recover_interrupted_publications(store, run)
 
                 try:
                     identity = read_persisted_identity(workspace_fd)

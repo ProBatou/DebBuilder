@@ -30,7 +30,7 @@ from .build_models import utc_now
 from .build_store import BuildStore
 from .execution_manager import DEFAULT_SHUTDOWN_TIMEOUT, ExecutionManager, ExecutionManagerError
 from .http_handler import create_handler
-from .lifecycle import MutationGate
+from .lifecycle import MutationGate, MutationGateClosed
 from .recipe_schema import RecipeDocumentError, normalize_recipe, recipe_document_for_storage, recipe_for_storage, require_safe_name, validate_recipe_metadata
 from .settings_store import SessionSecretError, cookie_secret, github_token, oidc_client_secret, prepare_cookie_secret
 from .runtime import RuntimeConfig
@@ -230,13 +230,26 @@ def run_recipe_pipeline(workflow: dict, *, dry_run: bool = True) -> dict:
 
 
 def run_post_build_automation(run_id: str, *, dry_run: bool, settings: dict | None = None, store: BuildStore | None = None) -> dict:
+    def publish_with_lifecycle_lease(publication_run_id: str, payload: dict) -> dict:
+        try:
+            lease = APPLICATION_MUTATION_GATE.lease() if APPLICATION_MUTATION_GATE is not None else None
+            if lease is None:
+                return publish_build_artifact(publication_run_id, payload)
+            with lease:
+                return publish_build_artifact(publication_run_id, payload)
+        except MutationGateClosed as exc:
+            return {
+                "status": "failed",
+                "error": {"code": exc.code, "message": str(exc), "details": {}},
+            }
+
     return automation_service.run_post_build(
         run_id,
         dry_run=dry_run,
         settings=settings or app_settings(),
         store=store or BuildStore(DATA / "builds"),
         validate=validate_build_artifact,
-        publish=publish_build_artifact,
+        publish=publish_with_lifecycle_lease,
     )
 
 

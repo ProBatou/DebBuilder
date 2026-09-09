@@ -9,6 +9,7 @@ from pathlib import Path
 import debbuilder.app as server
 from debbuilder import storage
 from debbuilder.build_store import BuildStore
+from debbuilder.lifecycle import MutationGate
 from tests.admin_api_case import AdminApiCase
 
 
@@ -1092,6 +1093,27 @@ class AdminApiTests(AdminApiCase):
         publish_mock.assert_called_once()
         self.assertEqual(response["publication"]["status"], "success")
         self.assertEqual(server.get_package("publish-auto")["lifecycle_display_status"], "published")
+
+    def test_shutdown_admission_prevents_new_automatic_publication(self):
+        store, run, _artifact = self.successful_build_run(
+            run_id="shutdown-auto-run", package="shutdown-auto", version="5.0-1",
+        )
+        gate = MutationGate()
+        gate.begin_shutdown()
+        settings = {"automation": {
+            "auto_validate_after_successful_build": True,
+            "auto_publish_after_successful_validation": True,
+        }}
+        with mock.patch.object(server, "APPLICATION_MUTATION_GATE", gate), \
+                mock.patch("debbuilder.app.validate_build_artifact", return_value={"status": "success"}) as validate, \
+                mock.patch("debbuilder.app.publish_build_artifact") as publish:
+            result = server.run_post_build_automation(
+                run["id"], dry_run=False, settings=settings, store=store,
+            )
+        validate.assert_called_once()
+        publish.assert_not_called()
+        self.assertEqual(result["publication"]["status"], "failed")
+        self.assertEqual(result["publication"]["error"]["code"], "application_shutting_down")
 
     def test_dry_run_creates_structured_workspace_and_is_visible_in_logs(self):
         workflow = {

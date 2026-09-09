@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Command-line entrypoint for DebBuilder."""
+import os
 from urllib.parse import urlparse
 
 from debbuilder import app
-from debbuilder.repo_files import content_type, resolve_public_repo_file
+from debbuilder.repo_files import content_type, open_public_repo_file
 
 REPO_ROOT = app.RUNTIME.repository_root
 
@@ -11,24 +12,20 @@ REPO_ROOT = app.RUNTIME.repository_root
 class Handler(app.Handler):
     """DebBuilder handler plus read-only serving of public APT artifacts."""
 
-    def _repo_file(self):
-        return resolve_public_repo_file(REPO_ROOT, urlparse(self.path).path)
-
     def _serve_repo_file(self, head_only=False):
-        file = self._repo_file()
-        if not file:
-            return False
-        size = file.stat().st_size
-        self.send_response(200)
-        self.send_header("Content-Type", content_type(file))
-        self.send_header("Content-Length", str(size))
-        self.send_header("Cache-Control", "public, max-age=60")
-        self.end_headers()
-        if not head_only:
-            with file.open("rb") as src:
-                while chunk := src.read(1024 * 1024):
+        with open_public_repo_file(REPO_ROOT, urlparse(self.path).path) as opened:
+            if not opened:
+                return False
+            file_fd, info, relative = opened
+            self.send_response(200)
+            self.send_header("Content-Type", content_type(relative))
+            self.send_header("Content-Length", str(info.st_size))
+            self.send_header("Cache-Control", "public, max-age=60")
+            self.end_headers()
+            if not head_only:
+                while chunk := os.read(file_fd, 1024 * 1024):
                     self.wfile.write(chunk)
-        return True
+            return True
 
     def do_HEAD(self):
         if self._serve_repo_file(head_only=True):

@@ -138,6 +138,21 @@ class CommandRunnerTests(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual((process_group, session), (pid, pid))
 
+    def test_passed_repository_lease_descriptor_reaches_child(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            lock = Path(temporary) / "lease"
+            fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                command = (
+                    f"{shlex.quote(sys.executable)} -c "
+                    f"'import os; print(os.fstat({fd}).st_ino)'"
+                )
+                result = run_command(command, workspace=temporary, pass_fds=(fd,))
+                self.assertEqual(result["status"], "success")
+                self.assertEqual(int(result["stdout"].strip()), os.fstat(fd).st_ino)
+            finally:
+                os.close(fd)
+
     def test_streams_stdout_and_stderr_while_preserving_final_output(self):
         with tempfile.TemporaryDirectory() as temporary:
             chunks = []

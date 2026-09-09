@@ -330,12 +330,16 @@ def create_handler(api):
                 except api.artifact_publication.PublicationError as exc:
                     api.json_response(self, {"error": {"code": exc.code, "message": str(exc), "details": exc.details}}, 400)
                     return
-                api.json_response(self, {"publication": result}, 200 if result["status"] == "success" else 422)
+                failure_code = str((result.get("error") or {}).get("code") or "")
+                failure_status = 409 if failure_code in {"repository_mutation_busy", "publication_identity_conflict"} else 422
+                api.json_response(self, {"publication": result}, 200 if result["status"] == "success" else failure_status)
                 return
             if self.path.startswith("/api/executions/") and self.path.endswith("/reconcile-publication"):
                 run_id = urllib.parse.unquote(self.path[len("/api/executions/"):-len("/reconcile-publication")].strip("/"))
                 result = api.reconcile_build_publication(run_id, data)
-                api.json_response(self, {"publication": result}, 200 if result["status"] == "success" else 422)
+                failure_code = str((result.get("error") or {}).get("code") or "")
+                failure_status = 409 if failure_code in {"repository_mutation_busy", "publication_identity_conflict"} else 422
+                api.json_response(self, {"publication": result}, 200 if result["status"] == "success" else failure_status)
                 return
             if self.path == "/api/notifications/test":
                 result = api.test_notification()

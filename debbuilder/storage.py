@@ -47,6 +47,11 @@ def atomic_write_text(path: Path, text: str) -> None:
                 temporary.flush()
                 os.fsync(temporary.fileno())
             os.replace(temporary_name, path)
+            directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
         finally:
             if temporary_name:
                 try:

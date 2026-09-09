@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import secrets
 import shutil
@@ -11,6 +12,7 @@ from pathlib import Path
 from .build_models import utc_now
 from .build_store import BuildStore
 from .recipe_schema import validate_recipe_metadata
+from .repository_lock import RepositoryLockError, repository_lease, safe_relative_path
 from .validation_backend import BackendError, OciSystemdBackend
 from .validation_profiles import node_satisfies, python_satisfies, resolve_profile
 
@@ -155,7 +157,7 @@ def _capture_systemd_failure(backend, checks: list[dict], service_name: str) -> 
 def validate_artifact(run_id: str, *, store: BuildStore, previous_artifact: str = "", backend_factory=None, profile: str = "bookworm", allowed_previous_roots: tuple[str | Path, ...] = ()) -> dict:
     if not store.run_dir(run_id).is_dir():
         raise ValidationError("build_run_not_found", "Build Run was not found")
-    with store.locked_run(run_id):
+    with store.locked_run(run_id) as workspace_fd:
         return _validate_artifact_locked(
             run_id,
             store=store,
@@ -163,10 +165,11 @@ def validate_artifact(run_id: str, *, store: BuildStore, previous_artifact: str 
             backend_factory=backend_factory,
             profile=profile,
             allowed_previous_roots=allowed_previous_roots,
+            workspace_fd=workspace_fd,
         )
 
 
-def _validate_artifact_locked(run_id: str, *, store: BuildStore, previous_artifact: str = "", backend_factory=None, profile: str = "bookworm", allowed_previous_roots: tuple[str | Path, ...] = ()) -> dict:
+def _validate_artifact_locked(run_id: str, *, store: BuildStore, previous_artifact: str = "", backend_factory=None, profile: str = "bookworm", allowed_previous_roots: tuple[str | Path, ...] = (), workspace_fd: int) -> dict:
     """Validate install/upgrade/remove/purge without changing the Build status."""
     run = store.load(run_id)
     if not run:
@@ -215,17 +218,38 @@ def _validate_artifact_locked(run_id: str, *, store: BuildStore, previous_artifa
     container_artifact = _container_artifact(workspace, artifact)
     previous_container = ""
     if previous_artifact:
-        previous = Path(previous_artifact).resolve()
-        allowed_roots = (store.root.resolve(), *(Path(root).resolve() for root in allowed_previous_roots))
-        try:
-            next(root for root in allowed_roots if previous.is_relative_to(root))
-        except StopIteration as exc:
-            raise ValidationError("previous_artifact_outside_build_store", "Previous artifact must belong to a DebBuilder Build Run") from exc
-        in_build_store = previous.is_relative_to(store.root.resolve())
-        if not previous.is_file() or previous.suffix != ".deb" or (in_build_store and previous.parent.name != "artifacts"):
+        previous = Path(os.path.abspath(previous_artifact))
+        store_root = store.root.resolve()
+        resolved_previous = previous.resolve(strict=False)
+        in_build_store = resolved_previous.is_relative_to(store_root)
+        configured_pools = tuple(Path(os.path.abspath(root)) for root in allowed_previous_roots)
+        pool_root = next((root for root in configured_pools if previous.is_relative_to(root)), None)
+        if not in_build_store and pool_root is None:
+            raise ValidationError("previous_artifact_outside_build_store", "Previous artifact must belong to a DebBuilder Build Run or the configured repository pool")
+        if in_build_store:
+            previous = resolved_previous
+        if previous.suffix != ".deb" or (in_build_store and previous.parent.name != "artifacts"):
             raise ValidationError("previous_artifact_not_available", "Previous-version artifact is missing or is not a .deb")
         previous_copy = validation_dir / "previous.deb"
-        shutil.copyfile(previous, previous_copy)
+        if pool_root is not None:
+            if pool_root.name != "pool":
+                raise ValidationError("previous_artifact_outside_build_store", "Configured previous-artifact root must be the repository pool directory")
+            repository_root = pool_root.parent
+            try:
+                relative = safe_relative_path(previous.relative_to(repository_root).as_posix(), required_prefix="pool")
+                with repository_lease(repository_root, operation=f"validation-snapshot:{run_id}") as lease:
+                    with lease.open_regular(relative, required_prefix="pool") as (source_fd, _):
+                        with os.fdopen(os.dup(source_fd), "rb") as source, previous_copy.open("wb") as destination:
+                            shutil.copyfileobj(source, destination)
+                            destination.flush()
+                            os.fsync(destination.fileno())
+            except (FileNotFoundError, RepositoryLockError) as exc:
+                code = exc.code if isinstance(exc, RepositoryLockError) else "previous_artifact_not_available"
+                raise ValidationError(code, "Previous repository artifact could not be snapshotted safely") from exc
+        else:
+            if not previous.is_file():
+                raise ValidationError("previous_artifact_not_available", "Previous-version artifact is missing or is not a .deb")
+            shutil.copyfile(previous, previous_copy)
         previous_copy.chmod(0o400)
         previous_container = "/validation/" + previous_copy.relative_to(workspace).as_posix()
         result["previous_artifact"] = str(previous)

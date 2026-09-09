@@ -271,7 +271,7 @@ def _terminate_process_group(process: subprocess.Popen, process_group: int, sele
     return exit_code, killed, "; ".join(dict.fromkeys(errors))
 
 
-def _stream_process_group(arguments: list[str], *, cwd: Path, env: dict[str, str], inactivity_timeout: float | None, maximum_runtime: float | None, redaction_environment: dict[str, str], on_output=None, cancellation_event=None, on_cancel=None, identity_recorder=None) -> dict:
+def _stream_process_group(arguments: list[str], *, cwd: Path, env: dict[str, str], inactivity_timeout: float | None, maximum_runtime: float | None, redaction_environment: dict[str, str], on_output=None, cancellation_event=None, on_cancel=None, identity_recorder=None, pass_fds: tuple[int, ...] = ()) -> dict:
     command_id = secrets.token_hex(16) if identity_recorder is not None else ""
     process_environment = dict(env)
     if identity_recorder is not None:
@@ -283,7 +283,7 @@ def _stream_process_group(arguments: list[str], *, cwd: Path, env: dict[str, str
     try:
         process = subprocess.Popen(
             arguments, cwd=cwd, env=process_environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            shell=False, bufsize=0, start_new_session=True,
+            shell=False, bufsize=0, start_new_session=True, pass_fds=pass_fds,
         )
     except BaseException:
         selector.close()
@@ -421,8 +421,10 @@ def _stream_process_group(arguments: list[str], *, cwd: Path, env: dict[str, str
                     stream.close()
 
 
-def _stream_systemd_cgroup(arguments: list[str], *, cwd: Path, env: dict[str, str], inactivity_timeout: float | None, maximum_runtime: float | None, redaction_environment: dict[str, str], on_output=None, cancellation_event=None, on_cancel=None, identity_recorder) -> dict:
+def _stream_systemd_cgroup(arguments: list[str], *, cwd: Path, env: dict[str, str], inactivity_timeout: float | None, maximum_runtime: float | None, redaction_environment: dict[str, str], on_output=None, cancellation_event=None, on_cancel=None, identity_recorder, pass_fds: tuple[int, ...] = ()) -> dict:
     """Stream one command spawned directly by PID 1 in its transient cgroup."""
+    if pass_fds:
+        raise CommandValidationError("descriptor inheritance is not supported by systemd containment")
     command_id = secrets.token_hex(16)
     selector = selectors.DefaultSelector()
     try:
@@ -574,7 +576,7 @@ def _validated_timeout(value: float | None, what: str) -> float | None:
     return float(value)
 
 
-def run_command(command: str, *, workspace: str | Path, working_directory: str = ".", environment: dict[str, str] | None = None, timeout: float | None = None, inactivity_timeout: float | None = 300, maximum_runtime: float | None = None, on_output=None, cancellation_event=None, on_cancel=None) -> dict:
+def run_command(command: str, *, workspace: str | Path, working_directory: str = ".", environment: dict[str, str] | None = None, timeout: float | None = None, inactivity_timeout: float | None = 300, maximum_runtime: float | None = None, on_output=None, cancellation_event=None, on_cancel=None, pass_fds: tuple[int, ...] = ()) -> dict:
     started = time.monotonic()
     display_cwd = str(working_directory or ".")
     safe_for_redaction = {key: value for key, value in (environment or {}).items() if isinstance(key, str) and isinstance(value, str)}
@@ -584,6 +586,10 @@ def run_command(command: str, *, workspace: str | Path, working_directory: str =
     try:
         inactivity_timeout = _validated_timeout(inactivity_timeout, "inactivity_timeout")
         maximum_runtime = _validated_timeout(maximum_runtime, "maximum_runtime")
+        if not isinstance(pass_fds, tuple) or any(
+            isinstance(fd, bool) or not isinstance(fd, int) or fd < 0 for fd in pass_fds
+        ):
+            raise CommandValidationError("pass_fds must be a tuple of non-negative file descriptors")
         env = controlled_environment(workspace, environment)
         arguments = parse_command(command)
         redaction_environment = {**env, **{f"SECRET_ARGUMENT_{index}": value for index, value in enumerate(secret_argument_values(arguments), 1)}}
@@ -602,12 +608,15 @@ def run_command(command: str, *, workspace: str | Path, working_directory: str =
             raise ExecutionCancelled(result["cancellation"], command_result=result)
         identity_recorder = current_recorder()
         capability = containment_capability() if identity_recorder is not None and identity_recorder.update is not None else None
-        stream = _stream_systemd_cgroup if capability is not None and capability.available else _stream_process_group
+        # A repository lease descriptor must reach the actual mutation process.
+        # Repository commands currently run outside Build command identity
+        # recording, so this branch preserves their lock across parent death.
+        stream = _stream_systemd_cgroup if not pass_fds and capability is not None and capability.available else _stream_process_group
         completed = stream(
             arguments, cwd=cwd, env=env, inactivity_timeout=inactivity_timeout,
             maximum_runtime=maximum_runtime, redaction_environment=redaction_environment,
             on_output=on_output, cancellation_event=cancellation_event, on_cancel=on_cancel,
-            identity_recorder=identity_recorder,
+            identity_recorder=identity_recorder, pass_fds=pass_fds,
         )
         status = "failed" if completed["timed_out"] or completed.get("termination_error") else "cancelled" if completed.get("cancelled") else "success" if completed["exit_code"] == 0 else "failed"
         result.update({"exit_code": completed["exit_code"], "process_exit_code": completed.get("process_exit_code"), "stdout": completed["stdout"], "stderr": completed["stderr"], "timed_out": completed["timed_out"], "timeout_reason": completed.get("timeout_reason", ""), "killed": completed.get("killed", False), "termination_error": completed.get("termination_error", ""), "cancelled": completed.get("cancelled", False), "cancellation_requested": completed.get("cancellation_requested", False), "status": status})

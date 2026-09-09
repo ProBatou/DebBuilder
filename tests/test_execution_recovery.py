@@ -118,6 +118,29 @@ class StartupRecoveryTests(unittest.TestCase):
             self.assertEqual(run["error"]["code"], RECOVERY_ERROR_CODE)
             self.assertTrue(all(step["status"] == "pending" for step in run["steps"]))
 
+    def test_stale_running_publication_is_interrupted_without_repository_inspection(self):
+        run = self.create("stale-publication", "success")
+        attempt = {
+            "id": "publication-one", "status": "running", "requested_at": run["created_at"],
+            "finished_at": None, "duration": None, "published_version": "",
+        }
+        run["publications"] = [attempt]
+        run["artifact"] = {"publications": [{
+            "id": attempt["id"], "status": "running", "requested_at": run["created_at"],
+            "finished_at": None, "published_version": "",
+        }]}
+        self.store.save(run)
+
+        result = recover_startup(self.store)
+
+        self.assertIsNone(result.admission_blocker)
+        recovered = self.store.load(run["id"])
+        self.assertEqual(recovered["status"], "success")
+        self.assertEqual(recovered["publications"][0]["status"], "failed")
+        self.assertEqual(recovered["publications"][0]["error"]["code"], "publication_interrupted")
+        self.assertEqual(recovered["artifact"]["publications"][0]["status"], "failed")
+        workspace_cleanup.clean_workspace(self.store, run["id"])
+
     def test_no_metadata_decision_table_blocks_execution_evidence_and_active_states(self):
         pending = self.create("pending-with-evidence", "pending")
         pending["events"].append({"at": pending["created_at"], "level": "info", "message": "began"})

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from debbuilder import artifact_validation, build_pipeline, workspace_cleanup
 from debbuilder.build_store import BuildStore
+from debbuilder.repository_lock import repository_lease
 from debbuilder.validation_backend import BackendError, OciSystemdBackend
 from debbuilder.validation_profiles import python_satisfies
 
@@ -390,6 +391,63 @@ class ArtifactValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(artifact_validation.ValidationError, "belong"):
                 artifact_validation.validate_artifact(run["id"], store=store, previous_artifact=str(outside), backend_factory=FakeBackend)
             self.assertEqual(store.load(run["id"]).get("validations", []), [])
+
+    def test_repository_previous_artifact_is_snapshotted_and_lease_released_before_backend(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store, run = self.successful_run(temporary)
+            repo = Path(temporary) / "repo"
+            previous = repo / "pool/main/d/demo/demo_0.9-1_all.deb"
+            previous.parent.mkdir(parents=True)
+            previous.write_bytes(b"old")
+
+            def factory(**kwargs):
+                class LeaseCheckingBackend(FakeBackend):
+                    def start(backend_self, validation_id):
+                        with repository_lease(repo, operation="backend-start-proof"):
+                            pass
+                        snapshot = Path(backend_self.workspace) / "validation"
+                        self.assertEqual(next(snapshot.rglob("previous.deb")).read_bytes(), b"old")
+                        return super().start(validation_id)
+                return LeaseCheckingBackend(**kwargs)
+
+            result = artifact_validation.validate_artifact(
+                run["id"], store=store, previous_artifact=str(previous),
+                allowed_previous_roots=(repo / "pool",), backend_factory=factory,
+            )
+            self.assertEqual(result["status"], "success")
+
+    def test_repository_previous_artifact_symlink_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store, run = self.successful_run(temporary)
+            repo = Path(temporary) / "repo"
+            previous = repo / "pool/main/d/demo/demo_0.9-1_all.deb"
+            previous.parent.mkdir(parents=True)
+            target = Path(temporary) / "outside.deb"
+            target.write_bytes(b"outside")
+            previous.symlink_to(target)
+            with self.assertRaises(artifact_validation.ValidationError) as raised:
+                artifact_validation.validate_artifact(
+                    run["id"], store=store, previous_artifact=str(previous),
+                    allowed_previous_roots=(repo / "pool",), backend_factory=FakeBackend,
+                )
+            self.assertIn(raised.exception.code, {"repository_file_invalid", "previous_artifact_not_available"})
+
+    def test_symlinked_configured_pool_cannot_be_reinterpreted_as_external_root(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store, run = self.successful_run(temporary)
+            repo = Path(temporary) / "repo"
+            repo.mkdir()
+            outside_pool = Path(temporary) / "outside/pool"
+            previous = outside_pool / "main/d/demo/demo_0.9-1_all.deb"
+            previous.parent.mkdir(parents=True)
+            previous.write_bytes(b"outside")
+            (repo / "pool").symlink_to(outside_pool, target_is_directory=True)
+            with self.assertRaises(artifact_validation.ValidationError) as raised:
+                artifact_validation.validate_artifact(
+                    run["id"], store=store, previous_artifact=str(previous.resolve()),
+                    allowed_previous_roots=(repo / "pool",), backend_factory=FakeBackend,
+                )
+            self.assertEqual(raised.exception.code, "previous_artifact_outside_build_store")
 
     def test_oci_backend_reports_missing_runtime_without_host_execution(self):
         with tempfile.TemporaryDirectory() as temporary:

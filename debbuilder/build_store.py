@@ -79,7 +79,9 @@ class BuildStore:
     @contextmanager
     def locked_run(self, run_id: str, *, blocking: bool = True):
         """Lease the workspace across processes and serialize Run mutations."""
+        from .repository_lock import require_no_repository_lease
         from .workspace_cleanup import locked_workspace
+        require_no_repository_lease()
         path = self.run_dir(run_id) / "run.json"
         with locked_workspace(self.root, run_id, blocking=blocking) as fd:
             with storage.locked_path(path):

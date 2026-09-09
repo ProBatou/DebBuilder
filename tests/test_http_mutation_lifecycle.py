@@ -78,6 +78,16 @@ class HttpMutationLifecycleTests(AdminApiCase):
             with self.subTest(path=path):
                 self.assert_route_lease(method, path, body, target, result)
 
+    def test_repository_busy_and_identity_conflict_map_to_http_conflict(self):
+        for code in ("repository_mutation_busy", "publication_identity_conflict"):
+            result = {"status": "failed", "error": {"code": code, "message": "busy", "details": {}}}
+            with self.subTest(code=code), mock.patch.object(server, "publish_build_artifact", return_value=result):
+                status, payload = self.error_response(
+                    "POST", "/api/executions/20260822-031400/publish", {},
+                )
+            self.assertEqual(status, 409)
+            self.assertEqual(payload["publication"]["error"]["code"], code)
+
     def test_queued_cancellation_releases_http_lease_after_bounded_request(self):
         gate = MutationGate()
         self.httpd.mutation_gate = gate

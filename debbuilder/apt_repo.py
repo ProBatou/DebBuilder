@@ -56,6 +56,8 @@ def parse_packages_index(text: str) -> list[dict]:
             continue
         if ": " in raw:
             key, value = raw.split(": ", 1)
+            if key in cur:
+                raise ValueError(f"duplicate Packages field: {key}")
             cur[key] = value
             last_key = key
     return rows
@@ -129,13 +131,7 @@ def published_versions(rows: list[dict], package: str, architecture: str | None 
     return out
 
 
-def parse_reprepro_distributions(text: str) -> dict:
-    data = {}
-    for raw in (text or "").splitlines():
-        if not raw.strip() or raw.lstrip().startswith("#") or ":" not in raw:
-            continue
-        key, value = raw.split(":", 1)
-        data[key.strip().lower()] = value.strip()
+def _distribution_config(data: dict[str, str]) -> dict:
     return {
         "origin": data.get("origin", ""),
         "label": data.get("label", ""),
@@ -146,7 +142,49 @@ def parse_reprepro_distributions(text: str) -> dict:
         "components": data.get("components", "").split(),
         "description": data.get("description", ""),
         "sign_with": data.get("signwith", ""),
+        "export_options": data.get("exportoptions", "").split(),
     }
+
+
+def parse_reprepro_distribution_stanzas(text: str) -> list[dict]:
+    """Parse every conf/distributions paragraph without merging identities."""
+    stanzas: list[dict] = []
+    current: dict[str, str] = {}
+    last_key = ""
+    for raw in (text or "").splitlines() + [""]:
+        if not raw.strip():
+            if current:
+                stanzas.append(_distribution_config(current))
+                current = {}
+                last_key = ""
+            continue
+        if raw.lstrip().startswith("#"):
+            continue
+        if raw.startswith((" ", "\t")) and last_key:
+            current[last_key] += " " + raw.strip()
+            continue
+        if ":" in raw:
+            key, value = raw.split(":", 1)
+            last_key = key.strip().lower()
+            current[last_key] = value.strip()
+    return stanzas
+
+
+def parse_reprepro_distributions(text: str) -> dict:
+    rows = parse_reprepro_distribution_stanzas(text)
+    return rows[0] if rows else _distribution_config({})
+
+
+def select_reprepro_distribution(text: str, requested: str) -> dict:
+    matches = [
+        row for row in parse_reprepro_distribution_stanzas(text)
+        if requested in {row.get("codename"), row.get("suite")}
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            f"reprepro distribution {requested!r} must match exactly one configured codename or suite"
+        )
+    return matches[0]
 
 
 def detect_repo_backend(repo_root: Path) -> str:
@@ -158,19 +196,50 @@ def detect_repo_backend(repo_root: Path) -> str:
     return "unknown"
 
 
-def reprepro_config(repo_root: Path) -> dict:
+def reprepro_config(repo_root: Path, distribution: str = "") -> dict:
     """Read the active reprepro distribution configuration."""
     path = Path(repo_root) / "conf" / "distributions"
     if not path.is_file():
         raise FileNotFoundError(str(path))
-    return parse_reprepro_distributions(path.read_text(encoding="utf-8"))
+    text = path.read_text(encoding="utf-8")
+    return select_reprepro_distribution(text, distribution) if distribution else parse_reprepro_distributions(text)
 
 
-def reprepro_list(repo_root: Path, distribution: str, *, runner=run_command) -> dict:
-    root = Path(repo_root).resolve()
+def _reprepro_layout_arguments(root: Path, *, lease=None) -> tuple[str, ...]:
+    """Override mutable path options with DebBuilder's supported local layout."""
+    paths = {
+        name: lease.directory_path(name) if lease is not None else root / name
+        for name in ("conf", "db", "dists", "lists", "logs", "morgue")
+    }
+    return (
+        "reprepro", "--basedir", str(root), "--outdir", str(root),
+        "--confdir", str(paths["conf"]), "--dbdir", str(paths["db"]),
+        "--distdir", str(paths["dists"]), "--listdir", str(paths["lists"]),
+        "--logdir", str(paths["logs"]), "--morguedir", str(paths["morgue"]),
+        "--waitforlock", "0",
+    )
+
+
+def reprepro_list(repo_root: Path, distribution: str, *, component: str = "", package: str = "", lease=None, runner=run_command) -> dict:
+    root = Path(repo_root).absolute()
+    inherited = ()
+    command_root = root
+    if lease is not None:
+        lease.require_active()
+        if root != lease.root:
+            raise ValueError("reprepro root does not match the active repository lease")
+        inherited = lease.inherited_fds
+        command_root = Path(f"/proc/self/fd/{lease.root_fd}")
+    arguments = [*_reprepro_layout_arguments(command_root, lease=lease)]
+    if component:
+        arguments.extend(("--component", component))
+    arguments.extend(("list", distribution))
+    if package:
+        arguments.append(package)
     result = runner(
-        f"reprepro --basedir {shlex.quote(str(root))} list {shlex.quote(distribution)}",
-        workspace=root, working_directory=".", environment=reprepro_environment(), timeout=60,
+        " ".join(shlex.quote(value) for value in arguments),
+        workspace=command_root, working_directory=".", environment=reprepro_environment(), timeout=60,
+        pass_fds=inherited,
     )
     rows = []
     for line in result.get("stdout", "").splitlines():
@@ -180,9 +249,24 @@ def reprepro_list(repo_root: Path, distribution: str, *, runner=run_command) -> 
     return {"command": result, "packages": rows}
 
 
-def reprepro_include_deb(repo_root: Path, distribution: str, deb_path: Path, component: str = "main", *, runner=run_command) -> dict:
+def reprepro_include_deb(repo_root: Path, distribution: str, deb_path: Path, component: str = "main", *, lease, source_fd: int, runner=run_command) -> dict:
     """Publish a verified .deb through the repository's native reprepro database."""
-    root = Path(repo_root).resolve()
-    command = " ".join(shlex.quote(value) for value in ("reprepro", "--basedir", str(root), "--component", component, "includedeb", distribution, str(Path(deb_path).resolve())))
-    result = runner(command, workspace=root, working_directory=".", environment=reprepro_environment(), timeout=120)
+    lease.require_active()
+    root = Path(repo_root).absolute()
+    if root != lease.root:
+        raise ValueError("reprepro root does not match the active repository lease")
+    command_root = Path(f"/proc/self/fd/{lease.root_fd}")
+    if isinstance(source_fd, bool) or not isinstance(source_fd, int) or source_fd < 0:
+        raise ValueError("a pinned source artifact descriptor is required")
+    source = f"/proc/self/fd/{source_fd}"
+    inherited = lease.inherited_fds + (source_fd,)
+    arguments = (
+        *_reprepro_layout_arguments(command_root, lease=lease), "--ignore=extension",
+        "--component", component, "includedeb", distribution, source,
+    )
+    command = " ".join(shlex.quote(value) for value in arguments)
+    result = runner(
+        command, workspace=command_root, working_directory=".", environment=reprepro_environment(),
+        timeout=120, pass_fds=inherited,
+    )
     return {"backend": "reprepro", "command": result}

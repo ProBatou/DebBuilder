@@ -1,8 +1,11 @@
 import json
+import os
+import stat
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from debbuilder import app
 from debbuilder import storage
@@ -46,6 +49,22 @@ class RuntimeConfigTests(unittest.TestCase):
 
 
 class AtomicStorageTests(unittest.TestCase):
+    def test_atomic_replace_fsyncs_file_and_containing_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "durable.json"
+            modes = []
+            real_fsync = os.fsync
+
+            def recording_fsync(descriptor):
+                modes.append(os.fstat(descriptor).st_mode)
+                return real_fsync(descriptor)
+
+            with mock.patch("debbuilder.storage.os.fsync", side_effect=recording_fsync):
+                storage.save_json(path, {"durable": True})
+
+            self.assertTrue(any(stat.S_ISREG(mode) for mode in modes))
+            self.assertTrue(any(stat.S_ISDIR(mode) for mode in modes))
+
     def test_parallel_json_replacements_never_expose_partial_content(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "state.json"

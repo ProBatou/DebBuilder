@@ -23,7 +23,12 @@ def snapshot(state="ready"):
             "by_status": {"success": 1, "failed": 1}, "failed_count": 1,
             "test_count": 1, "artifact_count": 1, "artifact_bytes": 30, "largest": [],
         },
-        "retention_policy": {"periodic_destructive_cleanup": False},
+        "retention_policy": {
+            "startup_destructive_cleanup": True,
+            "periodic_destructive_cleanup": True,
+            "cleanup_interval_seconds": 300,
+            "lifecycle_destructive_cleanup": True,
+        },
     }
 
 
@@ -48,6 +53,8 @@ class StorageApiTests(AdminApiCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(response["storage"]["bytes"]["managed_total"], 123)
+        self.assertTrue(response["storage"]["retention_policy"]["periodic_destructive_cleanup"])
+        self.assertEqual(response["storage"]["retention_policy"]["cleanup_interval_seconds"], 300)
         self.assertEqual(inventory.snapshot_calls, 1)
         collect.assert_not_called()
         walk.assert_not_called()

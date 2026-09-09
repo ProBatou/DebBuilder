@@ -254,7 +254,7 @@ function renderSettingsPage(){
           <label class="settings-check setting-toggle"><span>Automatic workspace cleanup</span><input type="checkbox" id="settingWorkspaceCleanupEnabled" ${cleanup.enabled?'checked':''}></label>
           ${fieldInput('settingFailedWorkspacesToRetain','Failed workspaces to retain',cleanup.failed_workspaces_to_retain,'type="number" min="0" max="1000" step="1" required')}
         </div>
-        <p class="muted">Completed sources, downloads and staging are disposable. Recent failed workspaces are kept for debugging. History, logs, manifests and final artifacts remain. Explicit history deletion also removes disposable files.</p>
+        <p class="muted">Authorized cleanup runs after startup, every five minutes, and after completed builds or tests. It removes only disposable sources, downloads and staging; recent failed workspaces are kept for debugging. History, logs, manifests and final artifacts remain. Explicit history deletion also removes disposable files.</p>
         <div class="maintenance-actions">
           <button type="button" class="btn btn--danger" id="btnClearLogs">Clear execution history</button>
           <small id="clearLogsStatus" class="settings-inline-status" aria-live="polite"></small>

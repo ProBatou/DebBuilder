@@ -3,6 +3,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from debbuilder import app, maintenance, workspace_cleanup
@@ -49,7 +50,7 @@ class StorageMaintenanceTests(unittest.TestCase):
         service.join(2)
         self.assertFalse(service.is_alive())
 
-    def test_drain_stop_processes_a_pending_cleanup_request(self):
+    def test_stop_discards_a_pending_cleanup_request(self):
         entered = threading.Event()
         release = threading.Event()
         cleanup = mock.Mock()
@@ -71,12 +72,128 @@ class StorageMaintenanceTests(unittest.TestCase):
         service.start()
         self.assertTrue(entered.wait(2))
         service.request(cleanup=True)
-        service.stop(drain=True)
+        service.stop()
         release.set()
         service.join(2)
 
-        cleanup.assert_called_once_with()
-        self.assertEqual(inventory.calls, 2)
+        cleanup.assert_not_called()
+        self.assertEqual(inventory.calls, 1)
+        self.assertFalse(service.is_alive())
+
+    def test_periodic_interval_requests_cleanup_and_inventory_on_one_worker(self):
+        inventory = FakeInventory()
+        cleanup_called = threading.Event()
+        cleanup = mock.Mock(side_effect=cleanup_called.set)
+        service = maintenance.MaintenanceService(
+            inventory, cleanup=cleanup, refresh_interval=0.03,
+        )
+
+        service.start()
+        self.assertTrue(inventory.collected.wait(2))
+        self.assertEqual(
+            sum(thread.name == "storage-maintenance" for thread in threading.enumerate()),
+            1,
+        )
+        self.assertTrue(cleanup_called.wait(2))
+        deadline = time.monotonic() + 2
+        while inventory.calls < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        service.stop()
+        service.join(2)
+
+        self.assertGreaterEqual(inventory.calls, 2)
+        self.assertGreaterEqual(cleanup.call_count, 1)
+        self.assertEqual(
+            sum(thread.name == "storage-maintenance" for thread in threading.enumerate()),
+            0,
+        )
+
+    def test_request_storm_is_bounded_to_one_followup_pass(self):
+        inventory = FakeInventory()
+        first_entered = threading.Event()
+        release_first = threading.Event()
+        second_entered = threading.Event()
+        calls = 0
+        service = None
+
+        def cleanup():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                first_entered.set()
+                release_first.wait(2)
+            elif calls == 2:
+                # A request emitted by the follow-up itself must not form an
+                # unbounded chain of immediately repeated scans.
+                service.request(cleanup=True)
+                second_entered.set()
+
+        service = maintenance.MaintenanceService(
+            inventory, cleanup=cleanup, refresh_interval=3600,
+        )
+        service.request(cleanup=True)
+        service.start()
+        self.assertTrue(first_entered.wait(2))
+        for _index in range(100):
+            service.request(cleanup=True)
+        release_first.set()
+        self.assertTrue(second_entered.wait(2))
+        time.sleep(0.05)
+        service.stop()
+        service.join(2)
+
+        self.assertEqual(calls, 2)
+        self.assertFalse(service.is_alive())
+
+    def test_cleanup_failure_does_not_kill_periodic_worker(self):
+        inventory = FakeInventory()
+        recovered = threading.Event()
+        calls = 0
+
+        def cleanup():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("isolated cleanup failure")
+            recovered.set()
+
+        service = maintenance.MaintenanceService(
+            inventory, cleanup=cleanup, refresh_interval=0.03,
+        )
+        with self.assertLogs("debbuilder.maintenance", level="ERROR"):
+            service.start()
+            service.request(cleanup=True)
+            self.assertTrue(recovered.wait(2))
+        self.assertTrue(service.is_alive())
+        service.stop()
+        service.join(2)
+
+    def test_application_cleanup_observes_service_stop_signal(self):
+        inventory = FakeInventory()
+        server = SimpleNamespace(
+            cleanup_authorization=workspace_cleanup.CleanupAuthorization(),
+            storage_inventory=inventory,
+        )
+        cleanup_entered = threading.Event()
+        release_cleanup = threading.Event()
+        observed_stop = []
+
+        def cleanup(*, authorization, should_stop):
+            self.assertIs(authorization, server.cleanup_authorization)
+            cleanup_entered.set()
+            release_cleanup.wait(2)
+            observed_stop.append(should_stop())
+
+        with mock.patch.object(app, "cleanup_workspaces", side_effect=cleanup):
+            service = app.create_maintenance_service(server)
+            service.request(cleanup=True)
+            service.start()
+            self.assertTrue(cleanup_entered.wait(2))
+            service.stop()
+            release_cleanup.set()
+            service.join(2)
+
+        self.assertEqual(observed_stop, [True])
         self.assertFalse(service.is_alive())
 
     def test_one_non_daemon_worker_refreshes_and_stops_cleanly(self):
@@ -120,18 +237,24 @@ class StorageMaintenanceTests(unittest.TestCase):
                 "message": "blocked by recovery",
             })
             inventory = StorageInventory(base / "data", base / "repo")
+            cleanup_finished = threading.Event()
+
+            def cleanup():
+                try:
+                    return workspace_cleanup.apply_retention(
+                        store, authorization=authorization,
+                    )
+                finally:
+                    cleanup_finished.set()
+
             service = maintenance.MaintenanceService(
                 inventory,
-                cleanup=lambda: workspace_cleanup.apply_retention(
-                    store, authorization=authorization,
-                ),
+                cleanup=cleanup,
                 refresh_interval=3600,
             )
             service.start()
             service.request(cleanup=True)
-            deadline = time.monotonic() + 2
-            while inventory.snapshot()["state"] == "collecting" and time.monotonic() < deadline:
-                time.sleep(0.01)
+            self.assertTrue(cleanup_finished.wait(2))
             service.stop()
             service.join(2)
 

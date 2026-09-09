@@ -1,10 +1,14 @@
 import signal
+import tempfile
 import threading
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import server as server_entrypoint
 from debbuilder import app
+from debbuilder import maintenance, workspace_cleanup
+from debbuilder.build_store import BuildStore
 
 
 class FakeManager:
@@ -142,6 +146,138 @@ class ServerLifecycleTests(unittest.TestCase):
         self.assertEqual(outcome, 0)
         self.assertIn("retention_started", events)
         self.assertIn("retention_stopped", events)
+
+    def test_clean_startup_requests_one_asynchronous_cleanup(self):
+        events = []
+        manager = FakeManager(events)
+        cleanup_entered = threading.Event()
+        release_cleanup = threading.Event()
+        requests = []
+
+        class Inventory:
+            def collect(self):
+                return {"state": "ready"}
+
+        class RecordingService(maintenance.MaintenanceService):
+            def request(self, *, refresh=True, cleanup=False):
+                requests.append((refresh, cleanup))
+                return super().request(refresh=refresh, cleanup=cleanup)
+
+        def create_maintenance(_http_server):
+            return RecordingService(
+                Inventory(),
+                cleanup=lambda: cleanup_entered.set() or release_cleanup.wait(2),
+                refresh_interval=3600,
+            )
+
+        def start(http_server, selected, *, prepare_directories, shutdown_check):
+            selected.worker = object()
+            http_server.execution_manager = selected
+            return selected
+
+        def serve():
+            self.assertTrue(cleanup_entered.wait(2))
+            events.append("served_while_cleanup_active")
+            release_cleanup.set()
+
+        server = FakeServer(events, serve)
+        with mock.patch("debbuilder.app.prepare_application_directories"), \
+                mock.patch("debbuilder.app.start_execution_manager", side_effect=start):
+            outcome = app.serve_application(
+                object(),
+                server_factory=lambda *_args: server,
+                manager_factory=lambda: manager,
+                maintenance_factory=create_maintenance,
+                install_signal_handlers=False,
+            )
+
+        self.assertEqual(outcome, 0)
+        self.assertEqual(requests, [(True, True)])
+        self.assertIn("served_while_cleanup_active", events)
+        self.assertFalse(any(
+            thread.name == "storage-maintenance" for thread in threading.enumerate()
+        ))
+
+    def test_startup_cleanup_obeys_global_and_resolved_recovery_authorization(self):
+        for blocked in (True, False):
+            with self.subTest(blocked=blocked), tempfile.TemporaryDirectory() as temporary:
+                events = []
+                manager = FakeManager(events, accepting=not blocked)
+                store = BuildStore(Path(temporary) / "builds")
+                run = store.create({
+                    "name": "recovered",
+                    "package": {
+                        "name": "recovered",
+                        "maintainer": "A <a@example.test>",
+                        "description": "A",
+                    },
+                    "source": {"repository": "owner/recovered"},
+                }, mode="build", run_id="recovered")
+                source = Path(run["workspace"]) / "source/evidence"
+                source.write_text("evidence")
+                run["status"] = "failed"
+                run["recovery"] = {
+                    "status": "blocked" if blocked else "resolved",
+                    "code": "execution_recovery_unresolved" if blocked else "execution_interrupted",
+                    "backend": "systemd_cgroup",
+                    "reason": "ownership unresolved" if blocked else "workload absent",
+                    "resolved_at": None if blocked else "2026-09-09T00:00:00+00:00",
+                }
+                store.save(run)
+                cleanup_finished = threading.Event()
+                inventory_finished = threading.Event()
+
+                class Inventory:
+                    def collect(self):
+                        inventory_finished.set()
+                        return {"state": "ready"}
+
+                def create_maintenance(http_server):
+                    service = None
+
+                    def cleanup():
+                        try:
+                            return workspace_cleanup.apply_retention(
+                                store,
+                                {"failed_workspaces_to_retain": 0},
+                                authorization=http_server.cleanup_authorization,
+                                should_stop=service.stop_requested,
+                            )
+                        finally:
+                            cleanup_finished.set()
+
+                    service = maintenance.MaintenanceService(
+                        Inventory(), cleanup=cleanup, refresh_interval=3600,
+                    )
+                    return service
+
+                def start(http_server, selected, *, prepare_directories, shutdown_check):
+                    if blocked:
+                        http_server.cleanup_authorization.update_global_blocker({
+                            "code": "execution_recovery_unresolved",
+                            "message": "global recovery remains unresolved",
+                        })
+                    selected.worker = object()
+                    http_server.execution_manager = selected
+                    return selected
+
+                def serve():
+                    self.assertTrue(cleanup_finished.wait(2))
+                    self.assertTrue(inventory_finished.wait(2))
+
+                server = FakeServer(events, serve)
+                with mock.patch("debbuilder.app.prepare_application_directories"), \
+                        mock.patch("debbuilder.app.start_execution_manager", side_effect=start):
+                    outcome = app.serve_application(
+                        object(),
+                        server_factory=lambda *_args: server,
+                        manager_factory=lambda: manager,
+                        maintenance_factory=create_maintenance,
+                        install_signal_handlers=False,
+                    )
+
+                self.assertEqual(outcome, 0)
+                self.assertEqual(source.exists(), blocked)
 
     def test_server_bind_failure_never_starts_or_shutdowns_manager(self):
         manager = FakeManager([])

@@ -12,6 +12,7 @@ import threading
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from .build_models import utc_now, validate_run
 from .build_store import EXECUTION_HISTORY_DELETION_FILE as HISTORY_MARKER
@@ -391,10 +392,14 @@ def apply_retention(
     policy: dict | None = None,
     *,
     authorization: CleanupAuthorization = OPEN_CLEANUP_AUTHORIZATION,
+    should_stop: Callable[[], bool] | None = None,
 ) -> dict:
     policy = validate_policy(DEFAULT_POLICY if policy is None else policy)
     result = {"cleaned": [], "retained": [], "skipped": [], "errors": []}
     if not policy["enabled"]:
+        return result
+    stop_requested = should_stop or (lambda: False)
+    if stop_requested():
         return result
     try:
         authorization.require_global()
@@ -408,6 +413,8 @@ def apply_retention(
         return result
     candidates = []
     for run_id in ids:
+        if stop_requested():
+            return result
         try:
             with store.locked_run(run_id, blocking=False) as fd:
                 run = read_run(fd, store.root, run_id)
@@ -428,6 +435,8 @@ def apply_retention(
     candidates.sort(key=lambda row: (row[1], row[0]), reverse=True)
     retained = 0
     for run_id, _date, failed, deleted, revision in candidates:
+        if stop_requested():
+            break
         if failed and not deleted and retained < policy["failed_workspaces_to_retain"]:
             result["retained"].append(run_id)
             retained += 1
@@ -436,6 +445,8 @@ def apply_retention(
             # Re-read while locked; a validation/publication may have begun
             # since the scan. The snapshot is never used to authorize deletion.
             with store.locked_run(run_id, blocking=False) as fd:
+                if stop_requested():
+                    break
                 run = read_run(fd, store.root, run_id)
                 authorization.require_run(run)
                 require_finished(run)

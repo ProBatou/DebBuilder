@@ -39,6 +39,11 @@ class WorkspaceCleanupTests(unittest.TestCase):
 
     def test_automatic_cleanup_preserves_history_metadata_logs_manifests_and_artifact(self):
         run, root = self.make_run()
+        previous = root / "validation/check/previous.deb"
+        previous.parent.mkdir(parents=True)
+        previous.write_bytes(b"previous artifact")
+        unknown = root / "unknown.bin"
+        unknown.write_bytes(b"unknown")
         before = {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file() and path.parts[-2] in {"artifacts", "manifests", "logs"}}
         metadata = (root / "run.json").read_bytes()
         snapshot = (root / "recipe.json").read_bytes()
@@ -50,6 +55,8 @@ class WorkspaceCleanupTests(unittest.TestCase):
         self.assertEqual((root / "recipe.json").read_bytes(), snapshot)
         for name, content in before.items():
             self.assertEqual((root / name).read_bytes(), content)
+        self.assertEqual(previous.read_bytes(), b"previous artifact")
+        self.assertEqual(unknown.read_bytes(), b"unknown")
         self.assertIsNotNone(execution_service.get_execution(self.store, run["id"]))
         self.assertIn("persistent log", execution_service.get_log(self.store, run["id"], verbosity="raw")["text"])
         self.assertEqual(workspace_cleanup.apply_retention(self.store)["cleaned"], [])
@@ -318,6 +325,39 @@ class WorkspaceCleanupTests(unittest.TestCase):
             result = workspace_cleanup.apply_retention(self.store)
         self.assertIn(run["id"], result["skipped"])
         self.assertTrue((root / "source/large-data").exists())
+
+    def test_retention_stop_boundary_starts_no_further_candidate(self):
+        _first, first_root = self.make_run("first")
+        _second, second_root = self.make_run("second")
+        stop = False
+        original = workspace_cleanup._clean_locked
+
+        def clean_one(*args, **kwargs):
+            nonlocal stop
+            result = original(*args, **kwargs)
+            stop = True
+            return result
+
+        with mock.patch("debbuilder.workspace_cleanup._clean_locked", side_effect=clean_one):
+            result = workspace_cleanup.apply_retention(
+                self.store, should_stop=lambda: stop,
+            )
+
+        self.assertEqual(len(result["cleaned"]), 1)
+        remaining = [root for root in (first_root, second_root) if (root / "source").exists()]
+        self.assertEqual(len(remaining), 1)
+
+    def test_malformed_historical_run_does_not_block_independent_candidate(self):
+        run, root = self.make_run("valid")
+        malformed = self.store.root / "malformed"
+        malformed.mkdir()
+        (malformed / "run.json").write_text("{")
+
+        result = workspace_cleanup.apply_retention(self.store)
+
+        self.assertEqual([row["id"] for row in result["cleaned"]], [run["id"]])
+        self.assertFalse((root / "source").exists())
+        self.assertEqual(result["errors"][0]["id"], "malformed")
 
     def test_artifact_in_disposable_data_is_never_deleted(self):
         run, root = self.make_run()

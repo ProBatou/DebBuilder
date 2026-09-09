@@ -491,12 +491,13 @@ def enqueue_recipe_run(manager: ExecutionManager | None, workflow: dict, *, dry_
     return {"run_id": run["id"], "status": "queued"}
 
 
-def cleanup_workspaces(*, authorization=None) -> dict:
+def cleanup_workspaces(*, authorization=None, should_stop=None) -> dict:
     """Use the current DATA/settings; cleanup failures never change a Run result."""
     try:
         result = workspace_cleanup.apply_retention(
             BuildStore(DATA / "builds"), app_settings().get("workspace_cleanup"),
             authorization=authorization or workspace_cleanup.OPEN_CLEANUP_AUTHORIZATION,
+            should_stop=should_stop,
         )
         for error in result["errors"]:
             logging.getLogger(__name__).warning("Workspace cleanup: %s", error)
@@ -586,10 +587,19 @@ def request_maintenance(*, refresh: bool = True, cleanup: bool = False) -> None:
 
 def create_maintenance_service(http_server):
     authorization = http_server.cleanup_authorization
-    return maintenance.MaintenanceService(
+    service = None
+
+    def cleanup():
+        return cleanup_workspaces(
+            authorization=authorization,
+            should_stop=service.stop_requested,
+        )
+
+    service = maintenance.MaintenanceService(
         http_server.storage_inventory,
-        cleanup=lambda: cleanup_workspaces(authorization=authorization),
+        cleanup=cleanup,
     )
+    return service
 
 
 def create_storage_inventory():
@@ -1184,6 +1194,9 @@ def serve_application(
                         selected_manager.begin_shutdown()
                     except BaseException as exc:
                         cleanup_failures.append(("execution admission shutdown", exc))
+                selected_maintenance = maintenance_service
+                if selected_maintenance is not None:
+                    selected_maintenance.stop()
                 with lifecycle_condition:
                     while not serving_started and not cleanup_started.is_set():
                         lifecycle_condition.wait()
@@ -1231,6 +1244,7 @@ def serve_application(
         APPLICATION_MAINTENANCE_SERVICE = maintenance_service
         maintenance_service.start()
         check_shutdown_requested()
+        maintenance_service.request(cleanup=True)
         print(f"DebBuilder Repo UI listening on http://{RUNTIME.host}:{RUNTIME.port}")
         with lifecycle_condition:
             check_shutdown_requested()
@@ -1261,6 +1275,8 @@ def serve_application(
                 manager.begin_shutdown()
             except BaseException as exc:
                 cleanup_failures.append(("execution admission shutdown", exc))
+        if maintenance_service is not None:
+            maintenance_service.stop()
         try:
             mutation_result = mutation_gate.wait_for_quiescence(
                 _remaining_shutdown_time(graceful_deadline)
@@ -1307,7 +1323,6 @@ def serve_application(
             if worker is not None and getattr(worker, "is_alive", lambda: False)():
                 worker.join()
         if maintenance_service is not None:
-            maintenance_service.stop(drain=True)
             if maintenance_service.is_alive():
                 maintenance_service.join(_remaining_shutdown_time(graceful_deadline))
                 if maintenance_service.is_alive():

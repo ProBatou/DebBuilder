@@ -99,17 +99,15 @@ existing settings files receive the defaults without a Recipe migration.
 
 Build/dry-run completion and queued cancellation request cleanup from the
 application-owned maintenance worker; execution does not synchronously scan all
-historical Runs before dequeuing the next one. The worker also refreshes a
-read-only storage inventory at startup, every five minutes and after relevant
-lifecycle changes. Broader startup/periodic destructive retention remains
-deferred to the dedicated cleanup-lifecycle work; the observer's periodic timer
-does not itself request deletion. Completed successful/prepared runs are eligible
-when cleanup is requested, even if manual validation or publication will happen
-later. The five most recent failed/cancelled workspaces are kept globally across
-all Recipes, ordered by the latest lifecycle completion time; older failures are
-cleaned. Failed dry-runs follow the same rule. Already cleaned workspaces do not
-consume retention slots. There is no age limit or automatic deletion of final
-artifacts/history in this policy.
+historical Runs before dequeuing the next one. The same worker requests authorized
+disposable-workspace cleanup after startup and every five minutes, and refreshes
+the read-only storage inventory after each maintenance pass. Completed
+successful/prepared runs are eligible even if manual validation or publication
+will happen later. The five most recent failed/cancelled workspaces are kept
+globally across all Recipes, ordered by the latest lifecycle completion time;
+older failures are cleaned. Failed dry-runs follow the same rule. Already cleaned
+workspaces do not consume retention slots. There is no age limit or automatic
+deletion of final artifacts/history in this policy.
 
 GET `/api/storage` returns only the maintenance worker's cached snapshot; it does
 not walk or mutate the filesystem. Settings → Maintenance shows compact totals

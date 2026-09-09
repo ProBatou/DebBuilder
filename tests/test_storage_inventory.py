@@ -199,6 +199,14 @@ class StorageInventoryTests(unittest.TestCase):
         self.assertIn(ready["state"], {"ready", "partial"})
         self.assertEqual(inventory.snapshot()["state"], "stale")
 
+    def test_retention_projection_reports_fixed_active_schedule(self):
+        result = self.collect()
+
+        self.assertTrue(result["retention_policy"]["startup_destructive_cleanup"])
+        self.assertTrue(result["retention_policy"]["periodic_destructive_cleanup"])
+        self.assertEqual(result["retention_policy"]["cleanup_interval_seconds"], 300)
+        self.assertTrue(result["retention_policy"]["lifecycle_destructive_cleanup"])
+
     def test_collection_error_is_error_then_stale_after_a_success(self):
         provider = mock.Mock(side_effect=RuntimeError("policy unavailable"))
         inventory = storage_inventory.StorageInventory(

@@ -12,7 +12,10 @@ const context = vm.createContext({
   clearTimeout: () => {},
   $: () => null,
 });
-vm.runInContext(fs.readFileSync('static/settings.js', 'utf8'), context, {filename: 'settings.js'});
+const settingsSource = fs.readFileSync('static/settings.js', 'utf8');
+vm.runInContext(settingsSource, context, {filename: 'settings.js'});
+assert.match(settingsSource, /cleanup runs after startup, every five minutes/);
+assert.match(settingsSource, /only disposable sources, downloads and staging/);
 
 assert.equal(context.formatStorageBytes(0), '0 B');
 assert.equal(context.formatStorageBytes(1024), '1.00 KiB');

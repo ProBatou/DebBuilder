@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Callable
 
 from .build_models import validate_run
+from .maintenance import MAINTENANCE_INTERVAL_SECONDS
 from .workspace_cleanup import DEFAULT_POLICY, directory_fd, validate_policy
 
 CATEGORIES = (
@@ -377,7 +378,10 @@ def collect_storage_snapshot(
         "retention_policy": {
             **policy,
             "scope": ["source", "staging", "downloads", "source.tar.gz"],
-            "periodic_destructive_cleanup": False,
+            "startup_destructive_cleanup": True,
+            "periodic_destructive_cleanup": True,
+            "cleanup_interval_seconds": MAINTENANCE_INTERVAL_SECONDS,
+            "lifecycle_destructive_cleanup": True,
             "artifacts_preserved": True,
             "validation_previous_preserved": True,
         },

@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import Callable
 
 LOGGER = logging.getLogger(__name__)
+MAINTENANCE_INTERVAL_SECONDS = 300
 
 
 class MaintenanceService:
@@ -14,7 +16,7 @@ class MaintenanceService:
         inventory,
         *,
         cleanup: Callable[[], object] | None = None,
-        refresh_interval: float = 300,
+        refresh_interval: float = MAINTENANCE_INTERVAL_SECONDS,
     ):
         self.inventory = inventory
         self.cleanup = cleanup
@@ -23,7 +25,8 @@ class MaintenanceService:
         self._refresh_requested = True
         self._cleanup_requested = False
         self._stop_requested = False
-        self._drain_on_stop = False
+        self._pass_active = False
+        self._accept_followup = False
         self._thread: threading.Thread | None = None
 
     @property
@@ -45,41 +48,94 @@ class MaintenanceService:
         with self._condition:
             if self._stop_requested:
                 return
+            # One pass may retain one coalesced follow-up. Requests received
+            # during that follow-up are already represented by the work in
+            # progress and are left to the fixed periodic sweep.
+            if self._pass_active and not self._accept_followup:
+                return
             self._refresh_requested = self._refresh_requested or bool(refresh)
             self._cleanup_requested = self._cleanup_requested or bool(cleanup)
             self._condition.notify()
 
     def _run(self) -> None:
+        next_periodic = time.monotonic() + self.refresh_interval
         while True:
             with self._condition:
-                if not self._refresh_requested and not self._cleanup_requested and not self._stop_requested:
-                    self._condition.wait(self.refresh_interval)
-                    if not self._stop_requested:
-                        self._refresh_requested = True
-                if self._stop_requested and not (
-                    self._drain_on_stop and (self._refresh_requested or self._cleanup_requested)
+                while not (
+                    self._refresh_requested
+                    or self._cleanup_requested
+                    or self._stop_requested
                 ):
+                    remaining = next_periodic - time.monotonic()
+                    if remaining <= 0:
+                        self._refresh_requested = True
+                        self._cleanup_requested = True
+                        break
+                    self._condition.wait(remaining)
+                if self._stop_requested:
+                    self._refresh_requested = False
+                    self._cleanup_requested = False
                     return
                 refresh = self._refresh_requested
                 cleanup = self._cleanup_requested
-                stopping = self._stop_requested
                 self._refresh_requested = False
                 self._cleanup_requested = False
-            if cleanup and self.cleanup is not None:
-                try:
-                    self.cleanup()
-                except Exception:
-                    LOGGER.exception("Requested workspace cleanup failed")
-            if refresh or cleanup:
-                self.inventory.collect()
-            if stopping:
-                return
+                self._pass_active = True
+                self._accept_followup = True
 
-    def stop(self, *, drain: bool = False) -> None:
+            while True:
+                if cleanup:
+                    try:
+                        if self.cleanup is not None:
+                            self.cleanup()
+                    except Exception:
+                        LOGGER.exception("Requested workspace cleanup failed")
+                if not self.stop_requested() and (refresh or cleanup):
+                    try:
+                        self.inventory.collect()
+                    except Exception:
+                        LOGGER.exception("Storage inventory refresh failed")
+                if cleanup:
+                    # A completed pass, including a denied or failed one,
+                    # satisfies this interval. Base the next deadline on all
+                    # of its work so a slow scan cannot create catch-up spin.
+                    next_periodic = time.monotonic() + self.refresh_interval
+
+                with self._condition:
+                    if self._stop_requested:
+                        self._refresh_requested = False
+                        self._cleanup_requested = False
+                        self._pass_active = False
+                        self._accept_followup = False
+                        return
+                    if self._accept_followup and (
+                        self._refresh_requested or self._cleanup_requested
+                    ):
+                        refresh = self._refresh_requested
+                        cleanup = self._cleanup_requested
+                        self._refresh_requested = False
+                        self._cleanup_requested = False
+                        self._accept_followup = False
+                        continue
+                    # Bound a request burst to the active pass and one
+                    # follow-up. A periodic pass provides eventual cleanup for
+                    # notifications coalesced into the follow-up itself.
+                    self._refresh_requested = False
+                    self._cleanup_requested = False
+                    self._pass_active = False
+                    self._accept_followup = False
+                    break
+
+    def stop(self) -> None:
         with self._condition:
-            self._drain_on_stop = self._drain_on_stop or bool(drain)
             self._stop_requested = True
+            self._refresh_requested = False
+            self._cleanup_requested = False
             self._condition.notify_all()
+
+    def stop_requested(self) -> bool:
+        with self._condition:
+            return self._stop_requested
 
     def join(self, timeout: float | None = None) -> None:
         thread = self._thread
@@ -108,7 +164,7 @@ class TargetMaintenanceService:
     def request(self, *, refresh: bool = True, cleanup: bool = False) -> None:
         return None
 
-    def stop(self, *, drain: bool = False) -> None:
+    def stop(self) -> None:
         self._stop.set()
 
     def join(self, timeout: float | None = None) -> None:

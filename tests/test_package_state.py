@@ -132,6 +132,18 @@ class PackageStoreTests(unittest.TestCase):
         failed = package_store.allowed_actions("build_failed", "app-recipe", {"mode": "build", "status": "failed"})
         self.assertEqual(failed, {"test": True, "build": True, "validate": False, "publish": False})
 
+    def test_pruned_local_artifact_disables_validate_and_publish_actions(self):
+        run = {
+            "mode": "build", "status": "success",
+            "artifact": {"path": "/data/builds/run/artifacts/demo.deb", "pruning": {"status": "pruned"}},
+            "validations": [{"status": "success"}], "publications": [],
+        }
+
+        actions = package_store.allowed_actions("publication_available", "demo", run)
+
+        self.assertFalse(actions["validate"])
+        self.assertFalse(actions["publish"])
+
     def test_lifecycle_display_statuses(self):
         status = package_store.derive_lifecycle_status
         self.assertEqual(status("success"), "validation_needed")

@@ -8,6 +8,7 @@ from unittest import mock
 
 from debbuilder import app, maintenance, workspace_cleanup
 from debbuilder.build_store import BuildStore
+from debbuilder.lifecycle import MutationGate
 from debbuilder.storage_inventory import StorageInventory
 
 
@@ -23,6 +24,53 @@ class FakeInventory:
 
 
 class StorageMaintenanceTests(unittest.TestCase):
+    def test_application_maintenance_holds_mutation_lease_before_cleanup(self):
+        inventory = FakeInventory()
+        gate = MutationGate()
+        server = SimpleNamespace(
+            cleanup_authorization=workspace_cleanup.CleanupAuthorization(),
+            mutation_gate=gate,
+            storage_inventory=inventory,
+        )
+        called = threading.Event()
+
+        def maintain(*, authorization, should_stop):
+            self.assertIs(authorization, server.cleanup_authorization)
+            self.assertEqual(gate.active, 1)
+            self.assertFalse(should_stop())
+            called.set()
+
+        with mock.patch.object(app, "maintain_run_storage", side_effect=maintain):
+            service = app.create_maintenance_service(server)
+            service.request(cleanup=True)
+            service.start()
+            self.assertTrue(called.wait(2))
+            service.stop()
+            service.join(2)
+
+        self.assertEqual(gate.active, 0)
+        self.assertFalse(service.is_alive())
+
+    def test_closed_mutation_gate_prevents_new_cleanup_pass(self):
+        inventory = FakeInventory()
+        gate = MutationGate()
+        server = SimpleNamespace(
+            cleanup_authorization=workspace_cleanup.CleanupAuthorization(),
+            mutation_gate=gate,
+            storage_inventory=inventory,
+        )
+        gate.begin_shutdown()
+        with mock.patch.object(app, "maintain_run_storage") as maintain:
+            service = app.create_maintenance_service(server)
+            service.request(cleanup=True)
+            service.start()
+            self.assertTrue(inventory.collected.wait(2))
+            service.stop()
+            service.join(2)
+
+        maintain.assert_not_called()
+        self.assertFalse(service.is_alive())
+
     def test_request_returns_while_inventory_collection_is_blocked(self):
         entered = threading.Event()
         release = threading.Event()
@@ -287,6 +335,40 @@ class StorageMaintenanceTests(unittest.TestCase):
             self.assertEqual(result["status"], "success")
             request.assert_called_once_with(refresh=True, cleanup=True)
             sweep.assert_not_called()
+
+    def test_application_maintenance_orders_cleanup_before_pruning(self):
+        calls = []
+        authorization = workspace_cleanup.CleanupAuthorization()
+        with mock.patch.object(app, "cleanup_workspaces", side_effect=lambda **_kwargs: calls.append("cleanup") or {"errors": []}), \
+                mock.patch.object(app.storage_pruning, "apply_pruning", side_effect=lambda *_args, **_kwargs: calls.append("pruning") or {"errors": []}), \
+                mock.patch.object(app, "repo_settings", return_value={"distribution": "bookworm", "component": "main"}), \
+                mock.patch.object(app, "app_settings", return_value={"workspace_cleanup": {"enabled": True, "failed_workspaces_to_retain": 5}}):
+            result = app.maintain_run_storage(authorization=authorization)
+
+        self.assertEqual(calls, ["cleanup", "pruning"])
+        self.assertIn("workspace_cleanup", result)
+        self.assertIn("storage_pruning", result)
+
+    def test_validation_publication_and_reconciliation_request_destructive_maintenance(self):
+        notifier = mock.Mock()
+        with mock.patch.object(app, "notification_service", return_value=notifier), \
+                mock.patch.object(app, "request_maintenance") as request, \
+                mock.patch.object(app.artifact_validation, "validate_artifact", return_value={"status": "success"}):
+            app.validate_build_artifact("run")
+        request.assert_called_once_with(refresh=True, cleanup=True)
+
+        with mock.patch.object(app, "notification_service", return_value=notifier), \
+                mock.patch.object(app, "repo_settings", return_value={"distribution": "bookworm", "component": "main"}), \
+                mock.patch.object(app, "request_maintenance") as request, \
+                mock.patch.object(app.artifact_publication, "publish_artifact", return_value={"status": "success"}):
+            app.publish_build_artifact("run")
+        request.assert_called_once_with(refresh=True, cleanup=True)
+
+        with mock.patch.object(app, "repo_settings", return_value={"distribution": "bookworm", "component": "main"}), \
+                mock.patch.object(app, "request_maintenance") as request, \
+                mock.patch.object(app.artifact_publication, "reconcile_publication", return_value={"status": "success"}):
+            app.reconcile_build_publication("run")
+        request.assert_called_once_with(refresh=True, cleanup=True)
 
 
 if __name__ == "__main__":

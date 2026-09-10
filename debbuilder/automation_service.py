@@ -35,7 +35,14 @@ def run_post_build(
     if dry_run or not summary["auto_validate_after_successful_build"]:
         return summary
     run = store.load(run_id)
-    if not run or run.get("mode") != "build" or run.get("status") != "success" or not (run.get("artifact") or {}).get("path"):
+    artifact = (run or {}).get("artifact") or {}
+    if (
+        not run
+        or run.get("mode") != "build"
+        or run.get("status") != "success"
+        or not artifact.get("path")
+        or artifact.get("pruning") is not None
+    ):
         return summary
     validation = validate(run_id, {})
     summary["validation"] = validation

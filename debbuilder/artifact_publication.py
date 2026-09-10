@@ -82,7 +82,7 @@ def publication_readiness(run: dict) -> dict:
     reasons = []
     if run.get("status") != "success":
         reasons.append("build_not_successful")
-    if not artifact.get("path"):
+    if not artifact.get("path") or artifact.get("pruning") is not None:
         reasons.append("artifact_unavailable")
     if not successful:
         reasons.append("validation_not_successful")
@@ -136,7 +136,7 @@ def _option_name(line: str) -> str:
     return value.split(None, 1)[0].split("=", 1)[0].lstrip("-").lower()
 
 
-def _repository_config(lease: RepositoryLease, requested: str) -> dict:
+def _repository_config(lease: RepositoryLease, requested: str, *, create_layout: bool = True) -> dict:
     distributions = _read_repository_text(lease, "conf/distributions")
     options = _read_repository_text(lease, "conf/options", required=False)
     unsupported = sorted({
@@ -165,7 +165,12 @@ def _repository_config(lease: RepositoryLease, requested: str) -> dict:
     if any(not REPOSITORY_TOKEN_RE.fullmatch(str(value)) for value in config.get("architectures", [])):
         raise PublicationError("repository_configuration_unsupported", "The selected Architectures contain an unsafe value")
     try:
-        lease.pin_standard_layout()
+        if create_layout:
+            lease.pin_standard_layout()
+        else:
+            lease.pin_directory("conf", create=False)
+            for name in ("db", "dists", "pool", "lists", "logs", "morgue"):
+                lease.pin_directory(name, create=False)
     except RepositoryLockError as exc:
         raise PublicationError(exc.code, str(exc), details=exc.details) from exc
     return config
@@ -185,6 +190,8 @@ def _validate_requested_identity(component: str, source: SourceArtifactIdentity)
 @contextmanager
 def _source_artifact(run: dict, workspace_fd: int):
     artifact = run.get("artifact") or {}
+    if artifact.get("pruning") is not None:
+        raise PublicationError("artifact_not_available", "The Run-local artifact has been pruned")
     recorded = artifact.get("inspection") or {}
     workspace = Path(str(run.get("workspace") or "")).absolute()
     path = Path(str(artifact.get("path") or ""))
@@ -464,6 +471,116 @@ def verify_published_artifact_exact(
         source_fd=source_fd, artifacts_fd=artifacts_fd, artifact_name=artifact_name,
         runner=runner,
     )
+
+
+def publication_proof_reference(proof: dict | PublicationProofV1) -> dict:
+    """Return the bounded, durable identity used to authorize local pruning."""
+    value = asdict(proof) if isinstance(proof, PublicationProofV1) else proof
+    if not isinstance(value, dict) or value.get("schema") != "debbuilder.repository-publication-proof.v1" or value.get("proof_version") != 1:
+        raise PublicationError("publication_proof_invalid", "Publication proof is not a supported PublicationProofV1 record")
+
+    def text_value(container: dict, key: str, *, limit: int = 4096) -> str:
+        result = container.get(key)
+        if not isinstance(result, str) or not result or len(result) > limit or "\x00" in result:
+            raise PublicationError("publication_proof_invalid", f"Publication proof field {key} is invalid")
+        return result
+
+    def integer_value(container: dict, key: str) -> int:
+        result = container.get(key)
+        if type(result) is not int or result < 0:
+            raise PublicationError("publication_proof_invalid", f"Publication proof field {key} is invalid")
+        return result
+
+    repository = value.get("repository")
+    distribution = value.get("distribution")
+    source = value.get("source")
+    targets = value.get("targets")
+    architectures = value.get("database_architectures")
+    if not isinstance(repository, dict) or not isinstance(distribution, dict) or not isinstance(source, dict):
+        raise PublicationError("publication_proof_invalid", "Publication proof identity is incomplete")
+    if not isinstance(targets, list) or not 1 <= len(targets) <= 64 or not isinstance(architectures, list):
+        raise PublicationError("publication_proof_invalid", "Publication proof targets are invalid")
+    canonical_targets = []
+    for target in targets:
+        if not isinstance(target, dict) or not isinstance(target.get("index"), dict) or not isinstance(target.get("pool"), dict):
+            raise PublicationError("publication_proof_invalid", "Publication proof target is invalid")
+        index = target["index"]
+        pool = target["pool"]
+        index_path = safe_relative_path(text_value(index, "path")).as_posix()
+        filename = safe_relative_path(text_value(index, "filename"), required_prefix="pool").as_posix()
+        pool_path = safe_relative_path(text_value(pool, "path"), required_prefix="pool").as_posix()
+        if filename != pool_path:
+            raise PublicationError("publication_proof_invalid", "Publication proof pool paths disagree")
+        index_sha = text_value(index, "sha256", limit=64).lower()
+        pool_sha = text_value(pool, "sha256", limit=64).lower()
+        if not SHA256_RE.fullmatch(index_sha) or not SHA256_RE.fullmatch(pool_sha):
+            raise PublicationError("publication_proof_invalid", "Publication proof digest is invalid")
+        canonical_targets.append({
+            "database_architecture": text_value(target, "database_architecture", limit=128),
+            "index": {"path": index_path, "filename": filename, "size": integer_value(index, "size"), "sha256": index_sha},
+            "pool": {"path": pool_path, "size": integer_value(pool, "size"), "sha256": pool_sha},
+        })
+    source_sha = text_value(source, "sha256", limit=64).lower()
+    if not SHA256_RE.fullmatch(source_sha):
+        raise PublicationError("publication_proof_invalid", "Publication proof source digest is invalid")
+    result = {
+        "schema": value["schema"],
+        "proof_version": 1,
+        "repository": {
+            "root": text_value(repository, "root"),
+            "device": integer_value(repository, "device"),
+            "inode": integer_value(repository, "inode"),
+        },
+        "distribution": {
+            "requested": text_value(distribution, "requested", limit=128),
+            "codename": text_value(distribution, "codename", limit=128),
+        },
+        "component": text_value(value, "component", limit=256),
+        "package": text_value(value, "package", limit=256),
+        "version": text_value(value, "version", limit=512),
+        "architecture": text_value(value, "architecture", limit=128),
+        "database_architectures": list(architectures),
+        "source": {
+            "path": text_value(source, "path"),
+            "size": integer_value(source, "size"),
+            "sha256": source_sha,
+        },
+        "targets": canonical_targets,
+    }
+    if not result["database_architectures"] or len(result["database_architectures"]) > 64 or any(
+        not isinstance(item, str) or not item or len(item) > 128
+        for item in result["database_architectures"]
+    ):
+        raise PublicationError("publication_proof_invalid", "Publication proof architectures are invalid")
+    return result
+
+
+@contextmanager
+def verified_published_run_artifact(
+    run: dict, workspace_fd: int, *, repo_root: str | Path,
+    distribution: str, component: str, operation: str, runner=None,
+):
+    """Hold the repository lease while re-proving a Run's exact artifact."""
+    with repository_lease(repo_root, operation=operation) as lease:
+        with _source_artifact(run, workspace_fd) as (source, source_fd, artifacts_fd, artifact_name):
+            config = _repository_config(lease, distribution, create_layout=False)
+            config["requested"] = distribution
+            _validate_requested_identity(component, source)
+            if component not in config.get("components", []):
+                raise PublicationError("component_not_configured", f"Component {component!r} is not configured")
+            proof = verify_published_artifact_exact(
+                lease, config=config, component=component, source=source,
+                source_fd=source_fd, artifacts_fd=artifacts_fd,
+                artifact_name=artifact_name, runner=runner,
+            )
+            yield lease, source, source_fd, artifacts_fd, artifact_name, proof
+
+
+def verify_source_artifact_fd(
+    source: SourceArtifactIdentity, source_fd: int, artifacts_fd: int, artifact_name: str,
+) -> None:
+    """Recheck the pinned local artifact immediately before a destructive step."""
+    _verify_source_fd(source, source_fd, artifacts_fd, artifact_name)
 
 
 def _attempt(run: dict, *, repo_root: str | Path, distribution: str, component: str, kind: str = "publication") -> tuple[dict, dict, float]:

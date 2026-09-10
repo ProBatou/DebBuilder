@@ -206,6 +206,109 @@ class StorageInventoryTests(unittest.TestCase):
         self.assertTrue(result["retention_policy"]["periodic_destructive_cleanup"])
         self.assertEqual(result["retention_policy"]["cleanup_interval_seconds"], 300)
         self.assertTrue(result["retention_policy"]["lifecycle_destructive_cleanup"])
+        self.assertEqual(
+            result["retention_policy"]["published_run_artifact_pruning"],
+            "exact_repository_proof_required",
+        )
+        self.assertTrue(result["retention_policy"]["artifact_manifests_preserved"])
+        self.assertTrue(
+            result["retention_policy"]["terminal_staging_manifests_pruned_without_retained_workspace_evidence"]
+        )
+
+    def test_pruned_artifact_metadata_is_counted_separately_from_local_files(self):
+        run, root = self.make_run()
+        artifact = root / "artifacts/package.deb"
+        artifact.unlink()
+        run = self.store.load(run["id"])
+        run["artifact"].update({"size": 123, "sha256": "a" * 64})
+        run["artifact"]["pruning"] = {
+            "schema": "debbuilder.artifact-pruning.v1",
+            "pruning_version": 1,
+            "status": "pruned",
+            "reason": "duplicate_after_exact_publication",
+            "pruned_at": "2026-09-09T10:00:00+00:00",
+            "source": {
+                "path": str(artifact), "name": artifact.name, "size": 123,
+                "sha256": "a" * 64,
+            },
+            "publication": {
+                "attempt_id": "publication",
+                "proof": {
+                    "schema": "debbuilder.repository-publication-proof.v1",
+                    "proof_version": 1,
+                    "repository": {"root": str(self.repo), "device": 1, "inode": 2},
+                    "distribution": {"requested": "bookworm", "codename": "bookworm"},
+                    "component": "main",
+                    "package": "package",
+                    "version": "1.0",
+                    "architecture": "all",
+                    "database_architectures": ["amd64"],
+                    "source": {"path": str(artifact), "size": 123, "sha256": "a" * 64},
+                    "targets": [{
+                        "database_architecture": "amd64",
+                        "index": {
+                            "path": "dists/bookworm/main/binary-amd64/Packages",
+                            "filename": "pool/main/p/package.deb",
+                            "size": 123,
+                            "sha256": "a" * 64,
+                        },
+                        "pool": {
+                            "path": "pool/main/p/package.deb",
+                            "size": 123,
+                            "sha256": "a" * 64,
+                        },
+                    }],
+                },
+            },
+        }
+        proof = run["artifact"]["pruning"]["publication"]["proof"]
+        run["publications"] = [{
+            "id": "publication", "status": "success",
+            "artifact": str(artifact), "proof": proof,
+        }]
+        self.store.save(run)
+
+        result = self.collect()
+
+        self.assertEqual(result["runs"]["artifact_count"], 0)
+        self.assertEqual(result["runs"]["artifact_bytes"], 0)
+        self.assertEqual(result["runs"]["pruned_artifact_count"], 1)
+        self.assertEqual(result["runs"]["pruned_artifact_bytes"], 123)
+
+        run = self.store.load(run["id"])
+        publication = run.pop("publications")
+        self.store.save(run)
+        self.assertEqual(self.collect()["runs"]["pruned_artifact_count"], 0)
+        run["publications"] = publication
+        run["artifact"]["sha256"] = "b" * 64
+        self.store.save(run)
+        self.assertEqual(self.collect()["runs"]["pruned_artifact_count"], 0)
+
+    def test_local_artifact_or_malformed_proof_never_counts_as_pruned(self):
+        run, root = self.make_run("forged-pruning")
+        artifact = root / "artifacts/package.deb"
+        run = self.store.load(run["id"])
+        run["artifact"]["pruning"] = {
+            "schema": "debbuilder.artifact-pruning.v1",
+            "pruning_version": 1,
+            "status": "pruned",
+            "reason": "duplicate_after_exact_publication",
+            "pruned_at": "2026-09-09T10:00:00+00:00",
+            "source": {
+                "path": str(artifact), "name": artifact.name,
+                "size": 123, "sha256": "a" * 64,
+            },
+            "publication": {"attempt_id": "publication", "proof": {}},
+        }
+        self.store.save(run)
+
+        local = self.collect()
+        self.assertEqual(local["runs"]["artifact_count"], 1)
+        self.assertEqual(local["runs"]["pruned_artifact_count"], 0)
+        artifact.unlink()
+        malformed = self.collect()
+        self.assertEqual(malformed["runs"]["artifact_count"], 0)
+        self.assertEqual(malformed["runs"]["pruned_artifact_count"], 0)
 
     def test_collection_error_is_error_then_stale_after_a_success(self):
         provider = mock.Mock(side_effect=RuntimeError("policy unavailable"))

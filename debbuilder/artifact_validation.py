@@ -175,7 +175,11 @@ def _validate_artifact_locked(run_id: str, *, store: BuildStore, previous_artifa
     if not run:
         raise ValidationError("build_run_not_found", "Build Run was not found")
     artifact_data = run.get("artifact") or {}
-    if run.get("status") != "success" or not artifact_data.get("path"):
+    if (
+        run.get("status") != "success"
+        or not artifact_data.get("path")
+        or artifact_data.get("pruning") is not None
+    ):
         raise ValidationError("artifact_not_available", "A successful Build Run with an artifact is required")
     workspace = Path(run["workspace"]).resolve()
     artifact = Path(artifact_data["path"]).resolve()

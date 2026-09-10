@@ -15,7 +15,8 @@ const context = vm.createContext({
 const settingsSource = fs.readFileSync('static/settings.js', 'utf8');
 vm.runInContext(settingsSource, context, {filename: 'settings.js'});
 assert.match(settingsSource, /cleanup runs after startup, every five minutes/);
-assert.match(settingsSource, /only disposable sources, downloads and staging/);
+assert.match(settingsSource, /published Run-local \.deb is pruned only after exact repository verification/);
+assert.match(settingsSource, /Terminal staging manifests are pruned after retained workspace evidence is cleared/);
 
 assert.equal(context.formatStorageBytes(0), '0 B');
 assert.equal(context.formatStorageBytes(1024), '1.00 KiB');
@@ -30,16 +31,16 @@ const base = {
   roots: {repository_within_data: true},
   bytes: {managed_total: 12 * 1024, repository: 4 * 1024},
   categories: {disposable: 2 * 1024},
-  runs: {count: 7, failed_count: 2, test_count: 3, artifact_count: 4, artifact_bytes: 1024},
+  runs: {count: 7, failed_count: 2, test_count: 3, artifact_count: 4, artifact_bytes: 1024, pruned_artifact_count: 2, pruned_artifact_bytes: 512},
 };
 
 const ready = context.renderStorageSummary(base);
-for (const label of ['Managed storage', 'Runs', 'APT repository', 'Disposable workspace', 'Artifacts']) {
+for (const label of ['Managed storage', 'Runs', 'APT repository', 'Disposable workspace', 'Run-local artifacts']) {
   assert.match(ready, new RegExp(label));
 }
 assert.match(ready, /12\.0 KiB/);
 assert.match(ready, /2 failed · 3 Test/);
-assert.match(ready, /4 final \.deb/);
+assert.match(ready, /4 local · 2 pruned/);
 assert.match(ready, /READY/);
 
 const partial = context.renderStorageSummary({...base, state: 'partial', partial: true});

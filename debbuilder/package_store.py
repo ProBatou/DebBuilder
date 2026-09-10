@@ -49,7 +49,12 @@ def allowed_actions(package_state: str, recipe_id: str, run: dict | None) -> dic
     artifact = run.get("artifact") or {}
     validation = (run.get("validations") or [{}])[-1]
     publication = (run.get("publications") or [{}])[-1]
-    build_ready = run.get("mode") == "build" and run.get("status") == "success" and bool(artifact.get("path"))
+    build_ready = (
+        run.get("mode") == "build"
+        and run.get("status") == "success"
+        and bool(artifact.get("path"))
+        and artifact.get("pruning") is None
+    )
     validation_status = validation.get("status", "not_run")
     publication_status = publication.get("status", "not_run")
     has_recipe = bool(recipe_id)

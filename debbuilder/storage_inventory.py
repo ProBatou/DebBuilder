@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from . import storage_pruning
 from .build_models import validate_run
 from .maintenance import MAINTENANCE_INTERVAL_SECONDS
 from .workspace_cleanup import DEFAULT_POLICY, directory_fd, validate_policy
@@ -36,6 +37,8 @@ RUN_METADATA_FILES = frozenset({
     ".workspace.lock",
     ".active-command.json",
     ".workspace-cleanup.json",
+    ".artifact-pruning-intent.json",
+    ".staging-manifest-pruning-intent.json",
     ".execution-history-deleted.json",
 })
 
@@ -105,6 +108,7 @@ class _Scan:
         self.data_root = data_root
         self.categories = {name: 0 for name in CATEGORIES}
         self.run_bytes: dict[str, int] = {}
+        self.run_artifact_counts: dict[str, int] = {}
         self.run_metadata: dict[str, dict] = {}
         self.run_revisions: dict[str, tuple[int, int, int, int]] = {}
         self.artifact_count = 0
@@ -127,6 +131,7 @@ class _Scan:
             if category == "artifacts":
                 self.artifact_count += 1
                 self.artifact_bytes += size
+                self.run_artifact_counts[run_id] = self.run_artifact_counts.get(run_id, 0) + 1
 
     def account_unknown(self, relative: Path, size: int) -> None:
         self.categories["unknown"] += size
@@ -327,6 +332,8 @@ def collect_storage_snapshot(
     by_status: dict[str, int] = {}
     failed_count = 0
     test_count = 0
+    pruned_artifact_count = 0
+    pruned_artifact_bytes = 0
     for run in scan.run_metadata.values():
         mode = str(run.get("mode") or "unknown")
         status = str(run.get("status") or "unknown")
@@ -334,6 +341,10 @@ def collect_storage_snapshot(
         by_status[status] = by_status.get(status, 0) + 1
         failed_count += int(status in {"failed", "cancelled"})
         test_count += int(mode == "dry_run")
+        pruned_size = storage_pruning.intentional_pruned_artifact_size(run)
+        if pruned_size is not None and scan.run_artifact_counts.get(str(run.get("id") or ""), 0) == 0:
+            pruned_artifact_count += 1
+            pruned_artifact_bytes += pruned_size
     largest = [
         {
             "id": run_id,
@@ -373,6 +384,8 @@ def collect_storage_snapshot(
             "test_count": test_count,
             "artifact_count": scan.artifact_count,
             "artifact_bytes": scan.artifact_bytes,
+            "pruned_artifact_count": pruned_artifact_count,
+            "pruned_artifact_bytes": pruned_artifact_bytes,
             "largest": largest,
         },
         "retention_policy": {
@@ -382,7 +395,9 @@ def collect_storage_snapshot(
             "periodic_destructive_cleanup": True,
             "cleanup_interval_seconds": MAINTENANCE_INTERVAL_SECONDS,
             "lifecycle_destructive_cleanup": True,
-            "artifacts_preserved": True,
+            "published_run_artifact_pruning": "exact_repository_proof_required",
+            "artifact_manifests_preserved": True,
+            "terminal_staging_manifests_pruned_without_retained_workspace_evidence": True,
             "validation_previous_preserved": True,
         },
     }
@@ -401,6 +416,7 @@ def _initial_snapshot() -> dict:
         "runs": {
             "count": None, "by_mode": {}, "by_status": {}, "failed_count": None,
             "test_count": None, "artifact_count": None, "artifact_bytes": None, "largest": [],
+            "pruned_artifact_count": None, "pruned_artifact_bytes": None,
         },
         "retention_policy": {},
     }

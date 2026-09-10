@@ -105,7 +105,7 @@ function renderStorageSummary(storage = currentStorage){
       ${storageMetric(hasRunMeasurement ? String(runs.count) : '—', 'Runs', hasRunMeasurement ? `${runs.failed_count || 0} failed · ${runs.test_count || 0} Test` : 'Awaiting measurement')}
       ${storageMetric(formatStorageBytes(bytes.repository), 'APT repository', storage?.roots?.repository_within_data ? 'Included in data root' : 'External root')}
       ${storageMetric(formatStorageBytes(categories.disposable), 'Disposable workspace', 'Sources, staging and downloads')}
-      ${storageMetric(formatStorageBytes(runs.artifact_bytes), 'Artifacts', hasRunMeasurement ? `${runs.artifact_count || 0} final .deb` : 'Awaiting measurement')}
+      ${storageMetric(formatStorageBytes(runs.artifact_bytes), 'Run-local artifacts', hasRunMeasurement ? `${runs.artifact_count || 0} local · ${runs.pruned_artifact_count || 0} pruned` : 'Awaiting measurement')}
     </div>
   </div>`;
 }
@@ -248,13 +248,13 @@ function renderSettingsPage(){
       </div>
 
       <section class="settings-section settings-card card maintenance-settings-card">
-        <header class="settings-section-head section-header"><div><h3>Maintenance</h3><p class="muted">Remove visible execution history and detailed logs without changing recipes, packages, APT publications, artifacts, manifests, validations, or publications. Active executions are excluded.</p></div></header>
+        <header class="settings-section-head section-header"><div><h3>Maintenance</h3><p class="muted">Remove visible execution history and detailed logs, and manage retained Run data without changing recipes, packages, APT publications, validations, or publication history. Active executions are excluded.</p></div></header>
         ${renderStorageSummary()}
         <div class="settings-form-grid settings-grid-two">
           <label class="settings-check setting-toggle"><span>Automatic workspace cleanup</span><input type="checkbox" id="settingWorkspaceCleanupEnabled" ${cleanup.enabled?'checked':''}></label>
           ${fieldInput('settingFailedWorkspacesToRetain','Failed workspaces to retain',cleanup.failed_workspaces_to_retain,'type="number" min="0" max="1000" step="1" required')}
         </div>
-        <p class="muted">Authorized cleanup runs after startup, every five minutes, and after completed builds or tests. It removes only disposable sources, downloads and staging; recent failed workspaces are kept for debugging. History, logs, manifests and final artifacts remain. Explicit history deletion also removes disposable files.</p>
+        <p class="muted">Authorized cleanup runs after startup, every five minutes, and after lifecycle completion. It removes disposable sources, downloads and staging; recent failed workspaces are kept for debugging. A published Run-local .deb is pruned only after exact repository verification. Terminal staging manifests are pruned after retained workspace evidence is cleared; artifact manifests, compact history and repository packages remain.</p>
         <div class="maintenance-actions">
           <button type="button" class="btn btn--danger" id="btnClearLogs">Clear execution history</button>
           <small id="clearLogsStatus" class="settings-inline-status" aria-live="polite"></small>

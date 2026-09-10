@@ -25,7 +25,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import artifact_publication, artifact_validation, auth_service, automation_service, build_pipeline, builtin_recipe, deb_inspector, execution_recovery, execution_service, maintenance, notifications, package_service, recipe_store, release_cache, settings_service, storage, storage_inventory, upstream_archive, workspace_cleanup
+from . import artifact_publication, artifact_validation, auth_service, automation_service, build_pipeline, builtin_recipe, deb_inspector, execution_recovery, execution_service, maintenance, notifications, package_service, recipe_store, release_cache, settings_service, storage, storage_inventory, storage_pruning, upstream_archive, workspace_cleanup
 from .build_models import utc_now
 from .build_store import BuildStore
 from .execution_manager import DEFAULT_SHUTDOWN_TIMEOUT, ExecutionManager, ExecutionManagerError
@@ -507,6 +507,34 @@ def cleanup_workspaces(*, authorization=None, should_stop=None) -> dict:
         return {"cleaned": [], "retained": [], "skipped": [], "errors": [{"error": str(exc)}]}
 
 
+def maintain_run_storage(*, authorization=None, should_stop=None) -> dict:
+    """Run the ordered destructive pass owned by the maintenance worker."""
+    stop_requested = should_stop or (lambda: False)
+    cleanup = cleanup_workspaces(
+        authorization=authorization,
+        should_stop=stop_requested,
+    )
+    pruning = {"pruned": [], "recovered": [], "already_pruned": [], "skipped": [], "manifests_pruned": [], "errors": []}
+    if not stop_requested():
+        try:
+            apt = repo_settings()
+            pruning = storage_pruning.apply_pruning(
+                BuildStore(DATA / "builds"),
+                repo_root=REPOSITORY_ROOT,
+                distribution=apt["distribution"],
+                component=apt["component"],
+                policy=app_settings().get("workspace_cleanup"),
+                authorization=authorization or workspace_cleanup.OPEN_CLEANUP_AUTHORIZATION,
+                should_stop=stop_requested,
+            )
+            for error in pruning["errors"]:
+                LOGGER.warning("Run storage pruning: %s", error)
+        except Exception as exc:
+            LOGGER.exception("Run storage pruning sweep failed")
+            pruning["errors"].append({"error": str(exc)})
+    return {"workspace_cleanup": cleanup, "storage_pruning": pruning}
+
+
 def _cancellation_result(run_id: str, status: str, metadata: dict) -> dict:
     allowed = ("code", "reason", "phase", "stage", "requested_at", "completed_at")
     return {
@@ -587,13 +615,24 @@ def request_maintenance(*, refresh: bool = True, cleanup: bool = False) -> None:
 
 def create_maintenance_service(http_server):
     authorization = http_server.cleanup_authorization
+    mutation_gate = getattr(http_server, "mutation_gate", None)
     service = None
 
     def cleanup():
-        return cleanup_workspaces(
-            authorization=authorization,
-            should_stop=service.stop_requested,
-        )
+        try:
+            lease = mutation_gate.lease() if mutation_gate is not None else None
+            if lease is None:
+                return maintain_run_storage(
+                    authorization=authorization,
+                    should_stop=service.stop_requested,
+                )
+            with lease:
+                return maintain_run_storage(
+                    authorization=authorization,
+                    should_stop=service.stop_requested,
+                )
+        except MutationGateClosed:
+            return {"status": "skipped", "reason": "application_shutting_down"}
 
     service = maintenance.MaintenanceService(
         http_server.storage_inventory,
@@ -620,7 +659,7 @@ def validate_build_artifact(run_id: str, payload: dict | None = None) -> dict:
         allowed_previous_roots=(REPOSITORY_ROOT / "pool",),
     )
     notification_service().notify_validation_result(result)
-    request_maintenance(refresh=True)
+    request_maintenance(refresh=True, cleanup=True)
     return result
 
 
@@ -633,16 +672,18 @@ def publish_build_artifact(run_id: str, payload: dict | None = None) -> dict:
         confirm=str(payload.get("confirm") or ""),
     )
     notification_service().notify_publication_result(result)
-    request_maintenance(refresh=True)
+    request_maintenance(refresh=True, cleanup=True)
     return result
 
 
 def reconcile_build_publication(run_id: str, payload: dict | None = None) -> dict:
     apt = repo_settings()
-    return artifact_publication.reconcile_publication(
+    result = artifact_publication.reconcile_publication(
         run_id, store=BuildStore(DATA / "builds"), repo_root=REPOSITORY_ROOT,
         distribution=apt["distribution"], component=apt["component"],
     )
+    request_maintenance(refresh=True, cleanup=True)
+    return result
 
 
 def read_workflow_file(path: Path) -> dict:

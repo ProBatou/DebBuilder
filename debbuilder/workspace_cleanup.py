@@ -186,6 +186,46 @@ def _check_targets(fd: int, directories: tuple[str, ...], files: tuple[str, ...]
             raise ValueError(f"Unsafe workspace cleanup target: {name}")
 
 
+def require_safe_workspace_targets(
+    fd: int, directories: tuple[str, ...], files: tuple[str, ...] = (),
+) -> None:
+    """Reject symlinks, mount crossings, and unexpected target types."""
+    _check_targets(fd, directories, files)
+
+
+def require_current_workspace_directory(workspace_fd: int, name: str, pinned_fd: int) -> None:
+    """Prove a pinned directory is still the workspace's safe current entry."""
+    _check_targets(workspace_fd, (name,))
+    opened = os.fstat(pinned_fd)
+    try:
+        current = os.stat(name, dir_fd=workspace_fd, follow_symlinks=False)
+    except OSError as exc:
+        raise ValueError(f"Workspace directory changed before deletion: {name}") from exc
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or not stat.S_ISDIR(current.st_mode)
+        or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+    ):
+        raise ValueError(f"Workspace directory changed before deletion: {name}")
+
+
+def require_current_run_directory(root: Path, run_id: str, workspace_fd: int) -> None:
+    """Prove the pinned Run is still the canonical builds-root entry."""
+    require_safe_name(run_id, "build run id")
+    pinned = os.fstat(workspace_fd)
+    try:
+        with directory_fd(root) as root_fd:
+            current = os.stat(run_id, dir_fd=root_fd, follow_symlinks=False)
+    except OSError as exc:
+        raise ValueError("Run directory changed before deletion") from exc
+    if (
+        not stat.S_ISDIR(pinned.st_mode)
+        or not stat.S_ISDIR(current.st_mode)
+        or (pinned.st_dev, pinned.st_ino) != (current.st_dev, current.st_ino)
+    ):
+        raise ValueError("Run directory changed before deletion")
+
+
 def _remove_targets(fd: int, directories: tuple[str, ...], files: tuple[str, ...] = ()) -> list[str]:
     removed = []
     for name in directories + files:
@@ -237,16 +277,13 @@ def _require_unused_workspace(workspace: Path) -> None:
             raise WorkspaceBusyError("Cannot verify whether a process still uses the workspace") from exc
 
 
-def _clean_locked(
+def require_destructive_run_safe(
     fd: int,
     run: dict,
     *,
-    reason: str,
     authorization: CleanupAuthorization = OPEN_CLEANUP_AUTHORIZATION,
-) -> dict:
-    # A terminal Run can still retain command ownership metadata after a
-    # containment failure.  Startup recovery must prove workload absence and
-    # clear that exact record before workspace data may be destroyed.
+) -> None:
+    """Apply the shared recovery, lifecycle, command, and process blockers."""
     from .command_identity import CommandIdentityError, read_persisted_identity
 
     authorization.require_run(run)
@@ -257,9 +294,22 @@ def _clean_locked(
         raise WorkspaceBusyError("Active command recovery is unverifiable; cleanup refused") from exc
     if identity is not None:
         raise WorkspaceBusyError("Active command recovery is unresolved; cleanup refused")
+    _require_unused_workspace(Path(run["workspace"]))
+
+
+def _clean_locked(
+    fd: int,
+    run: dict,
+    *,
+    reason: str,
+    authorization: CleanupAuthorization = OPEN_CLEANUP_AUTHORIZATION,
+) -> dict:
+    # A terminal Run can still retain command ownership metadata after a
+    # containment failure.  Startup recovery must prove workload absence and
+    # clear that exact record before workspace data may be destroyed.
+    require_destructive_run_safe(fd, run, authorization=authorization)
     _check_artifact(run)
     _check_targets(fd, DISPOSABLE_DIRECTORIES, DISPOSABLE_FILES)
-    _require_unused_workspace(Path(run["workspace"]))
     removed = _remove_targets(fd, DISPOSABLE_DIRECTORIES, DISPOSABLE_FILES)
     result = {"id": run["id"], "removed": removed, "reason": reason}
     if removed:

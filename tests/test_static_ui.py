@@ -128,7 +128,7 @@ class StaticUiTests(unittest.TestCase):
         pages = self.read("static/css/pages.css")
         self.assertIn("getJson('/api/storage')", settings)
         for label in (
-            "Managed storage", "Runs", "APT repository", "Disposable workspace", "Artifacts",
+            "Managed storage", "Runs", "APT repository", "Disposable workspace", "Run-local artifacts",
         ):
             self.assertIn(label, settings)
         for state in ("collecting", "ready", "partial", "stale", "error"):

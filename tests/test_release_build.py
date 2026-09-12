@@ -13,21 +13,21 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 class ReleasePlanTests(unittest.TestCase):
     def test_plan_uses_canonical_recipe_for_all_artifact_identity(self):
-        plan = release_build.release_plan("v0.3.0")
+        plan = release_build.release_plan("v0.4.0")
 
         self.assertEqual(plan["package"], "debbuilder")
-        self.assertEqual(plan["upstream_version"], "0.3.0")
+        self.assertEqual(plan["upstream_version"], "0.4.0")
         self.assertEqual(plan["debian_revision"], plan["definition"]["package"]["version_revision"])
-        self.assertEqual(plan["debian_version"], "0.3.0-2")
+        self.assertEqual(plan["debian_version"], "0.4.0-2")
         self.assertEqual(plan["architecture"], plan["definition"]["package"]["architecture"])
-        self.assertEqual(plan["filename"], "debbuilder_0.3.0-2_all.deb")
+        self.assertEqual(plan["filename"], "debbuilder_0.4.0-2_all.deb")
         self.assertEqual(plan["definition_version"], 4)
 
     def test_wrong_or_unsafe_tag_is_rejected(self):
         for tag, code in (
             ("v9.9.9", "release_version_mismatch"),
-            ("0.3.0", "invalid_release_tag"),
-            ("v0.3.0;false", "invalid_release_tag"),
+            ("0.4.0", "invalid_release_tag"),
+            ("v0.4.0;false", "invalid_release_tag"),
         ):
             with self.subTest(tag=tag), self.assertRaises(release_build.ReleaseBuildError) as raised:
                 release_build.release_plan(tag)
@@ -38,7 +38,7 @@ class ReleasePlanTests(unittest.TestCase):
         self.assertFalse(target.exists())
         with self.assertRaises(release_build.ReleaseBuildError) as raised:
             release_build.build_release_artifacts(
-                tag="v0.3.0", source_root=REPOSITORY_ROOT, output_directory=target,
+                tag="v0.4.0", source_root=REPOSITORY_ROOT, output_directory=target,
             )
         self.assertEqual(raised.exception.code, "unsafe_release_output")
         self.assertFalse(target.exists())
@@ -54,16 +54,16 @@ class RealReleaseBuildTests(unittest.TestCase):
             output = root / "release-assets"
 
             result = release_build.build_release_artifacts(
-                tag="v0.3.0", source_root=REPOSITORY_ROOT,
+                tag="v0.4.0", source_root=REPOSITORY_ROOT,
                 output_directory=output, temporary_parent=temporary_parent,
             )
 
-            artifact = output / "debbuilder_0.3.0-2_all.deb"
+            artifact = output / "debbuilder_0.4.0-2_all.deb"
             self.assertEqual(result["artifact"]["path"], str(artifact))
             self.assertTrue(artifact.is_file())
             self.assertGreater(result["artifact"]["size"], 0)
             self.assertEqual(result["checks"]["metadata"], {
-                "package": "debbuilder", "version": "0.3.0-2", "architecture": "all",
+                "package": "debbuilder", "version": "0.4.0-2", "architecture": "all",
             })
             self.assertEqual(result["checks"]["depends"], "python3, python3-dbus")
             self.assertEqual(result["checks"]["runtime_data_directory"], "/var/lib/debbuilder")
@@ -87,14 +87,14 @@ class RealReleaseBuildTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "release-assets"
             inconsistent = {
-                "ok": True, "package": "other", "version": "0.3.0-2", "architecture": "all",
+                "ok": True, "package": "other", "version": "0.4.0-2", "architecture": "all",
                 "depends": "python3, python3-dbus", "files": [], "file_count": 0,
                 "maintainer_scripts": [], "conffiles": [], "warnings": [], "control": {},
             }
             with mock.patch("debbuilder.release_build.deb_inspector.inspect_deb", return_value=inconsistent):
                 with self.assertRaises(debian_packaging.PackagingError) as raised:
                     release_build.build_release_artifacts(
-                        tag="v0.3.0", source_root=REPOSITORY_ROOT, output_directory=output,
+                        tag="v0.4.0", source_root=REPOSITORY_ROOT, output_directory=output,
                     )
             self.assertEqual(raised.exception.code, "deb_inspection_failed")
             self.assertFalse(output.exists())

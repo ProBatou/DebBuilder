@@ -21,6 +21,7 @@ OPERATOR_OVERRIDE_PATHS = (
     "build.environment",
     "build.inactivity_timeout",
     "build.maximum_runtime",
+    "resource_limits",
 )
 APPLICATION_MANAGED_AREAS = (
     "name and package identity/versioning/dependencies",
@@ -243,6 +244,7 @@ def _managed_projection(recipe: dict) -> dict:
     projected = copy.deepcopy(recipe)
     projected.pop("management", None)
     projected.pop("active", None)
+    projected.pop("resource_limits", None)
     projected.get("package", {}).pop("maintainer", None)
     build = projected.get("build", {})
     for key in ("environment", "inactivity_timeout", "maximum_runtime"):

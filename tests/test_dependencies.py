@@ -8,6 +8,26 @@ from debbuilder.dependency_checker import DependencyError, check_dependencies
 
 
 class DependencyCheckerTests(unittest.TestCase):
+    def test_resource_failure_is_not_reclassified_as_a_missing_dependency(self):
+        resource_control = {
+            "backend": "systemd_cgroup", "verification": "verified",
+            "outcome": {"code": "command_resource_limit_exceeded", "control": "memory_max_bytes"},
+        }
+
+        def runner(command, **kwargs):
+            return {
+                "status": "failed", "stdout": "", "stderr": "memory limit reached",
+                "exit_code": -9, "command": command, "arguments": command.split(),
+                "working_directory": kwargs["working_directory"], "duration": 0.01,
+                "error_code": "command_resource_limit_exceeded",
+                "resource_control": resource_control,
+            }
+
+        with tempfile.TemporaryDirectory() as workspace, self.assertRaises(DependencyError) as raised:
+            check_dependencies(["python3"], [], workspace=workspace, runner=runner)
+        self.assertEqual(raised.exception.code, "command_resource_limit_exceeded")
+        self.assertEqual(raised.exception.details["command"]["resource_control"], resource_control)
+
     def test_reports_detected_manual_available_and_missing_separately(self):
         calls = []
         def runner(command, **kwargs):
@@ -27,11 +47,13 @@ class DependencyCheckerTests(unittest.TestCase):
         self.assertEqual(len(calls), 3)
 
     def test_all_available_returns_exploitable_state(self):
-        runner = lambda command, **kwargs: {"status":"success", "stdout":"ii ", "exit_code":0,"command":command,"arguments":command.split(),"working_directory":kwargs["working_directory"],"duration":0.01}
+        control = {"backend": "systemd_cgroup", "verification": "verified", "outcome": None}
+        runner = lambda command, **kwargs: {"status":"success", "stdout":"ii ", "exit_code":0,"command":command,"arguments":command.split(),"working_directory":kwargs["working_directory"],"duration":0.01,"resource_control":control}
         with tempfile.TemporaryDirectory() as workspace:
             state = check_dependencies(["nodejs"], ["npm"], workspace=workspace, runner=runner)
         self.assertEqual(state["available"], ["nodejs", "npm"])
         self.assertEqual(state["missing"], [])
+        self.assertEqual(state["checks"][0]["resource_control"], control)
 
     def test_invalid_package_name_is_rejected_without_running_a_command(self):
         def runner(*_args, **_kwargs):

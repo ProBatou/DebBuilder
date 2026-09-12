@@ -76,6 +76,11 @@ def _tool_check(name: str, requirement: str, *, workspace: str | Path, working_d
         cancellation_event=cancellation_event, on_cancel=on_cancel,
     )
     raise_for_cancelled_result(result)
+    if result.get("error_code"):
+        raise DependencyError(
+            result["error_code"], result.get("stderr") or f"Resource enforcement failed while checking {name}",
+            details={"command": result},
+        )
     output = (result.get("stdout") or result.get("stderr") or "").strip()
     version_output = output.splitlines()[0].strip() if output else ""
     parsed_version = _version_tuple(version_output)
@@ -93,6 +98,7 @@ def _tool_check(name: str, requirement: str, *, workspace: str | Path, working_d
         "command": result.get("command", ""), "arguments": result.get("arguments", []),
         "working_directory": result.get("working_directory", working_directory),
         "exit_code": result.get("exit_code"), "duration": result.get("duration", 0),
+        "resource_control": result.get("resource_control"),
     }
 
 
@@ -121,12 +127,18 @@ def check_dependencies(detected: list[str], manually_added: list[str], *, worksp
             cancellation_event=cancellation_event, on_cancel=on_cancel,
         )
         raise_for_cancelled_result(result)
+        if result.get("error_code"):
+            raise DependencyError(
+                result["error_code"], result.get("stderr") or f"Resource enforcement failed while checking {name}",
+                details={"command": result},
+            )
         installed = result["status"] == "success" and result["stdout"].strip().startswith("ii")
         (available if installed else missing).append(name)
         checks.append({
             "dependency": name, "available": installed, "command": result["command"], "arguments": result["arguments"],
             "working_directory": result["working_directory"], "exit_code": result["exit_code"],
             "status": result["status"], "duration": result["duration"],
+            "resource_control": result.get("resource_control"),
         })
     state = {
         "detected": detected, "manually_added": manually_added, "required": required,

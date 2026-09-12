@@ -25,7 +25,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import artifact_publication, artifact_validation, auth_service, automation_service, build_pipeline, builtin_recipe, deb_inspector, execution_recovery, execution_service, maintenance, notifications, package_service, recipe_store, release_cache, settings_service, storage, storage_inventory, storage_pruning, upstream_archive, workspace_cleanup
+from . import artifact_publication, artifact_validation, auth_service, automation_service, build_pipeline, builtin_recipe, command_containment, deb_inspector, execution_recovery, execution_service, maintenance, notifications, package_service, recipe_store, release_cache, resource_limits, settings_service, storage, storage_inventory, storage_pruning, upstream_archive, workspace_cleanup
 from .build_models import utc_now
 from .build_store import BuildStore
 from .execution_manager import DEFAULT_SHUTDOWN_TIMEOUT, ExecutionManager, ExecutionManagerError
@@ -414,6 +414,7 @@ def _mark_enqueue_failed(store: BuildStore, run_id: str, exc: Exception) -> None
         logging.getLogger(__name__).warning("Could not append enqueue failure log for Run %s (%s)", run_id, type(exc).__name__)
 
 
+@command_containment.containment_safety_serialized
 def enqueue_recipe_run(manager: ExecutionManager | None, workflow: dict, *, dry_run: bool = True) -> dict:
     """Reserve capacity, persist exactly one Run, and submit it asynchronously."""
     if manager is None:
@@ -425,12 +426,78 @@ def enqueue_recipe_run(manager: ExecutionManager | None, workflow: dict, *, dry_
             run_id = manager.store.allocate_run_id()
             reservation.track(run_id)
             try:
+                canonical = recipe_document_for_storage(workflow)
+                settings_result = settings_service.load_app_settings_result(DATA, settings_defaults())
+                if settings_result.resource_limits_error:
+                    raise RunAdmissionError(
+                        "resource_settings_invalid",
+                        "Build/Test admission is blocked until resource-limit Settings are repaired",
+                        status=503,
+                        details=settings_result.resource_limits_error,
+                    )
+                effective, _origins = resource_limits.resolve_policy(
+                    settings_result.settings["resource_limits"], canonical["resource_limits"],
+                )
+                cleanup_blocker = command_containment.containment_cleanup_blocker()
+                if cleanup_blocker:
+                    raise RunAdmissionError(
+                        "execution_recovery_unresolved",
+                        "Build/Test admission is blocked because containment cleanup is unresolved",
+                        status=503,
+                        details={"backend": "systemd_cgroup", "reason": cleanup_blocker},
+                    )
+                probe_root = manager.store.root if manager.store.root.is_dir() else manager.store.root.parent
+                capability = command_containment.resource_limit_capability(
+                    effective, workspace=probe_root, refresh=resource_limits.enforcement_required(effective),
+                )
+                cleanup_blocker = command_containment.containment_cleanup_blocker()
+                if cleanup_blocker:
+                    raise RunAdmissionError(
+                        "execution_recovery_unresolved",
+                        "Build/Test admission is blocked because containment cleanup is unresolved",
+                        status=503,
+                        details={"backend": "systemd_cgroup", "reason": cleanup_blocker},
+                    )
+                if resource_limits.enforcement_required(effective) and not capability["available"]:
+                    raise RunAdmissionError(
+                        "resource_limits_unavailable",
+                        "Requested resource limits cannot be enforced on this host",
+                        status=503,
+                        details={
+                            "backend": capability["backend"],
+                            "requested_controls": capability["requested_controls"],
+                            "reason": capability["reason"],
+                        },
+                    )
+                resource_contract = resource_limits.admission_contract(
+                    settings_result.settings["resource_limits"], canonical["resource_limits"], capability,
+                )
+            except RecipeDocumentError as exc:
+                if not reservation.confirm_absent(run_id):
+                    reservation.transfer_unresolved(run_id, {
+                        "code": "execution_admission_absence_unresolved",
+                        "message": "Rejected admission could not prove that no Run workspace exists",
+                        **_enqueue_failure_details(exc, run_id),
+                    })
+                raise RunAdmissionError(
+                    exc.code, str(exc), status=422, details={"path": exc.path},
+                ) from exc
+            except BaseException as exc:
+                if not reservation.confirm_absent(run_id):
+                    reservation.transfer_unresolved(run_id, {
+                        "code": "execution_admission_absence_unresolved",
+                        "message": "Rejected admission could not prove that no Run workspace exists",
+                        **_enqueue_failure_details(exc, run_id),
+                    })
+                raise
+            try:
                 run = build_pipeline.create_pipeline_run(
-                    workflow,
+                    canonical,
                     store=manager.store,
                     dry_run=dry_run,
                     recipe_id=str(workflow.get("name") or "recipe"),
                     run_id=run_id,
+                    resource_contract=resource_contract,
                 )
             except BaseException as exc:
                 failure = {
@@ -1041,27 +1108,51 @@ def effective_security() -> dict:
 
 
 def settings_view() -> dict:
+    loaded = settings_service.load_app_settings_result(DATA, settings_defaults())
     view = settings_service.public_settings_view(
         data_dir=DATA,
         root=ROOT,
-        settings=app_settings(),
+        settings=loaded.settings,
         port=RUNTIME.port,
     )
     notification_settings = dict(view.get("notifications") or {})
     notification_settings["token"] = "masked"
     notification_settings["token_configured"] = notifications.ntfy_token_configured(DATA)
     view["notifications"] = notification_settings
+    capability = command_containment.cached_containment_capability()
+    view["resource_limits_status"] = {
+        "valid": loaded.resource_limits_error is None,
+        "diagnostic": loaded.resource_limits_error,
+        "capability": {
+            "backend": capability.backend,
+            "available": capability.available,
+            "reason": capability.reason,
+        },
+    }
     return view
 
 
 def update_settings(payload: dict) -> dict:
+    loaded = settings_service.load_app_settings_result(DATA, settings_defaults())
+    if loaded.resource_limits_error and (
+        not isinstance(payload, dict) or "resource_limits" not in payload
+    ):
+        diagnostic = loaded.resource_limits_error
+        raise resource_limits.ResourceLimitError(
+            "resource_settings_repair_required",
+            "Stored resource-limit Settings must be repaired explicitly before other Settings can be saved",
+            path=str(diagnostic.get("path") or "$.resource_limits"),
+            details={"stored_diagnostic": diagnostic},
+        )
+    if loaded.resource_limits_error:
+        payload = settings_service.prepare_resource_limits_repair(payload, loaded)
     security = payload.get("security") if isinstance(payload, dict) else None
     if isinstance(security, dict) and str(security.get("auth_mode") or "").lower() == "oidc":
         prepare_cookie_secret(DATA)
     notification_settings = payload.get("notifications") if isinstance(payload, dict) else None
     if isinstance(notification_settings, dict) and notification_settings.get("token"):
         notifications.save_ntfy_token(DATA, str(notification_settings["token"]))
-    settings_service.update_settings(DATA, payload, app_settings(), settings_view)
+    settings_service.update_settings(DATA, payload, loaded.settings, settings_view)
     request_maintenance(refresh=True)
     return settings_view()
 

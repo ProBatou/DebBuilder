@@ -253,7 +253,7 @@ async function createRecipeFromDialog() {
   }
   const tracking = $('newRecipeTracking').value;
   const versionSource = $('newRecipeVersionSource').value;
-  const workflow = {schema_version: 2, name: packageName, active: true, package: {name: packageName}, source: {provider: 'github', repository: $('newRecipeGithub').value.trim(), tracking, ref: tracking === 'latest_release' ? '' : $('newRecipeSourceRef').value.trim(), version: {source: versionSource, expression: versionSource === 'regex' ? $('newRecipeVersionExpression').value.trim() : ''}}};
+  const workflow = {schema_version: 3, name: packageName, active: true, resource_limits: {memory_max_bytes:null,tasks_max:null,cpu_quota_percent:null,io_read_bandwidth_max_bytes_per_sec:null,io_write_bandwidth_max_bytes_per_sec:null}, package: {name: packageName}, source: {provider: 'github', repository: $('newRecipeGithub').value.trim(), tracking, ref: tracking === 'latest_release' ? '' : $('newRecipeSourceRef').value.trim(), version: {source: versionSource, expression: versionSource === 'regex' ? $('newRecipeVersionExpression').value.trim() : ''}}};
   currentRecipeManaged = false;
   currentRecipeEditablePaths = [];
   currentRecipeDocument = workflow;

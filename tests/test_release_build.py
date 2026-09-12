@@ -21,7 +21,7 @@ class ReleasePlanTests(unittest.TestCase):
         self.assertEqual(plan["debian_version"], "0.3.0-2")
         self.assertEqual(plan["architecture"], plan["definition"]["package"]["architecture"])
         self.assertEqual(plan["filename"], "debbuilder_0.3.0-2_all.deb")
-        self.assertEqual(plan["definition_version"], 3)
+        self.assertEqual(plan["definition_version"], 4)
 
     def test_wrong_or_unsafe_tag_is_rejected(self):
         for tag, code in (

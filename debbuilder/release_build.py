@@ -188,7 +188,11 @@ def _extract_and_verify(plan: dict, staging: dict, artifact: dict, workspace: Pa
         command, workspace=workspace, working_directory=".", environment={"LC_ALL": "C"}, timeout=30,
     )
     if extracted["status"] != "success":
-        raise ReleaseBuildError("release_extract_failed", extracted["stderr"] or "Unable to extract generated package")
+        raise ReleaseBuildError(
+            extracted.get("error_code") or "release_extract_failed",
+            extracted["stderr"] or "Unable to extract generated package",
+            details={"command": extracted},
+        )
 
     unit_relative = Path(staging["systemd"]["path"].lstrip("/"))
     unit_path = extract_root / unit_relative

@@ -8,6 +8,9 @@ from unittest import mock
 
 from debbuilder import build_pipeline, execution_service, source_acquisition, workspace_cleanup
 from debbuilder.build_store import BuildStore
+from debbuilder.command_containment import expected_control_group, starting_metadata
+from debbuilder.command_containment import ContainmentError
+from debbuilder.command_identity import persist_identity
 from debbuilder.settings_store import default_settings, validate_settings
 
 
@@ -123,6 +126,63 @@ class WorkspaceCleanupTests(unittest.TestCase):
         )
 
         self.assertIn(run["id"], result["skipped"])
+        self.assertTrue((root / "source/large-data").is_file())
+
+    def test_terminal_run_with_active_systemd_identity_refuses_cleanup(self):
+        run, root = self.make_run("active-systemd-cleanup")
+        identity = starting_metadata(run["id"], "a" * 32)
+        identity.update({
+            "containment_state": "active",
+            "invocation_id": "b" * 32,
+            "control_group": expected_control_group(identity["unit_name"]),
+        })
+        with self.store.locked_run(run["id"]) as fd:
+            persist_identity(fd, identity)
+        with self.assertRaisesRegex(workspace_cleanup.WorkspaceBusyError, "Active command"):
+            workspace_cleanup.clean_workspace(self.store, run["id"])
+        self.assertTrue((root / "source/large-data").is_file())
+
+    def test_matching_unit_or_cgroup_without_identity_refuses_cleanup_and_history_deletion(self):
+        run, root = self.make_run("namespace-cleanup")
+        unit = starting_metadata(run["id"], "c" * 32)["unit_name"]
+        with mock.patch(
+            "debbuilder.command_containment.matching_run_command_units", return_value={unit},
+        ):
+            with self.assertRaisesRegex(workspace_cleanup.WorkspaceBusyError, "unit/cgroup"):
+                workspace_cleanup.clean_workspace(self.store, run["id"])
+            with self.assertRaisesRegex(workspace_cleanup.WorkspaceBusyError, "unit/cgroup"):
+                execution_service.delete_log(self.store, run["id"])
+        self.assertTrue((root / "source/large-data").is_file())
+        self.assertTrue((root / "logs/pipeline.log").is_file())
+
+    def test_unverifiable_command_namespace_refuses_destructive_cleanup(self):
+        run, root = self.make_run("namespace-unverifiable")
+        with mock.patch(
+            "debbuilder.command_containment.matching_run_command_units",
+            side_effect=ContainmentError("inventory denied"),
+        ):
+            with self.assertRaisesRegex(workspace_cleanup.WorkspaceBusyError, "inventory is unverifiable"):
+                workspace_cleanup.clean_workspace(self.store, run["id"])
+        self.assertTrue((root / "source/large-data").is_file())
+
+    def test_process_latched_probe_cleanup_failure_refuses_cleanup(self):
+        run, root = self.make_run("probe-cleanup-blocked")
+        with mock.patch(
+            "debbuilder.command_containment.probe_cleanup_blocker",
+            return_value="probe cgroup remains",
+        ):
+            with self.assertRaisesRegex(workspace_cleanup.WorkspaceBusyError, "probe containment"):
+                workspace_cleanup.clean_workspace(self.store, run["id"])
+        self.assertTrue((root / "source/large-data").is_file())
+
+    def test_process_latched_runtime_cleanup_failure_refuses_cleanup(self):
+        run, root = self.make_run("runtime-cleanup-blocked")
+        with mock.patch(
+            "debbuilder.command_containment.runtime_cleanup_blocker",
+            return_value="runtime cgroup remains",
+        ):
+            with self.assertRaisesRegex(workspace_cleanup.WorkspaceBusyError, "Runtime command"):
+                workspace_cleanup.clean_workspace(self.store, run["id"])
         self.assertTrue((root / "source/large-data").is_file())
 
     def test_global_recovery_blocker_denies_every_destructive_entrypoint(self):

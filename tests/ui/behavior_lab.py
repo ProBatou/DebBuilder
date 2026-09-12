@@ -88,6 +88,7 @@ def seed_failure(data_dir: Path, repository_root: Path) -> None:
 def _seed_interrupted(data_dir: Path, *, blocked: bool) -> None:
     from debbuilder.build_store import BuildStore
     from debbuilder.command_identity import IDENTITY_SCHEMA_VERSION, persist_identity
+    from debbuilder.resource_limits import empty_policy
 
     store = BuildStore(data_dir / "builds")
     run = store.create(fixture_recipe("recovery-run"), recipe_id="recovery-run", mode="build", run_id="behavior-lab-recovery-run")
@@ -99,6 +100,7 @@ def _seed_interrupted(data_dir: Path, *, blocked: bool) -> None:
             "schema_version": IDENTITY_SCHEMA_VERSION, "backend": "process_group", "containment_state": "active",
             "pid": 999999, "pgid": 999999, "start_time_ticks": 1,
             "boot_id": "00000000-0000-0000-0000-000000000000", "run_id": run["id"], "command_id": "behavior-lab-old-boot",
+            "resource_limits": empty_policy(), "resource_io_targets": [],
         }
         with store.locked_run(run["id"]) as fd:
             persist_identity(fd, identity)

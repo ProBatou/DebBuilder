@@ -39,6 +39,18 @@ class RecipeSchemaTests(unittest.TestCase):
                 recipe_document_for_storage(value)
             self.assertEqual(raised.exception.code, code)
 
+    def test_v3_present_null_resource_policy_is_rejected(self):
+        with self.assertRaises(RecipeDocumentError) as raised:
+            recipe_document_for_storage({
+                "schema_version": 3,
+                "name": "null-resource-policy",
+                "resource_limits": None,
+                "package": {"name": "null-resource-policy"},
+                "source": {"repository": "owner/null-resource-policy"},
+            })
+        self.assertEqual(raised.exception.code, "invalid_resource_limits")
+        self.assertEqual(raised.exception.path, "$.resource_limits")
+
     def test_upstream_archive_fhs_account_directories_and_mapping_overrides(self):
         recipe = validate_recipe_metadata({
             "name": "demo", "package": {"name": "demo", "architecture": "amd64"},
@@ -88,7 +100,7 @@ class RecipeSchemaTests(unittest.TestCase):
             },
         }
         stored = recipe_document_for_storage(document)
-        self.assertEqual(stored["schema_version"], 2)
+        self.assertEqual(stored["schema_version"], 3)
         self.assertEqual(stored["artifact"]["payload"], {
             "mode": "paths", "include": ["server.py", "static/"], "exclude": ["static/dev/"],
         })
@@ -107,7 +119,7 @@ class RecipeSchemaTests(unittest.TestCase):
             },
         }
         stored = recipe_document_for_storage(legacy)
-        self.assertEqual(stored["schema_version"], 2)
+        self.assertEqual(stored["schema_version"], 3)
         self.assertEqual(stored["artifact"]["payload"], {
             "mode": "paths",
             "include": ["share/defaults.yml", "bin/tool"],
@@ -131,7 +143,7 @@ class RecipeSchemaTests(unittest.TestCase):
             "build": {"timeout": 120, "output": {"mode": "source"}},
         }
         loaded = validate_recipe_metadata(historical)
-        self.assertEqual(loaded["schema_version"], 2)
+        self.assertEqual(loaded["schema_version"], 3)
         self.assertEqual(loaded["build"]["inactivity_timeout"], 120)
         self.assertEqual(loaded["artifact"]["payload"]["include"], ["snapshot"])
         self.assertEqual(loaded["artifact"]["payload"]["legacy_file_layout"], "basename")
@@ -184,7 +196,7 @@ class RecipeSchemaTests(unittest.TestCase):
             "name": "demo-recipe", "package": {"name": "demo"},
             "source": {"repository": "owner/demo", "tracking": "latest_release", "version": {"source": "tag"}},
         })
-        self.assertEqual(recipe["schema_version"], 2)
+        self.assertEqual(recipe["schema_version"], 3)
         self.assertEqual(recipe["package"]["name"], "demo")
         self.assertEqual(recipe["package"]["version_revision"], "1")
         self.assertEqual(recipe["source"]["repository"], "owner/demo")

@@ -142,6 +142,7 @@ function settingsPayload(){
       enabled: !!$('settingWorkspaceCleanupEnabled')?.checked,
       failed_workspaces_to_retain: Number($('settingFailedWorkspacesToRetain')?.value ?? 5)
     },
+    resource_limits: {...(currentSettings?.resource_limits || {})},
     security: {
       auth_mode: oidcConfigured ? 'oidc' : 'none',
       oidc_issuer: oidcIssuer,

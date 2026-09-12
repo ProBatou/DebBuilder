@@ -358,6 +358,16 @@ class StoragePruningTests(unittest.TestCase):
         self.assertEqual(result["errors"], [])
         self.assertTrue(artifact.is_file())
 
+    def test_runtime_cleanup_blocker_preserves_prunable_artifact(self):
+        run, _workspace, artifact = self.make_published_run("runtime-cleanup-blocked")
+        with mock.patch(
+            "debbuilder.command_containment.runtime_cleanup_blocker",
+            return_value="runtime cgroup remains",
+        ):
+            result = self.sweep()
+        self.assertIn(run["id"], result["skipped"])
+        self.assertTrue(artifact.is_file())
+
     def test_artifact_symlink_and_unexpected_missing_file_fail_closed(self):
         run, workspace, artifact = self.make_published_run()
         outside = self.base / "outside.deb"

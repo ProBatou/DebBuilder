@@ -256,7 +256,7 @@ def _run_upstream_artifact(canonical: dict, run: dict, *, store: BuildStore, dry
 
 
 def create_pipeline_run(
-    recipe: dict, *, store: BuildStore, dry_run: bool, recipe_id: str = "", run_id: str | None = None,
+    recipe: dict, *, store: BuildStore, dry_run: bool, recipe_id: str = "", run_id: str | None = None, resource_contract: dict | None = None,
 ) -> dict:
     """Validate a Recipe and persist an isolated pending Run without executing it."""
     canonical = validate_recipe_metadata(recipe)
@@ -265,6 +265,7 @@ def create_pipeline_run(
         recipe_id=recipe_id or canonical["name"],
         mode="dry_run" if dry_run else "build",
         run_id=run_id,
+        resource_contract=resource_contract,
     )
 
 
@@ -301,6 +302,7 @@ def execute_pipeline_run(run_id: str, *, store: BuildStore, expected_initial_sta
             record=lambda identity: persist_identity(workspace_fd, identity),
             clear=lambda identity: clear_identity(workspace_fd, identity),
             update=lambda expected, updated: update_identity(workspace_fd, expected, updated),
+            resource_policy=run["resource_limits"]["effective"],
         ):
             try:
                 return _run_pipeline_locked(
@@ -535,7 +537,7 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
                 run["status"] = "success"
                 _finish_step(run, store, artifact_step, artifact_started, status="success", summary=f"{artifact['size']} bytes · SHA-256 {artifact['sha256']}", details=stored_artifact)
             except debian_packaging.PackagingError as exc:
-                stage = "artifact" if exc.code == "deb_inspection_failed" else "package"
+                stage = "artifact" if exc.code == "deb_inspection_failed" or exc.details.get("artifact") else "package"
                 error = {"stage":stage,"code":exc.code,"message":str(exc),"details":exc.details}
                 if stage == "artifact":
                     artifact_data = exc.details.get("artifact", {})

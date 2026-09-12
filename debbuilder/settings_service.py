@@ -7,9 +7,11 @@ from .settings_store import (
     default_settings,
     github_token_configured,
     load_settings,
+    load_settings_result,
     ntfy_token_configured,
     oidc_client_secret,
     oidc_client_secret_configured,
+    repair_resource_limits,
     save_github_token,
     save_oidc_client_secret,
     save_settings,
@@ -47,6 +49,10 @@ def load_app_settings(data_dir: Path, defaults: dict) -> dict:
     return load_settings(data_dir, defaults)
 
 
+def load_app_settings_result(data_dir: Path, defaults: dict):
+    return load_settings_result(data_dir, defaults)
+
+
 def public_settings_view(*, data_dir: Path, root: Path, settings: dict, port: int) -> dict:
     general = dict(settings["general"])
     general.update({"port": port, "workdir": str(root)})
@@ -68,6 +74,7 @@ def public_settings_view(*, data_dir: Path, root: Path, settings: dict, port: in
         },
         "automation": settings.get("automation", {}),
         "workspace_cleanup": settings["workspace_cleanup"],
+        "resource_limits": settings["resource_limits"],
     }
 
 
@@ -86,3 +93,12 @@ def update_settings(data_dir: Path, payload: dict, current: dict, view_factory) 
 
     save_settings(data_dir, new_settings)
     return view_factory()
+
+
+def prepare_resource_limits_repair(payload: dict, loaded) -> dict:
+    """Canonicalize an explicit repair against the original malformed section."""
+    repaired = dict(payload)
+    repaired["resource_limits"] = repair_resource_limits(
+        loaded.resource_limits_repair_source, payload.get("resource_limits"),
+    )
+    return repaired

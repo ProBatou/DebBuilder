@@ -66,6 +66,7 @@ assert.equal(JSON.stringify(context.collectWorkflow().install.directories), '[]'
 const roundTrip = {
   name: 'typed-demo',
   active: false,
+  resource_limits: {memory_max_bytes: 536870912, tasks_max: 128, cpu_quota_percent: 250, io_read_bandwidth_max_bytes_per_sec: null, io_write_bandwidth_max_bytes_per_sec: 1048576},
   package: {name: 'typed-demo', version_revision: '1+b1', description: 'Typed demo\nLong Debian description.', runtime_dependencies: []},
   source: {repository: 'owner/typed-demo', version: {source: 'tag'}},
   artifact: {mode: 'source_build'},
@@ -82,8 +83,9 @@ const roundTrip = {
 };
 context.renderWorkflow(roundTrip);
 const collected = context.collectWorkflow();
-assert.equal(collected.schema_version, 2);
+assert.equal(collected.schema_version, 3);
 assert.equal(collected.active, false);
+assert.deepEqual(JSON.parse(JSON.stringify(collected.resource_limits)), roundTrip.resource_limits);
 assert.equal(collected.package.version_revision, '1+b1');
 assert.equal(collected.package.description, roundTrip.package.description);
 assert.deepEqual(JSON.parse(JSON.stringify(collected.package.runtime_dependencies)), []);

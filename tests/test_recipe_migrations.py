@@ -12,6 +12,7 @@ from debbuilder.recipe_migrations import (
     migrate_recipe_document,
     migrate_v0_to_v1,
     migrate_v1_to_v2,
+    migrate_v2_to_v3,
 )
 from debbuilder.recipe_schema import RecipeDocumentError, recipe_document_for_storage, validate_recipe_metadata
 
@@ -24,23 +25,24 @@ def fixture(name):
 
 
 class RecipeMigrationTests(unittest.TestCase):
-    def test_v0_migrates_sequentially_to_v2_without_mutating_source(self):
+    def test_v0_migrates_sequentially_to_v3_without_mutating_source(self):
         source = fixture("legacy-v0.json")
         original = copy.deepcopy(source)
         result = migrate_recipe_document(source)
         self.assertEqual(result.source_version, 0)
-        self.assertEqual(result.target_version, 2)
-        self.assertEqual(result.applied_migrations, ("v0_to_v1", "v1_to_v2"))
-        self.assertEqual(result.document["schema_version"], 2)
+        self.assertEqual(result.target_version, 3)
+        self.assertEqual(result.applied_migrations, ("v0_to_v1", "v1_to_v2", "v2_to_v3"))
+        self.assertEqual(result.document["schema_version"], 3)
+        self.assertTrue(all(value is None for value in result.document["resource_limits"].values()))
         self.assertNotIn("timeout", result.document["build"])
         self.assertEqual(result.document["build"]["inactivity_timeout"], 120)
         self.assertNotIn("steps", result.document)
         self.assertEqual(source, original)
 
-    def test_v1_migrates_to_v2_with_known_alias_semantics(self):
+    def test_v1_migrates_to_v3_with_known_alias_semantics(self):
         result = migrate_recipe_document(fixture("legacy-v1-aliases.json"))
         document = result.document
-        self.assertEqual(result.applied_migrations, ("v1_to_v2",))
+        self.assertEqual(result.applied_migrations, ("v1_to_v2", "v2_to_v3"))
         self.assertEqual(document["build"]["inactivity_timeout"], 90)
         self.assertNotIn("configured", document["service"])
         self.assertEqual(document["install"]["config_files"], [{
@@ -57,8 +59,8 @@ class RecipeMigrationTests(unittest.TestCase):
             "legacy_file_layout": "basename",
         })
 
-    def test_current_v2_is_unchanged_and_repeated_migration_is_stable(self):
-        source = fixture("current-v2.json")
+    def test_current_v3_is_unchanged_and_repeated_migration_is_stable(self):
+        source = fixture("current-v3.json")
         first = migrate_recipe_document(source)
         second = migrate_recipe_document(first.document)
         self.assertFalse(first.migrated)
@@ -66,13 +68,24 @@ class RecipeMigrationTests(unittest.TestCase):
         self.assertEqual(first.document, source)
         self.assertEqual(second.document, first.document)
 
+    def test_v2_to_v3_is_pure_deterministic_and_adds_only_null_policy(self):
+        source = fixture("current-v2.json")
+        original = copy.deepcopy(source)
+        first = migrate_recipe_document(source)
+        second = migrate_recipe_document(source)
+        self.assertEqual(first, second)
+        self.assertEqual(first.applied_migrations, ("v2_to_v3",))
+        self.assertEqual(first.document["schema_version"], 3)
+        self.assertTrue(all(value is None for value in first.document["resource_limits"].values()))
+        self.assertEqual(source, original)
+
     def test_migration_is_deterministic(self):
         source = fixture("legacy-v1-aliases.json")
         self.assertEqual(migrate_recipe_document(source), migrate_recipe_document(source))
 
     def test_future_and_invalid_versions_are_structured_refusals(self):
         cases = [
-            ({"schema_version": 3}, "future_schema_version", 3),
+            ({"schema_version": 4}, "future_schema_version", 4),
             ({"schema_version": True}, "invalid_schema_version", None),
             ({"schema_version": "1"}, "invalid_schema_version", None),
             ({"schema_version": 1.0}, "invalid_schema_version", None),
@@ -99,6 +112,7 @@ class RecipeMigrationTests(unittest.TestCase):
         for migration, document in (
             (migrate_v0_to_v1, {"schema_version": 1}),
             (migrate_v1_to_v2, {"schema_version": 2}),
+            (migrate_v2_to_v3, {"schema_version": 3}),
         ):
             with self.subTest(migration=migration.__name__), self.assertRaises(RecipeMigrationError) as raised:
                 migration(document)
@@ -148,7 +162,7 @@ class RecipeMigrationTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "unknown_field")
         self.assertEqual(raised.exception.path, "$.future_meaning")
 
-    def test_frontend_style_v1_is_accepted_and_stored_as_v2(self):
+    def test_frontend_style_v1_is_accepted_and_stored_as_v3(self):
         frontend = {
             "schema_version": 1,
             "name": "frontend",
@@ -160,18 +174,18 @@ class RecipeMigrationTests(unittest.TestCase):
             "service": {"enabled": False},
         }
         stored = recipe_document_for_storage(frontend)
-        self.assertEqual(stored["schema_version"], 2)
-        self.assertEqual(validate_recipe_metadata(frontend)["schema_version"], 2)
+        self.assertEqual(stored["schema_version"], 3)
+        self.assertEqual(validate_recipe_metadata(frontend)["schema_version"], 3)
 
     def test_strict_current_schema_validation_rejects_unknown_fields(self):
-        current = fixture("current-v2.json")
+        current = fixture("current-v3.json")
         current["unknown"] = "meaningful"
         with self.assertRaises(RecipeDocumentError) as raised:
             recipe_document_for_storage(current)
         self.assertEqual(raised.exception.code, "unknown_field")
 
-    def test_current_v2_does_not_reapply_legacy_alias_migrations(self):
-        current = fixture("current-v2.json")
+    def test_current_v3_does_not_reapply_legacy_alias_migrations(self):
+        current = fixture("current-v3.json")
         current["build"]["timeout"] = 90
         migrated = migrate_recipe_document(current)
         self.assertFalse(migrated.migrated)

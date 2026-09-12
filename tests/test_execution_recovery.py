@@ -15,6 +15,7 @@ from debbuilder.build_store import BuildStore
 from debbuilder.command_containment import (
     ContainmentError,
     ContainmentRecovery,
+    OrphanContainmentRecovery,
     UnitSnapshot,
     _SystemdConnection,
     command_unit_name,
@@ -36,6 +37,7 @@ from debbuilder.execution_cancellation import SERVER_SHUTDOWN
 from debbuilder.execution_manager import ExecutionManager, ExecutionManagerError
 from debbuilder.execution_recovery import BLOCKER_CODE, RECOVERY_ERROR_CODE, recover_startup
 from debbuilder.execution_recovery import StartupRecoveryResult
+from debbuilder.resource_limits import empty_policy
 from tests.admin_api_case import AdminApiCase
 
 
@@ -87,6 +89,8 @@ class StartupRecoveryTests(unittest.TestCase):
             "command_id": command_id,
             "unit_name": unit,
             "containment_state": state,
+            "resource_limits": empty_policy(),
+            "resource_io_targets": [],
         }
         if state != "starting":
             value.update({"invocation_id": "1" * 32, "control_group": expected_control_group(unit)})
@@ -103,6 +107,8 @@ class StartupRecoveryTests(unittest.TestCase):
             "boot_id": boot_id or current_boot_id(),
             "run_id": run_id,
             "command_id": "fallback-command",
+            "resource_limits": empty_policy(),
+            "resource_io_targets": [],
         }
 
     def test_pending_and_queued_without_execution_evidence_are_safely_terminalized(self):
@@ -415,13 +421,56 @@ class StartupRecoveryTests(unittest.TestCase):
         stray = "debbuilder-command-aaaaaaaaaaaaaaaa-" + "b" * 32 + ".service"
         mismatch = ContainmentRecovery(VerificationResult(VerificationStatus.MISMATCH, "different invocation"))
 
+        orphan = OrphanContainmentRecovery(
+            VerificationResult(VerificationStatus.MISMATCH, "invalid orphan provenance"),
+        )
         with mock.patch("debbuilder.execution_recovery.recover_systemd_containment", return_value=mismatch), \
-                mock.patch("debbuilder.execution_recovery.loaded_command_units", return_value={identity["unit_name"], stray}):
+                mock.patch("debbuilder.execution_recovery.loaded_command_units", return_value={identity["unit_name"], stray}), \
+                mock.patch("debbuilder.execution_recovery.recover_orphan_systemd_containment", return_value=orphan):
             result = recover_startup(self.store)
 
         self.assertEqual(result.stray_units, [stray])
         self.assertEqual(len([row for row in result.blockers if row.get("run_id") == run["id"]]), 1)
         self.assertEqual(result.admission_blocker["details"]["stray_unit_count"], 1)
+
+    def test_missing_run_orphan_is_reconciled_only_with_sufficient_provenance(self):
+        valid = "debbuilder-command-aaaaaaaaaaaaaaaa-" + "b" * 32 + ".service"
+        recovered = OrphanContainmentRecovery(
+            VerificationResult(VerificationStatus.NOT_RUNNING, "proved absent"),
+            signalled=True,
+            gone=True,
+        )
+        with mock.patch("debbuilder.execution_recovery.loaded_command_units", return_value={valid}), \
+                mock.patch("debbuilder.execution_recovery.recover_orphan_systemd_containment", return_value=recovered):
+            result = recover_startup(BuildStore(Path(self.temporary.name) / "missing-owner-builds"))
+        self.assertIsNone(result.admission_blocker)
+        self.assertEqual(result.reconciled_orphan_units, [valid])
+
+        unresolved = OrphanContainmentRecovery(
+            VerificationResult(VerificationStatus.MISMATCH, "invalid Description"),
+        )
+        with mock.patch("debbuilder.execution_recovery.loaded_command_units", return_value={valid}), \
+                mock.patch("debbuilder.execution_recovery.recover_orphan_systemd_containment", return_value=unresolved):
+            result = recover_startup(BuildStore(Path(self.temporary.name) / "missing-owner-builds-2"))
+        self.assertEqual(result.stray_units, [valid])
+        self.assertIsNotNone(result.admission_blocker)
+        self.assertIn("invalid Description", result.blockers[-1]["reason"])
+
+    def test_unverifiable_persisted_ownership_prevents_orphan_signalling(self):
+        run = self.create("corrupt-owner")
+        (self.store.run_dir(run["id"]) / ACTIVE_COMMAND_FILE).write_text("{", encoding="utf-8")
+        unit = "debbuilder-command-aaaaaaaaaaaaaaaa-" + "b" * 32 + ".service"
+        with mock.patch(
+            "debbuilder.execution_recovery.loaded_command_units", return_value={unit},
+        ), mock.patch(
+            "debbuilder.execution_recovery.recover_orphan_systemd_containment",
+        ) as recover_orphan:
+            result = recover_startup(self.store)
+
+        recover_orphan.assert_not_called()
+        self.assertEqual(result.stray_units, [unit])
+        self.assertIn("ownership inventory is unverifiable", result.blockers[-1]["reason"])
+        self.assertIsNotNone(result.admission_blocker)
 
     def test_manager_blocker_closes_reserve_and_submit_without_starting_work(self):
         executed = []
@@ -680,6 +729,8 @@ class RealSystemdStartupRecoveryTests(unittest.TestCase):
             "command_id": command_id,
             "unit_name": unit,
             "containment_state": "starting",
+            "resource_limits": empty_policy(),
+            "resource_io_targets": [],
         }
         if persist and durable_state == "starting":
             with self.store.locked_run(run["id"]) as fd:
@@ -768,7 +819,7 @@ class RealSystemdStartupRecoveryTests(unittest.TestCase):
                 self.assertFalse((self.store.run_dir(run["id"]) / ACTIVE_COMMAND_FILE).exists())
                 self.assert_unit_absent(identity["unit_name"])
 
-    def test_real_invocation_mismatch_and_stray_unit_are_not_signalled(self):
+    def test_real_invocation_mismatch_is_not_signalled_and_valid_orphan_is_reconciled(self):
         mismatch_run = self.create_running("real-mismatch")
         mismatch_identity = self.start_unit(
             mismatch_run, "import time; time.sleep(30)", durable_state="active",
@@ -799,10 +850,11 @@ class RealSystemdStartupRecoveryTests(unittest.TestCase):
         stray_run["finished_at"] = stray_run["created_at"]
         self.store.save(stray_run)
         result = recover_startup(self.store)
-        self.assertIn(stray_identity["unit_name"], result.stray_units)
+        self.assertIn(stray_identity["unit_name"], result.reconciled_orphan_units)
+        self.assertNotIn(stray_identity["unit_name"], result.stray_units)
         connection = _SystemdConnection()
         try:
-            self.assertIsNotNone(connection.snapshot(stray_identity["unit_name"]))
+            self.assertIsNone(connection.snapshot(stray_identity["unit_name"]))
         finally:
             connection.close()
 

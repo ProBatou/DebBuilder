@@ -8,7 +8,7 @@ from datetime import datetime
 
 from .build_models import RUN_STATUSES, utc_now
 from .build_store import BuildStore
-from .command_containment import loaded_command_units, recover_systemd_containment
+from .command_containment import loaded_command_units, recover_orphan_systemd_containment, recover_systemd_containment
 from .command_identity import (
     CommandIdentityError,
     IdentityRecorder,
@@ -77,6 +77,7 @@ class StartupRecoveryResult:
     recovered_run_ids: list[str] = field(default_factory=list)
     blockers: list[dict] = field(default_factory=list)
     stray_units: list[str] = field(default_factory=list)
+    reconciled_orphan_units: list[str] = field(default_factory=list)
     unit_scan_error: str = ""
 
     @property
@@ -100,6 +101,7 @@ class StartupRecoveryResult:
             "recovered_run_ids": list(self.recovered_run_ids),
             "blockers": [dict(row) for row in self.blockers],
             "stray_units": list(self.stray_units),
+            "reconciled_orphan_units": list(self.reconciled_orphan_units),
             "unit_scan_error": self.unit_scan_error,
             "admission_blocked": self.admission_blocker is not None,
         }
@@ -234,7 +236,7 @@ def _record_blocker(store: BuildStore, run: dict, *, backend: str, reason: str) 
     }
 
 
-def _terminalize_interrupted(store: BuildStore, run: dict, *, backend: str, reason: str) -> None:
+def _terminalize_interrupted(store: BuildStore, run: dict, *, backend: str, reason: str, resource_control: dict | None = None) -> None:
     finished_at = utc_now()
     active_step = next((step for step in run["steps"] if step.get("status") == "running"), None)
     stage = str(active_step.get("name")) if active_step else "recovery"
@@ -242,7 +244,11 @@ def _terminalize_interrupted(store: BuildStore, run: dict, *, backend: str, reas
         "stage": stage,
         "code": RECOVERY_ERROR_CODE,
         "message": "Execution was interrupted before startup recovery completed",
-        "details": {"recovery_backend": backend, "reason": reason},
+        "details": {
+            "recovery_backend": backend,
+            "reason": reason,
+            **({"resource_control": resource_control} if resource_control else {}),
+        },
     }
     if active_step is not None:
         active_step.update({
@@ -302,10 +308,11 @@ def _record_terminal_resolution(store: BuildStore, run: dict, *, backend: str, r
 
 
 def _reconcile_current_boot_identity(
-    identity: dict, *, run_id: str, workspace_fd: int,
-) -> tuple[bool, str, str]:
-    """Return (absence_proved, backend, reason) for one durable identity."""
+    identity: dict, *, run_id: str, workspace_fd: int, admitted_policy: dict | None = None,
+) -> tuple[bool, str, str, dict | None]:
+    """Return (absence_proved, backend, reason, bounded resource observation)."""
     backend = str(identity.get("backend") or "process_group")
+    policy_mismatch = identity.get("schema_version") == 3 and identity.get("resource_limits") != admitted_policy
     if backend == "systemd_cgroup":
         recorder = IdentityRecorder(
             run_id,
@@ -317,8 +324,14 @@ def _reconcile_current_boot_identity(
             identity, expected_run_id=run_id, recorder=recorder,
         )
         if recovered.verification.status is VerificationStatus.NOT_RUNNING and recovered.gone:
-            return True, backend, recovered.verification.reason
-        return False, backend, f"{recovered.verification.status.value}: {recovered.verification.reason}"
+            reason = recovered.verification.reason
+            resource_control = recovered.resource_control
+            if policy_mismatch:
+                reason += "; active command resource policy does not match the admitted Run policy"
+                if resource_control:
+                    resource_control = {**resource_control, "verification": "failed"}
+            return True, backend, reason, resource_control
+        return False, backend, f"{recovered.verification.status.value}: {recovered.verification.reason}", recovered.resource_control
 
     verification = verify_identity(identity, expected_run_id=run_id)
     termination = None
@@ -330,7 +343,7 @@ def _reconcile_current_boot_identity(
         reason = "fallback process group ended, but escaped descendants cannot be excluded on the current boot"
     else:
         reason = f"{verification.status.value}: {verification.reason}; fallback descendants cannot be excluded on the current boot"
-    return False, "process_group", reason
+    return False, "process_group", reason, None
 
 
 def recover_startup(store: BuildStore) -> StartupRecoveryResult:
@@ -338,11 +351,13 @@ def recover_startup(store: BuildStore) -> StartupRecoveryResult:
     result = StartupRecoveryResult()
     unit_bindings: dict[str, str] = {}
     blocked_ids: set[str] = set()
+    ownership_inventory_trustworthy = True
 
     try:
         boot_id = current_boot_id()
     except (CommandIdentityError, OSError) as exc:
         boot_id = ""
+        ownership_inventory_trustworthy = False
         result.blockers.append({
             "run_id": "", "code": BLOCKER_CODE, "backend": "unknown",
             "reason": f"current boot identity is unavailable: {exc}",
@@ -350,6 +365,8 @@ def recover_startup(store: BuildStore) -> StartupRecoveryResult:
 
     try:
         run_ids, inventory_errors = _persisted_run_ids(store)
+        if inventory_errors:
+            ownership_inventory_trustworthy = False
         for run_id, reason in inventory_errors:
             result.blockers.append({
                 "run_id": run_id, "code": BLOCKER_CODE, "backend": "unknown",
@@ -359,6 +376,7 @@ def recover_startup(store: BuildStore) -> StartupRecoveryResult:
                 blocked_ids.add(run_id)
     except (OSError, TypeError, ValueError) as exc:
         run_ids = []
+        ownership_inventory_trustworthy = False
         result.blockers.append({
             "run_id": "", "code": BLOCKER_CODE, "backend": "unknown",
             "reason": f"persisted Run inventory is unverifiable: {exc}",
@@ -377,6 +395,7 @@ def recover_startup(store: BuildStore) -> StartupRecoveryResult:
                     identity = read_persisted_identity(workspace_fd)
                     identity = validated_identity(identity, expected_run_id=run_id) if identity is not None else None
                 except (CommandIdentityError, OSError, TypeError, ValueError) as exc:
+                    ownership_inventory_trustworthy = False
                     blocker = _record_blocker(store, run, backend="unknown", reason=f"active command metadata is unverifiable: {exc}")
                     result.blockers.append(blocker)
                     blocked_ids.add(run_id)
@@ -407,8 +426,9 @@ def recover_startup(store: BuildStore) -> StartupRecoveryResult:
                             _clear_resolved_identity(workspace_fd, run_id)
                             _record_terminal_resolution(store, run, backend=backend, reason=reason)
                         else:
-                            resolved, backend, reason = _reconcile_current_boot_identity(
+                            resolved, backend, reason, _resource_control = _reconcile_current_boot_identity(
                                 identity, run_id=run_id, workspace_fd=workspace_fd,
+                                admitted_policy=run["resource_limits"]["effective"],
                             )
                             if resolved:
                                 _clear_resolved_identity(workspace_fd, run_id)
@@ -452,8 +472,9 @@ def recover_startup(store: BuildStore) -> StartupRecoveryResult:
                     result.recovered_run_ids.append(run_id)
                     continue
 
-                resolved, backend, reason = _reconcile_current_boot_identity(
+                resolved, backend, reason, resource_control = _reconcile_current_boot_identity(
                     identity, run_id=run_id, workspace_fd=workspace_fd,
+                    admitted_policy=run["resource_limits"]["effective"],
                 )
                 if resolved:
                     ambiguity = _terminalization_ambiguity(run)
@@ -462,7 +483,10 @@ def recover_startup(store: BuildStore) -> StartupRecoveryResult:
                         result.blockers.append(blocker)
                         blocked_ids.add(run_id)
                     else:
-                        _terminalize_interrupted(store, run, backend=backend, reason=reason)
+                        _terminalize_interrupted(
+                            store, run, backend=backend, reason=reason,
+                            resource_control=resource_control,
+                        )
                         _clear_resolved_identity(workspace_fd, run_id)
                         result.recovered_run_ids.append(run_id)
                 else:
@@ -470,6 +494,7 @@ def recover_startup(store: BuildStore) -> StartupRecoveryResult:
                     result.blockers.append(blocker)
                     blocked_ids.add(run_id)
         except WorkspaceBusyError as exc:
+            ownership_inventory_trustworthy = False
             result.processed_run_ids.append(run_id)
             result.blockers.append({
                 "run_id": run_id, "code": BLOCKER_CODE, "backend": "unknown",
@@ -477,6 +502,7 @@ def recover_startup(store: BuildStore) -> StartupRecoveryResult:
             })
             blocked_ids.add(run_id)
         except (CommandIdentityError, OSError, TypeError, ValueError) as exc:
+            ownership_inventory_trustworthy = False
             result.processed_run_ids.append(run_id)
             result.blockers.append({
                 "run_id": run_id, "code": BLOCKER_CODE, "backend": "unknown",
@@ -497,8 +523,8 @@ def recover_startup(store: BuildStore) -> StartupRecoveryResult:
         bound_run_id = unit_bindings.get(unit_name)
         if bound_run_id in blocked_ids:
             continue
-        result.stray_units.append(unit_name)
         if bound_run_id:
+            result.stray_units.append(unit_name)
             result.blockers.append({
                 "run_id": bound_run_id,
                 "code": BLOCKER_CODE,
@@ -506,5 +532,32 @@ def recover_startup(store: BuildStore) -> StartupRecoveryResult:
                 "reason": "a current-boot bound transient unit remains outside non-terminal recovery",
             })
             blocked_ids.add(bound_run_id)
+            continue
+        if not ownership_inventory_trustworthy:
+            result.stray_units.append(unit_name)
+            result.blockers.append({
+                "run_id": "",
+                "code": BLOCKER_CODE,
+                "backend": "systemd_cgroup",
+                "reason": (
+                    f"orphan command unit {unit_name} was not signalled because "
+                    "persisted ownership inventory is unverifiable"
+                )[:1000],
+            })
+            continue
+        orphan = recover_orphan_systemd_containment(unit_name)
+        if orphan.verification.status is VerificationStatus.NOT_RUNNING and orphan.gone:
+            result.reconciled_orphan_units.append(unit_name)
+            continue
+        result.stray_units.append(unit_name)
+        result.blockers.append({
+            "run_id": "",
+            "code": BLOCKER_CODE,
+            "backend": "systemd_cgroup",
+            "reason": (
+                f"orphan command unit {unit_name} remains unresolved: "
+                f"{orphan.verification.status.value}: {orphan.verification.reason}"
+            )[:1000],
+        })
 
     return result

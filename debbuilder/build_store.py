@@ -87,7 +87,7 @@ class BuildStore:
             with storage.locked_path(path):
                 yield fd
 
-    def create(self, recipe: dict, *, recipe_id: str = "", mode: str = "dry_run", run_id: str | None = None) -> dict:
+    def create(self, recipe: dict, *, recipe_id: str = "", mode: str = "dry_run", run_id: str | None = None, resource_contract: dict | None = None) -> dict:
         canonical = recipe_for_storage(recipe)
         identifier = run_id or make_run_id()
         folder = self.run_dir(identifier)
@@ -100,15 +100,18 @@ class BuildStore:
         snapshot_path.write_text(snapshot)
         snapshot_path.chmod(0o400)
         digest = hashlib.sha256(snapshot.encode()).hexdigest()
-        run = new_run(identifier, recipe_id or canonical["name"], mode, str(folder.resolve()), digest)
+        run = new_run(
+            identifier, recipe_id or canonical["name"], mode, str(folder.resolve()), digest,
+            resource_contract=resource_contract,
+        )
         self.save(run)
         (folder / "logs" / "pipeline.log").touch(mode=0o600)
         return run
 
     def save(self, run: dict) -> None:
-        validate_run(run)
-        path = self.run_dir(str(run["id"])) / "run.json"
-        storage.save_json(path, run)
+        normalized = validate_run(run)
+        path = self.run_dir(str(normalized["id"])) / "run.json"
+        storage.save_json(path, normalized)
         path.chmod(0o600)
 
     def load(self, run_id: str) -> dict | None:
@@ -118,8 +121,7 @@ class BuildStore:
         run = storage.load_json(path, None)
         if not isinstance(run, dict):
             return None
-        validate_run(run)
-        return run
+        return validate_run(run)
 
     def transition_status(self, run_id: str, *, expected: str, status: str) -> dict:
         """Atomically persist one compare-and-set Run status transition."""
@@ -142,7 +144,7 @@ class BuildStore:
             run = storage.load_json(path, None)
             if isinstance(run, dict):
                 try:
-                    validate_run(run)
+                    run = validate_run(run)
                 except ValueError:
                     continue
                 rows.append(run)

@@ -12,9 +12,18 @@ import subprocess
 import time
 from pathlib import Path
 
-from .command_containment import ContainmentError, SystemdCommandContainment, containment_capability
+from .command_containment import (
+    ContainmentCleanupError,
+    ContainmentError,
+    SystemdCommandContainment,
+    containment_cleanup_blocker,
+    containment_capability,
+    latch_runtime_cleanup_blocker,
+    resource_limit_capability,
+)
 from .command_identity import COMMAND_ID_ENV, RUN_ID_ENV, CommandIdentityError, VerificationStatus, capture_identity, current_recorder, verify_identity
 from .execution_cancellation import CANCELLATION_CODE, USER_REQUESTED, ExecutionCancelled
+from .resource_limits import ResourceLimitError, empty_policy, enforcement_required, normalize_policy
 
 SECRET_KEY = re.compile(r"(?i)(token|secret|password|passwd|api[_-]?key|credential)")
 SECRET_OPTION = re.compile(r"(?i)^--?(?:token|secret|password|passwd|api[_-]?key|credential)(?:=|$)")
@@ -271,7 +280,7 @@ def _terminate_process_group(process: subprocess.Popen, process_group: int, sele
     return exit_code, killed, "; ".join(dict.fromkeys(errors))
 
 
-def _stream_process_group(arguments: list[str], *, cwd: Path, env: dict[str, str], inactivity_timeout: float | None, maximum_runtime: float | None, redaction_environment: dict[str, str], on_output=None, cancellation_event=None, on_cancel=None, identity_recorder=None, pass_fds: tuple[int, ...] = ()) -> dict:
+def _stream_process_group(arguments: list[str], *, cwd: Path, env: dict[str, str], inactivity_timeout: float | None, maximum_runtime: float | None, redaction_environment: dict[str, str], on_output=None, cancellation_event=None, on_cancel=None, identity_recorder=None, pass_fds: tuple[int, ...] = (), resource_policy: dict | None = None, resource_workspace: Path | None = None) -> dict:
     command_id = secrets.token_hex(16) if identity_recorder is not None else ""
     process_environment = dict(env)
     if identity_recorder is not None:
@@ -320,6 +329,7 @@ def _stream_process_group(arguments: list[str], *, cwd: Path, env: dict[str, str
                     command_id=command_id,
                     process_exited=lambda: process.poll() is not None,
                     allow_vanished_environment=True,
+                    resource_policy=resource_policy,
                 )
             except (CommandIdentityError, OSError) as exc:
                 # A very short command can exit while its several /proc fields
@@ -421,7 +431,7 @@ def _stream_process_group(arguments: list[str], *, cwd: Path, env: dict[str, str
                     stream.close()
 
 
-def _stream_systemd_cgroup(arguments: list[str], *, cwd: Path, env: dict[str, str], inactivity_timeout: float | None, maximum_runtime: float | None, redaction_environment: dict[str, str], on_output=None, cancellation_event=None, on_cancel=None, identity_recorder, pass_fds: tuple[int, ...] = ()) -> dict:
+def _stream_systemd_cgroup(arguments: list[str], *, cwd: Path, env: dict[str, str], inactivity_timeout: float | None, maximum_runtime: float | None, redaction_environment: dict[str, str], on_output=None, cancellation_event=None, on_cancel=None, identity_recorder, pass_fds: tuple[int, ...] = (), resource_policy: dict | None = None, resource_workspace: Path | None = None) -> dict:
     """Stream one command spawned directly by PID 1 in its transient cgroup."""
     if pass_fds:
         raise CommandValidationError("descriptor inheritance is not supported by systemd containment")
@@ -431,6 +441,8 @@ def _stream_systemd_cgroup(arguments: list[str], *, cwd: Path, env: dict[str, st
         containment = SystemdCommandContainment.start(
             arguments, cwd=cwd, environment=env,
             recorder=identity_recorder, command_id=command_id,
+            resource_policy=resource_policy,
+            resource_workspace=resource_workspace,
         )
     except BaseException:
         selector.close()
@@ -479,9 +491,11 @@ def _stream_systemd_cgroup(arguments: list[str], *, cwd: Path, env: dict[str, st
                     "process_exit_code": terminated.process_exit_code,
                     "killed": terminated.killed,
                     "termination_error": terminated.error or None,
+                    "containment_gone": terminated.gone,
                     "cancellation_requested": True,
                     "cancelled": terminated.gone and not bool(terminated.error),
                     "cancellation": cancellation or {},
+                    "resource_control": containment.resource_control(),
                 }
             if maximum_runtime is not None and now - started >= maximum_runtime:
                 timeout_reason = "maximum_runtime"
@@ -522,13 +536,18 @@ def _stream_systemd_cgroup(arguments: list[str], *, cwd: Path, env: dict[str, st
                 "process_exit_code": terminated.process_exit_code,
                 "killed": terminated.killed,
                 "termination_error": terminated.error,
+                "containment_gone": terminated.gone,
                 "cancellation_requested": False,
                 "cancelled": False,
+                "resource_control": containment.resource_control(),
             }
 
         finished = containment.finish(on_wait=drain)
         drain_remaining()
-        if not finished.gone or finished.error:
+        if not finished.gone or finished.error or finished.enforcement_error:
+            resource_control = containment.resource_control(
+                verification="failed" if finished.enforcement_error else "verified",
+            )
             return {
                 "exit_code": process_exit_code,
                 "stdout": "".join(output["stdout"]),
@@ -537,9 +556,11 @@ def _stream_systemd_cgroup(arguments: list[str], *, cwd: Path, env: dict[str, st
                 "timeout_reason": "",
                 "process_exit_code": process_exit_code,
                 "killed": finished.killed,
-                "termination_error": finished.error or "transient containment disappearance was not proved",
+                "termination_error": finished.error or ("transient containment disappearance was not proved" if not finished.gone else ""),
+                "containment_gone": finished.gone,
                 "cancellation_requested": False,
                 "cancelled": False,
+                "resource_control": resource_control,
             }
         return {
             "exit_code": process_exit_code,
@@ -548,8 +569,10 @@ def _stream_systemd_cgroup(arguments: list[str], *, cwd: Path, env: dict[str, st
             "timed_out": False,
             "timeout_reason": "",
             "termination_error": "",
+            "containment_gone": True,
             "cancellation_requested": False,
             "cancelled": False,
+            "resource_control": containment.resource_control(),
         }
     except BaseException as original:
         try:
@@ -557,9 +580,9 @@ def _stream_systemd_cgroup(arguments: list[str], *, cwd: Path, env: dict[str, st
             terminated = containment.clear_after_termination(terminated)
             drain_remaining(emit=False)
         except BaseException as cleanup:
-            raise ContainmentError(f"command callback failed and containment cleanup also failed: {cleanup}") from original
-        if not terminated.gone or terminated.error:
-            raise ContainmentError(
+            raise ContainmentCleanupError(f"command callback failed and containment cleanup also failed: {cleanup}") from original
+        if not terminated.gone:
+            raise ContainmentCleanupError(
                 f"command callback failed and containment cleanup could not be proved: {terminated.error or 'unit remains'}"
             ) from original
         raise
@@ -582,7 +605,7 @@ def run_command(command: str, *, workspace: str | Path, working_directory: str =
     safe_for_redaction = {key: value for key, value in (environment or {}).items() if isinstance(key, str) and isinstance(value, str)}
     if timeout is not None and maximum_runtime is None:
         maximum_runtime = timeout
-    result = {"command": redact_command(command, [], safe_for_redaction), "arguments": [], "working_directory": display_cwd, "configured_working_directory": display_cwd, "status": "failed", "exit_code": None, "process_exit_code": None, "stdout": "", "stderr": "", "duration": 0.0, "timed_out": False, "timeout_reason": "", "killed": False, "termination_error": "", "cancelled": False, "cancellation_requested": False}
+    result = {"command": redact_command(command, [], safe_for_redaction), "arguments": [], "working_directory": display_cwd, "configured_working_directory": display_cwd, "status": "failed", "exit_code": None, "process_exit_code": None, "stdout": "", "stderr": "", "duration": 0.0, "timed_out": False, "timeout_reason": "", "killed": False, "termination_error": "", "cancelled": False, "cancellation_requested": False, "error_code": ""}
     try:
         inactivity_timeout = _validated_timeout(inactivity_timeout, "inactivity_timeout")
         maximum_runtime = _validated_timeout(maximum_runtime, "maximum_runtime")
@@ -607,24 +630,94 @@ def run_command(command: str, *, workspace: str | Path, working_directory: str =
             result["duration"] = round(time.monotonic() - started, 6)
             raise ExecutionCancelled(result["cancellation"], command_result=result)
         identity_recorder = current_recorder()
+        resource_policy = normalize_policy(identity_recorder.resource_policy if identity_recorder is not None else empty_policy())
+        finite_policy = enforcement_required(resource_policy)
+        unresolved_cleanup = containment_cleanup_blocker()
+        if identity_recorder is not None and unresolved_cleanup:
+            raise ContainmentCleanupError(
+                f"containment cleanup is unresolved: {unresolved_cleanup}"
+            )
         capability = containment_capability() if identity_recorder is not None and identity_recorder.update is not None else None
+        if finite_policy and identity_recorder is not None and identity_recorder.update is not None:
+            checked = resource_limit_capability(
+                resource_policy, workspace=Path(workspace).resolve(), refresh=True,
+            )
+            capability = type(capability)(
+                checked["backend"], checked["available"], checked["reason"],
+            )
+        unresolved_cleanup = containment_cleanup_blocker()
+        if identity_recorder is not None and unresolved_cleanup:
+            raise ContainmentCleanupError(
+                f"containment cleanup is unresolved: {unresolved_cleanup}"
+            )
+        if finite_policy and (pass_fds or capability is None or not capability.available):
+            raise ContainmentError(
+                "resource_limit_enforcement_failed: finite resource policy requires available systemd/cgroup containment"
+            )
         # A repository lease descriptor must reach the actual mutation process.
         # Repository commands currently run outside Build command identity
         # recording, so this branch preserves their lock across parent death.
-        stream = _stream_systemd_cgroup if not pass_fds and capability is not None and capability.available else _stream_process_group
+        uses_systemd_containment = not pass_fds and capability is not None and capability.available
+        stream = _stream_systemd_cgroup if uses_systemd_containment else _stream_process_group
         completed = stream(
             arguments, cwd=cwd, env=env, inactivity_timeout=inactivity_timeout,
             maximum_runtime=maximum_runtime, redaction_environment=redaction_environment,
             on_output=on_output, cancellation_event=cancellation_event, on_cancel=on_cancel,
             identity_recorder=identity_recorder, pass_fds=pass_fds,
+            resource_policy=resource_policy,
+            resource_workspace=Path(workspace).resolve(),
         )
-        status = "failed" if completed["timed_out"] or completed.get("termination_error") else "cancelled" if completed.get("cancelled") else "success" if completed["exit_code"] == 0 else "failed"
-        result.update({"exit_code": completed["exit_code"], "process_exit_code": completed.get("process_exit_code"), "stdout": completed["stdout"], "stderr": completed["stderr"], "timed_out": completed["timed_out"], "timeout_reason": completed.get("timeout_reason", ""), "killed": completed.get("killed", False), "termination_error": completed.get("termination_error", ""), "cancelled": completed.get("cancelled", False), "cancellation_requested": completed.get("cancellation_requested", False), "status": status})
+        if (
+            uses_systemd_containment
+            and completed.get("termination_error")
+            and not completed.get("containment_gone", False)
+        ):
+            latch_runtime_cleanup_blocker(str(completed["termination_error"]))
+        if not completed.get("resource_control"):
+            completed["resource_control"] = {
+                "backend": "process_group",
+                "enforcement_required": False,
+                "verification": "fallback",
+                "requested": resource_policy,
+                "unit_result": "",
+                "observations": {},
+                "outcome": None,
+            }
+        resource_outcome = ((completed.get("resource_control") or {}).get("outcome") or {})
+        if completed.get("termination_error"):
+            status = "failed"
+        elif completed.get("cancellation_requested"):
+            status = "cancelled" if completed.get("cancelled") else "failed"
+        elif completed["timed_out"] or resource_outcome:
+            status = "failed"
+        else:
+            status = "success" if completed["exit_code"] == 0 else "failed"
+        result.update({"exit_code": completed["exit_code"], "process_exit_code": completed.get("process_exit_code"), "stdout": completed["stdout"], "stderr": completed["stderr"], "timed_out": completed["timed_out"], "timeout_reason": completed.get("timeout_reason", ""), "killed": completed.get("killed", False), "termination_error": completed.get("termination_error", ""), "cancelled": completed.get("cancelled", False), "cancellation_requested": completed.get("cancellation_requested", False), "status": status, "resource_control": completed.get("resource_control")})
+        if completed.get("termination_error"):
+            result["error_code"] = "command_containment_termination_failed"
+        elif resource_outcome and not completed["timed_out"] and not completed.get("cancellation_requested"):
+            result["error_code"] = resource_outcome.get("code", "command_resource_limit_exceeded")
         if completed.get("cancellation_requested"):
             result["cancellation"] = completed.get("cancellation") or {"code": CANCELLATION_CODE, "reason": USER_REQUESTED}
             result["duration"] = round(time.monotonic() - started, 6)
             raise ExecutionCancelled(result["cancellation"], command_result=result)
-    except (CommandValidationError, ContainmentError, CommandIdentityError, OSError) as exc:
+    except (CommandValidationError, ContainmentError, CommandIdentityError, ResourceLimitError, OSError) as exc:
         result["stderr"] = str(exc)
+        if isinstance(exc, ContainmentCleanupError):
+            if locals().get("uses_systemd_containment", False):
+                latch_runtime_cleanup_blocker(str(exc))
+            result["error_code"] = "command_containment_termination_failed"
+        elif isinstance(exc, (ContainmentError, ResourceLimitError)) and enforcement_required(locals().get("resource_policy", empty_policy())):
+            result["error_code"] = "resource_limit_enforcement_failed"
+        if isinstance(exc, (ContainmentError, ResourceLimitError)) and enforcement_required(locals().get("resource_policy", empty_policy())):
+            result["resource_control"] = {
+                "backend": "systemd_cgroup",
+                "enforcement_required": True,
+                "verification": "failed",
+                "requested": normalize_policy(resource_policy),
+                "unit_result": "",
+                "observations": {},
+                "outcome": {"code": "resource_limit_enforcement_failed", "control": None},
+            }
     result["duration"] = round(time.monotonic() - started, 6)
     return result

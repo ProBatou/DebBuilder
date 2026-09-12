@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 
 class RecipeMigrationError(ValueError):
@@ -149,10 +149,33 @@ def migrate_v1_to_v2(document: dict) -> dict:
     return migrated
 
 
+def migrate_v2_to_v3(document: dict) -> dict:
+    """Add the explicit, host-independent per-command resource policy."""
+    _require_source(document, 2)
+    if "resource_limits" in document:
+        raise RecipeMigrationError(
+            "ambiguous_recipe_fields",
+            "Recipe v2 unexpectedly contains resource_limits and cannot be migrated safely",
+            source_version=2,
+            path="$.resource_limits",
+        )
+    migrated = deepcopy(document)
+    migrated["resource_limits"] = {
+        "memory_max_bytes": None,
+        "tasks_max": None,
+        "cpu_quota_percent": None,
+        "io_read_bandwidth_max_bytes_per_sec": None,
+        "io_write_bandwidth_max_bytes_per_sec": None,
+    }
+    migrated["schema_version"] = 3
+    return migrated
+
+
 Migration = Callable[[dict], dict]
 MIGRATIONS: dict[int, Migration] = {
     0: migrate_v0_to_v1,
     1: migrate_v1_to_v2,
+    2: migrate_v2_to_v3,
 }
 
 

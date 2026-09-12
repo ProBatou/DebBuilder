@@ -14,10 +14,12 @@ from pathlib import Path
 from typing import Callable
 
 from .recipe_schema import require_safe_name
+from .resource_limits import empty_policy, normalize_policy
 
 
 ACTIVE_COMMAND_FILE = ".active-command.json"
-IDENTITY_SCHEMA_VERSION = 2
+IDENTITY_SCHEMA_VERSION = 3
+PREVIOUS_IDENTITY_SCHEMA_VERSION = 2
 LEGACY_IDENTITY_SCHEMA_VERSION = 1
 MAX_IDENTITY_BYTES = 4096
 MAX_ENVIRON_BYTES = 1024 * 1024
@@ -61,6 +63,7 @@ class IdentityRecorder:
     record: Callable[[dict], None]
     clear: Callable[[dict], object]
     update: Callable[[dict, dict], object] | None = None
+    resource_policy: dict | None = None
 
 
 _RECORDER: ContextVar[IdentityRecorder | None] = ContextVar("debbuilder_command_identity", default=None)
@@ -73,12 +76,16 @@ def recording_identities(
     record: Callable[[dict], None],
     clear: Callable[[dict], object],
     update: Callable[[dict, dict], object] | None = None,
+    resource_policy: dict | None = None,
 ):
     """Associate command_runner calls in this execution context with one Run."""
     require_safe_name(run_id, "build run id")
     if not callable(record) or not callable(clear) or (update is not None and not callable(update)):
         raise TypeError("command identity record and clear callbacks must be callable")
-    token = _RECORDER.set(IdentityRecorder(run_id, record, clear, update))
+    token = _RECORDER.set(IdentityRecorder(
+        run_id, record, clear, update,
+        normalize_policy(resource_policy if resource_policy is not None else empty_policy()),
+    ))
     try:
         yield
     finally:
@@ -169,6 +176,7 @@ def capture_identity(
     command_id: str,
     process_exited=None,
     allow_vanished_environment: bool = False,
+    resource_policy: dict | None = None,
 ) -> dict:
     """Capture the durable identity of a freshly spawned process-group leader.
 
@@ -214,6 +222,8 @@ def capture_identity(
         "boot_id": _read_boot_id(),
         "run_id": run_id,
         "command_id": command_id,
+        "resource_limits": normalize_policy(resource_policy if resource_policy is not None else empty_policy()),
+        "resource_io_targets": [],
     }
 
 
@@ -223,15 +233,24 @@ def _validated_identity(value, *, expected_run_id: str | None = None) -> dict:
     legacy_fields = {
         "schema_version", "pid", "pgid", "start_time_ticks", "boot_id", "run_id", "command_id",
     }
-    process_group_fields = legacy_fields | {"backend", "containment_state"}
-    systemd_starting_fields = {
+    process_group_v2_fields = legacy_fields | {"backend", "containment_state"}
+    systemd_v2_starting_fields = {
         "schema_version", "backend", "boot_id", "run_id", "command_id", "unit_name", "containment_state",
     }
+    systemd_v2_active_fields = systemd_v2_starting_fields | {"invocation_id", "control_group"}
+    process_group_fields = process_group_v2_fields | {"resource_limits", "resource_io_targets"}
+    systemd_starting_fields = systemd_v2_starting_fields | {"resource_limits", "resource_io_targets"}
     systemd_active_required = systemd_starting_fields | {"invocation_id", "control_group"}
     fields = set(value)
     schema_version = value.get("schema_version")
     if schema_version == LEGACY_IDENTITY_SCHEMA_VERSION and fields == legacy_fields:
         backend = "process_group"
+    elif schema_version == PREVIOUS_IDENTITY_SCHEMA_VERSION and fields == process_group_v2_fields:
+        backend = value.get("backend")
+    elif schema_version == PREVIOUS_IDENTITY_SCHEMA_VERSION and fields == systemd_v2_starting_fields:
+        backend = value.get("backend")
+    elif schema_version == PREVIOUS_IDENTITY_SCHEMA_VERSION and fields == systemd_v2_active_fields:
+        backend = value.get("backend")
     elif schema_version == IDENTITY_SCHEMA_VERSION and fields == process_group_fields:
         backend = value.get("backend")
     elif schema_version == IDENTITY_SCHEMA_VERSION and fields == systemd_starting_fields:
@@ -243,12 +262,12 @@ def _validated_identity(value, *, expected_run_id: str | None = None) -> dict:
         backend = value.get("backend")
     else:
         raise CommandIdentityError("active command identity has invalid fields")
-    if schema_version not in {LEGACY_IDENTITY_SCHEMA_VERSION, IDENTITY_SCHEMA_VERSION}:
+    if schema_version not in {LEGACY_IDENTITY_SCHEMA_VERSION, PREVIOUS_IDENTITY_SCHEMA_VERSION, IDENTITY_SCHEMA_VERSION}:
         raise CommandIdentityError("active command identity schema is unsupported")
     if backend not in {"process_group", "systemd_cgroup"}:
         raise CommandIdentityError("active command backend is invalid")
     if backend == "process_group":
-        if schema_version == IDENTITY_SCHEMA_VERSION and value.get("containment_state") != "active":
+        if schema_version != LEGACY_IDENTITY_SCHEMA_VERSION and value.get("containment_state") != "active":
             raise CommandIdentityError("process-group containment state is invalid")
         for field in ("pid", "pgid"):
             if type(value.get(field)) is not int or value[field] <= 0:
@@ -263,7 +282,8 @@ def _validated_identity(value, *, expected_run_id: str | None = None) -> dict:
         ):
             raise CommandIdentityError("systemd unit name is invalid")
         if value["containment_state"] == "starting":
-            if fields != systemd_starting_fields:
+            expected_fields = systemd_starting_fields if schema_version == IDENTITY_SCHEMA_VERSION else systemd_v2_starting_fields
+            if fields != expected_fields:
                 raise CommandIdentityError("starting systemd containment has invalid fields")
         else:
             if not isinstance(value.get("invocation_id"), str) or not re.fullmatch(r"[0-9a-f]{32}", value["invocation_id"]):
@@ -272,6 +292,18 @@ def _validated_identity(value, *, expected_run_id: str | None = None) -> dict:
                 r"/system\.slice/debbuilder-command-[0-9a-f]{16}-[0-9a-f]{32}\.service", value["control_group"],
             ):
                 raise CommandIdentityError("systemd control group is invalid")
+    if schema_version == IDENTITY_SCHEMA_VERSION:
+        try:
+            if not isinstance(value.get("resource_limits"), dict):
+                raise CommandIdentityError("active command resource policy must be an object")
+            normalize_policy(value.get("resource_limits"), path="$.resource_limits")
+        except (CommandIdentityError, ValueError) as exc:
+            raise CommandIdentityError(f"active command resource policy is invalid: {exc}") from exc
+        targets = value.get("resource_io_targets")
+        if not isinstance(targets, list) or len(targets) > 2 or any(
+            not isinstance(path, str) or not path.startswith("/") for path in targets
+        ):
+            raise CommandIdentityError("active command I/O targets are invalid")
     if not isinstance(value.get("boot_id"), str) or not BOOT_ID.fullmatch(value["boot_id"]):
         raise CommandIdentityError("active command boot ID is invalid")
     require_safe_name(value.get("run_id"), "build run id")

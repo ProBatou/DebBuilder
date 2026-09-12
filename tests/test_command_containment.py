@@ -17,12 +17,15 @@ import debbuilder.command_runner as command_runner_module
 from debbuilder.build_store import BuildStore
 from debbuilder.command_containment import (
     ContainmentCapability,
+    ContainmentError,
+    ContainmentTermination,
     SystemdCommandContainment,
     UnitSnapshot,
     _SystemdConnection,
     command_unit_name,
     containment_capability,
     expected_control_group,
+    starting_metadata,
     unit_description,
     verify_unit,
 )
@@ -61,6 +64,9 @@ class SystemdCommandContainmentTests(unittest.TestCase):
             raise unittest.SkipTest(cls.capability.reason)
 
     def setUp(self):
+        runtime_blocker = mock.patch.object(containment_module, "_RUNTIME_CLEANUP_ERROR", "")
+        runtime_blocker.start()
+        self.addCleanup(runtime_blocker.stop)
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.store = BuildStore(Path(self.temporary.name) / "builds")
@@ -93,6 +99,7 @@ class SystemdCommandContainmentTests(unittest.TestCase):
 
     def run_strong(self, run, command, **kwargs):
         transitions = []
+        resource_policy = kwargs.pop("resource_policy", None)
         with self.store.locked_run(run["id"]) as fd:
             self.running_fd = fd
             def record(value):
@@ -109,6 +116,7 @@ class SystemdCommandContainmentTests(unittest.TestCase):
             with recording_identities(
                 run["id"], record=record, update=update,
                 clear=lambda value: clear_identity(fd, value),
+                resource_policy=resource_policy,
             ):
                 try:
                     result = run_command(command, workspace=run["workspace"], **kwargs)
@@ -319,6 +327,94 @@ class SystemdCommandContainmentTests(unittest.TestCase):
         connection = _SystemdConnection()
         try:
             self.assertIsNone(connection.snapshot(transitions[0]["unit_name"]))
+        finally:
+            connection.close()
+
+    def test_post_activation_setup_failure_clears_exact_active_identity(self):
+        run = self.create_run("post-activation-failure")
+        with mock.patch.object(
+            SystemdCommandContainment, "_start_resource_event_watchers",
+            side_effect=ContainmentError("injected post-activation failure"),
+        ):
+            result, transitions, remaining = self.run_strong(run, "sleep 30")
+
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("post-activation failure", result["stderr"])
+        self.assertEqual([row["containment_state"] for row in transitions], ["starting", "active"])
+        self.assertIsNone(remaining)
+        connection = _SystemdConnection()
+        try:
+            self.assertIsNone(connection.snapshot(transitions[-1]["unit_name"]))
+        finally:
+            connection.close()
+
+    def test_watcher_thread_start_failure_still_removes_unit_before_identity_clear(self):
+        run = self.create_run("watcher-thread-start-failure")
+        with mock.patch.object(
+            threading.Thread, "start",
+            side_effect=RuntimeError("injected thread start failure"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "thread start failure"):
+                self.run_strong(
+                    run, "sleep 30", resource_policy={"tasks_max": 8},
+                )
+
+        with self.store.locked_run(run["id"]) as fd:
+            self.assertIsNone(read_persisted_identity(fd))
+        self.assertEqual(len(self.units), 1)
+        unit_name = next(iter(self.units))
+        connection = _SystemdConnection()
+        try:
+            self.assertIsNone(connection.snapshot(unit_name))
+        finally:
+            connection.close()
+
+    def test_post_activation_cleanup_uncertainty_keeps_identity_and_is_stronger_failure(self):
+        run = self.create_run("post-activation-cleanup-failure")
+        with (
+            mock.patch.object(
+                SystemdCommandContainment, "_start_resource_event_watchers",
+                side_effect=ContainmentError("injected post-activation failure"),
+            ),
+            mock.patch.object(
+                SystemdCommandContainment, "_wait_for_disappearance",
+                return_value=ContainmentTermination(None, False, False, "injected disappearance uncertainty"),
+            ),
+        ):
+            result, transitions, remaining = self.run_strong(run, "sleep 30")
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error_code"], "command_containment_termination_failed")
+        self.assertIn("disappearance uncertainty", result["stderr"])
+        self.assertEqual(remaining, transitions[-1])
+
+    def test_shutdown_cancellation_during_finite_launch_barrier_preserves_identity_until_gone(self):
+        run = self.create_run("barrier-shutdown")
+        cancellation = threading.Event()
+        real_watchers = SystemdCommandContainment._start_resource_event_watchers
+
+        def start_watchers(command, snapshot):
+            real_watchers(command, snapshot)
+            cancellation.set()
+
+        with mock.patch.object(
+            SystemdCommandContainment, "_start_resource_event_watchers", new=start_watchers,
+        ):
+            result, transitions, remaining = self.run_strong(
+                run,
+                "sleep 30",
+                resource_policy={"tasks_max": 8},
+                cancellation_event=cancellation,
+                on_cancel=lambda: {"reason": "server_shutdown"},
+            )
+
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(result["cancellation"]["reason"], "server_shutdown")
+        self.assertEqual([row["containment_state"] for row in transitions], ["starting", "active", "stopping"])
+        self.assertIsNone(remaining)
+        connection = _SystemdConnection()
+        try:
+            self.assertIsNone(connection.snapshot(transitions[-1]["unit_name"]))
         finally:
             connection.close()
 
@@ -560,6 +656,238 @@ with store.locked_run(run_id) as fd:
 
 
 class ContainmentFallbackTests(unittest.TestCase):
+    def test_resource_mismatch_fails_but_owned_unit_is_still_cleaned(self):
+        from debbuilder.command_containment import starting_metadata
+
+        run_id, command_id = "resource-mismatch", "d" * 32
+        intent = starting_metadata(run_id, command_id, {"tasks_max": 10}, workspace=Path("/tmp"))
+        active = {
+            **intent,
+            "containment_state": "active",
+            "invocation_id": "e" * 32,
+            "control_group": expected_control_group(intent["unit_name"]),
+        }
+        snapshot = UnitSnapshot(
+            unit_name=intent["unit_name"],
+            description=unit_description(run_id, command_id),
+            transient=True,
+            invocation_id=active["invocation_id"],
+            control_group=active["control_group"],
+            active_state="active",
+            sub_state="running",
+            service_type="exec",
+            exit_type="cgroup",
+            kill_mode="control-group",
+            result="success",
+            main_pid=123,
+            exec_main_code=0,
+            exec_main_status=0,
+            tasks_max=20,
+            effective_tasks_max=20,
+            tasks_accounting=True,
+        )
+
+        class Connection:
+            def __init__(self):
+                self.stopped = False
+
+            def snapshot(self, _unit):
+                return None if self.stopped else snapshot
+
+            def stop(self, _unit):
+                self.stopped = True
+
+            def close(self):
+                return None
+
+        connection = Connection()
+        cleared = []
+        recorder = IdentityRecorder(run_id, lambda _value: None, lambda value: cleared.append(value) or True)
+        command = SystemdCommandContainment(connection, recorder, active, None, None)
+        result = command.finish()
+        self.assertTrue(connection.stopped)
+        self.assertTrue(result.gone)
+        self.assertEqual(result.error, "")
+        self.assertIn("resource enforcement could not be verified", result.enforcement_error)
+        self.assertEqual(cleared, [active])
+
+    def test_active_identity_commit_then_error_is_cleaned_only_after_unit_absence(self):
+        run_id, command_id = "active-commit-error", "a" * 32
+        intent = starting_metadata(run_id, command_id)
+        active_snapshot = UnitSnapshot(
+            unit_name=intent["unit_name"],
+            description=unit_description(run_id, command_id),
+            transient=True,
+            invocation_id="b" * 32,
+            control_group=expected_control_group(intent["unit_name"]),
+            active_state="active", sub_state="running",
+            service_type="exec", exit_type="cgroup", kill_mode="control-group",
+            result="success", main_pid=123, exec_main_code=0, exec_main_status=0,
+        )
+
+        class Connection:
+            stopped = False
+
+            def start_transient(self, *_args, **_kwargs):
+                return None
+
+            def snapshot(self, _unit):
+                return None if self.stopped else active_snapshot
+
+            def stop(self, _unit):
+                self.stopped = True
+
+            def close(self):
+                return None
+
+        durable = {"value": None}
+
+        def record(value):
+            durable["value"] = value
+
+        def update(expected, updated):
+            self.assertEqual(durable["value"], expected)
+            durable["value"] = updated
+            raise OSError("injected post-commit durability error")
+
+        def clear(expected):
+            if durable["value"] != expected:
+                return False
+            self.assertTrue(connection.stopped)
+            durable["value"] = None
+            return True
+
+        connection = Connection()
+        recorder = IdentityRecorder(run_id, record, clear, update)
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            containment_module, "_SystemdConnection", return_value=connection,
+        ), mock.patch.object(containment_module, "_cgroup_is_absent", return_value=True):
+            with self.assertRaisesRegex(OSError, "post-commit"):
+                SystemdCommandContainment.start(
+                    ["/usr/bin/true"], cwd=Path(temporary),
+                    environment={"PATH": "/usr/bin:/bin"}, recorder=recorder,
+                    command_id=command_id,
+                )
+        self.assertTrue(connection.stopped)
+        self.assertIsNone(durable["value"])
+
+    def test_stopping_identity_commit_then_error_still_stops_and_clears_exact_candidate(self):
+        run_id, command_id = "stopping-commit-error", "c" * 32
+        intent = starting_metadata(run_id, command_id)
+        active = {
+            **intent, "containment_state": "active", "invocation_id": "d" * 32,
+            "control_group": expected_control_group(intent["unit_name"]),
+        }
+        live = UnitSnapshot(
+            unit_name=active["unit_name"], description=unit_description(run_id, command_id),
+            transient=True, invocation_id=active["invocation_id"],
+            control_group=active["control_group"], active_state="active", sub_state="running",
+            service_type="exec", exit_type="cgroup", kill_mode="control-group",
+            result="success", main_pid=123, exec_main_code=0, exec_main_status=0,
+        )
+
+        class Connection:
+            stopped = False
+
+            def snapshot(self, _unit):
+                return None if self.stopped else live
+
+            def stop(self, _unit):
+                self.stopped = True
+
+            def close(self):
+                return None
+
+        durable = {"value": active}
+
+        def update(expected, stopping):
+            self.assertEqual(durable["value"], expected)
+            durable["value"] = stopping
+            raise OSError("injected stopping durability error")
+
+        def clear(expected):
+            if durable["value"] != expected:
+                return False
+            self.assertTrue(connection.stopped)
+            durable["value"] = None
+            return True
+
+        connection = Connection()
+        command = SystemdCommandContainment(
+            connection, IdentityRecorder(run_id, mock.Mock(), clear, update),
+            active, None, None,
+        )
+        with mock.patch.object(containment_module, "_cgroup_is_absent", return_value=True):
+            terminated = command.terminate()
+            cleared = command.clear_after_termination(terminated)
+        self.assertTrue(cleared.gone)
+        self.assertIn("update was ambiguous", cleared.error)
+        self.assertTrue(connection.stopped)
+        self.assertIsNone(durable["value"])
+
+    def test_non_true_stopping_update_does_not_authorize_stop(self):
+        run_id, command_id = "stopping-none", "e" * 32
+        intent = starting_metadata(run_id, command_id)
+        active = {
+            **intent, "containment_state": "active", "invocation_id": "f" * 32,
+            "control_group": expected_control_group(intent["unit_name"]),
+        }
+        live = UnitSnapshot(
+            unit_name=active["unit_name"], description=unit_description(run_id, command_id),
+            transient=True, invocation_id=active["invocation_id"],
+            control_group=active["control_group"], active_state="active", sub_state="running",
+            service_type="exec", exit_type="cgroup", kill_mode="control-group",
+            result="success", main_pid=123, exec_main_code=0, exec_main_status=0,
+        )
+        connection = mock.Mock()
+        connection.snapshot.return_value = live
+        command = SystemdCommandContainment(
+            connection, IdentityRecorder(run_id, mock.Mock(), mock.Mock(), lambda *_args: None),
+            active, None, None,
+        )
+        terminated = command.terminate()
+        self.assertFalse(terminated.gone)
+        connection.stop.assert_not_called()
+
+    def test_starting_identity_pins_invocation_through_stop_wait(self):
+        run_id, command_id = "starting-pin", "1" * 32
+        intent = starting_metadata(run_id, command_id)
+        original = UnitSnapshot(
+            unit_name=intent["unit_name"], description=unit_description(run_id, command_id),
+            transient=True, invocation_id="2" * 32,
+            control_group=expected_control_group(intent["unit_name"]),
+            active_state="active", sub_state="running", service_type="exec",
+            exit_type="cgroup", kill_mode="control-group", result="success",
+            main_pid=123, exec_main_code=0, exec_main_status=0,
+        )
+        replacement = UnitSnapshot(**{**original.__dict__, "invocation_id": "3" * 32})
+
+        class Connection:
+            snapshots = [original, replacement]
+            reset_calls = []
+
+            def snapshot(self, _unit):
+                return self.snapshots.pop(0)
+
+            def stop(self, _unit):
+                return None
+
+            def reset_failed(self, unit):
+                self.reset_calls.append(unit)
+
+            def close(self):
+                return None
+
+        connection = Connection()
+        command = SystemdCommandContainment(
+            connection, IdentityRecorder(run_id, mock.Mock(), mock.Mock(), mock.Mock()),
+            intent, None, None,
+        )
+        terminated = command._terminate_record(intent, persist_stopping=False)
+        self.assertFalse(terminated.gone)
+        self.assertIn("invocation changed", terminated.error)
+        self.assertEqual(connection.reset_calls, [])
+
     def test_completed_systemd_command_promotes_without_a_live_cgroup_snapshot(self):
         command_id = "a" * 32
         run_id = "completed-before-snapshot"
@@ -612,6 +940,10 @@ class ContainmentFallbackTests(unittest.TestCase):
         with (
             tempfile.TemporaryDirectory() as temporary,
             mock.patch.object(containment_module, "_SystemdConnection", CompletedConnection),
+            mock.patch.object(
+                containment_module, "NAMESPACE_LEASE_PATH",
+                Path(temporary) / "namespace.lock",
+            ),
         ):
             command = SystemdCommandContainment.start(
                 ["/usr/bin/true"],
@@ -621,6 +953,8 @@ class ContainmentFallbackTests(unittest.TestCase):
                 command_id=command_id,
             )
             try:
+                with self.assertRaisesRegex(ContainmentError, "lease is busy"):
+                    containment_module._acquire_namespace_lease(exclusive=True)
                 self.assertEqual(command.poll(), 0)
                 self.assertEqual(command.metadata["invocation_id"], snapshot.invocation_id)
                 self.assertEqual(command.metadata["control_group"], expected_control_group(unit_name))
@@ -629,6 +963,8 @@ class ContainmentFallbackTests(unittest.TestCase):
                 self.assertEqual(cleared, [command.metadata])
             finally:
                 command.close()
+            exclusive_fd = containment_module._acquire_namespace_lease(exclusive=True)
+            os.close(exclusive_fd)
 
     def test_cgroup_absence_permission_error_is_not_absence(self):
         unit = "debbuilder-command-" + "a" * 16 + "-" + "b" * 32 + ".service"

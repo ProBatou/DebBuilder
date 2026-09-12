@@ -1,12 +1,19 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "name": "debbuilder",
   "active": true,
   "management": {
     "owner": "application",
     "builtin_id": "debbuilder",
-    "definition_version": 3,
+    "definition_version": 4,
     "operator_overrides": {}
+  },
+  "resource_limits": {
+    "memory_max_bytes": null,
+    "tasks_max": null,
+    "cpu_quota_percent": null,
+    "io_read_bandwidth_max_bytes_per_sec": null,
+    "io_write_bandwidth_max_bytes_per_sec": null
   },
   "package": {
     "name": "debbuilder",

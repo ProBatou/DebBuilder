@@ -5,11 +5,13 @@ import json
 import os
 import re
 import secrets
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qsl, urlparse
 
 from . import storage
 from .workspace_cleanup import DEFAULT_POLICY, validate_policy
+from .resource_limits import FIELDS, ResourceLimitError, empty_policy, normalize_policy
 
 _SECRET_WORDS = re.compile(r"(?i)(token|secret|password|passwd|apikey|api_key|client_secret)")
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -44,6 +46,7 @@ def default_settings(repo_url: str, suite: str, component: str, architecture: st
             "auto_validate_after_successful_build": False,
             "auto_publish_after_successful_validation": False,
         },
+        "resource_limits": empty_policy(),
         "workspace_cleanup": dict(DEFAULT_POLICY),
         "security": security or {"auth_mode": "none", "oidc_issuer": "", "oidc_client_id": "", "oidc_redirect_uri": ""},
     }
@@ -57,17 +60,47 @@ def secrets_path(data_dir: Path) -> Path:
     return data_dir / "secrets.json"
 
 
-def load_settings(data_dir: Path, defaults: dict) -> dict:
+@dataclass(frozen=True)
+class SettingsLoadResult:
+    settings: dict
+    resource_limits_error: dict | None = None
+    resource_limits_repair_source: dict | None = None
+
+
+def repair_resource_limits(stored: dict | None, patch: dict) -> dict:
+    """Apply an explicit repair without discarding omitted valid stored ceilings."""
+    if not isinstance(patch, dict):
+        raise ResourceLimitError(
+            "invalid_resource_limits", "Resource limits must be an object",
+            path="$.resource_limits",
+        )
+    if not isinstance(stored, dict):
+        return normalize_policy(patch, path="$.resource_limits")
+    unknown = set(stored) - set(FIELDS)
+    candidate = patch if unknown and set(FIELDS).issubset(patch) else {**stored, **patch}
+    return normalize_policy(candidate, path="$.resource_limits")
+
+
+def load_settings_result(data_dir: Path, defaults: dict) -> SettingsLoadResult:
     result = json.loads(json.dumps(defaults))
     path = settings_path(data_dir)
     if not path.exists():
-        return result
+        return SettingsLoadResult(result)
     try:
         stored = json.loads(path.read_text())
-    except Exception:
-        return result
+    except Exception as exc:
+        return SettingsLoadResult(result, {
+            "code": "resource_settings_unreadable",
+            "message": "Stored Settings cannot be read safely; Build/Test admission is blocked until Settings are saved again",
+            "path": "$.resource_limits",
+            "details": {"cause": type(exc).__name__},
+        })
     if not isinstance(stored, dict):
-        return result
+        return SettingsLoadResult(result, {
+            "code": "resource_settings_unreadable",
+            "message": "Stored Settings must be an object; Build/Test admission is blocked until Settings are saved again",
+            "path": "$.resource_limits", "details": {},
+        })
     for section, values in result.items():
         stored_section = stored.get(section)
         if not isinstance(stored_section, dict):
@@ -77,7 +110,35 @@ def load_settings(data_dir: Path, defaults: dict) -> dict:
                 values[key] = value
             elif key in values and isinstance(values[key], str) and isinstance(value, str):
                 values[key] = value
-    return result
+    if "resource_limits" in stored:
+        try:
+            if not isinstance(stored["resource_limits"], dict):
+                raise ResourceLimitError(
+                    "invalid_resource_limits", "Resource limits must be an object",
+                    path="$.resource_limits",
+                )
+            result["resource_limits"] = normalize_policy(stored["resource_limits"], path="$.resource_limits")
+        except ResourceLimitError as exc:
+            stored_limits = stored["resource_limits"]
+            if isinstance(stored_limits, dict):
+                salvaged = empty_policy()
+                for field in FIELDS:
+                    if field not in stored_limits:
+                        continue
+                    try:
+                        salvaged[field] = normalize_policy(
+                            {field: stored_limits[field]}, path="$.resource_limits",
+                        )[field]
+                    except ResourceLimitError:
+                        continue
+                result["resource_limits"] = salvaged
+                return SettingsLoadResult(result, exc.as_dict(), dict(stored_limits))
+            return SettingsLoadResult(result, exc.as_dict())
+    return SettingsLoadResult(result)
+
+
+def load_settings(data_dir: Path, defaults: dict) -> dict:
+    return load_settings_result(data_dir, defaults).settings
 
 
 def load_secrets(data_dir: Path) -> dict:
@@ -322,6 +383,17 @@ def validate_settings(payload: dict, current: dict) -> dict:
         if not isinstance(policy, dict):
             raise ValueError("workspace_cleanup settings must be an object")
         result["workspace_cleanup"] = validate_policy({**result.get("workspace_cleanup", DEFAULT_POLICY), **policy})
+
+    if "resource_limits" in payload:
+        if not isinstance(payload["resource_limits"], dict):
+            raise ResourceLimitError(
+                "invalid_resource_limits", "Resource limits must be an object",
+                path="$.resource_limits",
+            )
+        result["resource_limits"] = normalize_policy(
+            {**result.get("resource_limits", empty_policy()), **payload["resource_limits"]},
+            path="$.resource_limits",
+        )
 
     if "security" in payload:
         security = payload.get("security")

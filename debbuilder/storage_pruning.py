@@ -9,6 +9,7 @@ from typing import Callable
 
 from . import artifact_publication
 from .build_models import utc_now, validate_run
+from .command_containment import containment_safety_gate
 from .repository_lock import RepositoryMutationBusy
 from .workspace_cleanup import (
     DISPOSABLE_DIRECTORIES,
@@ -635,33 +636,34 @@ def apply_pruning(
         if stop_requested():
             break
         try:
-            with store.locked_run(run_id, blocking=False) as workspace_fd:
-                run = read_run(workspace_fd, store.root, run_id)
-                try:
-                    manifest_status = _prune_staging_manifest_locked(
-                        workspace_fd, run, authorization=authorization,
-                        should_stop=stop_requested, allow_new=configured["enabled"],
-                        builds_root=store.root,
-                    )
-                    if manifest_status in {"pruned", "recovered"}:
-                        result["manifests_pruned"].append(run_id)
+            with containment_safety_gate():
+                with store.locked_run(run_id, blocking=False) as workspace_fd:
                     run = read_run(workspace_fd, store.root, run_id)
-                except PruningIneligible:
-                    pass
-                except PruningStopped:
-                    raise
-                except WorkspaceBusyError:
-                    raise
-                except (OSError, ValueError) as exc:
-                    result["errors"].append({"id": run_id, "error": str(exc), "scope": "staging_manifest"})
-                row = _prune_locked(
-                    workspace_fd, run, repo_root=Path(repo_root).absolute(),
-                    distribution=distribution, component=component,
-                    authorization=authorization, should_stop=stop_requested,
-                    allow_new=configured["enabled"],
-                    builds_root=store.root,
-                    runner=runner,
-                )
+                    try:
+                        manifest_status = _prune_staging_manifest_locked(
+                            workspace_fd, run, authorization=authorization,
+                            should_stop=stop_requested, allow_new=configured["enabled"],
+                            builds_root=store.root,
+                        )
+                        if manifest_status in {"pruned", "recovered"}:
+                            result["manifests_pruned"].append(run_id)
+                        run = read_run(workspace_fd, store.root, run_id)
+                    except PruningIneligible:
+                        pass
+                    except PruningStopped:
+                        raise
+                    except WorkspaceBusyError:
+                        raise
+                    except (OSError, ValueError) as exc:
+                        result["errors"].append({"id": run_id, "error": str(exc), "scope": "staging_manifest"})
+                    row = _prune_locked(
+                        workspace_fd, run, repo_root=Path(repo_root).absolute(),
+                        distribution=distribution, component=component,
+                        authorization=authorization, should_stop=stop_requested,
+                        allow_new=configured["enabled"],
+                        builds_root=store.root,
+                        runner=runner,
+                    )
             result[row["status"]].append(run_id)
         except PruningStopped:
             break

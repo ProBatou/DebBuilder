@@ -236,6 +236,8 @@ def create_handler(api):
                     api.json_response(self, {"ok": False, "error": {"code": "invalid_json", "message": f"JSON syntax error at line {exc.lineno}, column {exc.colno}", "path": "$"}}, 400)
                 else:
                     api.json_response(self, {"error": str(exc)}, 400)
+            except api.resource_limits.ResourceLimitError as exc:
+                api.json_response(self, {"error": exc.as_dict()}, 422)
             except Exception as exc:
                 if self.path in {"/api/recipes/validate", "/api/recipes/import"}:
                     api.json_response(self, {"ok": False, "error": {"code": "invalid_request", "message": str(exc), "path": "$"}}, 400)

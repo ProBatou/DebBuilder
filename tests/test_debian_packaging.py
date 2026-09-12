@@ -3,6 +3,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from debbuilder import deb_inspector, debian_packaging, upstream_archive
 from debbuilder.recipe_schema import validate_recipe_metadata
@@ -43,6 +44,37 @@ def archive_packaging_recipe(payload):
 
 
 class DebianPackagingTests(unittest.TestCase):
+    def test_package_and_inspection_commands_preserve_resource_failures(self):
+        failed = {
+            "status": "failed", "stdout": "", "stderr": "resource enforcement failed",
+            "exit_code": None, "command": "dpkg-deb", "arguments": ["dpkg-deb"],
+            "working_directory": ".", "duration": 0.01,
+            "error_code": "resource_limit_enforcement_failed",
+            "resource_control": {"verification": "failed"},
+        }
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            debian_packaging, "validate_staging", return_value={"valid": True},
+        ), self.assertRaises(debian_packaging.PackagingError) as raised:
+            debian_packaging.build_deb(
+                packaging_recipe(),
+                {"version": "1.0-1", "staging_directory": str(Path(temporary) / "staging")},
+                temporary,
+                runner=lambda *_args, **_kwargs: dict(failed),
+            )
+        self.assertEqual(raised.exception.code, "resource_limit_enforcement_failed")
+        self.assertEqual(raised.exception.details["command"]["resource_control"], {"verification": "failed"})
+
+        with tempfile.TemporaryDirectory() as temporary:
+            deb = Path(temporary) / "example.deb"
+            deb.write_bytes(b"not-needed")
+            with self.assertRaises(deb_inspector.DebInspectionCommandError) as inspected:
+                deb_inspector.inspect_deb(
+                    deb, workspace=temporary,
+                    runner=lambda *_args, **_kwargs: dict(failed),
+                )
+        self.assertEqual(inspected.exception.code, "resource_limit_enforcement_failed")
+        self.assertEqual(inspected.exception.details["command"]["resource_control"], {"verification": "failed"})
+
     def make_workspace(self, root):
         workspace = Path(root)
         for name in ("source", "staging", "artifacts", "logs"):
@@ -421,6 +453,8 @@ class DebianPackagingTests(unittest.TestCase):
             self.assertGreater(artifact["size"], 0)
             self.assertEqual(artifact["inspection"]["package"], "demo")
             self.assertEqual(artifact["inspection"]["depends"], "ca-certificates, adduser")
+            self.assertEqual(len(artifact["inspection"]["commands"]), 3)
+            self.assertTrue(all("resource_control" in row for row in artifact["inspection"]["commands"]))
             root_entry = next(row for row in artifact["inspection"]["files"] if row["path"] == "./")
             self.assertEqual(root_entry["mode"], "drwxr-xr-x")
 

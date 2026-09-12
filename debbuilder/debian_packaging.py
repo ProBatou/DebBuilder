@@ -388,7 +388,7 @@ def build_deb(recipe: dict, staging_result: dict, workspace: str | Path, *, runn
     result = runner(f"dpkg-deb --build --root-owner-group staging artifacts/{filename}", workspace=workspace, working_directory=".", environment={"LC_ALL":"C"}, timeout=120, cancellation_event=cancellation_event, on_cancel=on_cancel)
     raise_for_cancelled_result(result)
     if result["status"] != "success" or not artifact.is_file():
-        raise PackagingError("deb_build_failed", result["stderr"] or "dpkg-deb failed", details={"command": result})
+        raise PackagingError(result.get("error_code") or "deb_build_failed", result["stderr"] or "dpkg-deb failed", details={"command": result})
     if callable(before_inspection):
         before_inspection()
     digest = hashlib.sha256()
@@ -401,7 +401,10 @@ def build_deb(recipe: dict, staging_result: dict, workspace: str | Path, *, runn
     except ExecutionCancelled:
         raise
     except (OSError, ValueError) as exc:
-        raise PackagingError("deb_inspection_failed", str(exc), details={"artifact": artifact_details}) from exc
+        raise PackagingError(
+            getattr(exc, "code", "deb_inspection_failed"), str(exc),
+            details={"artifact": artifact_details, **getattr(exc, "details", {})},
+        ) from exc
     if inspection and not inspection.get("ok"):
         raise PackagingError("deb_inspection_failed", "Generated Debian package failed inspection", details={"artifact": artifact_details, "inspection": inspection})
     if inspection and (inspection.get("package") != package or inspection.get("version") != version or inspection.get("architecture") != architecture):

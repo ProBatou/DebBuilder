@@ -11,6 +11,23 @@ from .execution_cancellation import raise_for_cancelled_result
 CONTROL_KEYS = ["Package", "Version", "Architecture", "Depends", "Maintainer", "Description", "Homepage", "Section", "Priority"]
 
 
+class DebInspectionCommandError(ValueError):
+    def __init__(self, code: str, message: str, *, command: dict):
+        super().__init__(message)
+        self.code = code
+        self.details = {"command": command}
+
+
+def _command_record(result: dict) -> dict:
+    return {
+        key: result.get(key) for key in (
+            "command", "arguments", "working_directory", "status", "exit_code",
+            "process_exit_code", "duration", "timed_out", "timeout_reason",
+            "killed", "termination_error", "error_code", "resource_control",
+        )
+    }
+
+
 def inspection_for_storage(inspection: dict) -> dict:
     """Add metadata without discarding the complete package inventory.
 
@@ -29,6 +46,11 @@ def _invoke(arguments: list[str], workspace: Path, runner=run_command, *, cancel
     command = " ".join(shlex.quote(argument) for argument in arguments)
     result = runner(command, workspace=workspace, working_directory=".", environment={"LC_ALL":"C"}, timeout=30, cancellation_event=cancellation_event, on_cancel=on_cancel, pass_fds=pass_fds)
     raise_for_cancelled_result(result)
+    if result.get("error_code"):
+        raise DebInspectionCommandError(
+            result["error_code"], result.get("stderr") or "Debian package inspection resource enforcement failed",
+            command=_command_record(result),
+        )
     return result
 
 
@@ -78,9 +100,16 @@ def inspect_deb(path: str | Path, *, workspace: str | Path | None = None, runner
         with tempfile.TemporaryDirectory(prefix="debbuilder-inspect-") as temporary:
             return inspect_deb(deb, workspace=temporary, runner=runner, cancellation_event=cancellation_event, on_cancel=on_cancel, pass_fds=pass_fds)
     root = Path(workspace).resolve()
-    fields = _control_fields(deb, root, runner, cancellation_event=cancellation_event, on_cancel=on_cancel, pass_fds=pass_fds)
-    files = _file_list(deb, root, runner, cancellation_event=cancellation_event, on_cancel=on_cancel, pass_fds=pass_fds)
-    scripts, conffiles = _control_metadata(deb, root, runner, cancellation_event=cancellation_event, on_cancel=on_cancel, pass_fds=pass_fds)
+    commands = []
+
+    def recorded_runner(*args, **kwargs):
+        result = runner(*args, **kwargs)
+        commands.append(_command_record(result))
+        return result
+
+    fields = _control_fields(deb, root, recorded_runner, cancellation_event=cancellation_event, on_cancel=on_cancel, pass_fds=pass_fds)
+    files = _file_list(deb, root, recorded_runner, cancellation_event=cancellation_event, on_cancel=on_cancel, pass_fds=pass_fds)
+    scripts, conffiles = _control_metadata(deb, root, recorded_runner, cancellation_event=cancellation_event, on_cancel=on_cancel, pass_fds=pass_fds)
     warnings = [f"missing {key}" for key in ("Package", "Version", "Architecture") if not fields.get(key)]
     return {
         "ok": not warnings, "path": str(deb), "size": deb.stat().st_size,
@@ -89,4 +118,5 @@ def inspect_deb(path: str | Path, *, workspace: str | Path | None = None, runner
         "maintainer": fields.get("Maintainer", ""), "description": fields.get("Description", ""),
         "homepage": fields.get("Homepage", ""), "control": fields, "files": files,
         "file_count": len(files), "maintainer_scripts": scripts, "conffiles": conffiles, "warnings": warnings,
+        "commands": commands,
     }

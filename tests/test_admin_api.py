@@ -15,6 +15,29 @@ from tests.admin_api_case import AdminApiCase
 
 class AdminApiTests(AdminApiCase):
 
+    def test_resource_settings_api_round_trip_and_structured_validation(self):
+        status, initial = self.request("GET", "/api/settings")
+        self.assertEqual(status, 200)
+        self.assertTrue(all(value is None for value in initial["settings"]["resource_limits"].values()))
+        policy = {
+            "memory_max_bytes": 536870912,
+            "tasks_max": 128,
+            "cpu_quota_percent": 250,
+            "io_read_bandwidth_max_bytes_per_sec": None,
+            "io_write_bandwidth_max_bytes_per_sec": 1048576,
+        }
+        status, updated = self.request("POST", "/api/settings", {"resource_limits": policy})
+        self.assertEqual(status, 200)
+        self.assertEqual(updated["settings"]["resource_limits"], policy)
+        self.assertEqual(json.loads((server.DATA / "settings.json").read_text())["resource_limits"], policy)
+
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            self.request("POST", "/api/settings", {"resource_limits": {"tasks_max": False}})
+        self.assertEqual(raised.exception.code, 422)
+        error = json.loads(raised.exception.read())["error"]
+        self.assertEqual(error["code"], "invalid_resource_limit")
+        self.assertEqual(error["path"], "$.resource_limits.tasks_max")
+
     def test_get_package_list_seeded_from_inventory_and_recipe_association(self):
         status, data = self.request("GET", "/api/packages")
         self.assertEqual(status, 200)
@@ -938,7 +961,7 @@ class AdminApiTests(AdminApiCase):
         status, _ = self.request("POST", "/api/workflows/v1-demo", {"workflow": recipe})
         self.assertEqual(status, 200)
         stored = json.loads((server.USER_WORKFLOWS / "v1-demo.json").read_text())
-        self.assertEqual(stored["schema_version"], 2)
+        self.assertEqual(stored["schema_version"], 3)
         self.assertNotIn("package_name", stored)
         self.assertNotIn("github_repository", stored)
         self.assertNotIn("config_policy", stored["install"])
@@ -963,7 +986,7 @@ class AdminApiTests(AdminApiCase):
         stored = json.loads(path.read_text())
 
         self.assertEqual(status, 200)
-        self.assertEqual(loaded["schema_version"], 2)
+        self.assertEqual(loaded["schema_version"], 3)
         self.assertEqual(stored["schema_version"], 1)
         self.assertEqual(stored["build"]["timeout"], 45)
         self.assertIn("steps", stored)

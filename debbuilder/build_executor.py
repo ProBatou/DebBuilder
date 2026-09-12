@@ -147,7 +147,7 @@ def execute_build(recipe: dict, detection: dict, source_directory: str | Path, *
         if result.get("cancellation_requested") or result.get("status") == "cancelled":
             raise ExecutionCancelled(result.get("cancellation"), command_result=result)
         if result["status"] != "success":
-            code = "build_command_timeout" if result.get("timed_out") else "build_command_failed"
+            code = result.get("error_code") or ("build_command_timeout" if result.get("timed_out") else "build_command_failed")
             timeout_reason = result.get("timeout_reason")
             message = f"Build command {index} timed out ({timeout_reason})" if result.get("timed_out") and timeout_reason else f"Build command {index} timed out" if result.get("timed_out") else f"Build command {index} failed with exit code {result.get('exit_code')}"
             raise BuildError(code, message, details={"plan": plan, "commands": results, "failed_command": result})

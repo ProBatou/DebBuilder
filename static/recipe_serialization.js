@@ -2,6 +2,7 @@
 window.recipeSourceChanges = [];
 window.recipeExtraDependencies = [];
 window.recipeAdvancedFields = {};
+window.recipeResourceLimits = {memory_max_bytes:null,tasks_max:null,cpu_quota_percent:null,io_read_bandwidth_max_bytes_per_sec:null,io_write_bandwidth_max_bytes_per_sec:null};
 window.recipeBuildOutput = {mode:'source', path:'', paths:[]};
 window.recipeSuggestedOutputPaths = [];
 window.recipeInstallMappings = [];
@@ -181,9 +182,10 @@ function collectWorkflow() {
     artifact.asset_name = '';
   }
   return {
-    schema_version: 2,
+    schema_version: 3,
     name,
     active: !!$('recipeMetaActive')?.checked,
+    resource_limits: {...window.recipeResourceLimits},
     package: {
       name: packageName,
       version_revision: value('recipePackageVersionRevision'),
@@ -281,6 +283,14 @@ function renderWorkflow(wf) {
     const account = install.account || owner;
     const scripts = install.maintainer_scripts || {};
     const service = wf.service || {};
+    window.recipeResourceLimits = {
+      memory_max_bytes: null,
+      tasks_max: null,
+      cpu_quota_percent: null,
+      io_read_bandwidth_max_bytes_per_sec: null,
+      io_write_bandwidth_max_bytes_per_sec: null,
+      ...(wf.resource_limits || {}),
+    };
     window.recipeAdvancedFields = {inactivity_timeout: Object.prototype.hasOwnProperty.call(build, 'inactivity_timeout') ? build.inactivity_timeout : 300, maximum_runtime: build.maximum_runtime || ''};
     const configuredOutput = build.output || {};
     const outputMode = ['source','path','paths'].includes(configuredOutput.mode) ? configuredOutput.mode : (configuredOutput.path ? 'path' : 'source');

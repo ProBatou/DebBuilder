@@ -166,7 +166,7 @@ def _read_run_metadata(data_root: Path, run_id: str, scan: _Scan) -> None:
             scan.diagnostic(f"Run {run_id} changed while storage was measured")
         if not isinstance(run, dict) or str(run.get("id") or "") != run_id:
             raise ValueError("Run identity is invalid")
-        validate_run(run)
+        run = validate_run(run)
         if Path(str(run.get("workspace") or "")) != path.parent:
             raise ValueError("Run workspace is not canonical")
         scan.run_metadata[run_id] = run

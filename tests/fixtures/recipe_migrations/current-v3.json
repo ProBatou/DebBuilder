@@ -1,0 +1,17 @@
+{
+  "schema_version": 3,
+  "name": "current-v3",
+  "active": true,
+  "resource_limits": {
+    "memory_max_bytes": null,
+    "tasks_max": null,
+    "cpu_quota_percent": null,
+    "io_read_bandwidth_max_bytes_per_sec": null,
+    "io_write_bandwidth_max_bytes_per_sec": null
+  },
+  "package": {"name": "current-v3"},
+  "source": {"provider": "github", "repository": "example/current-v3"},
+  "build": {"inactivity_timeout": 300, "output": {"mode": "source"}},
+  "install": {"content": {"source": "build_output"}},
+  "service": {"enabled": false}
+}

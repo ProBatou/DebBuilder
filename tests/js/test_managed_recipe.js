@@ -31,9 +31,10 @@ assert.notEqual(start, -1);
 assert.notEqual(end, -1);
 
 const effective = {
-  schema_version: 2,
+  schema_version: 3,
   name: 'debbuilder',
   active: true,
+  resource_limits: {memory_max_bytes: null, tasks_max: 128, cpu_quota_percent: null, io_read_bandwidth_max_bytes_per_sec: null, io_write_bandwidth_max_bytes_per_sec: null},
   package: {name: 'debbuilder', maintainer: 'Default <default@example.test>'},
   source: {repository: 'ProBatou/DebBuilder'},
   build: {environment: {}, inactivity_timeout: 300, maximum_runtime: null, detected_project: 'python'},
@@ -45,6 +46,7 @@ const form = {
   package: {...effective.package, maintainer: 'Ops <ops@example.test>'},
   source: {repository: 'stale/form-value'},
   build: {...effective.build, environment: {HTTP_PROXY: 'http://proxy'}, detected_project: null},
+  resource_limits: {...effective.resource_limits, tasks_max: 64},
 };
 
 const context = vm.createContext({
@@ -52,6 +54,7 @@ const context = vm.createContext({
   currentRecipeEditablePaths: [
     'active', 'package.maintainer', 'build.environment',
     'build.inactivity_timeout', 'build.maximum_runtime',
+    'resource_limits',
   ],
   currentRecipeDocument: effective,
   collectWorkflow: () => form,
@@ -82,6 +85,7 @@ assert.deepEqual({...submitted.build.environment}, {HTTP_PROXY: 'http://proxy'})
 assert.equal(submitted.source.repository, 'ProBatou/DebBuilder');
 assert.equal(submitted.build.detected_project, 'python');
 assert.deepEqual({...submitted.management}, effective.management);
+assert.equal(submitted.resource_limits.tasks_max, 64);
 
 context.currentRecipeManaged = false;
 context.applyRecipeManagementUi();

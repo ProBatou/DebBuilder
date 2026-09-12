@@ -6,6 +6,7 @@ import re
 
 from .archive_payload import normalize_archive_payload
 from .recipe_migrations import CURRENT_SCHEMA_VERSION, RecipeMigrationError, migrate_recipe_document
+from .resource_limits import ResourceLimitError, normalize_policy
 
 SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
 SAFE_NAME = re.compile(r"^[a-zA-Z0-9_.+-]+$")
@@ -23,7 +24,7 @@ RESTART_POLICIES = {"", "no", "always", "on-success", "on-failure", "on-abnormal
 SOURCE_CHANGE_FIELDS = {"operation", "path", "search", "content"}
 BUILTIN_RECIPE_ID = "debbuilder"
 MANAGEMENT_FIELDS = {"owner", "builtin_id", "definition_version", "operator_overrides"}
-OPERATOR_OVERRIDE_FIELDS = {"active", "package", "build"}
+OPERATOR_OVERRIDE_FIELDS = {"active", "package", "build", "resource_limits"}
 OPERATOR_PACKAGE_OVERRIDE_FIELDS = {"maintainer"}
 OPERATOR_BUILD_OVERRIDE_FIELDS = {"environment", "inactivity_timeout", "maximum_runtime"}
 
@@ -210,6 +211,21 @@ def _management(value, recipe_name: str) -> dict:
                 )
             normalized_build[key] = timeout
         normalized_overrides["build"] = normalized_build
+    if "resource_limits" in overrides:
+        try:
+            if not isinstance(overrides["resource_limits"], dict):
+                raise ResourceLimitError(
+                    "invalid_resource_limits", "Resource limits must be an object",
+                    path="$.management.operator_overrides.resource_limits",
+                )
+            normalized_overrides["resource_limits"] = normalize_policy(
+                overrides["resource_limits"],
+                path="$.management.operator_overrides.resource_limits",
+            )
+        except ResourceLimitError as exc:
+            raise RecipeDocumentError(
+                "builtin_recipe_override_invalid", str(exc), path=exc.path,
+            ) from exc
     return {
         "owner": "application",
         "builtin_id": BUILTIN_RECIPE_ID,
@@ -253,6 +269,11 @@ def normalize_recipe(workflow: dict) -> dict:
     """Return a canonical current-schema Recipe with defaults applied."""
     if not isinstance(workflow, dict):
         raise ValueError("workflow must be an object")
+    if "resource_limits" in workflow and not isinstance(workflow["resource_limits"], dict):
+        raise ResourceLimitError(
+            "invalid_resource_limits", "Resource limits must be an object",
+            path="$.resource_limits",
+        )
     workflow = migrate_recipe_document(workflow).document
     package_in = _dict(workflow.get("package"), "package")
     source_in = _dict(workflow.get("source"), "source")
@@ -297,6 +318,7 @@ def normalize_recipe(workflow: dict) -> dict:
         "name": name,
         "active": workflow.get("active", True),
         **({"management": _management(workflow["management"], name)} if "management" in workflow else {}),
+        "resource_limits": normalize_policy(workflow.get("resource_limits", {})),
         "package": {
             "name": package_name,
             "version_revision": str(package_in.get("version_revision") or "1"),
@@ -396,7 +418,7 @@ def _safe_relative(value: str, what: str, *, allow_dot: bool = False) -> None:
 
 
 def validate_recipe_metadata(workflow: dict) -> dict:
-    """Normalize and validate all fields represented by Recipe v1."""
+    """Normalize and validate all fields represented by the current Recipe schema."""
     recipe = normalize_recipe(workflow)
     require_safe_name(recipe["name"], "recipe name")
     package = recipe["package"]
@@ -617,6 +639,8 @@ def recipe_document_for_storage(workflow) -> dict:
         ) from exc
     except RecipeDocumentError:
         raise
+    except ResourceLimitError as exc:
+        raise RecipeDocumentError(exc.code, str(exc), path=exc.path) from exc
     except (TypeError, ValueError, re.error) as exc:
         raise RecipeDocumentError("invalid_recipe", str(exc)) from exc
     unknown = _find_unknown_field(migrated, normalized)

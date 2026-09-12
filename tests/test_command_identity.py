@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import debbuilder.command_containment as containment
 import debbuilder.command_runner as command_runner
 from debbuilder.command_identity import (
     ACTIVE_COMMAND_FILE,
@@ -26,8 +27,10 @@ from debbuilder.command_identity import (
     terminate_verified_process_group,
     verify_identity,
     verify_persisted_identity,
+    validated_identity,
 )
 from debbuilder.command_runner import run_command
+from debbuilder.command_containment import command_unit_name, expected_control_group
 from debbuilder.execution_cancellation import ExecutionCancelled
 from debbuilder.build_store import BuildStore
 
@@ -48,6 +51,9 @@ def recipe(name="identity-run"):
 @unittest.skipUnless(sys.platform.startswith("linux") and Path("/proc/self/stat").is_file(), "Linux /proc is required")
 class CommandIdentityTests(unittest.TestCase):
     def setUp(self):
+        runtime_blocker = mock.patch.object(containment, "_RUNTIME_CLEANUP_ERROR", "")
+        runtime_blocker.start()
+        self.addCleanup(runtime_blocker.stop)
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
@@ -118,6 +124,46 @@ class CommandIdentityTests(unittest.TestCase):
         self.processes.append(process)
         self.assertEqual(process.stdout.readline().strip(), "ready")
         return process, capture_identity(process.pid, run_id=run_id, command_id=command_id)
+
+    def test_v3_binds_policy_and_v1_v2_process_identities_remain_readable(self):
+        process, current = self.live_identity()
+        self.assertEqual(current["schema_version"], 3)
+        self.assertIn("resource_limits", current)
+        self.assertEqual(current["resource_io_targets"], [])
+        previous = {key: value for key, value in current.items() if key not in {"resource_limits", "resource_io_targets"}}
+        previous["schema_version"] = 2
+        self.assertEqual(validated_identity(previous), previous)
+        legacy = {key: value for key, value in previous.items() if key not in {"backend", "containment_state"}}
+        legacy["schema_version"] = 1
+        self.assertEqual(validated_identity(legacy), legacy)
+
+    def test_v2_systemd_starting_and_active_identities_remain_readable(self):
+        run_id = "v2-systemd"
+        command_id = "a" * 32
+        unit_name = command_unit_name(run_id, command_id)
+        starting = {
+            "schema_version": 2,
+            "backend": "systemd_cgroup",
+            "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+            "run_id": run_id,
+            "command_id": command_id,
+            "unit_name": unit_name,
+            "containment_state": "starting",
+        }
+        self.assertEqual(validated_identity(starting), starting)
+        active = {
+            **starting,
+            "containment_state": "active",
+            "invocation_id": "b" * 32,
+            "control_group": expected_control_group(unit_name),
+        }
+        self.assertEqual(validated_identity(active), active)
+
+    def test_v3_resource_policy_must_be_an_object(self):
+        _process, identity = self.live_identity()
+        identity["resource_limits"] = None
+        with self.assertRaises(CommandIdentityError):
+            validated_identity(identity)
 
     def test_proc_stat_parser_handles_spaces_and_parentheses_in_comm(self):
         proc = self.root / "proc"

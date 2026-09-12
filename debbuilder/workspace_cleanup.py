@@ -16,6 +16,7 @@ from typing import Callable
 
 from .build_models import utc_now, validate_run
 from .build_store import EXECUTION_HISTORY_DELETION_FILE as HISTORY_MARKER
+from .command_containment import containment_safety_gate, containment_safety_serialized
 from .recipe_schema import require_safe_name
 
 DISPOSABLE_DIRECTORIES = ("source", "staging", "downloads")
@@ -145,7 +146,7 @@ def read_run(fd: int, root: Path, run_id: str) -> dict:
     run = read_json(fd, "run.json")
     if not isinstance(run, dict):
         raise FileNotFoundError("Execution not found")
-    validate_run(run)
+    run = validate_run(run)
     if run.get("id") != run_id or Path(str(run.get("workspace", ""))) != root.absolute() / run_id:
         raise ValueError("Run identity/workspace does not match the canonical builds root")
     return run
@@ -284,8 +285,22 @@ def require_destructive_run_safe(
     authorization: CleanupAuthorization = OPEN_CLEANUP_AUTHORIZATION,
 ) -> None:
     """Apply the shared recovery, lifecycle, command, and process blockers."""
+    from .command_containment import (
+        ContainmentError,
+        matching_run_command_units,
+        probe_cleanup_blocker,
+        runtime_cleanup_blocker,
+    )
     from .command_identity import CommandIdentityError, read_persisted_identity
 
+    if probe_cleanup_blocker():
+        raise WorkspaceBusyError(
+            "Capability-probe containment cleanup is unresolved; cleanup refused"
+        )
+    if runtime_cleanup_blocker():
+        raise WorkspaceBusyError(
+            "Runtime command containment cleanup is unresolved; cleanup refused"
+        )
     authorization.require_run(run)
     require_finished(run)
     try:
@@ -294,6 +309,14 @@ def require_destructive_run_safe(
         raise WorkspaceBusyError("Active command recovery is unverifiable; cleanup refused") from exc
     if identity is not None:
         raise WorkspaceBusyError("Active command recovery is unresolved; cleanup refused")
+    try:
+        namespace_members = matching_run_command_units(str(run["id"]))
+    except (ContainmentError, OSError, TypeError, ValueError) as exc:
+        raise WorkspaceBusyError("Command unit/cgroup inventory is unverifiable; cleanup refused") from exc
+    if namespace_members:
+        raise WorkspaceBusyError(
+            "A DebBuilder command unit/cgroup still matches this Run; cleanup refused"
+        )
     _require_unused_workspace(Path(run["workspace"]))
 
 
@@ -317,6 +340,7 @@ def _clean_locked(
     return result
 
 
+@containment_safety_serialized
 def clean_workspace(
     store,
     run_id: str,
@@ -342,6 +366,7 @@ def _clear_output(value) -> None:
             _clear_output(child)
 
 
+@containment_safety_serialized
 def delete_history(
     store,
     run_id: str,
@@ -494,24 +519,25 @@ def apply_retention(
         try:
             # Re-read while locked; a validation/publication may have begun
             # since the scan. The snapshot is never used to authorize deletion.
-            with store.locked_run(run_id, blocking=False) as fd:
-                if stop_requested():
-                    break
-                run = read_run(fd, store.root, run_id)
-                authorization.require_run(run)
-                require_finished(run)
-                if os.stat("run.json", dir_fd=fd, follow_symlinks=False).st_mtime_ns != revision:
-                    result["skipped"].append(run_id)
-                    continue
-                current_failed = execution_summary(run)["lifecycle_status"] in {"failed", "build_failed", "validation_failed", "publication_failed", "cancelled"}
-                if current_failed != failed:
-                    result["skipped"].append(run_id)
-                    continue
-                cleanup = _clean_locked(
-                    fd, run, reason="retention", authorization=authorization,
-                )
-                if cleanup["removed"]:
-                    result["cleaned"].append(cleanup)
+            with containment_safety_gate():
+                with store.locked_run(run_id, blocking=False) as fd:
+                    if stop_requested():
+                        break
+                    run = read_run(fd, store.root, run_id)
+                    authorization.require_run(run)
+                    require_finished(run)
+                    if os.stat("run.json", dir_fd=fd, follow_symlinks=False).st_mtime_ns != revision:
+                        result["skipped"].append(run_id)
+                        continue
+                    current_failed = execution_summary(run)["lifecycle_status"] in {"failed", "build_failed", "validation_failed", "publication_failed", "cancelled"}
+                    if current_failed != failed:
+                        result["skipped"].append(run_id)
+                        continue
+                    cleanup = _clean_locked(
+                        fd, run, reason="retention", authorization=authorization,
+                    )
+                    if cleanup["removed"]:
+                        result["cleaned"].append(cleanup)
         except (WorkspaceBusyError, FileNotFoundError):
             result["skipped"].append(run_id)
         except (OSError, ValueError) as exc:

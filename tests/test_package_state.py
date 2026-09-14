@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from debbuilder import apt_repo, deb_inspector, package_store
+from debbuilder.package_service import PackageService
 
 
 class AptRepoTests(unittest.TestCase):
@@ -195,6 +196,88 @@ class PackageStoreTests(unittest.TestCase):
         self.assertIn(enriched["lifecycle_state"], {"up_to_date", "publication_available", "update_available"})
         self.assertIn("build", enriched)
         self.assertIn("repository", enriched)
+
+    def test_enrich_package_preserves_release_asset_payload_identity(self):
+        source = {
+            "type": "github_release_asset", "repository": "owner/demo",
+            "release_id": 123, "asset_id": 456, "asset_name": "demo-linux-amd64",
+            "asset_url": "https://github.com/owner/demo/releases/download/v1/demo-linux-amd64",
+            "asset_api_url": "https://api.github.com/repos/owner/demo/releases/assets/456",
+            "content_type": "application/octet-stream", "declared_size": 42, "download_size": 42,
+            "payload_kind": "raw_file", "file_count": 1, "archive_format": "", "sha256": "a" * 64,
+            "expected_sha256": "a" * 64, "checksum_verified": True,
+        }
+        enriched = package_store.enrich_package({"name": "demo", "source": source})
+        for field, value in source.items():
+            self.assertEqual(enriched["source"][field], value)
+
+    def test_package_service_projects_resolved_raw_release_asset_identity(self):
+        service = PackageService(
+            data_dir=Path("/tmp/not-used"), workspace_root=Path("/tmp/not-used"),
+            list_workflows=lambda: [], workflow_path=lambda _recipe_id: None,
+            read_workflow=lambda _path: {}, repo_settings=lambda: {"architecture": "amd64"},
+            release_lookup=lambda _repository: None,
+        )
+        run = {
+            "id": "run-1", "recipe_id": "demo", "mode": "dry_run", "status": "prepared",
+            "version": {"upstream": "1.2.3", "debian": "1.2.3-1"},
+            "steps": [{"name": "source", "details": {
+                "repository": "owner/demo", "ref": "v1.2.3", "tag": "v1.2.3",
+                "release_id": 123, "release_url": "https://github.com/owner/demo/releases/tag/v1.2.3",
+                "payload_kind": "raw_file", "file_count": 1,
+                "asset": {
+                    "source": "release_asset", "asset_id": 456, "name": "demo-linux-amd64",
+                    "url": "https://github.com/owner/demo/releases/download/v1.2.3/demo-linux-amd64",
+                    "api_url": "https://api.github.com/repos/owner/demo/releases/assets/456",
+                    "content_type": "application/octet-stream", "declared_size": 42, "download_size": 42,
+                    "payload_kind": "raw_file", "file_count": 1, "sha256": "a" * 64,
+                    "expected_sha256": "a" * 64, "checksum_verified": True,
+                },
+            }}],
+        }
+        projected = service._enrich_package(
+            {"name": "demo", "source": {}}, {}, [run],
+            {"repository": "https://apt.example.test", "distribution": "stable", "component": "main"}, False,
+        )
+        expected = {
+            "type": "github_release_asset", "repository": "owner/demo",
+            "release": "v1.2.3", "tag": "v1.2.3", "release_id": 123,
+            "asset_id": 456, "asset_name": "demo-linux-amd64",
+            "asset_url": "https://github.com/owner/demo/releases/download/v1.2.3/demo-linux-amd64",
+            "asset_api_url": "https://api.github.com/repos/owner/demo/releases/assets/456",
+            "content_type": "application/octet-stream", "declared_size": 42, "download_size": 42,
+            "payload_kind": "raw_file", "file_count": 1, "archive_format": "", "sha256": "a" * 64,
+            "expected_sha256": "a" * 64, "checksum_verified": True,
+        }
+        for field, value in expected.items():
+            self.assertEqual(projected["source"][field], value)
+        self.assertNotIn("path", projected["source"])
+
+    def test_package_service_projects_generated_archive_payload(self):
+        service = PackageService(
+            data_dir=Path("/tmp/not-used"), workspace_root=Path("/tmp/not-used"),
+            list_workflows=lambda: [], workflow_path=lambda _recipe_id: None,
+            read_workflow=lambda _path: {}, repo_settings=lambda: {"architecture": "amd64"},
+            release_lookup=lambda _repository: None,
+        )
+        run = {
+            "id": "run-1", "recipe_id": "demo", "mode": "dry_run", "status": "prepared",
+            "version": {"upstream": "1.2.3", "debian": "1.2.3-1"},
+            "steps": [{"name": "source", "details": {
+                "repository": "owner/demo", "ref": "v1.2.3", "tag": "v1.2.3",
+                "payload_kind": "archive", "file_count": 4, "extraction": {"files": 4},
+                "asset": {"source": "github_source", "name": "source-v1.2.3.tar.gz", "archive_format": "tar.gz"},
+            }}],
+        }
+        projected = service._enrich_package(
+            {"name": "demo", "source": {}}, {}, [run],
+            {"repository": "https://apt.example.test", "distribution": "stable", "component": "main"}, False,
+        )
+        self.assertEqual(projected["source"]["type"], "github")
+        self.assertEqual(projected["source"]["payload_kind"], "archive")
+        self.assertEqual(projected["source"]["file_count"], 4)
+        self.assertEqual(projected["source"]["extracted_file_count"], 4)
+        self.assertEqual(projected["source"]["archive_format"], "tar.gz")
 
 
 

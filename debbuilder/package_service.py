@@ -325,7 +325,32 @@ class PackageService:
                 "tag": source_details.get("tag", ""),
                 "latest_release": source_details.get("tag", ""),
                 "release_url": source_details.get("release_url", ""),
+                "release_id": source_details.get("release_id"),
+                "payload_kind": source_details.get("payload_kind", ""),
+                "file_count": source_details.get("file_count"),
+                "extracted_file_count": (source_details.get("extraction") or {}).get("files") if isinstance(source_details.get("extraction"), dict) else None,
             }
+            selected_source_asset = source_details.get("asset") if isinstance(source_details.get("asset"), dict) else {}
+            if selected_source_asset:
+                package["source"]["archive_format"] = selected_source_asset.get("archive_format", "")
+            if selected_source_asset.get("source") == "release_asset":
+                package["source"].update({
+                    "type": "github_release_asset",
+                    "asset_id": selected_source_asset.get("asset_id"),
+                    "asset_name": selected_source_asset.get("name", ""),
+                    "asset_url": selected_source_asset.get("url", ""),
+                    "asset_api_url": selected_source_asset.get("api_url", ""),
+                    "asset_pattern": selected_source_asset.get("name", ""),
+                    "content_type": selected_source_asset.get("content_type", ""),
+                    "declared_size": selected_source_asset.get("declared_size"),
+                    "download_size": selected_source_asset.get("download_size"),
+                    "payload_kind": selected_source_asset.get("payload_kind", source_details.get("payload_kind", "")),
+                    "file_count": selected_source_asset.get("file_count", source_details.get("file_count")),
+                    "archive_format": selected_source_asset.get("archive_format", ""),
+                    "sha256": selected_source_asset.get("sha256", ""),
+                    "expected_sha256": selected_source_asset.get("expected_sha256", ""),
+                    "checksum_verified": selected_source_asset.get("checksum_verified", False),
+                })
             if (successful or {}).get("artifact", {}).get("source") == "upstream_release":
                 package["source"].update({
                     "type": "github_release_asset",

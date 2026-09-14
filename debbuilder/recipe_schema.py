@@ -489,10 +489,10 @@ def validate_recipe_metadata(workflow: dict) -> dict:
         if artifact["archive_source"] == "release_asset":
             if artifact["asset_selection"] == "exact":
                 if not artifact["asset_name"] or artifact["name_pattern"]:
-                    raise ValueError("release asset archive requires exactly one exact asset_name")
+                    raise ValueError("release asset selection requires exactly one exact asset_name")
             if artifact["asset_selection"] == "pattern":
                 if not artifact["name_pattern"] or artifact["asset_name"]:
-                    raise ValueError("release asset archive requires exactly one name_pattern")
+                    raise ValueError("release asset selection requires exactly one name_pattern")
         elif artifact["asset_name"] or artifact["name_pattern"]:
             raise ValueError("release asset fields are only valid with release_asset archive source")
         if artifact["payload"]["mode"] == "paths" and not artifact["payload"]["include"]:

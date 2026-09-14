@@ -17,6 +17,30 @@ def recipe(tracking="latest_release", ref="", version_source="tag"):
 
 
 class SourceResolutionTests(unittest.TestCase):
+    def test_latest_release_preserves_bounded_release_and_asset_identity(self):
+        response = {
+            "id": 123, "tag_name": "v1.2.3", "name": "v1.2.3",
+            "html_url": "https://github.com/owner/demo/releases/tag/v1.2.3",
+            "tarball_url": "https://api.github.com/repos/owner/demo/tarball/v1.2.3",
+            "zipball_url": "https://api.github.com/repos/owner/demo/zipball/v1.2.3",
+            "assets": [{
+                "id": 456, "url": "https://api.github.com/repos/owner/demo/releases/assets/456",
+                "name": "demo", "browser_download_url": "https://github.com/owner/demo/releases/download/v1.2.3/demo",
+                "size": 42, "content_type": "application/octet-stream", "digest": "sha256:" + "a" * 64,
+                "uploader": {"login": "not-needed"},
+            }],
+            "body": "not-needed",
+        }
+        with mock.patch.object(github_client, "request_json", return_value=response):
+            result = github_client.latest_release("owner/demo")
+        self.assertEqual(result["release_id"], 123)
+        self.assertEqual(result["assets"], [{
+            "asset_id": 456, "api_url": "https://api.github.com/repos/owner/demo/releases/assets/456",
+            "name": "demo", "url": "https://github.com/owner/demo/releases/download/v1.2.3/demo",
+            "size": 42, "content_type": "application/octet-stream", "digest": "sha256:" + "a" * 64,
+        }])
+        self.assertNotIn("body", result)
+
     def test_latest_release_resolves_upstream_and_debian_versions(self):
         release = {"tag": "v1.4.2", "name": "Demo 1.4.2", "archive_url": "https://api.github.com/repos/owner/demo/tarball/v1.4.2", "url": "https://github.com/owner/demo/releases/tag/v1.4.2"}
         with mock.patch("debbuilder.source_acquisition.github_client.repo_info", return_value={"repository": "owner/demo"}), mock.patch("debbuilder.source_acquisition.github_client.latest_release", return_value=release):

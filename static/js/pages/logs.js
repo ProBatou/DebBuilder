@@ -515,11 +515,18 @@ function renderOpenExecution(execution, {preserveLog = false} = {}) {
   const validation = (execution.validations || []).slice(-1)[0] || {};
   const publication = (execution.publications || []).slice(-1)[0] || {};
   const source = (execution.steps || []).find(step => step.name === 'source')?.details || {};
+  const sourceAsset = source.asset || {};
+  const sourceFileCount = Number(source.file_count ?? sourceAsset.file_count ?? 0);
+  const sourcePayload = source.payload_kind === 'raw_file'
+    ? `Raw file · ${sourceFileCount} ${sourceFileCount === 1 ? 'file' : 'files'}`
+    : source.payload_kind === 'archive'
+      ? `Archive payload · ${sourceFileCount} ${sourceFileCount === 1 ? 'file' : 'files'}`
+      : '—';
   const version = typeof execution.version === 'object' ? execution.version : {debian: execution.version};
   const lifecycle = STATUS_LABELS[execution.lifecycle_status] || execution.lifecycle_status || execution.status || 'Unknown';
   const recovery = validation.recovery_blocker;
   const meta = [['Run ID', '#' + execution.id], ['Package', execution.package || execution.recipe_id || '—'], ['Lifecycle', lifecycle], ['Mode', execution.mode || execution.action || '—'], ['Build status', execution.build_status || execution.status], ['Date', fmtTime(execution.updated || execution.created_at_epoch)], ['Validation', execution.validation_status || validation.status || 'Not run'], ['Validation recovery', recovery?.message || '—'], ['Publication', execution.publication_status || publication.status || 'Not run']];
-  const moreMeta = [['Recipe', execution.recipe_id || '—'], ['Source', source.repository || '—'], ['Resolved ref', source.ref || source.tag || '—'], ['Upstream', version.upstream || '—'], ['Debian version', version.debian || '—'], ['Artifact', (artifact.path || '').split('/').pop() || '—'], ['Size', artifact.size || '—'], ['SHA-256', artifact.sha256 || '—']];
+  const moreMeta = [['Recipe', execution.recipe_id || '—'], ['Source', source.repository || '—'], ['Resolved ref', source.ref || source.tag || '—'], ['Source payload', sourcePayload], ['Source asset', sourceAsset.name || '—'], ['Source SHA-256', sourceAsset.sha256 || '—'], ['Upstream', version.upstream || '—'], ['Debian version', version.debian || '—'], ['Artifact', (artifact.path || '').split('/').pop() || '—'], ['Size', artifact.size || '—'], ['SHA-256', artifact.sha256 || '—']];
   const symbols = {pending: '○', running: '◌', success: '✓', failed: '✕', cancelled: '⊘', skipped: '–'};
   if ($('executionMeta')) $('executionMeta').innerHTML = executionMetaHtml(meta);
   if ($('executionMetaMore')) $('executionMetaMore').innerHTML = executionMetaHtml(moreMeta);

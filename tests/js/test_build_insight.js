@@ -122,6 +122,23 @@ const entireArchive = {
 const entireArchiveHtml = context.preflightSourceSection(entireArchive, {artifact:{mode:'upstream_archive'}});
 assert.match(entireArchiveHtml, /Entire archive/);
 assert.match(entireArchiveHtml, /912 resolved files · 3 exclusions/);
+assert.match(entireArchiveHtml, /Archive payload · 912 files/);
+
+const rawFile = {
+  ...staticProject,
+  source:{payload_kind:'raw_file',file_count:1,asset:{name:'demo-linux-amd64',payload_kind:'raw_file',file_count:1},archive_payload:{mode:'raw_file',selected_files:1}},
+  detection:{project_type:'upstream_archive',payload_kind:'raw_file',file_count:1,selected_asset:{name:'demo-linux-amd64',payload_kind:'raw_file',file_count:1},archive_payload:{mode:'raw_file',selected_files:1}},
+};
+const rawFileHtml = context.preflightSourceSection(rawFile, {artifact:{mode:'upstream_archive'}});
+assert.match(rawFileHtml, /Raw file · 1 file/);
+assert.doesNotMatch(rawFileHtml, /Archive payload/);
+
+const actualArchiveWins = {
+  ...rawFile,
+  source:{...rawFile.source,payload_kind:'archive',file_count:4,asset:{name:'misleading-name',payload_kind:'archive',file_count:4},archive_payload:{mode:'entire_archive',selected_files:4,excluded_directories:0,excluded_files:0}},
+  detection:{...rawFile.detection,payload_kind:'archive',file_count:4,selected_asset:{name:'misleading-name',payload_kind:'archive',file_count:4},archive_payload:{mode:'entire_archive',selected_files:4,excluded_directories:0,excluded_files:0}},
+};
+assert.match(context.preflightSourceSection(actualArchiveWins, {artifact:{mode:'upstream_archive'}}), /Archive payload · 4 files/);
 
 const serviceHtml = context.preflightServiceSection(result, workflow);
 assert.match(serviceHtml, /insight-section--service/);

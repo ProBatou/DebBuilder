@@ -182,8 +182,8 @@ def _finish_terminal_run(run: dict, store: BuildStore, started: float, control: 
 
 
 def _archive_source_details(source: dict) -> dict:
-    """Keep the runtime file plan out of persisted Run source details."""
-    details = {key: value for key, value in source.items() if key != "archive_payload"}
+    """Keep runtime paths and the file plan out of persisted Run source details."""
+    details = {key: value for key, value in source.items() if key not in {"archive_payload", "source_directory"}}
     details["archive_payload"] = upstream_archive.payload_plan_summary(source["archive_payload"])
     return details
 
@@ -361,12 +361,15 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
             _cancellation_checkpoint(control, run, store, "detection")
             if archive_mode:
                 payload = upstream_archive.payload_plan_summary(source["archive_payload"])
-                detected_files = payload["include"] if payload["mode"] == "paths" else ["Entire archive"]
+                raw_file = source.get("payload_kind") == "raw_file"
+                detected_files = [source["asset"]["name"]] if raw_file else payload["include"] if payload["mode"] == "paths" else ["Entire archive"]
                 detection = {
-                    "project_type": "upstream_archive", "display_name": "Upstream release artifact · no source build",
+                    "project_type": "upstream_archive", "display_name": "Upstream raw file · no source build" if raw_file else "Upstream release artifact · no source build",
                     "detected_files": detected_files, "build_dependencies": [],
                     "system_build_dependencies": [], "build_tools": [], "tool_version_requirements": {},
-                    "proposed_commands": [], "warnings": [], "selected_asset": source["asset"], "archive_payload": payload,
+                    "proposed_commands": [], "warnings": [], "selected_asset": source["asset"],
+                    "payload_kind": source.get("payload_kind", "archive"), "file_count": 1 if raw_file else payload["selected_files"],
+                    "archive_payload": payload,
                 }
             else:
                 detection = detector(source["source_directory"], working_directory=canonical["build"]["working_directory"])

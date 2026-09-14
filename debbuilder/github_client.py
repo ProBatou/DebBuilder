@@ -69,6 +69,7 @@ def latest_release(repository: str, token: str = "") -> dict:
             raise GitHubError("release_not_found", "Release not found", status=404) from exc
         raise
     return {
+        "release_id": row.get("id"),
         "tag": row.get("tag_name", ""),
         "name": row.get("name", ""),
         "url": row.get("html_url", ""),
@@ -76,6 +77,7 @@ def latest_release(repository: str, token: str = "") -> dict:
         "tarball_url": row.get("tarball_url", ""),
         "zipball_url": row.get("zipball_url", ""),
         "assets": [{
+            "asset_id": a.get("id"), "api_url": a.get("url", ""),
             "name": a.get("name", ""), "url": a.get("browser_download_url", ""),
             "size": a.get("size", 0), "content_type": a.get("content_type", ""),
             "digest": a.get("digest", ""),

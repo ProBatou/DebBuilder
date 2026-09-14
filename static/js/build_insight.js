@@ -42,12 +42,21 @@ function preflightArchivePayload(result, workflow = {}) {
   const detection = result.detection || stepDetails(result, 'detection');
   const payload = detection.archive_payload || source.archive_payload || {};
   if (!payload.mode) return '';
+  const selected = detection.selected_asset || source.asset || {};
+  const payloadKind = detection.payload_kind || source.payload_kind || selected.payload_kind || 'archive';
+  const fileCount = Number(detection.file_count ?? source.file_count ?? selected.file_count ?? payload.selected_files ?? 0);
+  const heading = payloadKind === 'raw_file'
+    ? `Raw file · ${preflightCount('file', fileCount)}`
+    : `Archive payload · ${preflightCount('file', fileCount)}`;
+  if (payloadKind === 'raw_file') {
+    return `<section class="preflight-archive-payload" aria-label="Raw file"><div class="preflight-subsection-head"><strong>${esc(heading)}</strong></div></section>`;
+  }
   const configured = payload.mode === 'entire_archive'
     ? 'Entire archive'
     : `${preflightCount('directory', Number(payload.selected_directories || 0))} · ${preflightCount('explicit file', Number(payload.explicit_files || 0))}`;
   const exclusionCount = Number(payload.excluded_directories || 0) + Number(payload.excluded_files || 0);
   const resolved = `${preflightCount('resolved file', Number(payload.selected_files || 0))}${exclusionCount ? ` · ${preflightCount('exclusion', exclusionCount)}` : ''}`;
-  return `<section class="preflight-archive-payload" aria-label="Archive payload"><div class="preflight-subsection-head"><strong>Archive payload</strong></div><div class="preflight-archive-payload-facts"><span>${esc(configured)}</span><span>${esc(resolved)}</span></div></section>`;
+  return `<section class="preflight-archive-payload" aria-label="Archive payload"><div class="preflight-subsection-head"><strong>${esc(heading)}</strong></div><div class="preflight-archive-payload-facts"><span>${esc(configured)}</span><span>${esc(resolved)}</span></div></section>`;
 }
 
 function executionDiagnosticHtml(execution, {expanded = false, includeDetails = true} = {}) {

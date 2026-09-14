@@ -201,6 +201,11 @@ function renderArchivePayloadSummary() {
   const node = $('recipeArchivePayloadSummary');
   if (!node) return;
   const state = window.recipeArchiveState;
+  const inspectedSource = window.recipeArchiveInspectionMeta?.source || {};
+  if (!state.stale && inspectedSource.payload_kind === 'raw_file') {
+    node.innerHTML = `<section class="archive-summary-card archive-summary-card--selected"><div class="archive-summary-title"><strong>Resolved payload</strong><span>Raw file · ${archiveCount('file', inspectedSource.file_count || 1)}</span></div><code>${esc(inspectedSource.name || '')}</code></section>`;
+    return;
+  }
   const summary = ArchiveTree.selectionSummary(state);
   const selectedLabel = summary.mode === 'entire_archive'
     ? `Entire archive${summary.resolvedFiles === null ? '' : ` · ${archiveCount('file', summary.resolvedFiles)}`}`
@@ -244,7 +249,13 @@ function renderArchivePayload() {
     const source = window.recipeArchiveInspectionMeta?.source || {};
     const sourceLabel = [source.source || 'archive', source.name || ''].filter(Boolean).join(' · ');
     node.classList.toggle('is-stale', state.stale);
-    node.innerHTML = `<div class="archive-inspection-head"><strong>${esc(sourceLabel)}</strong><span>${archiveCount('file', state.inventory.file_count)} · ${archiveCount('directory', state.inventory.directory_count)}</span></div><div class="archive-tree" role="tree" aria-label="Archive contents">${rows.map(archiveTreeRow).join('')}</div>`;
+    const rawFile = source.payload_kind === 'raw_file';
+    const payloadLabel = state.stale
+      ? `Stale inspection · ${archiveCount('file', state.inventory.file_count)}`
+      : rawFile
+        ? `Raw file · ${archiveCount('file', source.file_count || 1)}`
+        : `Archive payload · ${archiveCount('file', state.inventory.file_count)} · ${archiveCount('directory', state.inventory.directory_count)}`;
+    node.innerHTML = `<div class="archive-inspection-head"><strong>${esc(sourceLabel)}</strong><span>${payloadLabel}</span></div>${rawFile ? '' : `<div class="archive-tree" role="tree" aria-label="Archive contents">${rows.map(archiveTreeRow).join('')}</div>`}`;
   }
   const status = $('recipeArchiveInspectionStatus');
   if (status) status.textContent = !state.tree ? 'Inspect to browse archive contents.' : state.stale ? 'Inspection is stale. Inspect again to enable tree actions.' : state.selectionError ? state.selectionError.message : 'Inspection is current.';
@@ -264,7 +275,7 @@ function renderArchiveInspectionError(error) {
   if (window.recipeArchiveState?.tree) ArchiveTree.markStale(window.recipeArchiveState);
   node.classList.add('has-error');
   node.innerHTML = `<p>${esc(error?.message || 'Archive inspection failed')}</p>` +
-    (sources.length ? `<div class="archive-file-list">${sources.map(row => `<div class="archive-file-row"><code>${esc(row.name)}</code><span>${esc(row.source)} · ${esc(row.archive_format)}</span></div>`).join('')}</div>` : '');
+    (sources.length ? `<div class="archive-file-list">${sources.map(row => `<div class="archive-file-row"><code>${esc(row.name)}</code><span>${esc(row.source)} · ${esc(row.payload_kind === 'raw_file' ? 'raw file' : row.archive_format)}</span></div>`).join('')}</div>` : '');
   if ($('recipeArchiveInspectionStatus')) $('recipeArchiveInspectionStatus').textContent = 'Inspection failed. Configured selections are unchanged.';
   renderArchivePayloadSummary();
 }

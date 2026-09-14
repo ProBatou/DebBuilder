@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import stat
+import tempfile
 from pathlib import Path
 
 from .archive_payload import parse_archive_path
@@ -77,11 +78,119 @@ def _apply_modes(root: Path, directory_mode: str, file_mode: str) -> None:
             path.chmod(file_bits | (0o111 if executable else 0))
 
 
+def _raw_payload_record(output: dict) -> dict | None:
+    plan = output.get("payload")
+    if not isinstance(plan, dict) or plan.get("mode") != "raw_file":
+        return None
+    files = plan.get("files")
+    if not isinstance(files, list) or len(files) != 1 or not isinstance(files[0], dict):
+        raise PackagingError("invalid_install_content", "Resolved raw payload plan must contain exactly one file")
+    return files[0]
+
+
+def _copy_verified_raw_record(record: dict, source_root: Path, target: Path | None = None) -> None:
+    """Verify, and optionally copy, the exact raw identity sealed during acquisition."""
+    relative_value = str(record.get("relative_path") or "")
+    identity = record.get("verified_identity")
+    try:
+        parsed = parse_archive_path(relative_value)
+    except ValueError as exc:
+        raise PackagingError(
+            "invalid_install_content", f"Resolved raw payload path is unsafe: {relative_value}",
+            details={"path": relative_value},
+        ) from exc
+    required_identity = {
+        "device", "inode", "size", "sha256", "directory_device", "directory_inode",
+    }
+    if parsed.is_directory or len(parsed.parts) != 1 or not isinstance(identity, dict) or set(identity) != required_identity:
+        raise PackagingError(
+            "invalid_install_content", "Resolved raw payload identity is incomplete",
+            details={"path": relative_value},
+        )
+
+    directory_descriptor = None
+    file_descriptor = None
+    temporary_path = None
+    destination = None
+    try:
+        directory_descriptor = os.open(source_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        directory_status = os.fstat(directory_descriptor)
+        current_directory = source_root.lstat()
+        if (
+            not stat.S_ISDIR(current_directory.st_mode)
+            or (current_directory.st_dev, current_directory.st_ino) != (identity["directory_device"], identity["directory_inode"])
+            or (directory_status.st_dev, directory_status.st_ino) != (identity["directory_device"], identity["directory_inode"])
+            or os.listdir(directory_descriptor) != [relative_value]
+        ):
+            raise PackagingError("invalid_install_content", "Verified raw source workspace changed before staging")
+        file_descriptor = os.open(relative_value, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_descriptor)
+        file_status = os.fstat(file_descriptor)
+        current_file = os.stat(relative_value, dir_fd=directory_descriptor, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(file_status.st_mode) or not stat.S_ISREG(current_file.st_mode)
+            or (file_status.st_dev, file_status.st_ino) != (identity["device"], identity["inode"])
+            or (current_file.st_dev, current_file.st_ino) != (identity["device"], identity["inode"])
+            or file_status.st_size != identity["size"]
+        ):
+            raise PackagingError("invalid_install_content", "Verified raw Release asset changed before staging")
+
+        if target is not None:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary_descriptor, temporary_name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+            temporary_path = Path(temporary_name)
+            destination = os.fdopen(temporary_descriptor, "wb")
+        digest = hashlib.sha256()
+        with os.fdopen(os.dup(file_descriptor), "rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                if destination is not None:
+                    destination.write(chunk)
+                digest.update(chunk)
+        if destination is not None:
+            destination.close()
+            destination = None
+        if digest.hexdigest() != identity["sha256"]:
+            raise PackagingError("invalid_install_content", "Verified raw Release asset content changed before staging")
+        final_file = os.fstat(file_descriptor)
+        final_current = os.stat(relative_value, dir_fd=directory_descriptor, follow_symlinks=False)
+        final_directory = os.fstat(directory_descriptor)
+        if (
+            (final_file.st_dev, final_file.st_ino, final_file.st_size) != (identity["device"], identity["inode"], identity["size"])
+            or (final_current.st_dev, final_current.st_ino) != (identity["device"], identity["inode"])
+            or (final_directory.st_dev, final_directory.st_ino) != (identity["directory_device"], identity["directory_inode"])
+            or os.listdir(directory_descriptor) != [relative_value]
+        ):
+            raise PackagingError("invalid_install_content", "Verified raw source identity changed during staging")
+        if target is not None:
+            os.replace(temporary_path, target)
+            temporary_path = None
+    except PackagingError:
+        raise
+    except OSError as exc:
+        raise PackagingError(
+            "invalid_install_content", "Verified raw Release asset could not be copied safely",
+            details={"path": relative_value},
+        ) from exc
+    finally:
+        if destination is not None:
+            destination.close()
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+        if file_descriptor is not None:
+            os.close(file_descriptor)
+        if directory_descriptor is not None:
+            os.close(directory_descriptor)
+
+
 def _stage_archive_payload(output: dict, source_root: Path, destination: Path) -> list[str]:
     plan = output.get("payload")
     if not isinstance(plan, dict) or not isinstance(plan.get("files"), list):
         raise PackagingError("invalid_install_content", "Resolved archive payload plan is missing")
     legacy_layout = bool(plan.get("legacy_layout"))
+    raw_record = _raw_payload_record(output)
+    if raw_record is not None:
+        relative_value = str(raw_record.get("relative_path") or "")
+        _copy_verified_raw_record(raw_record, source_root, destination / relative_value)
+        return [relative_value]
     copied = []
     staged_paths = set()
     for record in plan["files"]:
@@ -203,6 +312,9 @@ def prepare_staging(recipe: dict, build_result: dict, workspace: str | Path, *, 
         raise PackagingError("invalid_install_content", "workspace/source escapes the Build workspace") from exc
     output = build_result["output"]
     archive_output = output.get("mode") == "archive_payload"
+    raw_record = _raw_payload_record(output) if archive_output else None
+    if raw_record is not None:
+        _copy_verified_raw_record(raw_record, source_root)
     if archive_output:
         content_sources = [source_root]
     else:
@@ -266,7 +378,14 @@ def prepare_staging(recipe: dict, build_result: dict, workspace: str | Path, *, 
                 "unsafe_configuration_source", f"{mapping_context}; source escapes acquired source",
                 details={**mapping_details, "cause": "source escapes acquired source"},
             ) from exc
-        if source_file.is_symlink() or not source_file.is_file():
+        if raw_record is not None:
+            raw_source = source_root / str(raw_record.get("relative_path") or "")
+            if source_file != raw_source:
+                raise PackagingError(
+                    "invalid_install_content", f"{mapping_context}; raw payload mappings must use the selected Release asset",
+                    details={**mapping_details, "cause": "mapping does not reference the selected raw asset"},
+                )
+        if raw_record is None and (source_file.is_symlink() or not source_file.is_file()):
             if not preview:
                 cause = "is a symbolic link" if source_file.is_symlink() else "does not exist" if not source_file.exists() else "is not a regular file"
                 raise PackagingError(
@@ -281,7 +400,10 @@ def prepare_staging(recipe: dict, build_result: dict, workspace: str | Path, *, 
         if policy == "create_if_missing":
             template = staging / "usr" / "share" / recipe["package"]["name"] / "config-templates" / destination_path.lstrip("/")
             template.parent.mkdir(parents=True, exist_ok=True)
-            if source_file.is_file():
+            if raw_record is not None:
+                _copy_verified_raw_record(raw_record, source_root, template)
+                template.chmod(int(mapping_mode, 8))
+            elif source_file.is_file():
                 shutil.copyfile(source_file, template)
                 template.chmod(int(mapping_mode, 8))
             postinst.append(f"if [ ! -e {destination_path} ]; then install -D -m {mapping_mode} {('/' + template.relative_to(staging).as_posix())} {destination_path}; fi")
@@ -296,7 +418,10 @@ def prepare_staging(recipe: dict, build_result: dict, workspace: str | Path, *, 
                     details={**mapping_details, "cause": str(exc)},
                 ) from exc
             staged_path.parent.mkdir(parents=True, exist_ok=True)
-            if source_file.is_file():
+            if raw_record is not None:
+                _copy_verified_raw_record(raw_record, source_root, staged_path)
+                staged_path.chmod(int(mapping_mode, 8))
+            elif source_file.is_file():
                 shutil.copyfile(source_file, staged_path)
                 staged_path.chmod(int(mapping_mode, 8))
             if policy == "dpkg_conffile":

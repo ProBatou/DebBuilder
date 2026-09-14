@@ -8,6 +8,10 @@ async function loadExecutions({resumePolling = true} = {}) {
   return true;
 }
 
+function validationAttemptIsActive(validation) {
+  return ['queued', 'running', 'cancelling'].includes(validation?.status);
+}
+
 function executionIsSelected(id) {
   return adminState.selectedExecution?.id === id;
 }
@@ -46,6 +50,12 @@ function executionCancellationState(id) {
     : '';
 }
 
+function validationCancellationState(id) {
+  return adminState.validationCancellation && adminState.validationCancellation.id === id
+    ? adminState.validationCancellation.state
+    : '';
+}
+
 function executionWithAcceptedCancellation(execution) {
   if (executionCancellationState(execution?.id) !== 'accepted' || !['queued', 'running'].includes(execution?.status)) return execution;
   return {
@@ -70,6 +80,13 @@ function applyCanonicalExecution(execution, {preserveLog = false} = {}) {
   if (executionCancellationState(execution?.id) && !['queued', 'running', 'cancelling'].includes(execution?.status)) {
     adminState.executionCancellation = null;
   }
+  const validation = (execution?.validations || []).slice(-1)[0] || {};
+  if (adminState.validationCancellation?.id && adminState.validationCancellation.id !== execution?.id) {
+    adminState.validationCancellation = null;
+  }
+  if (validationCancellationState(execution?.id) && !validationAttemptIsActive(validation)) {
+    adminState.validationCancellation = null;
+  }
   execution = executionWithAcceptedCancellation(execution);
   if (adminState.selectedExecution?.id !== execution.id) adminState.diagnosticExpandedRunId = '';
   adminState.selectedExecution = execution;
@@ -84,7 +101,8 @@ function scheduleExecutionPoll(delay) {
   if (!adminState.selectedExecution || !$('view-logs')?.classList.contains('active')) return;
   const actionPending = adminState.executionAction?.id === adminState.selectedExecution.id;
   const cancellationPending = executionCancellationState(adminState.selectedExecution.id);
-  if (!executionIsLive(adminState.selectedExecution) && !actionPending && !cancellationPending) return;
+  const validationCancellationPending = validationCancellationState(adminState.selectedExecution.id);
+  if (!executionIsLive(adminState.selectedExecution) && !actionPending && !cancellationPending && !validationCancellationPending) return;
   adminState.logPollTimer = setTimeout(pollOpenExecution, delay);
 }
 
@@ -96,6 +114,7 @@ function executionPollDelay(execution) {
 function stopLogPolling() {
   if (adminState.logPollTimer) clearTimeout(adminState.logPollTimer);
   adminState.logPollTimer = null;
+  adminState.executionPollRevision = (Number(adminState.executionPollRevision) || 0) + 1;
   adminState.logFollowing = false;
   updateLogLiveBadge();
 }
@@ -165,12 +184,14 @@ function updateExecutionActionButtons(execution) {
   const deleteButton = $('btnDeleteExecutionLog');
   const cancelButton = $('btnCancelExecution');
   const cancellationState = executionCancellationState(execution?.id);
+  const validationCancellation = validationCancellationState(execution?.id);
+  const validationActive = validationAttemptIsActive(validation);
   const cancelling = execution?.status === 'cancelling' || cancellationState === 'pending' || cancellationState === 'accepted';
   const cancellable = ['queued', 'running'].includes(execution?.status);
   if (validateButton) {
-    validateButton.hidden = !actions.validate && !validationPending;
-    validateButton.disabled = !!validationPending;
-    validateButton.textContent = validationPending ? 'Validating…' : validation.status ? 'Revalidate' : 'Validate';
+    validateButton.hidden = !actions.validate && !validationPending && !validationActive;
+    validateButton.disabled = !!validationPending || validationActive;
+    validateButton.textContent = validationPending ? 'Starting validation…' : validationActive ? (STATUS_LABELS[validation.status] || validation.status) : validation.status ? 'Revalidate' : 'Validate';
   }
   if (publishButton) {
     publishButton.hidden = !actions.publish && !publicationPending;
@@ -178,9 +199,10 @@ function updateExecutionActionButtons(execution) {
     publishButton.textContent = publicationPending ? 'Publishing…' : publication.status === 'failed' ? 'Retry publish' : 'Publish';
   }
   if (cancelButton) {
-    cancelButton.hidden = !execution || cancellationState === 'refreshing' || (!cancellable && !cancelling);
-    cancelButton.disabled = !execution || !!cancellationState || cancelling || !cancellable;
-    cancelButton.textContent = cancelling ? 'Cancelling…' : 'Cancel';
+    const validationCancelling = validation.status === 'cancelling' || !!validationCancellation;
+    cancelButton.hidden = !execution || cancellationState === 'refreshing' || (!cancellable && !cancelling && !validationActive);
+    cancelButton.disabled = !execution || !!cancellationState || cancelling || validationCancelling || (!cancellable && !validation.cancellable);
+    cancelButton.textContent = validationActive ? (validationCancelling ? 'Cancelling validation…' : 'Cancel validation') : cancelling ? 'Cancelling…' : 'Cancel';
   }
   if (deleteButton) deleteButton.disabled = !execution || executionIsLive(execution) || validationPending || publicationPending;
 }
@@ -188,6 +210,13 @@ function updateExecutionActionButtons(execution) {
 function renderExecutionCancellation(execution) {
   const node = $('executionCancellationSummary');
   if (!node) return;
+  const validation = (execution?.validations || []).slice(-1)[0] || {};
+  if (validation.status === 'cancelling' || validation.status === 'cancelled') {
+    const cancelled = validation.status === 'cancelled';
+    node.innerHTML = `<strong>${cancelled ? 'Validation cancelled' : 'Validation cancellation requested'}</strong><span>${cancelled ? 'The Build Run remains successful and can be revalidated.' : 'Cleanup is completing before the attempt becomes terminal.'}</span>`;
+    node.hidden = false;
+    return;
+  }
   const cancellation = execution?.cancellation;
   if (!cancellation || !['cancelling', 'cancelled'].includes(cancellation.kind || execution?.status)) {
     node.hidden = true;
@@ -237,16 +266,18 @@ async function loadExecutionLog(id, {reset = false} = {}) {
 async function pollOpenExecution() {
   const selected = adminState.selectedExecution;
   if (!selected) return;
+  const revision = (Number(adminState.executionPollRevision) || 0) + 1;
+  adminState.executionPollRevision = revision;
   try {
     const detail = (await getJson('/api/executions/' + encodeURIComponent(selected.id))).execution;
-    if (adminState.selectedExecution?.id !== selected.id) return;
+    if (adminState.selectedExecution?.id !== selected.id || revision !== adminState.executionPollRevision) return;
     applyCanonicalExecution(detail, {preserveLog: true});
     await loadExecutionLog(detail.id);
     adminState.logFollowing = executionIsLive(detail);
     updateLogLiveBadge();
     scheduleExecutionPoll(executionPollDelay(detail));
   } catch (error) {
-    if (adminState.selectedExecution?.id !== selected.id) return;
+    if (adminState.selectedExecution?.id !== selected.id || revision !== adminState.executionPollRevision) return;
     if (error.status === 404) {
       adminState.executions = adminState.executions.filter(execution => execution.id !== selected.id);
       clearOpenExecution();
@@ -353,6 +384,28 @@ async function refreshExecutionLifecycle(id) {
 
 async function cancelOpenExecution(id) {
   const execution = adminState.selectedExecution?.id === id ? adminState.selectedExecution : null;
+  const validation = (execution?.validations || []).slice(-1)[0] || {};
+  if (execution && validationAttemptIsActive(validation)) {
+    if (adminState.validationCancellation) return;
+    adminState.validationCancellation = {id, state: 'pending', attemptId: validation.attempt_id || validation.id};
+    updateExecutionActionButtons(execution);
+    scheduleExecutionPoll(0);
+    try {
+      const current = await cancelValidationRequest(id, validation.attempt_id || validation.id);
+      if (adminState.selectedExecution?.id !== id) return;
+      const validations = [...(adminState.selectedExecution.validations || [])];
+      validations[validations.length - 1] = {...validations[validations.length - 1], ...current};
+      adminState.validationCancellation = current.status === 'cancelling' ? {id, state: 'accepted', attemptId: current.attempt_id} : null;
+      applyCanonicalExecution({...adminState.selectedExecution, validations, validation_status: current.status, lifecycle_active: validationAttemptIsActive(current)}, {preserveLog: true});
+      scheduleExecutionPoll(0);
+    } catch (error) {
+      adminState.validationCancellation = null;
+      if (adminState.selectedExecution?.id === id) updateExecutionActionButtons(adminState.selectedExecution);
+      showToast(`Validation cancellation failed: ${error.message}`, {type: 'error'});
+      scheduleExecutionPoll(5000);
+    }
+    return;
+  }
   if (!execution || adminState.executionCancellation || !['queued', 'running'].includes(execution.status)) return;
   adminState.executionCancellation = {id, state: 'pending'};
   updateExecutionActionButtons(execution);
@@ -401,12 +454,30 @@ async function validateExecution(id) {
   if (adminState.selectedExecution?.id === id) updateExecutionActionButtons(adminState.selectedExecution);
   scheduleExecutionPoll(0);
   try {
-    await postLifecycleJson(`/api/executions/${encodeURIComponent(id)}/validate`, {});
+    const response = await postLifecycleJson(`/api/executions/${encodeURIComponent(id)}/validate`, {});
+    if (adminState.selectedExecution?.id === id) {
+      adminState.executionPollRevision = (Number(adminState.executionPollRevision) || 0) + 1;
+      const validations = [...(adminState.selectedExecution.validations || [])];
+      const existing = validations.findIndex(row => (row.attempt_id || row.id) === response.validation.attempt_id);
+      if (existing >= 0) validations[existing] = {...validations[existing], ...response.validation};
+      else validations.push(response.validation);
+      applyCanonicalExecution({
+        ...adminState.selectedExecution,
+        validations,
+        validation_status: response.validation.status,
+        lifecycle_status: 'validating',
+        lifecycle_active: true,
+      }, {preserveLog: true});
+    }
+    showToast(`Validation accepted: ${response.validation.status}`, {type: 'info'});
   } catch (error) {
     showToast(`Validation could not start: ${error.message}`, {type: 'error'});
   } finally {
     adminState.executionAction = null;
-    await refreshExecutionLifecycle(id);
+    if (adminState.selectedExecution?.id === id) {
+      updateExecutionActionButtons(adminState.selectedExecution);
+      scheduleExecutionPoll(0);
+    }
   }
 }
 
@@ -446,16 +517,14 @@ function renderOpenExecution(execution, {preserveLog = false} = {}) {
   const source = (execution.steps || []).find(step => step.name === 'source')?.details || {};
   const version = typeof execution.version === 'object' ? execution.version : {debian: execution.version};
   const lifecycle = STATUS_LABELS[execution.lifecycle_status] || execution.lifecycle_status || execution.status || 'Unknown';
-  const meta = [['Run ID', '#' + execution.id], ['Package', execution.package || execution.recipe_id || '—'], ['Lifecycle', lifecycle], ['Mode', execution.mode || execution.action || '—'], ['Build status', execution.build_status || execution.status], ['Date', fmtTime(execution.updated || execution.created_at_epoch)], ['Validation', execution.validation_status || validation.status || 'Not run'], ['Publication', execution.publication_status || publication.status || 'Not run']];
+  const recovery = validation.recovery_blocker;
+  const meta = [['Run ID', '#' + execution.id], ['Package', execution.package || execution.recipe_id || '—'], ['Lifecycle', lifecycle], ['Mode', execution.mode || execution.action || '—'], ['Build status', execution.build_status || execution.status], ['Date', fmtTime(execution.updated || execution.created_at_epoch)], ['Validation', execution.validation_status || validation.status || 'Not run'], ['Validation recovery', recovery?.message || '—'], ['Publication', execution.publication_status || publication.status || 'Not run']];
   const moreMeta = [['Recipe', execution.recipe_id || '—'], ['Source', source.repository || '—'], ['Resolved ref', source.ref || source.tag || '—'], ['Upstream', version.upstream || '—'], ['Debian version', version.debian || '—'], ['Artifact', (artifact.path || '').split('/').pop() || '—'], ['Size', artifact.size || '—'], ['SHA-256', artifact.sha256 || '—']];
   const symbols = {pending: '○', running: '◌', success: '✓', failed: '✕', cancelled: '⊘', skipped: '–'};
   if ($('executionMeta')) $('executionMeta').innerHTML = executionMetaHtml(meta);
   if ($('executionMetaMore')) $('executionMetaMore').innerHTML = executionMetaHtml(moreMeta);
   if ($('executionMoreDetails')) $('executionMoreDetails').hidden = false;
-  if (validation.profile && $('executionMetaMore')) {
-    const node = (validation.checks || []).find(check => check.name === 'runtime_node' || check.name === 'toolchain_node');
-    $('executionMetaMore').insertAdjacentHTML('beforeend', executionMetaHtml([['Validation backend', validation.backend?.runtime || '—'], ['Profile', validation.profile.name || '—'], ['Node', node?.details?.actual || 'Not required'], ['Network', validation.backend?.network || 'disabled']]));
-  }
+  if (validation.profile && $('executionMetaMore')) $('executionMetaMore').insertAdjacentHTML('beforeend', executionMetaHtml([['Validation profile', validation.profile.name || '—']]));
   if ($('executionSteps')) $('executionSteps').innerHTML = (execution.steps || []).map(step => `<span class="step-chip ${esc(step.status || 'pending')}">${symbols[step.status] || '○'} ${esc(step.name)} · ${esc(step.status || 'pending')}</span>`).join('');
   renderExecutionCancellation(execution);
   renderExecutionDiagnostic(execution);

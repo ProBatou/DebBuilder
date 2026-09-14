@@ -72,11 +72,21 @@ class PublicationProofV1:
     source: dict
 
 
-def publication_readiness(run: dict) -> dict:
+def publication_readiness(run: dict, *, store: BuildStore | None = None) -> dict:
     artifact = run.get("artifact") or {}
+    projected = run
+    validation_inventory_unverifiable = False
+    if store is not None:
+        # Manifest-backed attempts are canonical across cancellation races and
+        # crashes; raw Run rows are only historical lifecycle detail.
+        from . import validation_service
+        projected = validation_service.project_run(run, store)
+        validation_inventory_unverifiable = any(
+            row.get("recovery_blocker") for row in projected.get("validations", [])
+        )
     validations = [
-        row for row in run.get("validations", [])
-        if row.get("artifact") == artifact.get("path")
+        row for row in projected.get("validations", [])
+        if row.get("artifact") == artifact.get("path") or row.get("artifact_matches_run") is True
     ]
     successful = [row for row in validations if row.get("status") == "success"]
     reasons = []
@@ -86,6 +96,8 @@ def publication_readiness(run: dict) -> dict:
         reasons.append("artifact_unavailable")
     if not successful:
         reasons.append("validation_not_successful")
+    if validation_inventory_unverifiable:
+        reasons.append("validation_state_unverifiable")
     return {
         "ready": not reasons,
         "reasons": reasons,
@@ -583,7 +595,7 @@ def verify_source_artifact_fd(
     _verify_source_fd(source, source_fd, artifacts_fd, artifact_name)
 
 
-def _attempt(run: dict, *, repo_root: str | Path, distribution: str, component: str, kind: str = "publication") -> tuple[dict, dict, float]:
+def _attempt(run: dict, *, store: BuildStore, repo_root: str | Path, distribution: str, component: str, kind: str = "publication") -> tuple[dict, dict, float]:
     artifact = run.get("artifact") or {}
     info = artifact.get("inspection") or {}
     attempt = {
@@ -594,7 +606,7 @@ def _attempt(run: dict, *, repo_root: str | Path, distribution: str, component: 
         "architecture": info.get("architecture", ""), "status": "running",
         "requested_at": utc_now(), "finished_at": None, "duration": None,
         "repository": {"root": str(Path(repo_root).absolute()), "distribution": distribution, "component": component},
-        "readiness": publication_readiness(run), "preflight": {}, "command": None,
+        "readiness": publication_readiness(run, store=store), "preflight": {}, "command": None,
         "proof": None, "published_version": "", "error": None,
     }
     compact = {key: attempt[key] for key in ("id", "status", "requested_at", "finished_at", "published_version")}
@@ -632,7 +644,7 @@ def publish_artifact(
         if not run:
             raise PublicationError("build_run_not_found", "Build Run was not found")
         attempt, compact, started = _attempt(
-            run, repo_root=repo_root, distribution=distribution, component=component,
+            run, store=store, repo_root=repo_root, distribution=distribution, component=component,
         )
         store.save(run)
         try:
@@ -739,7 +751,7 @@ def reconcile_publication(
         if not run:
             raise PublicationError("build_run_not_found", "Build Run was not found")
         attempt, compact, started = _attempt(
-            run, repo_root=repo_root, distribution=distribution, component=component,
+            run, store=store, repo_root=repo_root, distribution=distribution, component=component,
             kind="reconciliation",
         )
         store.save(run)

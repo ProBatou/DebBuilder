@@ -6,11 +6,15 @@ const adminState = {
   selectedExecution: null,
   executionAction: null,
   executionCancellation: null,
+  validationCancellation: null,
+  executionPollRevision: 0,
   logPollTimer: null,
   logOffset: 0,
   logVerbosity: 'normal',
   logAutoScroll: true,
   logFollowing: false,
+  packageValidationPollTimer: null,
+  packageValidationRevision: 0,
 };
 
 function badge(status) {
@@ -29,6 +33,7 @@ function switchView(name) {
   closeLogDetail();
   if (name !== 'settings' && typeof flushSettingsAutosave === 'function') flushSettingsAutosave().catch(() => {});
   if (name !== 'logs') stopLogPolling();
+  if (name !== 'packages' && typeof stopPackageValidationPolling === 'function') stopPackageValidationPolling();
   document.querySelectorAll('.nav-link').forEach(button => button.classList.toggle('active', button.dataset.view === name));
   document.querySelectorAll('.view').forEach(view => view.classList.toggle('active', view.id === 'view-' + name));
   if (name === 'recipes') scheduleRecipeStepUpdate();
@@ -117,6 +122,7 @@ async function handleAdminAction(element) {
   else if (action === 'create-recipe') await createRecipeForPackage(packageName);
   else if (action === 'build-package') await buildPackage(packageName, element.dataset.dryRun === 'true');
   else if (action === 'validate-package') await validatePackage(packageName);
+  else if (action === 'cancel-package-validation') await cancelPackageValidation(packageName);
   else if (action === 'publish-package') await publishPackage(packageName);
   else if (action === 'delete-package') await deletePackageUi(packageName);
   else if (action === 'open-history-execution') {

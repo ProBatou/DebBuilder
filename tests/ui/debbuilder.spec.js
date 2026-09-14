@@ -736,6 +736,131 @@ test('Logs selects an execution and renders lifecycle, steps, and output', async
   await capture(page, testInfo, 'log-detail', {fullPage: false});
 });
 
+test('Validation admission, polling, stale responses, reload, failure, and cancellation stay canonical', async ({page}, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'One focused desktop lifecycle journey is sufficient');
+  const runId = 'ui-03-validation-needed';
+  const baseResponse = await page.request.get(`/api/executions/${runId}`);
+  expect(baseResponse.ok()).toBe(true);
+  const base = (await baseResponse.json()).execution;
+  let mode = 'idle';
+  let submissions = 0;
+  let cancellations = 0;
+  let staleReads = 0;
+  let releaseQueuedPoll;
+  let releaseStalePoll;
+  const queuedPollGate = new Promise(resolve => { releaseQueuedPoll = resolve; });
+  const stalePollGate = new Promise(resolve => { releaseStalePoll = resolve; });
+
+  const validation = status => ({
+    id: 'validation-ui-attempt', attempt_id: 'validation-ui-attempt', build_run_id: runId,
+    status, phase: status === 'queued' ? 'queued' : 'lifecycle', cancellable: ['queued', 'running', 'cancelling'].includes(status),
+    created_at: '2026-09-14T10:00:00+00:00', started_at: status === 'queued' ? null : '2026-09-14T10:00:01+00:00',
+    finished_at: ['success', 'failed', 'cancelled'].includes(status) ? '2026-09-14T10:00:02+00:00' : null,
+    profile: {name: 'bookworm'}, checks: status === 'failed' ? [{name: 'package_install', status: 'failed', error: 'Validation check failed'}] : [],
+    error: status === 'failed' ? {code: 'package_install_failed', message: 'Offline lifecycle validation failed'} : null,
+  });
+  const projected = status => ({
+    ...base,
+    validation_status: status,
+    lifecycle_status: ['queued', 'running', 'cancelling'].includes(status) ? 'validating'
+      : status === 'success' ? 'ready_to_publish' : status === 'failed' ? 'validation_failed' : 'validation_cancelled',
+    lifecycle_active: ['queued', 'running', 'cancelling'].includes(status),
+    allowed_actions: {validate: !['queued', 'running', 'cancelling'].includes(status), publish: status === 'success'},
+    validations: [validation(status)],
+    diagnostic: status === 'failed' ? {
+      title: 'Package validation failed', code: 'package_install_failed', reason: 'Offline lifecycle validation failed',
+      where: [{label: 'Profile', value: 'bookworm'}], facts: [{label: 'Failed checks', value: 'package_install'}],
+      next_action: 'Review the package lifecycle failure.',
+    } : null,
+  });
+  const fulfill = (route, body, status = 200) => route.fulfill({status, contentType: 'application/json', body: JSON.stringify(body)});
+
+  await page.route(`**/api/executions/${runId}**`, async route => {
+    const request = route.request();
+    const pathname = new URL(request.url()).pathname;
+    if (request.method() === 'POST' && pathname.endsWith('/validate')) {
+      submissions += 1;
+      mode = 'queued';
+      return fulfill(route, {validation: validation('queued')}, 202);
+    }
+    if (request.method() === 'POST' && pathname.endsWith('/validations/validation-ui-attempt/cancel')) {
+      cancellations += 1;
+      mode = 'cancelled';
+      return fulfill(route, {ok: true, accepted: true, validation: validation('cancelling')}, 202);
+    }
+    if (request.method() === 'GET' && pathname === `/api/executions/${runId}`) {
+      if (mode === 'idle') return fulfill(route, {execution: base});
+      if (mode === 'queued') {
+        await queuedPollGate;
+        mode = 'success';
+        return fulfill(route, {execution: projected('running')});
+      }
+      if (mode === 'stale') {
+        staleReads += 1;
+        if (staleReads === 1) {
+          await stalePollGate;
+          return fulfill(route, {execution: projected('running')});
+        }
+        return fulfill(route, {execution: projected('success')});
+      }
+      if (mode === 'recovery') {
+        const blocked = validation('cancelling');
+        blocked.recovery_blocker = {
+          code: 'validation_container_recovery_required',
+          message: 'Operator attention required',
+        };
+        return fulfill(route, {execution: {...projected('cancelling'), validations: [blocked]}});
+      }
+      return fulfill(route, {execution: projected(mode)});
+    }
+    return route.fallback();
+  });
+
+  await openView(page, 'logs');
+  await page.locator(`#executionList [data-execution-id="${runId}"]`).click();
+  await expect(page.locator('#btnRevalidateExecution')).toHaveText('Validate');
+  await page.locator('#btnRevalidateExecution').evaluate(button => { button.click(); button.click(); });
+  await expect.poll(() => submissions).toBe(1);
+  await expect(page.locator('#btnRevalidateExecution')).toHaveText('Queued');
+  await expect(page.locator('#btnRevalidateExecution')).toBeDisabled();
+  releaseQueuedPoll();
+  await expect(page.locator('#btnRevalidateExecution')).toHaveText('Revalidate');
+  await expect(page.locator('#executionMeta')).toContainText('Ready to publish');
+  expect(submissions).toBe(1);
+
+  mode = 'running';
+  await page.evaluate(() => pollOpenExecution());
+  await page.evaluate(() => stopLogPolling());
+  mode = 'stale';
+  await page.evaluate(() => { pollOpenExecution(); });
+  await expect.poll(() => staleReads).toBe(1);
+  await page.evaluate(() => pollOpenExecution());
+  releaseStalePoll();
+  await expect(page.locator('#btnRevalidateExecution')).toHaveText('Revalidate');
+  await expect(page.locator('#executionMeta')).toContainText('Ready to publish');
+
+  mode = 'running';
+  await page.reload();
+  await openView(page, 'logs');
+  await page.locator(`#executionList [data-execution-id="${runId}"]`).click();
+  await expect(page.locator('#btnRevalidateExecution')).toHaveText('Running');
+  await expect(page.locator('#btnCancelExecution')).toHaveText('Cancel validation');
+  await page.locator('#btnCancelExecution').click();
+  await expect.poll(() => cancellations).toBe(1);
+  await expect(page.locator('#executionCancellationSummary')).toContainText('Validation cancelled');
+
+  mode = 'failed';
+  await page.evaluate(() => pollOpenExecution());
+  await expect(page.locator('#executionMeta')).toContainText('Validation failed');
+  await expect(page.locator('#executionDiagnostic')).toContainText('package_install');
+  mode = 'recovery';
+  await page.evaluate(() => pollOpenExecution());
+  await expect(page.locator('#executionMeta')).toContainText('Validation recovery');
+  await expect(page.locator('#executionMeta')).toContainText('Operator attention');
+  await expect(page.locator('body')).not.toContainText('BEGIN PGP PRIVATE KEY');
+  await expect(page.locator('body')).not.toContainText('/tmp/debbuilder-validation');
+});
+
 test('Logs explains build, validation, and publication failures', async ({page}, testInfo) => {
   await openView(page, 'logs');
   const openFailure = async id => {

@@ -567,7 +567,7 @@ def execution_summary(run: dict) -> dict:
         "duration": run.get("duration"), "workspace": run.get("workspace", ""),
         "validation_count": len(validations), "validation_status": validation_status, "publication_status": publication_status,
         "lifecycle_status": lifecycle_status,
-        "lifecycle_active": build_status in {"pending", "queued", "running", "cancelling"} or validation_status == "running" or publication_status == "running",
+        "lifecycle_active": build_status in {"pending", "queued", "running", "cancelling"} or validation_status in {"queued", "running", "cancelling"} or publication_status == "running",
         "ready_for_build": run.get("mode") == "dry_run" and build_status == "prepared",
         "allowed_actions": {"validate": actions["validate"], "publish": actions["publish"]},
     }

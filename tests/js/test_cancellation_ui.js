@@ -24,6 +24,7 @@ function element(overrides = {}) {
     insertAdjacentHTML(_where, value) { this.innerHTML += value; },
     open: false,
     removeAttribute: () => {},
+    setAttribute: () => {},
     scrollHeight: 0,
     scrollTop: 0,
     showModal() { this.open = true; },
@@ -130,13 +131,19 @@ function modalHarness() {
 }
 
 function packageActionHarness() {
+  const nodes = {packageDetail: element(), packageDrawer: element()};
   const context = vm.createContext({
-    adminState: {packages: []},
+    STATUS_LABELS: {running: 'Running', cancelling: 'Cancelling…'},
+    adminState: {packages: [], packageValidationPollTimer: null, packageValidationRevision: 0, selectedPackage: 'demo'},
     badge: status => status,
     esc: value => String(value ?? ''),
-    $: () => null,
+    fmtTime: value => String(value ?? ''),
+    setTimeout: () => 1,
+    clearTimeout: () => {},
+    $: id => nodes[id] || null,
   });
   vm.runInContext(fs.readFileSync('static/js/pages/packages.js', 'utf8'), context, {filename: 'packages.js'});
+  context.nodes = nodes;
   return context;
 }
 
@@ -295,6 +302,87 @@ function packageActionHarness() {
   assert.match(retryActions, />Build</);
   assert.doesNotMatch(retryActions, />Validate</);
   assert.doesNotMatch(retryActions, />Publish</);
+
+  const activeValidation = {
+    id: 'validation-attempt', attempt_id: 'validation-attempt', status: 'running',
+    cancellable: true, profile: {name: 'bookworm'},
+  };
+  const validatingRun = run('validation-run', 'success', {
+    lifecycle_status: 'validating', lifecycle_active: true,
+    validations: [activeValidation], allowed_actions: {validate: false, publish: false},
+  });
+  logs.context.applyCanonicalExecution(validatingRun);
+  assert.equal(logs.nodes.btnRevalidateExecution.disabled, true);
+  assert.equal(logs.nodes.btnRevalidateExecution.textContent, 'Running');
+  assert.equal(logs.nodes.btnCancelExecution.hidden, false);
+  assert.equal(logs.nodes.btnCancelExecution.textContent, 'Cancel validation');
+
+  logs.context.renderOpenExecution({...validatingRun, validations: [{
+    ...activeValidation,
+    status: 'cancelling',
+    recovery_blocker: {code: 'validation_container_recovery_required', message: 'Operator attention required'},
+  }]});
+  assert.match(logs.nodes.executionMeta.innerHTML, /Validation recovery/);
+  assert.match(logs.nodes.executionMeta.innerHTML, /Operator attention/);
+  assert.doesNotMatch(logs.nodes.executionMetaMore.innerHTML, /Validation backend/);
+
+  const pendingValidationCancel = deferred();
+  let validationCancelRequests = 0;
+  logs.context.cancelValidationRequest = async () => {
+    validationCancelRequests += 1;
+    return pendingValidationCancel.promise;
+  };
+  const firstValidationCancel = logs.context.cancelOpenExecution('validation-run');
+  const duplicateValidationCancel = logs.context.cancelOpenExecution('validation-run');
+  assert.equal(validationCancelRequests, 1);
+  assert.equal(logs.nodes.btnCancelExecution.disabled, true);
+  pendingValidationCancel.resolve({...activeValidation, status: 'cancelling'});
+  await Promise.all([firstValidationCancel, duplicateValidationCancel]);
+  assert.equal(logs.context.adminState.selectedExecution.validations[0].status, 'cancelling');
+  assert.match(logs.nodes.executionCancellationSummary.innerHTML, /Validation cancellation requested/);
+
+  const staleRunning = deferred();
+  let validationPolls = 0;
+  const successfulValidation = {
+    ...validatingRun,
+    lifecycle_status: 'ready_to_publish', lifecycle_active: false, validation_status: 'success',
+    validations: [{...activeValidation, status: 'success', cancellable: false}],
+  };
+  logs.context.adminState.validationCancellation = null;
+  logs.context.applyCanonicalExecution(validatingRun);
+  logs.context.loadExecutionLog = async () => ({});
+  logs.context.getJson = async () => {
+    validationPolls += 1;
+    return validationPolls === 1 ? staleRunning.promise : {execution: successfulValidation};
+  };
+  const firstValidationPoll = logs.context.pollOpenExecution();
+  await Promise.resolve();
+  await logs.context.pollOpenExecution();
+  staleRunning.resolve({execution: validatingRun});
+  await firstValidationPoll;
+  assert.equal(logs.context.adminState.selectedExecution.validation_status, 'success');
+  assert.equal(logs.nodes.btnRevalidateExecution.disabled, false);
+  assert.equal(logs.nodes.btnRevalidateExecution.textContent, 'Revalidate');
+  const terminalTimers = logs.timers.length;
+  logs.context.scheduleExecutionPoll(1500);
+  assert.equal(logs.timers.length, terminalTimers);
+
+  const activePackageActions = packages.actionButtons({
+    name: 'demo', recipe: 'demo-recipe', validation: activeValidation,
+    allowed_actions: {test: false, build: false, validate: false, publish: false},
+  });
+  assert.match(activePackageActions, />Running</);
+  assert.match(activePackageActions, />Cancel validation</);
+  assert.doesNotMatch(activePackageActions, /data-admin-action="validate-package"/);
+  packages.renderOpenPackage({
+    name: 'demo', source: {}, version: {}, build: {}, repository: {}, history: [],
+    validation: {...activeValidation, status: 'cancelling', recovery_blocker: {
+      code: 'validation_container_recovery_required', message: 'Operator attention required',
+    }},
+    publication: {}, allowed_actions: {},
+  });
+  assert.match(packages.nodes.packageDetail.innerHTML, /Validation recovery/);
+  assert.match(packages.nodes.packageDetail.innerHTML, /Operator attention required/);
 
   console.log('cancellation UI JS tests passed');
 })().catch(error => {

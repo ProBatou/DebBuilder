@@ -7,6 +7,7 @@ import re
 from .archive_payload import normalize_archive_payload
 from .recipe_migrations import CURRENT_SCHEMA_VERSION, RecipeMigrationError, migrate_recipe_document
 from .resource_limits import ResourceLimitError, normalize_policy
+from .runtime_apt_repositories import normalize_runtime_apt_repositories
 
 SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
 SAFE_NAME = re.compile(r"^[a-zA-Z0-9_.+-]+$")
@@ -319,6 +320,9 @@ def normalize_recipe(workflow: dict) -> dict:
         "active": workflow.get("active", True),
         **({"management": _management(workflow["management"], name)} if "management" in workflow else {}),
         "resource_limits": normalize_policy(workflow.get("resource_limits", {})),
+        "runtime_apt_repositories": normalize_runtime_apt_repositories(
+            workflow.get("runtime_apt_repositories"),
+        ),
         "package": {
             "name": package_name,
             "version_revision": str(package_in.get("version_revision") or "1"),

@@ -92,6 +92,32 @@ function functionSource(source, name, nextName) {
   assert.equal(packageModals[0].subject, 'package');
   assert.equal(toasts.at(-1), 'Test queued: package-run');
 
+  const validationPosts = [];
+  let releaseValidation;
+  packageContext.adminState.packages = [{
+    name: 'demo', build: {latest_run_id: 'validation-run'}, validation: {},
+  }];
+  packageContext.packageValidationSubmissions = new Set();
+  packageContext.postLifecycleJson = async (url, body) => {
+    validationPosts.push({url, body});
+    return new Promise(resolve => { releaseValidation = resolve; });
+  };
+  packageContext.openPackage = async () => {};
+  packageContext.packageByName = name => packageContext.adminState.packages.find(row => row.name === name);
+  packageContext.renderPackages = () => {};
+  packageContext.renderOpenPackage = () => {};
+  packageContext.schedulePackageValidationPoll = () => {};
+  packageContext.$ = () => ({classList: {contains: () => false}});
+  vm.runInContext(functionSource(packages, 'validatePackage', 'cancelPackageValidation'), packageContext);
+  const validationPromise = vm.runInContext("Promise.all([validatePackage('demo'), validatePackage('demo')])", packageContext);
+  await Promise.resolve();
+  assert.equal(validationPosts.length, 1);
+  releaseValidation({validation: {attempt_id: 'attempt-one', status: 'queued'}});
+  await validationPromise;
+  assert.equal(validationPosts[0].url, '/api/executions/validation-run/validate');
+  assert.deepEqual(validationPosts[0].body, {});
+  assert.equal(toasts.at(-1), 'Validation accepted: queued');
+
   console.log('async run JS tests passed');
 })().catch(error => {
   console.error(error);

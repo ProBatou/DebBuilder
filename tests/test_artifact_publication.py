@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from debbuilder import artifact_publication, build_pipeline, workspace_cleanup
+from debbuilder import artifact_publication, build_pipeline, storage, workspace_cleanup
 from debbuilder.build_store import BuildStore
 from debbuilder.repository_lock import repository_lease
 
@@ -159,6 +159,37 @@ class ArtifactPublicationTests(unittest.TestCase):
             self.assertEqual(persisted["status"], "success")
             self.assertEqual(persisted["validations"][0]["status"], "success")
             self.assertEqual(persisted["publications"][0]["status"], "failed")
+
+    def test_manifest_cancellation_overrides_a_stale_successful_run_row(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store, run = self.make_run(temporary)
+            attempt_id = run["validations"][0]["id"]
+            root = store.run_dir(run["id"]) / "manifests/validation-attempts" / attempt_id
+            root.mkdir(parents=True)
+            artifact = run["artifact"]
+            identity = {
+                "package": artifact["inspection"]["package"],
+                "version": artifact["inspection"]["version"],
+                "architecture": artifact["inspection"]["architecture"],
+                "size": artifact["size"],
+                "sha256": artifact["sha256"],
+            }
+            storage.save_json(root / "attempt.json", {
+                "contract_version": 1, "id": attempt_id, "build_run_id": run["id"],
+                "inputs": {"profile": "bookworm", "artifact": identity, "previous_artifact": None},
+                "selected_profile": {
+                    "name": "bookworm",
+                    "image": {"name": "debbuilder-validation:bookworm", "id": "sha256:" + "a" * 64, "digest": None},
+                },
+                "created_at": "2026-09-14T08:00:00+00:00",
+                "started_at": "2026-09-14T08:00:01+00:00",
+                "finished_at": "2026-09-14T08:00:02+00:00",
+                "status": "cancelled", "prepared_dependencies": None, "result": None,
+                "error": {"code": "validation_lifecycle_cancelled", "message": "Validation was cancelled"},
+            })
+            readiness = artifact_publication.publication_readiness(store.load(run["id"]), store=store)
+            self.assertFalse(readiness["ready"])
+            self.assertIn("validation_not_successful", readiness["reasons"])
 
     def test_publishes_validated_all_package_without_changing_distribution_config(self):
         with tempfile.TemporaryDirectory() as temporary:

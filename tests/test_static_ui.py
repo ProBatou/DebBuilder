@@ -71,7 +71,7 @@ class StaticUiTests(unittest.TestCase):
         self.assertIn("adminState.logVerbosity === 'raw'", admin)
         self.assertIn('date.toLocaleString(undefined', admin)
         self.assertIn("second: '2-digit'", admin)
-        self.assertIn("if (!executionIsLive(adminState.selectedExecution) && !actionPending && !cancellationPending) return;", admin)
+        self.assertIn("if (!executionIsLive(adminState.selectedExecution) && !actionPending && !cancellationPending && !validationCancellationPending) return;", admin)
         self.assertIn("return actionPending ? 500 : 1500", admin)
         self.assertIn('id="btnCancelExecution"', html)
         self.assertIn('id="executionCancellationSummary"', html)

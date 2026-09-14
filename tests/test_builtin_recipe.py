@@ -39,11 +39,11 @@ class BuiltinRecipeTests(unittest.TestCase):
 
         self.assertTrue(path.is_file())
         self.assertEqual(recipe_document_for_storage(raw), raw)
-        self.assertEqual(canonical["schema_version"], 3)
+        self.assertEqual(canonical["schema_version"], 4)
         self.assertEqual(canonical["name"], "debbuilder")
         self.assertEqual(canonical["management"], {
             "owner": "application", "builtin_id": "debbuilder",
-            "definition_version": 4, "operator_overrides": {},
+            "definition_version": 5, "operator_overrides": {},
         })
         self.assertEqual(builtin_recipe.OPERATOR_OVERRIDE_PATHS, (
             "active",
@@ -54,6 +54,7 @@ class BuiltinRecipeTests(unittest.TestCase):
             "resource_limits",
         ))
         self.assertEqual(canonical["package"]["runtime_dependencies"], ["python3", "python3-dbus"])
+        self.assertEqual(canonical["runtime_apt_repositories"], [])
         self.assertEqual(canonical["install"]["config_files"], [{
             "source": "packaging/debbuilder.env",
             "destination": "/etc/debbuilder/debbuilder.env",
@@ -164,19 +165,19 @@ class BuiltinRecipeTests(unittest.TestCase):
         builtin_recipe.update_builtin_recipe(self.path, edited)
 
         upgraded_definition = self.definition()
-        upgraded_definition["management"]["definition_version"] = 5
-        upgraded_definition["package"]["description"] = "DebBuilder managed definition v5"
+        upgraded_definition["management"]["definition_version"] = 6
+        upgraded_definition["package"]["description"] = "DebBuilder managed definition v6"
         upgraded_definition["package"]["runtime_dependencies"].append("curl")
-        definition_path = Path(self.temporary.name) / "definition-v5.json"
+        definition_path = Path(self.temporary.name) / "definition-v6.json"
         definition_path.write_text(json.dumps(upgraded_definition))
 
         result = builtin_recipe.reconcile_builtin_recipe(self.workflows, definition_path=definition_path)
 
         self.assertEqual(result.action, "upgraded")
-        self.assertEqual(result.previous_definition_version, 4)
-        self.assertEqual(result.definition_version, 5)
+        self.assertEqual(result.previous_definition_version, 5)
+        self.assertEqual(result.definition_version, 6)
         self.assertFalse(result.recipe["active"])
-        self.assertEqual(result.recipe["package"]["description"], "DebBuilder managed definition v5")
+        self.assertEqual(result.recipe["package"]["description"], "DebBuilder managed definition v6")
         self.assertIn("curl", result.recipe["package"]["runtime_dependencies"])
         self.assertEqual(result.recipe["management"]["operator_overrides"], {"active": False})
 
@@ -195,7 +196,7 @@ class BuiltinRecipeTests(unittest.TestCase):
 
         self.assertEqual(result.action, "upgraded")
         self.assertEqual(result.previous_definition_version, 1)
-        self.assertEqual(result.definition_version, 4)
+        self.assertEqual(result.definition_version, 5)
         self.assertEqual(result.recipe["service"]["restart_sec"], "3s")
         self.assertEqual(result.recipe["service"]["timeout_stop_sec"], "20s")
         self.assertEqual(result.recipe["service"]["kill_signal"], "SIGTERM")
@@ -223,7 +224,7 @@ class BuiltinRecipeTests(unittest.TestCase):
 
         self.assertEqual(result.action, "upgraded")
         self.assertEqual(result.previous_definition_version, 2)
-        self.assertEqual(result.definition_version, 4)
+        self.assertEqual(result.definition_version, 5)
         self.assertEqual(result.recipe["service"]["environment_files"], ["/etc/debbuilder/debbuilder.env"])
         self.assertFalse(result.recipe["active"])
         self.assertEqual(result.recipe["package"]["maintainer"], "Operator <operator@example.test>")

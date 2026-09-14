@@ -3,11 +3,13 @@ import os
 import time
 import urllib.error
 import http.client
+import threading
 from unittest import mock
 from pathlib import Path
 
 import debbuilder.app as server
 from debbuilder import storage
+from debbuilder import dependency_preparation
 from debbuilder.build_store import BuildStore
 from debbuilder.lifecycle import MutationGate
 from tests.admin_api_case import AdminApiCase
@@ -159,12 +161,21 @@ class AdminApiTests(AdminApiCase):
         self.assertIsNone(package["validation"])
         self.assertIsNone(package["publication"])
 
-        current["validations"] = [{"id": "current-validation", "artifact": str(current_artifact), "status": "success"}]
+        current["validations"] = [{
+            "id": "current-validation", "artifact": str(current_artifact), "status": "success",
+            "commands": [{"stdout": "BEGIN PGP PRIVATE KEY"}],
+            "backend": {"workspace": "/tmp/private-validation"},
+        }]
         store.save(current)
         with mock.patch("debbuilder.app.live_published_index", return_value=published_old):
             package = server.get_package("debbuilder")
         self.assertEqual(package["lifecycle_display_status"], "ready_to_publish")
         self.assertTrue(package["build"]["ready_to_publish"])
+        serialized_package = json.dumps(package)
+        self.assertNotIn("BEGIN PGP PRIVATE KEY", serialized_package)
+        self.assertNotIn("/tmp/private-validation", serialized_package)
+        self.assertNotIn("commands", package["validation"])
+        self.assertNotIn("backend", package["validation"])
 
         current["publications"] = [{"id": "current-publication", "status": "success", "published_version": "0.1.4-2"}]
         store.save(current)
@@ -265,9 +276,17 @@ class AdminApiTests(AdminApiCase):
         detail = assert_state("validation_needed", active=False, validate=True, publish=False)
         self.assertEqual(detail["artifact"]["path"], str(artifact))
 
-        run["validations"] = [{"id": "validation-one", "artifact": str(artifact), "status": "running"}]
+        run["validations"] = [{
+            "id": "validation-one", "artifact": str(artifact), "status": "running",
+            "commands": [{"stdout": "BEGIN PGP PRIVATE KEY"}],
+            "backend": {"workspace": "/tmp/private-validation"},
+        }]
         store.save(run)
-        assert_state("validating", active=True, validate=False, publish=False)
+        detail = assert_state("validating", active=True, validate=False, publish=False)
+        self.assertNotIn("BEGIN PGP PRIVATE KEY", json.dumps(detail))
+        self.assertNotIn("/tmp/private-validation", json.dumps(detail))
+        self.assertNotIn("commands", detail["validations"][-1])
+        self.assertNotIn("backend", detail["validations"][-1])
         run["validations"][-1]["status"] = "failed"
         store.save(run)
         assert_state("validation_failed", active=False, validate=True, publish=False)
@@ -961,7 +980,8 @@ class AdminApiTests(AdminApiCase):
         status, _ = self.request("POST", "/api/workflows/v1-demo", {"workflow": recipe})
         self.assertEqual(status, 200)
         stored = json.loads((server.USER_WORKFLOWS / "v1-demo.json").read_text())
-        self.assertEqual(stored["schema_version"], 3)
+        self.assertEqual(stored["schema_version"], 4)
+        self.assertEqual(stored["runtime_apt_repositories"], [])
         self.assertNotIn("package_name", stored)
         self.assertNotIn("github_repository", stored)
         self.assertNotIn("config_policy", stored["install"])
@@ -986,7 +1006,7 @@ class AdminApiTests(AdminApiCase):
         stored = json.loads(path.read_text())
 
         self.assertEqual(status, 200)
-        self.assertEqual(loaded["schema_version"], 3)
+        self.assertEqual(loaded["schema_version"], 4)
         self.assertEqual(stored["schema_version"], 1)
         self.assertEqual(stored["build"]["timeout"], 45)
         self.assertIn("steps", stored)
@@ -1026,7 +1046,7 @@ class AdminApiTests(AdminApiCase):
     def test_auto_validation_does_not_run_after_dry_run(self):
         server.update_settings({"automation": {"auto_validate_after_successful_build": True, "auto_publish_after_successful_validation": True}})
         workflow = {"name": "dry-auto", "active": True, "steps": []}
-        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": "dry-run", "status": "success"}) as run, mock.patch("debbuilder.app.validate_build_artifact") as validate:
+        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": "dry-run", "status": "success"}) as run, mock.patch.object(server.APPLICATION_VALIDATION_MANAGER, "admit") as validate:
             response = server.run_recipe_pipeline_with_automation(workflow, dry_run=True)
         self.assertEqual(response["run_id"], "dry-run")
         run.assert_called_once_with(workflow, dry_run=True)
@@ -1036,21 +1056,13 @@ class AdminApiTests(AdminApiCase):
         store, run, artifact = self.successful_build_run(run_id="latest-auto-run", package="latest-auto", version="2.0-1")
         server.update_settings({"automation": {"auto_validate_after_successful_build": True, "auto_publish_after_successful_validation": False}})
 
-        def validate(run_id, payload):
-            self.assertEqual(payload, {})
-            current = store.load(run_id)
-            validation = {"id": "auto-validation", "build_run_id": run_id, "artifact": current["artifact"]["path"], "status": "success"}
-            current.setdefault("validations", []).append(validation)
-            store.save(current)
-            return validation
-
-        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": run["id"], "status": "success"}), mock.patch("debbuilder.app.validate_build_artifact", side_effect=validate) as validate_mock, mock.patch("debbuilder.app.publish_build_artifact") as publish:
+        validation = {"id": "auto-validation", "attempt_id": "auto-validation", "build_run_id": run["id"], "status": "queued"}
+        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": run["id"], "status": "success"}), mock.patch.object(server.APPLICATION_VALIDATION_MANAGER, "admit", return_value=validation) as validate_mock, mock.patch("debbuilder.app.publish_build_artifact") as publish:
             response = server.run_recipe_pipeline_with_automation({"name": "latest-auto-recipe", "active": True}, dry_run=False)
-        validate_mock.assert_called_once_with("latest-auto-run", {})
+        validate_mock.assert_called_once_with("latest-auto-run", {}, automatic=True, publish_after_success=False)
         publish.assert_not_called()
-        self.assertEqual(response["validation"]["status"], "success")
-        self.assertEqual(store.load("latest-auto-run")["validations"][0]["artifact"], str(artifact))
-        self.assertEqual(server.get_package("latest-auto")["lifecycle_display_status"], "ready_to_publish")
+        self.assertEqual(response["validation"]["status"], "queued")
+        self.assertEqual(store.load("latest-auto-run").get("validations"), None)
 
     def test_auto_validation_uses_returned_build_run_not_previous_artifact(self):
         store, old, old_artifact = self.successful_build_run(run_id="old-auto-run", package="same-auto", version="1.0-1")
@@ -1062,60 +1074,33 @@ class AdminApiTests(AdminApiCase):
         store.save(current)
         server.update_settings({"automation": {"auto_validate_after_successful_build": True}})
 
-        def validate(run_id, _payload):
-            self.assertEqual(run_id, "current-auto-run")
-            run = store.load(run_id)
-            validation = {"id": "current-validation", "build_run_id": run_id, "artifact": str(current_artifact), "status": "success"}
-            run.setdefault("validations", []).append(validation)
-            store.save(run)
-            return validation
-
-        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": "current-auto-run", "status": "success"}), mock.patch("debbuilder.app.validate_build_artifact", side_effect=validate) as validate_mock:
+        validation = {"id": "current-validation", "attempt_id": "current-validation", "build_run_id": "current-auto-run", "status": "queued"}
+        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": "current-auto-run", "status": "success"}), mock.patch.object(server.APPLICATION_VALIDATION_MANAGER, "admit", return_value=validation) as validate_mock:
             server.run_recipe_pipeline_with_automation({"name": "same-auto-recipe", "active": True}, dry_run=False)
-        validate_mock.assert_called_once()
+        validate_mock.assert_called_once_with("current-auto-run", {}, automatic=True, publish_after_success=False)
         self.assertEqual(len(store.load("old-auto-run")["validations"]), 1)
-        self.assertEqual(store.load("current-auto-run")["validations"][0]["artifact"], str(current_artifact))
+        self.assertIsNone(store.load("current-auto-run").get("validations"))
 
     def test_auto_validation_failure_records_validation_failed_lifecycle(self):
         store, run, artifact = self.successful_build_run(run_id="failed-auto-run", package="failed-auto", version="3.0-1")
         server.update_settings({"automation": {"auto_validate_after_successful_build": True}})
 
-        def validate(run_id, _payload):
-            current = store.load(run_id)
-            validation = {"id": "failed-validation", "build_run_id": run_id, "artifact": str(artifact), "status": "failed", "error": {"message": "install failed"}}
-            current.setdefault("validations", []).append(validation)
-            store.save(current)
-            return validation
-
-        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": run["id"], "status": "success"}), mock.patch("debbuilder.app.validate_build_artifact", side_effect=validate):
+        validation = {"id": "failed-validation", "build_run_id": run["id"], "status": "failed", "error": {"message": "admission failed"}}
+        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": run["id"], "status": "success"}), mock.patch.object(server.APPLICATION_VALIDATION_MANAGER, "admit", return_value=validation):
             response = server.run_recipe_pipeline_with_automation({"name": "failed-auto-recipe", "active": True}, dry_run=False)
         self.assertEqual(response["validation"]["status"], "failed")
-        self.assertEqual(server.get_package("failed-auto")["lifecycle_display_status"], "validation_failed")
 
     def test_auto_publish_runs_after_successful_auto_validation_when_enabled(self):
         store, run, artifact = self.successful_build_run(run_id="publish-auto-run", package="publish-auto", version="4.0-1")
         server.update_settings({"automation": {"auto_validate_after_successful_build": True, "auto_publish_after_successful_validation": True}})
 
-        def validate(run_id, _payload):
-            current = store.load(run_id)
-            validation = {"id": "publish-validation", "build_run_id": run_id, "artifact": str(artifact), "status": "success"}
-            current.setdefault("validations", []).append(validation)
-            store.save(current)
-            return validation
-
-        def publish(run_id, payload):
-            self.assertEqual(payload["confirm"], "publish:publish-auto:4.0-1")
-            current = store.load(run_id)
-            publication = {"id": "auto-publication", "build_run_id": run_id, "artifact": str(artifact), "status": "success", "published_version": "4.0-1"}
-            current.setdefault("publications", []).append(publication)
-            store.save(current)
-            return publication
-
-        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": run["id"], "status": "success"}), mock.patch("debbuilder.app.validate_build_artifact", side_effect=validate), mock.patch("debbuilder.app.publish_build_artifact", side_effect=publish) as publish_mock:
+        validation = {"id": "publish-validation", "attempt_id": "publish-validation", "build_run_id": run["id"], "status": "queued"}
+        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": run["id"], "status": "success"}), mock.patch.object(server.APPLICATION_VALIDATION_MANAGER, "admit", return_value=validation) as validate_mock, mock.patch("debbuilder.app.publish_build_artifact") as publish_mock:
             response = server.run_recipe_pipeline_with_automation({"name": "publish-auto-recipe", "active": True}, dry_run=False)
-        publish_mock.assert_called_once()
-        self.assertEqual(response["publication"]["status"], "success")
-        self.assertEqual(server.get_package("publish-auto")["lifecycle_display_status"], "published")
+        validate_mock.assert_called_once_with("publish-auto-run", {}, automatic=True, publish_after_success=True)
+        publish_mock.assert_not_called()
+        self.assertEqual(response["validation"]["status"], "queued")
+        self.assertNotIn("publication", response)
 
     def test_shutdown_admission_prevents_new_automatic_publication(self):
         store, run, _artifact = self.successful_build_run(
@@ -1128,15 +1113,15 @@ class AdminApiTests(AdminApiCase):
             "auto_publish_after_successful_validation": True,
         }}
         with mock.patch.object(server, "APPLICATION_MUTATION_GATE", gate), \
-                mock.patch("debbuilder.app.validate_build_artifact", return_value={"status": "success"}) as validate, \
+                mock.patch.object(server.APPLICATION_VALIDATION_MANAGER, "admit", return_value={"status": "queued"}) as validate, \
                 mock.patch("debbuilder.app.publish_build_artifact") as publish:
             result = server.run_post_build_automation(
                 run["id"], dry_run=False, settings=settings, store=store,
             )
-        validate.assert_called_once()
+        validate.assert_called_once_with(run["id"], {}, automatic=True, publish_after_success=True)
         publish.assert_not_called()
-        self.assertEqual(result["publication"]["status"], "failed")
-        self.assertEqual(result["publication"]["error"]["code"], "application_shutting_down")
+        self.assertEqual(result["validation"]["status"], "queued")
+        self.assertIsNone(result["publication"])
 
     def test_dry_run_creates_structured_workspace_and_is_visible_in_logs(self):
         workflow = {
@@ -1169,13 +1154,112 @@ class AdminApiTests(AdminApiCase):
         _, log = self.request("GET", f"/api/executions/{result['run_id']}/logs?verbosity=raw")
         self.assertIn("snapshot", log["log"]["text"])
 
-    def test_successful_build_artifact_can_be_validated_through_separate_endpoint(self):
-        validation = {"id": "validation-one", "build_run_id": "run-one", "status": "success", "checks": [], "commands": []}
-        with mock.patch("debbuilder.app.validate_build_artifact", return_value=validation) as validate:
+    def test_successful_build_artifact_validation_returns_async_admission(self):
+        validation = {"id": "validation-one", "attempt_id": "validation-one", "build_run_id": "run-one", "status": "queued"}
+        with mock.patch("debbuilder.app.admit_validation_attempt", return_value=validation) as validate:
             status, result = self.request("POST", "/api/executions/run-one/validate", {"previous_artifact": ""})
-        self.assertEqual(status, 200)
-        self.assertEqual(result["validation"]["status"], "success")
-        validate.assert_called_once_with("run-one", {"previous_artifact": ""})
+        self.assertEqual(status, 202)
+        self.assertEqual(result["validation"]["status"], "queued")
+        validate.assert_called_once_with(self.httpd.validation_manager, "run-one", {"previous_artifact": ""})
+
+    def test_validation_admission_status_and_cancellation_http_lifecycle(self):
+        store, run, artifact = self.successful_build_run(run_id="async-validation-run", package="async-validation")
+        metadata = dependency_preparation.ArtifactMetadata(
+            artifact, "async-validation", "1.0-1", "all", "", "", artifact.stat().st_size, "b" * 64,
+        )
+        entered = threading.Event()
+
+        def execute(_run_id, _attempt_id, event, _automation):
+            entered.set()
+            event.wait(3)
+
+        image = {"name": "debbuilder-validation:bookworm", "id": "sha256:" + "a" * 64, "digest": None}
+        with mock.patch.object(self.httpd.validation_manager, "execute", side_effect=execute), \
+                mock.patch("debbuilder.validation_service.PodmanRuntime.inspect_image", return_value=image), \
+                mock.patch("debbuilder.validation_service.dependency_preparation.inspect_artifact", return_value=metadata):
+            status, admitted = self.request("POST", f"/api/executions/{run['id']}/validate", {})
+            self.assertEqual(status, 202)
+            validation = admitted["validation"]
+            self.assertTrue(entered.wait(2))
+            attempt_path = store.run_dir(run["id"]) / "manifests/validation-attempts" / validation["attempt_id"] / "attempt.json"
+            self.assertTrue(attempt_path.is_file())
+            before = attempt_path.read_bytes()
+            status, observed = self.request("GET", validation["status_url"])
+            self.assertEqual(status, 200)
+            self.assertEqual(observed["validation"]["attempt_id"], validation["attempt_id"])
+            self.assertEqual(attempt_path.read_bytes(), before)
+            with self.assertRaises(urllib.error.HTTPError) as invalid:
+                self.request("GET", "/api/executions/%2F/validations/invalid")
+            self.assertEqual(invalid.exception.code, 400)
+            self.assertEqual(json.loads(invalid.exception.read())["error"]["code"], "invalid_validation_identity")
+            self.assertEqual(attempt_path.read_bytes(), before)
+            status, cancelled = self.request("POST", validation["cancel_url"], {})
+            self.assertEqual(status, 200)
+            self.assertEqual(cancelled["validation"]["status"], "cancelled")
+            status, repeated = self.request("POST", validation["cancel_url"], {})
+            self.assertEqual(status, 200)
+            self.assertEqual(repeated["validation"]["status"], "cancelled")
+        self.assertEqual(store.load(run["id"])["status"], "success")
+
+    def test_invalid_validation_admission_has_no_phantom_attempt(self):
+        store, run, _artifact = self.successful_build_run(run_id="invalid-validation-run", package="invalid-validation")
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            self.request("POST", f"/api/executions/{run['id']}/validate", {"unexpected": True})
+        self.assertEqual(raised.exception.code, 400)
+        root = store.run_dir(run["id"]) / "manifests/validation-attempts"
+        self.assertEqual(list(root.iterdir()) if root.exists() else [], [])
+
+    def test_validation_worker_orchestrates_preparation_then_offline_lifecycle(self):
+        store = BuildStore(server.DATA / "builds")
+        configured = {
+            "name": "cp1c-orchestration",
+            "package": {"name": "cp1c-orchestration"},
+            "source": {"repository": "owner/cp1c-orchestration"},
+        }
+        run = store.create(configured, mode="build", run_id="cp1c-orchestration-run")
+        artifact = Path(run["workspace"]) / "artifacts/cp1c-orchestration_1.0-1_all.deb"
+        artifact.write_bytes(b"controlled")
+        run["status"] = "success"
+        run["artifact"] = {"path": str(artifact), "name": artifact.name, "inspection": {
+            "maintainer_scripts": [], "package": "cp1c-orchestration", "version": "1.0-1",
+        }}
+        store.save(run)
+        prepared = {"packages": [], "profile_name": "bookworm", "image": {"id": "sha256:" + "a" * 64}}
+        validation = {"id": "attempt", "status": "success", "checks": [], "commands": [], "error": None}
+        notifier = mock.Mock()
+        notifier.notify_validation_result.side_effect = RuntimeError("notification unavailable")
+        with mock.patch("debbuilder.app.dependency_preparation.prepare_runtime_dependencies", return_value={"prepared_dependencies": prepared}) as prepare, \
+                mock.patch("debbuilder.app.dependency_preparation.begin_lifecycle_attempt") as begin, \
+                mock.patch("debbuilder.app.dependency_preparation.complete_lifecycle_attempt") as complete, \
+                mock.patch("debbuilder.app.dependency_preparation.SUPERVISOR.register") as register, \
+                mock.patch("debbuilder.app.dependency_preparation.SUPERVISOR.unregister") as unregister, \
+                mock.patch("debbuilder.app.artifact_validation.validate_artifact", return_value=validation) as lifecycle, \
+                mock.patch("debbuilder.app.validation_service.load_automation", return_value={"automatic": True, "publish_after_success": True}) as load_automation, \
+                mock.patch("debbuilder.app.publish_build_artifact") as publish, \
+                mock.patch("debbuilder.app.notification_service", return_value=notifier), \
+                mock.patch("debbuilder.app.request_maintenance"):
+            admitted = {
+                "inputs": {"profile": "bookworm", "previous_artifact": None},
+                "status": "success",
+            }
+            with mock.patch("debbuilder.app.validation_service.load_attempt", return_value=admitted):
+                result = server.execute_validation_attempt(run["id"], "attempt", __import__("threading").Event(), {})
+        self.assertIs(result, validation)
+        self.assertEqual(result["dependency_preparation"]["package_count"], 0)
+        self.assertEqual(prepare.call_args.kwargs["repositories"], [])
+        self.assertEqual(prepare.call_args.kwargs["current_artifact"], artifact)
+        self.assertEqual(lifecycle.call_args.kwargs["prepared_dependencies"], prepared)
+        self.assertEqual(lifecycle.call_args.kwargs["attempt_id"], "attempt")
+        self.assertTrue(prepare.call_args.kwargs["admitted"])
+        begin.assert_called_once()
+        complete.assert_called_once()
+        register.assert_called_once()
+        unregister.assert_called_once()
+        notifier.notify_validation_result.assert_called_once_with(validation)
+        self.assertEqual(load_automation.call_count, 2)
+        self.assertEqual(load_automation.call_args.args[0].root, store.root)
+        self.assertEqual(load_automation.call_args.args[1:], (run["id"], "attempt"))
+        publish.assert_called_once_with(run["id"], {"confirm": "publish:cp1c-orchestration:1.0-1"})
 
     def test_oidc_settings_round_trip_without_exposing_secret(self):
         payload = {

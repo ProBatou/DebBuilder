@@ -16,6 +16,7 @@ import logging
 import math
 import os
 import re
+import secrets
 import signal
 import sys
 import time
@@ -25,7 +26,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import artifact_publication, artifact_validation, auth_service, automation_service, build_pipeline, builtin_recipe, command_containment, deb_inspector, execution_recovery, execution_service, maintenance, notifications, package_service, recipe_store, release_cache, resource_limits, settings_service, storage, storage_inventory, storage_pruning, upstream_archive, workspace_cleanup
+from . import artifact_publication, artifact_validation, auth_service, automation_service, build_pipeline, builtin_recipe, command_containment, deb_inspector, dependency_preparation, execution_recovery, execution_service, maintenance, notifications, package_service, recipe_store, release_cache, resource_limits, settings_service, storage, storage_inventory, storage_pruning, upstream_archive, validation_oci, validation_service, workspace_cleanup
 from .build_models import utc_now
 from .build_store import BuildStore
 from .execution_manager import DEFAULT_SHUTDOWN_TIMEOUT, ExecutionManager, ExecutionManagerError
@@ -69,6 +70,7 @@ NOTIFICATION_SERVICE = None
 GITHUB_RELEASE_CACHE_SERVICE = None
 APPLICATION_MUTATION_GATE = None
 APPLICATION_MAINTENANCE_SERVICE = None
+APPLICATION_VALIDATION_MANAGER = None
 
 
 class RunAdmissionError(RuntimeError):
@@ -230,6 +232,27 @@ def run_recipe_pipeline(workflow: dict, *, dry_run: bool = True) -> dict:
 
 
 def run_post_build_automation(run_id: str, *, dry_run: bool, settings: dict | None = None, store: BuildStore | None = None) -> dict:
+    selected_settings = settings or app_settings()
+
+    def admit_automatic_validation(validation_run_id: str, payload: dict) -> dict:
+        manager = APPLICATION_VALIDATION_MANAGER
+        if manager is None:
+            return {
+                "status": "failed",
+                "error": {"code": "validation_manager_unavailable", "message": "Validation manager is unavailable", "details": {}},
+            }
+        try:
+            return manager.admit(
+                validation_run_id,
+                payload,
+                automatic=True,
+                publish_after_success=bool(
+                    (selected_settings.get("automation") or {}).get("auto_publish_after_successful_validation", False)
+                ),
+            )
+        except validation_service.ValidationAdmissionError as exc:
+            return {"status": "failed", "error": exc.as_dict()}
+
     def publish_with_lifecycle_lease(publication_run_id: str, payload: dict) -> dict:
         try:
             lease = APPLICATION_MUTATION_GATE.lease() if APPLICATION_MUTATION_GATE is not None else None
@@ -246,9 +269,9 @@ def run_post_build_automation(run_id: str, *, dry_run: bool, settings: dict | No
     return automation_service.run_post_build(
         run_id,
         dry_run=dry_run,
-        settings=settings or app_settings(),
+        settings=selected_settings,
         store=store or BuildStore(DATA / "builds"),
-        validate=validate_build_artifact,
+        validate=admit_automatic_validation,
         publish=publish_with_lifecycle_lease,
     )
 
@@ -297,6 +320,22 @@ def create_execution_manager(*, store: BuildStore | None = None, queue_capacity:
     return ExecutionManager(store or BuildStore(DATA / "builds"), queue_capacity=queue_capacity, execute=callback)
 
 
+def create_validation_manager(*, store: BuildStore | None = None, queue_capacity: int = 8, execute=None):
+    callback = execute or execute_validation_attempt
+    selected_store = store or BuildStore(DATA / "builds")
+    return validation_service.ValidationManager(
+        selected_store,
+        execute=callback,
+        registry_root=DATA / "validation-containers",
+        workspace_root=ROOT,
+        allowed_previous_roots=(REPOSITORY_ROOT / "pool",),
+        queue_capacity=queue_capacity,
+        resume_publication=lambda run_id, attempt_id: continue_validation_publication(
+            run_id, attempt_id, store=selected_store,
+        ),
+    )
+
+
 def prepare_application_directories() -> None:
     """Prepare mutable application data through the one startup-owned path."""
     RUNTIME.prepare_data_directories()
@@ -325,6 +364,7 @@ def start_execution_manager(
     http_server,
     manager: ExecutionManager | None = None,
     *,
+    validation_manager=None,
     prepare_directories: bool = True,
     shutdown_check=None,
 ) -> ExecutionManager:
@@ -337,13 +377,41 @@ def start_execution_manager(
         prepare_application_directories()
         if shutdown_check is not None:
             shutdown_check()
+    global APPLICATION_VALIDATION_MANAGER
     selected = manager or create_execution_manager()
+    selected_validation = validation_manager or create_validation_manager(store=selected.store)
     recovery = execution_recovery.recover_startup(selected.store)
+    container_recovery = validation_oci.recover_owned_containers(
+        DATA / "validation-containers", workspace=ROOT,
+    )
+    attempt_recovery = dependency_preparation.recover_interrupted_attempts(
+        selected.store, container_recovery.resolved_identities,
+        inventory_trustworthy=container_recovery.inventory_trustworthy,
+    )
+    attempt_blocker = None
+    if attempt_recovery["blockers"]:
+        attempt_blocker = {
+            "code": "validation_attempt_recovery_unresolved",
+            "message": "Build/Test admission is blocked until validation attempt recovery is resolved",
+            "details": {"unresolved_count": len(attempt_recovery["blockers"])},
+        }
+    blockers = [value for value in (
+        recovery.admission_blocker, container_recovery.admission_blocker, attempt_blocker,
+    ) if value]
+    admission_blocker = None
+    if len(blockers) == 1:
+        admission_blocker = blockers[0]
+    elif blockers:
+        admission_blocker = {
+            "code": "startup_recovery_unresolved",
+            "message": "Build/Test admission is blocked until workload recovery is resolved",
+            "details": {"blockers": blockers},
+        }
     authorization = getattr(http_server, "cleanup_authorization", None)
     if authorization is None:
         authorization = workspace_cleanup.CleanupAuthorization()
         http_server.cleanup_authorization = authorization
-    authorization.update_global_blocker(recovery.admission_blocker)
+    authorization.update_global_blocker(admission_blocker)
     if getattr(http_server, "storage_inventory", None) is None:
         http_server.storage_inventory = create_storage_inventory()
     if shutdown_check is not None:
@@ -356,7 +424,19 @@ def start_execution_manager(
     except (RecipeStartupError, recipe_store.RecipeStoreError, builtin_recipe.BuiltinRecipeError) as exc:
         LOGGER.error("Recipe startup failure: %s", json.dumps(recipe_startup_diagnostic(exc), sort_keys=True))
         raise
-    selected.start(admission_blocker=recovery.admission_blocker)
+    if admission_blocker is None:
+        dependency_preparation.SUPERVISOR.open_admission()
+    else:
+        dependency_preparation.SUPERVISOR.block("startup recovery is unresolved")
+    # Validation admission must exist before recovered Builds can finish and
+    # request automatic validation.  Publish ownership first so the outer
+    # lifecycle can always stop this worker during a partial startup.
+    http_server.validation_manager = selected_validation
+    selected_validation.start(admission_blocker=admission_blocker)
+    APPLICATION_VALIDATION_MANAGER = selected_validation
+    if shutdown_check is not None:
+        shutdown_check()
+    selected.start(admission_blocker=admission_blocker)
     if shutdown_check is not None:
         shutdown_check()
     http_server.recipe_migration = migration.as_dict()
@@ -366,12 +446,23 @@ def start_execution_manager(
         "previous_definition_version": reconciliation.previous_definition_version,
     }
     http_server.execution_recovery = recovery.as_dict()
+    http_server.validation_container_recovery = container_recovery.as_dict()
+    http_server.validation_attempt_recovery = attempt_recovery
     http_server.execution_manager = selected
+    http_server.validation_manager = selected_validation
     return selected
 
 
 def stop_execution_manager(http_server, *, timeout: float | None = None) -> None:
     """Stop and detach the HTTP server's manager after submitted work drains."""
+    global APPLICATION_VALIDATION_MANAGER
+    validation_manager = getattr(http_server, "validation_manager", None)
+    if validation_manager is not None:
+        validation_manager.begin_shutdown()
+    if not dependency_preparation.SUPERVISOR.shutdown(timeout):
+        raise TimeoutError("Validation dependency preparations did not stop before the timeout")
+    if validation_manager is not None and not validation_manager.shutdown(timeout):
+        raise TimeoutError("Validation manager did not stop before the timeout")
     mutation_gate = getattr(http_server, "mutation_gate", None)
     if mutation_gate is not None:
         mutation_gate.begin_shutdown()
@@ -379,10 +470,12 @@ def stop_execution_manager(http_server, *, timeout: float | None = None) -> None
         if not result["complete"]:
             raise TimeoutError("Durable HTTP mutations did not stop before the timeout")
     manager = getattr(http_server, "execution_manager", None)
-    if manager is None:
-        return
-    manager.stop(timeout=timeout)
+    if manager is not None:
+        manager.stop(timeout=timeout)
     http_server.execution_manager = None
+    http_server.validation_manager = None
+    if APPLICATION_VALIDATION_MANAGER is validation_manager:
+        APPLICATION_VALIDATION_MANAGER = None
     # This helper stops only the replaceable manager, not the shared server
     # lifecycle.  A later manager start therefore receives a fresh open gate.
     http_server.mutation_gate = MutationGate()
@@ -716,16 +809,195 @@ def create_storage_inventory():
     )
 
 
-def validate_build_artifact(run_id: str, payload: dict | None = None) -> dict:
-    payload = payload or {}
-    result = artifact_validation.validate_artifact(
-        run_id,
-        store=BuildStore(DATA / "builds"),
-        previous_artifact=str(payload.get("previous_artifact") or ""),
-        profile=str(payload.get("profile") or "bookworm"),
-        allowed_previous_roots=(REPOSITORY_ROOT / "pool",),
+def admit_validation_attempt(manager, run_id: str, payload: dict | None = None) -> dict:
+    if manager is None:
+        raise validation_service.ValidationAdmissionError(
+            "validation_manager_unavailable", "Validation manager is unavailable", status=503,
+        )
+    return manager.admit(run_id, payload)
+
+
+def get_validation_attempt(run_id: str, attempt_id: str, *, manager=None) -> dict:
+    store = BuildStore(DATA / "builds")
+    run = store.load(run_id)
+    if not run:
+        raise validation_service.ValidationAdmissionError(
+            "build_run_not_found", "Build Run was not found", status=404,
+        )
+    attempt = validation_service.load_attempt(store, run_id, attempt_id)
+    blocker = manager.blocker if manager is not None else None
+    return validation_service.public_attempt(attempt, run=run, blocker=blocker)
+
+
+def cancel_validation_attempt(manager, run_id: str, attempt_id: str) -> dict:
+    if manager is None:
+        raise validation_service.ValidationCancellationError(
+            "validation_manager_unavailable", "Validation manager is unavailable", status=503,
+        )
+    return manager.cancel(run_id, attempt_id)
+
+
+def _notify_validation_best_effort(result: dict) -> None:
+    try:
+        notification_service().notify_validation_result(result)
+    except Exception:
+        LOGGER.exception("Validation notification failed after durable completion")
+
+
+def _append_validation_log_best_effort(store: BuildStore, run_id: str, attempt_id: str, status: str) -> None:
+    try:
+        store.append_log_line(run_id, f"validation {attempt_id}: {status}")
+    except Exception:
+        LOGGER.exception("Validation log append failed after durable completion")
+
+
+def continue_validation_publication(run_id: str, attempt_id: str, *, store: BuildStore | None = None):
+    """Consume one durable automatic-publication intent; safe to replay after a crash."""
+    selected_store = store or BuildStore(DATA / "builds")
+    try:
+        attempt = validation_service.load_attempt(selected_store, run_id, attempt_id)
+        automation = validation_service.load_automation(selected_store, run_id, attempt_id)
+        if not isinstance(attempt, dict) or not isinstance(automation, dict):
+            return None
+        publication_state = automation.get(
+            "publication_state",
+            validation_service.PUBLICATION_PENDING
+            if automation.get("publish_after_success")
+            else validation_service.PUBLICATION_NOT_REQUESTED,
+        )
+        if (
+            attempt.get("status") != "success"
+            or publication_state != validation_service.PUBLICATION_PENDING
+        ):
+            return None
+        run = selected_store.load(run_id)
+        if not run:
+            return None
+        payload = {"confirm": automation_service.publication_confirmation(run)}
+        gate = APPLICATION_MUTATION_GATE
+        lease = gate.lease() if gate is not None else None
+        if lease is None:
+            result = publish_build_artifact(run_id, payload)
+        else:
+            with lease:
+                result = publish_build_artifact(run_id, payload)
+        validation_service.complete_publication_intent(selected_store, run_id, attempt_id)
+        return result
+    except MutationGateClosed:
+        LOGGER.info("Automatic publication remains pending because shutdown has started")
+    except Exception:
+        # The pending bit deliberately remains durable. Startup replay is safe:
+        # publication verifies an already-present exact repository identity.
+        LOGGER.exception("Automatic publication continuation failed for %s/%s", run_id, attempt_id)
+    return None
+
+
+def execute_validation_attempt(run_id: str, attempt_id: str, event: threading.Event, automation: dict | None = None) -> dict:
+    """Execute one already-admitted attempt through preparation and offline lifecycle."""
+    store = BuildStore(DATA / "builds")
+    run = store.load(run_id)
+    if not run:
+        raise artifact_validation.ValidationError("build_run_not_found", "Build Run was not found")
+    attempt = validation_service.load_attempt(store, run_id, attempt_id)
+    artifact = Path(str((run.get("artifact") or {}).get("path") or ""))
+    if run.get("status") != "success" or not artifact.is_file():
+        raise artifact_validation.ValidationError("artifact_not_available", "A successful Build Run with an artifact is required")
+    profile = attempt["inputs"]["profile"]
+    preparation_previous = (
+        Path(run["workspace"]) / "validation" / attempt_id / "preparation-previous.deb"
+        if attempt["inputs"].get("previous_artifact") else None
     )
-    notification_service().notify_validation_result(result)
+    store.append_log_line(run_id, f"validation {attempt_id}: running dependency preparation")
+    try:
+        recipe = validate_recipe_metadata(json.loads((Path(run["workspace"]) / "recipe.json").read_text()))
+        attempt = dependency_preparation.prepare_runtime_dependencies(
+            run_id,
+            attempt_id,
+            store=store,
+            current_artifact=artifact,
+            previous_artifact=preparation_previous,
+            profile_name=profile,
+            repositories=recipe.get("runtime_apt_repositories") or [],
+            registry_root=DATA / "validation-containers",
+            cancellation_event=event,
+            admitted=True,
+        )
+    except Exception as exc:
+        current = validation_service.load_attempt(store, run_id, attempt_id)
+        projected = validation_service.public_attempt(current, run=store.load(run_id))
+        _notify_validation_best_effort(projected)
+        request_maintenance(refresh=True, cleanup=True)
+        if current["status"] in {"failed", "cancelled", "cancelling"}:
+            _append_validation_log_best_effort(store, run_id, attempt_id, current["status"])
+            return projected
+        code = str(getattr(exc, "code", "validation_preparation_failed"))
+        raise artifact_validation.ValidationError(code, str(exc), details=getattr(exc, "details", {})) from exc
+    prepared = attempt["prepared_dependencies"]
+    registered = False
+    lifecycle_started = False
+    lifecycle_completion_attempted = False
+    try:
+        dependency_preparation.SUPERVISOR.register(attempt_id, event)
+        registered = True
+        dependency_preparation.begin_lifecycle_attempt(store, run_id, attempt_id, prepared)
+        lifecycle_started = True
+        store.append_log_line(run_id, f"validation {attempt_id}: running offline lifecycle")
+        result = artifact_validation.validate_artifact(
+            run_id,
+            store=store,
+            previous_artifact=str(preparation_previous or ""),
+            profile=profile,
+            allowed_previous_roots=(REPOSITORY_ROOT / "pool",),
+            prepared_dependencies=prepared,
+            attempt_id=attempt_id,
+            registry_root=DATA / "validation-containers",
+            cancellation_event=event,
+        )
+        lifecycle_completion_attempted = True
+        completed = dependency_preparation.complete_lifecycle_attempt(store, run_id, attempt_id, result)
+        if completed["status"] == "cancelled" and result.get("status") != "cancelled":
+            result["status"] = "cancelled"
+            result["error"] = {
+                "code": "validation_lifecycle_cancelled",
+                "message": "Offline lifecycle validation was cancelled",
+                "details": {},
+            }
+    except Exception as exc:
+        if lifecycle_started and not lifecycle_completion_attempted:
+            lifecycle_completion_attempted = True
+            code = str(getattr(exc, "code", "validation_lifecycle_failed"))
+            completed = dependency_preparation.complete_lifecycle_attempt(store, run_id, attempt_id, {
+                "status": "failed",
+                "error": {"code": code, "message": str(exc), "details": getattr(exc, "details", {})},
+            })
+            if completed["status"] == "cancelled":
+                projected = validation_service.public_attempt(completed, run=store.load(run_id))
+                _notify_validation_best_effort(projected)
+                _append_validation_log_best_effort(store, run_id, attempt_id, "cancelled")
+                request_maintenance(refresh=True, cleanup=True)
+                return projected
+        if isinstance(exc, artifact_validation.ValidationError):
+            raise
+        raise artifact_validation.ValidationError(
+            str(getattr(exc, "code", "validation_lifecycle_failed")),
+            str(exc),
+            details=getattr(exc, "details", {}),
+        ) from exc
+    finally:
+        if registered:
+            dependency_preparation.SUPERVISOR.unregister(attempt_id)
+    result["attempt_id"] = attempt_id
+    result["dependency_preparation"] = {
+        "status": "success",
+        "package_count": len(prepared["packages"]),
+        "profile": prepared["profile_name"],
+        "image_id": prepared["image"]["id"],
+    }
+    _notify_validation_best_effort(result)
+    _append_validation_log_best_effort(store, run_id, attempt_id, result.get("status", "failed"))
+    # Durable pending intent survives shutdown, crashes, and best-effort side
+    # effect failures. Startup asks the same idempotent continuation to resume.
+    continue_validation_publication(run_id, attempt_id, store=store)
     request_maintenance(refresh=True, cleanup=True)
     return result
 
@@ -738,7 +1010,10 @@ def publish_build_artifact(run_id: str, payload: dict | None = None) -> dict:
         distribution=apt["distribution"], component=apt["component"],
         confirm=str(payload.get("confirm") or ""),
     )
-    notification_service().notify_publication_result(result)
+    try:
+        notification_service().notify_publication_result(result)
+    except Exception:
+        LOGGER.exception("Publication notification failed after durable completion")
     request_maintenance(refresh=True, cleanup=True)
     return result
 
@@ -928,6 +1203,11 @@ def package_projection_service() -> package_service.PackageService:
         read_workflow=read_workflow_file,
         repo_settings=repo_settings,
         release_lookup=lambda repository: github_release_cache().get(repository),
+        run_projector=lambda run, store: validation_service.project_run(
+            run,
+            store,
+            blocker=APPLICATION_VALIDATION_MANAGER.blocker if APPLICATION_VALIDATION_MANAGER is not None else None,
+        ),
     )
 
 
@@ -999,23 +1279,44 @@ def list_recipes() -> list[dict]:
 
 
 def list_executions(limit: int = 50, *, structured_runs: list[dict] | None = None) -> list[dict]:
+    store = BuildStore(DATA / "builds")
+    runs = structured_runs if structured_runs is not None else store.list(limit=1_000_000)
+    projected = [validation_service.project_run(
+        run,
+        store,
+        blocker=APPLICATION_VALIDATION_MANAGER.blocker if APPLICATION_VALIDATION_MANAGER is not None else None,
+    ) for run in runs]
     return execution_service.list_executions(
-        BuildStore(DATA / "builds"),
+        store,
         build_run_package,
         limit=limit,
-        runs=structured_runs,
+        runs=projected,
     )
 
 
 def get_execution(run_id: str) -> dict | None:
-    execution = execution_service.get_execution(BuildStore(DATA / "builds"), run_id)
+    store = BuildStore(DATA / "builds")
+    run = store.load(run_id)
+    projected = validation_service.project_run(
+        run,
+        store,
+        blocker=APPLICATION_VALIDATION_MANAGER.blocker if APPLICATION_VALIDATION_MANAGER is not None else None,
+    ) if run else None
+    execution = execution_service.get_execution(store, run_id, run=projected)
     if execution:
         execution["package"] = build_run_package(execution)
     return execution
 
 
 def get_execution_log(run_id: str, *, verbosity: str = "normal", after: int = 0) -> dict | None:
-    return execution_service.get_log(BuildStore(DATA / "builds"), run_id, verbosity=verbosity, after=after)
+    store = BuildStore(DATA / "builds")
+    run = store.load(run_id)
+    projected = validation_service.project_run(
+        run,
+        store,
+        blocker=APPLICATION_VALIDATION_MANAGER.blocker if APPLICATION_VALIDATION_MANAGER is not None else None,
+    ) if run else None
+    return execution_service.get_log(store, run_id, verbosity=verbosity, after=after, run=projected)
 
 
 def delete_execution_log(run_id: str, *, authorization=None) -> dict:
@@ -1279,10 +1580,11 @@ def serve_application(
     shutdown_timeout=DEFAULT_SHUTDOWN_TIMEOUT,
 ) -> int:
     """Own startup, serving, and shutdown under one diagnostic target."""
-    global APPLICATION_MAINTENANCE_SERVICE, APPLICATION_MUTATION_GATE, GITHUB_RELEASE_CACHE_SERVICE
+    global APPLICATION_MAINTENANCE_SERVICE, APPLICATION_MUTATION_GATE, APPLICATION_VALIDATION_MANAGER, GITHUB_RELEASE_CACHE_SERVICE
     graceful_timeout = _graceful_shutdown_timeout(shutdown_timeout)
     http_server = None
     manager = None
+    validation_manager = None
     maintenance_service = None
     cleanup_started = threading.Event()
     shutdown_requested = threading.Event()
@@ -1326,6 +1628,12 @@ def serve_application(
                         selected_manager.begin_shutdown()
                     except BaseException as exc:
                         cleanup_failures.append(("execution admission shutdown", exc))
+                selected_validation = validation_manager
+                if selected_validation is not None:
+                    try:
+                        selected_validation.begin_shutdown()
+                    except BaseException as exc:
+                        cleanup_failures.append(("validation admission shutdown", exc))
                 selected_maintenance = maintenance_service
                 if selected_maintenance is not None:
                     selected_maintenance.stop()
@@ -1366,6 +1674,7 @@ def serve_application(
             prepare_directories=False,
             shutdown_check=check_shutdown_requested,
         )
+        validation_manager = getattr(http_server, "validation_manager", None)
         check_shutdown_requested()
         maintenance_service = (
             maintenance.TargetMaintenanceService(retention_target)
@@ -1401,14 +1710,43 @@ def serve_application(
                 os.write(signal_write_fd, b"\0")
             except (BlockingIOError, OSError):
                 pass
+        if validation_manager is None and http_server is not None:
+            validation_manager = getattr(http_server, "validation_manager", None)
         manager_started = manager is not None and manager.worker is not None
         if manager_started:
             try:
                 manager.begin_shutdown()
             except BaseException as exc:
                 cleanup_failures.append(("execution admission shutdown", exc))
+        if validation_manager is not None:
+            try:
+                validation_manager.begin_shutdown()
+            except BaseException as exc:
+                cleanup_failures.append(("validation admission shutdown", exc))
         if maintenance_service is not None:
             maintenance_service.stop()
+        try:
+            validation_stopped = dependency_preparation.SUPERVISOR.shutdown(
+                _remaining_shutdown_time(graceful_deadline)
+            )
+            if not validation_stopped:
+                failure = TimeoutError(
+                    "validation preparation/lifecycle did not stop within the graceful shutdown target"
+                )
+                cleanup_failures.append(("validation shutdown", failure))
+                LOGGER.error("Incomplete validation shutdown: %s", failure)
+        except BaseException as exc:
+            cleanup_failures.append(("validation shutdown", exc))
+        if validation_manager is not None:
+            try:
+                if not validation_manager.shutdown(_remaining_shutdown_time(graceful_deadline)):
+                    failure = TimeoutError("validation worker did not stop within the graceful shutdown target")
+                    cleanup_failures.append(("validation manager shutdown", failure))
+                    LOGGER.error("Incomplete validation manager shutdown: %s", failure)
+                    validation_manager.shutdown(None)
+            except BaseException as exc:
+                cleanup_failures.append(("validation manager shutdown", exc))
+                validation_manager.shutdown(None)
         try:
             mutation_result = mutation_gate.wait_for_quiescence(
                 _remaining_shutdown_time(graceful_deadline)
@@ -1491,6 +1829,8 @@ def serve_application(
                     cleanup_failures.append(("signal wakeup pipe close", exc))
         APPLICATION_MUTATION_GATE = previous_mutation_gate
         APPLICATION_MAINTENANCE_SERVICE = previous_maintenance_service
+        if APPLICATION_VALIDATION_MANAGER is validation_manager:
+            APPLICATION_VALIDATION_MANAGER = None
 
     for component, failure in cleanup_failures:
         LOGGER.error("Incomplete %s: %s", component, failure)

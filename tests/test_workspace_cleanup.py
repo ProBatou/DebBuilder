@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from debbuilder import build_pipeline, execution_service, source_acquisition, workspace_cleanup
+from debbuilder import build_pipeline, execution_service, source_acquisition, validation_service, workspace_cleanup
 from debbuilder.build_store import BuildStore
 from debbuilder.command_containment import expected_control_group, starting_metadata
 from debbuilder.command_containment import ContainmentError
@@ -96,6 +96,42 @@ class WorkspaceCleanupTests(unittest.TestCase):
         result = workspace_cleanup.apply_retention(self.store, {"failed_workspaces_to_retain": 0})
         self.assertEqual(result["cleaned"], [])
         self.assertEqual(execution_service.delete_logs(self.store, all_runs=True, dry_run=True)["count"], 0)
+
+    def test_manifest_backed_queued_validation_blocks_cleanup_and_history_deletion(self):
+        run, root = self.make_run("manifest-queued")
+        attempt_id = "queued-attempt"
+        attempt_root = validation_service.attempt_root(self.store, run["id"], attempt_id)
+        attempt_root.mkdir(parents=True)
+        validation_service._save_attempt(attempt_root / "attempt.json", {
+            "contract_version": 1,
+            "id": attempt_id,
+            "build_run_id": run["id"],
+            "inputs": {"profile": "bookworm", "artifact": {
+                "package": "demo", "version": "1.0-1", "architecture": "all",
+                "size": 9, "sha256": "a" * 64,
+            }, "previous_artifact": None},
+            "selected_profile": {"name": "bookworm", "image": {
+                "name": "debbuilder-validation:bookworm", "id": "sha256:" + "b" * 64, "digest": None,
+            }},
+            "created_at": "2026-09-14T10:00:00+00:00",
+            "started_at": None,
+            "finished_at": None,
+            "status": "queued",
+            "prepared_dependencies": None,
+            "result": None,
+            "error": None,
+        })
+
+        with self.assertRaisesRegex(workspace_cleanup.WorkspaceBusyError, "active"):
+            workspace_cleanup.clean_workspace(self.store, run["id"])
+        with self.assertRaisesRegex(workspace_cleanup.WorkspaceBusyError, "active"):
+            execution_service.delete_log(self.store, run["id"])
+        result = workspace_cleanup.apply_retention(
+            self.store, {"failed_workspaces_to_retain": 0},
+        )
+        self.assertIn(run["id"], result["skipped"])
+        self.assertTrue((root / "source/large-data").is_file())
+        self.assertTrue((root / "logs/pipeline.log").is_file())
 
     def test_non_latest_running_validation_or_publication_denies_cleanup(self):
         for records_key in ("validations", "publications"):

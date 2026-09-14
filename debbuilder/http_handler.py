@@ -142,6 +142,27 @@ def create_handler(api):
                 if path.endswith("/logs"):
                     self._get_execution_log(parsed)
                     return True
+                validation_identity = self._validation_identity(path)
+                if validation_identity is not None:
+                    run_id, attempt_id, action = validation_identity
+                    if action:
+                        return False
+                    try:
+                        validation = api.get_validation_attempt(
+                            run_id,
+                            attempt_id,
+                            manager=getattr(self.server, "validation_manager", None),
+                        )
+                    except ValueError as exc:
+                        api.json_response(self, {"error": {
+                            "code": "invalid_validation_identity", "message": str(exc), "details": {},
+                        }}, 400)
+                        return True
+                    except api.validation_service.ValidationAdmissionError as exc:
+                        api.json_response(self, {"error": exc.as_dict()}, exc.status)
+                        return True
+                    api.json_response(self, {"validation": validation})
+                    return True
                 self._get_execution(path)
             elif path == "/api/settings":
                 api.json_response(self, {"settings": api.settings_view()})
@@ -156,6 +177,16 @@ def create_handler(api):
             else:
                 return False
             return True
+
+        @staticmethod
+        def _validation_identity(path: str):
+            parts = path.strip("/").split("/")
+            if len(parts) not in {5, 6} or parts[:2] != ["api", "executions"] or parts[3] != "validations":
+                return None
+            run_id = urllib.parse.unquote(parts[2])
+            attempt_id = urllib.parse.unquote(parts[4])
+            action = parts[5] if len(parts) == 6 else ""
+            return run_id, attempt_id, action
 
         def _get_package(self, path: str):
             name = urllib.parse.unquote(path.rsplit("/", 1)[-1])
@@ -246,6 +277,34 @@ def create_handler(api):
 
         def _post(self, data: dict):
             parsed_path = urlparse(self.path).path
+            validation_identity = self._validation_identity(parsed_path)
+            if validation_identity is not None and validation_identity[2] == "cancel":
+                run_id, attempt_id, _action = validation_identity
+                if not isinstance(data, dict) or data:
+                    api.json_response(self, {"error": {
+                        "code": "invalid_validation_cancellation_request",
+                        "message": "Validation cancellation does not accept request fields",
+                        "details": {"run_id": run_id, "attempt_id": attempt_id},
+                    }}, 400)
+                    return
+                try:
+                    result = api.cancel_validation_attempt(
+                        getattr(self.server, "validation_manager", None), run_id, attempt_id,
+                    )
+                except ValueError as exc:
+                    api.json_response(self, {"error": {
+                        "code": "invalid_validation_identity", "message": str(exc), "details": {},
+                    }}, 400)
+                    return
+                except api.validation_service.ValidationAdmissionError as exc:
+                    api.json_response(self, {"error": exc.as_dict()}, exc.status)
+                    return
+                except api.validation_service.ValidationCancellationError as exc:
+                    api.json_response(self, {"error": exc.as_dict()}, exc.status)
+                    return
+                status = 202 if result["validation"]["status"] == "cancelling" else 200
+                api.json_response(self, {"ok": True, **result}, status)
+                return
             if parsed_path.startswith("/api/executions/") and parsed_path.endswith("/cancel"):
                 run_id = urllib.parse.unquote(parsed_path[len("/api/executions/"):-len("/cancel")].strip("/"))
                 if not isinstance(data, dict) or data:
@@ -319,11 +378,13 @@ def create_handler(api):
             if self.path.startswith("/api/executions/") and self.path.endswith("/validate"):
                 run_id = urllib.parse.unquote(self.path[len("/api/executions/"):-len("/validate")].strip("/"))
                 try:
-                    result = api.validate_build_artifact(run_id, data)
-                except api.artifact_validation.ValidationError as exc:
-                    api.json_response(self, {"error": {"code": exc.code, "message": str(exc), "details": exc.details}}, 400)
+                    result = api.admit_validation_attempt(
+                        getattr(self.server, "validation_manager", None), run_id, data,
+                    )
+                except api.validation_service.ValidationAdmissionError as exc:
+                    api.json_response(self, {"error": exc.as_dict()}, exc.status)
                     return
-                api.json_response(self, {"validation": result}, 200 if result["status"] == "success" else 422)
+                api.json_response(self, {"validation": result}, 202)
                 return
             if self.path.startswith("/api/executions/") and self.path.endswith("/publish"):
                 run_id = urllib.parse.unquote(self.path[len("/api/executions/"):-len("/publish")].strip("/"))

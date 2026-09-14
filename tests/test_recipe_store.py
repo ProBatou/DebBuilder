@@ -30,7 +30,7 @@ class RecipeStoreTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def test_load_migrates_legacy_recipe_and_writes_canonical_v3(self):
+    def test_load_migrates_legacy_recipe_and_writes_canonical_v4(self):
         path = self.directory / "legacy.json"
         path.write_text(json.dumps({
             "schema_version": 1,
@@ -41,9 +41,10 @@ class RecipeStoreTests(unittest.TestCase):
 
         result = load_recipe_result(path)
 
-        self.assertEqual(result.recipe["schema_version"], 3)
+        self.assertEqual(result.recipe["schema_version"], 4)
+        self.assertEqual(result.recipe["runtime_apt_repositories"], [])
         self.assertEqual(result.recipe["build"]["inactivity_timeout"], 75)
-        self.assertEqual(result.applied_migrations, ("v1_to_v2", "v2_to_v3"))
+        self.assertEqual(result.applied_migrations, ("v1_to_v2", "v2_to_v3", "v3_to_v4"))
         self.assertTrue(result.rewritten)
         self.assertEqual(path.read_bytes(), canonical_bytes(result.recipe))
 
@@ -54,7 +55,7 @@ class RecipeStoreTests(unittest.TestCase):
 
         loaded = load_recipe(path, write_back=False)
 
-        self.assertEqual(loaded["schema_version"], 3)
+        self.assertEqual(loaded["schema_version"], 4)
         self.assertEqual(path.read_bytes(), original)
 
     def test_canonical_current_recipe_is_not_rewritten(self):
@@ -77,7 +78,7 @@ class RecipeStoreTests(unittest.TestCase):
             with ThreadPoolExecutor(max_workers=8) as executor:
                 loaded = list(executor.map(lambda _index: load_recipe(path), range(16)))
 
-        self.assertTrue(all(recipe["schema_version"] == 3 for recipe in loaded))
+        self.assertTrue(all(recipe["schema_version"] == 4 for recipe in loaded))
         self.assertEqual(replace.call_count, 1)
 
     def test_save_accepts_frontend_v1_and_is_idempotent(self):
@@ -95,7 +96,7 @@ class RecipeStoreTests(unittest.TestCase):
         with mock.patch("debbuilder.recipe_store.os.replace") as replace:
             repeated = save_recipe(path, frontend)
 
-        self.assertEqual(stored["schema_version"], 3)
+        self.assertEqual(stored["schema_version"], 4)
         self.assertEqual(repeated, stored)
         replace.assert_not_called()
         self.assertEqual(path.stat().st_mtime_ns, before)

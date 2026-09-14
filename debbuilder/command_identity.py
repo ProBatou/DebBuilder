@@ -96,6 +96,16 @@ def current_recorder() -> IdentityRecorder | None:
     return _RECORDER.get()
 
 
+@contextmanager
+def suspended_identity_recording():
+    """Temporarily run stronger out-of-band cleanup without workload cancellation/policy."""
+    token = _RECORDER.set(None)
+    try:
+        yield
+    finally:
+        _RECORDER.reset(token)
+
+
 def _read_boot_id(path: Path = BOOT_ID_PATH) -> str:
     value = path.read_text(encoding="ascii").strip().lower()
     if not BOOT_ID.fullmatch(value):

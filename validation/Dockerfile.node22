@@ -2,7 +2,7 @@ FROM node:22.22.1-bookworm-slim@sha256:af5818e10f6294a719b4314f34ec03d8e8ad8f571
 
 ENV container=docker
 RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd systemd-sysv dbus dpkg curl \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd systemd-sysv dbus dpkg curl ca-certificates python3 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* \
     && systemctl mask systemd-remount-fs.service systemd-logind.service getty.target console-getty.service

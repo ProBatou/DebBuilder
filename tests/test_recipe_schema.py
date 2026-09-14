@@ -100,7 +100,7 @@ class RecipeSchemaTests(unittest.TestCase):
             },
         }
         stored = recipe_document_for_storage(document)
-        self.assertEqual(stored["schema_version"], 3)
+        self.assertEqual(stored["schema_version"], 4)
         self.assertEqual(stored["artifact"]["payload"], {
             "mode": "paths", "include": ["server.py", "static/"], "exclude": ["static/dev/"],
         })
@@ -119,7 +119,7 @@ class RecipeSchemaTests(unittest.TestCase):
             },
         }
         stored = recipe_document_for_storage(legacy)
-        self.assertEqual(stored["schema_version"], 3)
+        self.assertEqual(stored["schema_version"], 4)
         self.assertEqual(stored["artifact"]["payload"], {
             "mode": "paths",
             "include": ["share/defaults.yml", "bin/tool"],
@@ -143,7 +143,8 @@ class RecipeSchemaTests(unittest.TestCase):
             "build": {"timeout": 120, "output": {"mode": "source"}},
         }
         loaded = validate_recipe_metadata(historical)
-        self.assertEqual(loaded["schema_version"], 3)
+        self.assertEqual(loaded["schema_version"], 4)
+        self.assertEqual(loaded["runtime_apt_repositories"], [])
         self.assertEqual(loaded["build"]["inactivity_timeout"], 120)
         self.assertEqual(loaded["artifact"]["payload"]["include"], ["snapshot"])
         self.assertEqual(loaded["artifact"]["payload"]["legacy_file_layout"], "basename")
@@ -196,7 +197,8 @@ class RecipeSchemaTests(unittest.TestCase):
             "name": "demo-recipe", "package": {"name": "demo"},
             "source": {"repository": "owner/demo", "tracking": "latest_release", "version": {"source": "tag"}},
         })
-        self.assertEqual(recipe["schema_version"], 3)
+        self.assertEqual(recipe["schema_version"], 4)
+        self.assertEqual(recipe["runtime_apt_repositories"], [])
         self.assertEqual(recipe["package"]["name"], "demo")
         self.assertEqual(recipe["package"]["version_revision"], "1")
         self.assertEqual(recipe["source"]["repository"], "owner/demo")

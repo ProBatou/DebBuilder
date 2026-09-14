@@ -17,6 +17,7 @@ const STATUS_LABELS = {
   build_failed: 'Build failed',
   validating: 'Validating',
   validation_failed: 'Validation failed',
+  validation_cancelled: 'Validation cancelled',
   publishing: 'Publishing',
   publication_failed: 'Publication failed',
   ready_to_publish: 'Ready to publish',
@@ -110,6 +111,22 @@ async function cancelExecutionRequest(runId) {
   }
   const outcome = payload.status === 'cancelled' ? 'cancelled' : payload.status === 'cancelling' ? 'cancelling' : 'accepted';
   return {outcome, httpStatus: response.status, payload};
+}
+
+async function cancelValidationRequest(runId, attemptId) {
+  const response = await fetch(`/api/executions/${encodeURIComponent(runId)}/validations/${encodeURIComponent(attemptId)}/cancel`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: '{}',
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    const error = new Error(payload.error?.message || payload.error || response.statusText || 'Validation cancellation failed');
+    error.status = response.status;
+    error.code = payload.error?.code || 'request_failed';
+    throw error;
+  }
+  return payload.validation;
 }
 
 function fmtTime(timestamp) {

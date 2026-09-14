@@ -28,8 +28,10 @@ def derive_lifecycle_status(build_status: str, validation_status: str = "not_run
         return "building"
     if build_status != "success":
         return build_status or "unknown"
-    if validation_status == "running":
+    if validation_status in {"queued", "running", "cancelling"}:
         return "validating"
+    if validation_status == "cancelled":
+        return "validation_cancelled"
     if validation_status == "failed":
         return "validation_failed"
     if validation_status != "success":
@@ -63,7 +65,7 @@ def allowed_actions(package_state: str, recipe_id: str, run: dict | None) -> dic
         "build": has_recipe and package_state in BUILDABLE_PACKAGE_STATES and not (
             run.get("mode") == "dry_run" and run.get("status") == "cancelled"
         ),
-        "validate": build_ready and validation_status != "running" and publication_status != "running",
+        "validate": build_ready and validation_status not in {"queued", "running", "cancelling"} and publication_status != "running",
         "publish": build_ready and validation_status == "success" and publication_status not in {"running", "success"},
     }
 

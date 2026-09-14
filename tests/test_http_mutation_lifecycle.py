@@ -59,7 +59,7 @@ class HttpMutationLifecycleTests(AdminApiCase):
         cases = (
             (
                 "POST", "/api/executions/20260822-031400/validate", {},
-                "validate_build_artifact", {"status": "success"},
+                "admit_validation_attempt", {"status": "queued", "attempt_id": "validation-one"},
             ),
             (
                 "POST", "/api/executions/20260822-031400/publish", {},
@@ -108,7 +108,10 @@ class HttpMutationLifecycleTests(AdminApiCase):
         self.assertEqual(status, 200)
         self.assertTrue(requested.is_set())
         maintenance_service.request.assert_called_once_with(cleanup=True)
-        self.assertTrue(gate.wait_for_quiescence(0)["complete"])
+        # The client can finish reading the response immediately before the
+        # server thread exits its lease context; assert bounded release rather
+        # than scheduler ordering.
+        self.assertTrue(gate.wait_for_quiescence(1)["complete"])
 
     def test_new_mutator_is_rejected_but_read_only_request_is_excluded(self):
         gate = MutationGate()

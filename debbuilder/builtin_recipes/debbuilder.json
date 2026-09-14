@@ -1,11 +1,11 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "name": "debbuilder",
   "active": true,
   "management": {
     "owner": "application",
     "builtin_id": "debbuilder",
-    "definition_version": 4,
+    "definition_version": 5,
     "operator_overrides": {}
   },
   "resource_limits": {
@@ -15,6 +15,7 @@
     "io_read_bandwidth_max_bytes_per_sec": null,
     "io_write_bandwidth_max_bytes_per_sec": null
   },
+  "runtime_apt_repositories": [],
   "package": {
     "name": "debbuilder",
     "version_revision": "2",

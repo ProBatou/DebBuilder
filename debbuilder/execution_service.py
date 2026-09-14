@@ -230,9 +230,9 @@ def list_executions(
     ]
 
 
-def get_execution(store: BuildStore, run_id: str) -> dict | None:
+def get_execution(store: BuildStore, run_id: str, *, run: dict | None = None) -> dict | None:
     require_safe_name(run_id, "execution")
-    run = store.load(run_id)
+    run = run if run is not None else store.load(run_id)
     if not run or store.execution_history_deleted(run_id, run):
         return None
     detail = build_pipeline.execution_detail(run)
@@ -263,6 +263,10 @@ def format_log(run: dict, *, verbosity: str = "normal") -> str:
         rows = [f"{step['name']}: {step['status']}{(' - ' + step.get('summary', '')) if step.get('summary') else ''}" for step in run.get("steps", []) if step.get("status") != "pending"]
         events = [str(event.get("message") or "") for event in run.get("events", []) if any(marker in str(event.get("message") or "") for marker in ("Build tools", "Dependencies", "Build command", "validation", "publication"))]
         rows.extend(events)
+        rows.extend(
+            f"validation {validation.get('id', '')}: {validation.get('status', '')} ({validation.get('phase', 'lifecycle')})"
+            for validation in run.get("validations") or []
+        )
         rows.extend(f"error: {line}" for line in _error_lines(run))
         return "\n".join(row for row in rows if row) + ("\n" if rows else "")
     rows = []
@@ -287,9 +291,9 @@ def format_log(run: dict, *, verbosity: str = "normal") -> str:
     return "\n".join(row for row in rows if row) + ("\n" if rows else "")
 
 
-def get_log(store: BuildStore, run_id: str, *, verbosity: str = "normal", after: int = 0) -> dict | None:
+def get_log(store: BuildStore, run_id: str, *, verbosity: str = "normal", after: int = 0, run: dict | None = None) -> dict | None:
     require_safe_name(run_id, "execution")
-    run = store.load(run_id)
+    run = run if run is not None else store.load(run_id)
     verbosity = verbosity if verbosity in {"compact", "normal", "verbose", "raw"} else "normal"
     if not run or store.execution_history_deleted(run_id, run):
         return None

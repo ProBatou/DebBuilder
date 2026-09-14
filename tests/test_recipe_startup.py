@@ -7,6 +7,7 @@ from unittest import mock
 from debbuilder import app, build_pipeline, builtin_recipe, recipe_store, settings_store
 from debbuilder.build_store import BuildStore
 from debbuilder.execution_recovery import StartupRecoveryResult
+from debbuilder.validation_oci import OciRecoveryResult
 
 
 class RecipeStartupTests(unittest.TestCase):
@@ -15,6 +16,8 @@ class RecipeStartupTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.workflows = Path(self.temporary.name) / "workflows"
         self.workflows.mkdir()
+        self.store = BuildStore(Path(self.temporary.name) / "builds")
+        self.addCleanup(app.dependency_preparation.SUPERVISOR.open_admission)
         self.user_workflows = mock.patch.object(app, "USER_WORKFLOWS", self.workflows)
         self.user_workflows.start()
         self.addCleanup(self.user_workflows.stop)
@@ -45,7 +48,7 @@ class RecipeStartupTests(unittest.TestCase):
 
     def test_startup_orders_recovery_before_recipe_preparation_and_manager_start(self):
         events = []
-        manager = mock.Mock(store=object())
+        manager = mock.Mock(store=self.store)
         migration = self.report()
         reconciliation = self.reconciliation()
 
@@ -68,7 +71,7 @@ class RecipeStartupTests(unittest.TestCase):
 
     def test_migration_failure_still_runs_recovery_then_keeps_worker_stopped(self):
         events = []
-        manager = mock.Mock(store=object(), worker=None, accepting=False)
+        manager = mock.Mock(store=self.store, worker=None, accepting=False)
         with mock.patch("debbuilder.app.recipe_store.migrate_recipe_directory", return_value=self.report(failed=1)), \
                 mock.patch("debbuilder.app.builtin_recipe.reconcile_builtin_recipe") as reconcile, \
                 mock.patch("debbuilder.app.execution_recovery.recover_startup", side_effect=lambda _store: events.append("recovery") or StartupRecoveryResult()) as recover:
@@ -88,7 +91,7 @@ class RecipeStartupTests(unittest.TestCase):
 
     def test_authentication_failure_occurs_after_recovery_and_before_recipe_preparation(self):
         events = []
-        manager = mock.Mock(store=object(), worker=None, accepting=False)
+        manager = mock.Mock(store=self.store, worker=None, accepting=False)
         with mock.patch(
             "debbuilder.app.execution_recovery.recover_startup",
             side_effect=lambda _store: events.append("recovery") or StartupRecoveryResult(),
@@ -108,7 +111,7 @@ class RecipeStartupTests(unittest.TestCase):
 
     def test_oidc_startup_creates_session_secret_once_and_reuses_it(self):
         data = Path(self.temporary.name) / "data"
-        managers = [mock.Mock(store=object()), mock.Mock(store=object())]
+        managers = [mock.Mock(store=self.store), mock.Mock(store=self.store)]
         oidc = {
             "auth_mode": "oidc",
             "oidc_issuer": "https://id.example.test",
@@ -139,7 +142,7 @@ class RecipeStartupTests(unittest.TestCase):
         secret_path = data / "secrets.json"
         corrupt = b'{"session":{"cookie_secret":"PRIVATE_TEST_VALUE"}'
         secret_path.write_bytes(corrupt)
-        manager = mock.Mock(store=object(), worker=None, accepting=False)
+        manager = mock.Mock(store=self.store, worker=None, accepting=False)
         oidc = {
             "auth_mode": "oidc",
             "oidc_issuer": "https://id.example.test",
@@ -163,7 +166,7 @@ class RecipeStartupTests(unittest.TestCase):
 
     def test_builtin_failure_still_runs_recovery_then_keeps_worker_stopped(self):
         events = []
-        manager = mock.Mock(store=object(), worker=None, accepting=False)
+        manager = mock.Mock(store=self.store, worker=None, accepting=False)
         failure = builtin_recipe.BuiltinRecipeError("builtin_recipe_adoption_failed", "manual review required")
         with mock.patch("debbuilder.app.recipe_store.migrate_recipe_directory", side_effect=lambda _path: events.append("migration") or self.report()), \
                 mock.patch("debbuilder.app.builtin_recipe.reconcile_builtin_recipe", side_effect=lambda _path: events.append("builtin") or (_ for _ in ()).throw(failure)), \
@@ -180,7 +183,7 @@ class RecipeStartupTests(unittest.TestCase):
         self.assertFalse(hasattr(http_server, "execution_manager"))
 
     def test_recovery_blocker_remains_authoritative_after_recipe_prerequisites(self):
-        manager = mock.Mock(store=object())
+        manager = mock.Mock(store=self.store)
         migration = self.report()
         reconciliation = self.reconciliation()
         recovery = StartupRecoveryResult(blockers=[{"run_id": "surviving-run", "reason": "unresolved"}])
@@ -192,6 +195,21 @@ class RecipeStartupTests(unittest.TestCase):
 
         manager.start.assert_called_once_with(admission_blocker=recovery.admission_blocker)
         self.assertTrue(http_server.execution_recovery["admission_blocked"])
+
+    def test_validation_container_recovery_blocker_closes_manager_and_cleanup_admission(self):
+        manager = mock.Mock(store=self.store)
+        container_recovery = OciRecoveryResult(blockers=[{
+            "code": "validation_container_ownership_unverifiable", "reason": "foreign namespace container",
+        }])
+        with mock.patch("debbuilder.app.execution_recovery.recover_startup", return_value=StartupRecoveryResult()), \
+                mock.patch("debbuilder.app.validation_oci.recover_owned_containers", return_value=container_recovery), \
+                mock.patch("debbuilder.app.prepare_recipes_for_startup", return_value=(self.report(), self.reconciliation())):
+            http_server = self.server()
+            app.start_execution_manager(http_server, manager)
+        blocker = container_recovery.admission_blocker
+        manager.start.assert_called_once_with(admission_blocker=blocker)
+        self.assertEqual(http_server.cleanup_authorization.global_blocker(), blocker)
+        self.assertTrue(http_server.validation_container_recovery["admission_blocked"])
 
     def test_startup_diagnostic_is_bounded_and_does_not_expose_filesystem_paths(self):
         report = recipe_store.RecipeDirectoryMigrationReport(
@@ -231,7 +249,7 @@ class RecipeStartupTests(unittest.TestCase):
             "build": {"timeout": 45},
         }))
 
-        managers = [mock.Mock(store=object()), mock.Mock(store=object())]
+        managers = [mock.Mock(store=self.store), mock.Mock(store=self.store)]
         servers = [self.server(), self.server()]
         with mock.patch("debbuilder.app.execution_recovery.recover_startup", return_value=StartupRecoveryResult()) as recover:
             app.start_execution_manager(servers[0], managers[0])

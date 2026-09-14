@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 
 class RecipeMigrationError(ValueError):
@@ -171,11 +171,28 @@ def migrate_v2_to_v3(document: dict) -> dict:
     return migrated
 
 
+def migrate_v3_to_v4(document: dict) -> dict:
+    """Add explicit runtime APT repository declarations."""
+    _require_source(document, 3)
+    if "runtime_apt_repositories" in document:
+        raise RecipeMigrationError(
+            "ambiguous_recipe_fields",
+            "Recipe v3 unexpectedly contains runtime_apt_repositories and cannot be migrated safely",
+            source_version=3,
+            path="$.runtime_apt_repositories",
+        )
+    migrated = deepcopy(document)
+    migrated["runtime_apt_repositories"] = []
+    migrated["schema_version"] = 4
+    return migrated
+
+
 Migration = Callable[[dict], dict]
 MIGRATIONS: dict[int, Migration] = {
     0: migrate_v0_to_v1,
     1: migrate_v1_to_v2,
     2: migrate_v2_to_v3,
+    3: migrate_v3_to_v4,
 }
 
 

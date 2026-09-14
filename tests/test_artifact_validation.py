@@ -1,13 +1,28 @@
 import json
+import os
+import shutil
+import socket
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from debbuilder import artifact_validation, build_pipeline, workspace_cleanup
 from debbuilder.build_store import BuildStore
+from debbuilder.command_identity import current_recorder
+from debbuilder.dependency_preparation import (
+    SUPERVISOR,
+    begin_lifecycle_attempt,
+    complete_lifecycle_attempt,
+    prepare_runtime_dependencies,
+    inspect_artifact,
+)
+from debbuilder.execution_cancellation import ExecutionCancelled
 from debbuilder.repository_lock import repository_lease
-from debbuilder.validation_backend import BackendError, OciSystemdBackend
+from debbuilder.resource_limits import admission_contract, requested_controls
+from debbuilder.validation_backend import BackendError, OciSystemdBackend, OwnedOciSystemdBackend
+from debbuilder.validation_oci import IdentityRegistry, new_identity
 from debbuilder.validation_profiles import python_satisfies
 
 
@@ -111,6 +126,300 @@ class MixedPolicyBackend(FakeBackend):
 
 
 class ArtifactValidationTests(unittest.TestCase):
+    def test_local_apt_argv_uses_only_explicit_files_and_disables_sources(self):
+        arguments = artifact_validation._local_apt_arguments(
+            conffile_option="--force-confold",
+            package_paths=["/debbuilder-bundle/dependency-000.deb", "/debbuilder-input/current.deb"],
+        )
+        self.assertEqual(arguments[-3:], [
+            "install", "/debbuilder-bundle/dependency-000.deb", "/debbuilder-input/current.deb",
+        ])
+        self.assertIn("Dpkg::Options::=--force-confold", arguments)
+        self.assertIn("Dir::Etc::sourcelist=/dev/null", arguments)
+        self.assertIn("Dir::Etc::sourceparts=/dev/null", arguments)
+        self.assertNotIn("--no-download", arguments)
+        self.assertNotIn("*", " ".join(arguments))
+
+    def test_lifecycle_refuses_creation_until_preparation_identity_is_absent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            image = {"name": "debbuilder-validation:bookworm", "id": "sha256:" + "a" * 64, "digest": None}
+            registry = IdentityRegistry(root / "registry")
+            registry.persist(new_identity(
+                run_id="run", attempt_id="attempt", role="dependency-preparation",
+                runtime="podman", image=image,
+            ))
+            backend = OwnedOciSystemdBackend(
+                root, image=image["name"], run_id="run", attempt_id="attempt",
+                registry_root=registry.root, resource_policy={}, mounts=[], expected_image=image,
+                runner=lambda *_args, **_kwargs: self.fail("OCI must not be called while preparation identity exists"),
+            )
+            with self.assertRaises(BackendError) as raised:
+                backend.start("attempt")
+            self.assertEqual(raised.exception.code, "validation_container_overlap")
+
+    def test_prepared_bundle_is_reverified_and_mounted_read_only_with_explicit_package_paths(self):
+        from tests.test_dependency_preparation import build_deb
+
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            attempt_id = "bundle-verification"
+            packages = workspace / "manifests/validation-attempts" / attempt_id / "packages"
+            packages.mkdir(parents=True)
+            artifact = build_deb(
+                workspace, workspace / "current.deb", package="demo", version="1.0-1",
+                depends="cp1c-dependency (= 1.0-1)",
+            )
+            dependency = build_deb(
+                workspace, packages / "dependency.deb",
+                package="cp1c-dependency", version="1.0-1",
+            )
+            current_metadata = inspect_artifact(artifact, workspace=workspace)
+            dependency_metadata = inspect_artifact(dependency, workspace=workspace)
+            now = "2026-09-14T08:00:00+00:00"
+            prepared = {
+                "contract_version": 1,
+                "profile_name": "bookworm",
+                "image": {"name": "debbuilder-validation:bookworm", "id": "sha256:" + "a" * 64, "digest": None},
+                "native_architecture": "amd64",
+                "artifacts": {"current": current_metadata.identity(), "previous": None},
+                "repositories": [], "base_packages": [],
+                "packages": [{
+                    **dependency_metadata.identity(), "role": "current", "origin": None,
+                }],
+                "started_at": now, "finished_at": now, "diagnostics": [], "enforcement": [],
+            }
+            validation_dir = workspace / "validation" / attempt_id
+            validation_dir.mkdir(parents=True)
+            bundle = artifact_validation._prepare_lifecycle_inputs(
+                workspace=workspace, validation_dir=validation_dir, attempt_id=attempt_id,
+                current_artifact=artifact, previous_artifact=None,
+                prepared_dependencies=prepared,
+                selected_profile={"name": "bookworm", "image": "debbuilder-validation:bookworm"},
+                runner=artifact_validation.run_command, cancellation_event=None,
+            )
+            self.assertEqual(bundle["phase_paths"]["current"], ["/debbuilder-bundle/dependency-000.deb"])
+            self.assertTrue(all(options == "ro" for _source, _target, options in bundle["mounts"]))
+            self.assertEqual(
+                {target for _source, target, _options in bundle["mounts"]},
+                {"/debbuilder-input/current.deb", "/debbuilder-bundle"},
+            )
+
+    def test_prepared_bundle_missing_hash_architecture_and_symlink_mismatches_fail_closed(self):
+        from tests.test_dependency_preparation import build_deb
+
+        for case in ("missing", "hash", "architecture", "symlink"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                workspace = Path(temporary)
+                attempt_id = f"bundle-{case}"
+                packages = workspace / "manifests/validation-attempts" / attempt_id / "packages"
+                packages.mkdir(parents=True)
+                artifact = build_deb(workspace, workspace / "current.deb", package="demo", version="1.0-1")
+                dependency = build_deb(workspace, packages / "dependency.deb", package="cp1c-dependency", version="1.0-1")
+                current_metadata = inspect_artifact(artifact, workspace=workspace)
+                dependency_metadata = inspect_artifact(dependency, workspace=workspace)
+                prepared = {
+                    "contract_version": 1, "profile_name": "bookworm",
+                    "image": {"name": "debbuilder-validation:bookworm", "id": "sha256:" + "a" * 64, "digest": None},
+                    "native_architecture": "amd64",
+                    "artifacts": {"current": current_metadata.identity(), "previous": None},
+                    "repositories": [], "base_packages": [],
+                    "packages": [{**dependency_metadata.identity(), "role": "current", "origin": None}],
+                    "started_at": "2026-09-14T08:00:00+00:00",
+                    "finished_at": "2026-09-14T08:00:00+00:00",
+                    "diagnostics": [], "enforcement": [],
+                }
+                if case == "missing":
+                    dependency.unlink()
+                elif case == "hash":
+                    prepared["packages"][0]["sha256"] = "f" * 64
+                elif case == "architecture":
+                    prepared["packages"][0]["architecture"] = "arm64"
+                else:
+                    outside = workspace / "outside.deb"
+                    dependency.rename(outside)
+                    dependency.symlink_to(outside)
+                validation_dir = workspace / "validation" / attempt_id
+                validation_dir.mkdir(parents=True)
+                with self.assertRaises(artifact_validation.ValidationError) as raised:
+                    artifact_validation._prepare_lifecycle_inputs(
+                        workspace=workspace, validation_dir=validation_dir, attempt_id=attempt_id,
+                        current_artifact=artifact, previous_artifact=None,
+                        prepared_dependencies=prepared,
+                        selected_profile={"name": "bookworm", "image": "debbuilder-validation:bookworm"},
+                        runner=artifact_validation.run_command, cancellation_event=None,
+                    )
+                self.assertEqual(raised.exception.code, "prepared_bundle_mismatch")
+
+    def test_cancellation_and_timeout_during_offline_apt_always_stop_lifecycle(self):
+        from tests.test_dependency_preparation import build_deb
+
+        for phase, outcome in (
+            ("previous", "cancel"), ("previous", "timeout"),
+            ("current", "cancel"), ("current", "timeout"),
+        ):
+            with self.subTest(phase=phase, outcome=outcome), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                configured = recipe()
+                configured["artifact"] = {"mode": "upstream_deb", "architecture": "all"}
+                configured["service"] = {"enabled": False, "name": "", "command": ""}
+                store = BuildStore(root / "builds")
+                run = store.create(configured, mode="build", run_id=f"offline-{phase}-{outcome}")
+                current = build_deb(root, Path(run["workspace"]) / "artifacts/demo_2.0-1_all.deb", package="demo", version="2.0-1")
+                previous = None
+                if phase == "previous":
+                    previous_dir = store.root / "old-run" / "artifacts"
+                    previous_dir.mkdir(parents=True)
+                    previous = build_deb(root, previous_dir / "demo_1.0-1_all.deb", package="demo", version="1.0-1")
+                persisted = store.load(run["id"])
+                persisted["status"] = "success"
+                persisted["artifact"] = {
+                    "path": str(current), "name": current.name,
+                    "inspection": {"maintainer_scripts": [], "conffiles": [], "files": [], "service_units": [], "depends": ""},
+                }
+                store.save(persisted)
+                current_metadata = inspect_artifact(current, workspace=Path(run["workspace"]))
+                previous_metadata = inspect_artifact(previous, workspace=Path(run["workspace"])) if previous else None
+                attempt_id = f"attempt-{phase}-{outcome}"
+                packages = Path(run["workspace"]) / "manifests/validation-attempts" / attempt_id / "packages"
+                packages.mkdir(parents=True)
+                prepared = {
+                    "contract_version": 1, "profile_name": "bookworm",
+                    "image": {"name": "debbuilder-validation:bookworm", "id": "sha256:" + "a" * 64, "digest": None},
+                    "native_architecture": "amd64",
+                    "artifacts": {"current": current_metadata.identity(), "previous": previous_metadata.identity() if previous_metadata else None},
+                    "repositories": [], "base_packages": [], "packages": [],
+                    "started_at": "2026-09-14T08:00:00+00:00", "finished_at": "2026-09-14T08:00:00+00:00",
+                    "diagnostics": [], "enforcement": [],
+                }
+                created = []
+
+                class InterruptingBackend(FakeBackend):
+                    def __init__(self, **kwargs):
+                        super().__init__(workspace=kwargs["workspace"], image=kwargs["image"], on_result=kwargs["on_result"])
+                        self.phase_calls = 0
+                        self.stopped = False
+                        created.append(self)
+
+                    def start(self, validation_id):
+                        return {**super().start(validation_id), "network": "disabled", "network_verified": True}
+
+                    def exec(self, arguments, **kwargs):
+                        if arguments == ["dpkg", "--print-architecture"]:
+                            result = super().exec(arguments, **kwargs)
+                            result["stdout"] = "amd64\n"
+                            return result
+                        if arguments[:2] == ["dpkg-query", "--show"] and len(arguments) == 3 and "binary:Package" in arguments[2]:
+                            result = super().exec(arguments, **kwargs)
+                            result.update({"status": "success", "exit_code": 0, "accepted": True, "stdout": ""})
+                            return result
+                        if arguments and arguments[0] == "apt-get":
+                            self.phase_calls += 1
+                            selected = "previous" if previous and self.phase_calls == 1 else "current"
+                            if selected == phase:
+                                if outcome == "cancel":
+                                    raise ExecutionCancelled()
+                                result = super().exec(arguments, **kwargs)
+                                result.update({"status": "failed", "exit_code": -9, "accepted": False, "timed_out": True, "stderr": "offline install timed out"})
+                                return result
+                        return super().exec(arguments, **kwargs)
+
+                    def stop(self):
+                        self.stopped = True
+                        return None
+
+                result = artifact_validation.validate_artifact(
+                    run["id"], store=store, previous_artifact=str(previous or ""),
+                    prepared_dependencies=prepared, attempt_id=attempt_id,
+                    registry_root=root / "registry", backend_factory=InterruptingBackend,
+                )
+                self.assertEqual(result["status"], "cancelled" if outcome == "cancel" else "failed")
+                self.assertTrue(created[0].stopped)
+                if phase == "previous":
+                    self.assertEqual(created[0].phase_calls, 1, "current upgrade must not run after previous failure")
+
+    def test_cancellation_during_runtime_checks_still_stops_backend(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store, run = self.successful_run(temporary)
+            persisted = store.load(run["id"])
+            persisted["artifact"]["inspection"]["depends"] = "nodejs"
+            store.save(persisted)
+            stopped = []
+
+            class RuntimeCancellingBackend(FakeBackend):
+                def exec(self, arguments, **kwargs):
+                    if arguments == ["node", "--version"]:
+                        raise ExecutionCancelled()
+                    return super().exec(arguments, **kwargs)
+
+                def stop(self):
+                    stopped.append(True)
+                    return None
+
+            result = artifact_validation.validate_artifact(
+                run["id"], store=store, backend_factory=RuntimeCancellingBackend,
+            )
+            self.assertEqual(result["status"], "cancelled")
+            self.assertEqual(stopped, [True])
+
+    def test_cancellation_during_prepared_input_verification_is_durable(self):
+        from tests.test_dependency_preparation import build_deb
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            configured = recipe()
+            configured["artifact"] = {"mode": "upstream_deb", "architecture": "all"}
+            configured["service"] = {"enabled": False, "name": "", "command": ""}
+            store = BuildStore(root / "builds")
+            run = store.create(configured, mode="build", run_id="cancel-before-container")
+            artifact = build_deb(
+                root, Path(run["workspace"]) / "artifacts/demo_1.0-1_all.deb",
+                package="demo", version="1.0-1",
+            )
+            persisted = store.load(run["id"])
+            persisted["status"] = "success"
+            persisted["artifact"] = {
+                "path": str(artifact), "name": artifact.name,
+                "inspection": {"maintainer_scripts": [], "conffiles": [], "files": [], "service_units": [], "depends": ""},
+            }
+            store.save(persisted)
+            metadata = inspect_artifact(artifact, workspace=Path(run["workspace"]))
+            attempt_id = "cancel-before-container-attempt"
+            (Path(run["workspace"]) / "manifests/validation-attempts" / attempt_id / "packages").mkdir(parents=True)
+            prepared = {
+                "contract_version": 1, "profile_name": "bookworm",
+                "image": {"name": "debbuilder-validation:bookworm", "id": "sha256:" + "a" * 64, "digest": None},
+                "native_architecture": "amd64",
+                "artifacts": {"current": metadata.identity(), "previous": None},
+                "repositories": [], "base_packages": [], "packages": [],
+                "started_at": "2026-09-14T08:00:00+00:00", "finished_at": "2026-09-14T08:00:00+00:00",
+                "diagnostics": [], "enforcement": [],
+            }
+            cancellation = threading.Event()
+            cancellation.set()
+            backend_factory = mock.Mock()
+            result = artifact_validation.validate_artifact(
+                run["id"], store=store, prepared_dependencies=prepared,
+                attempt_id=attempt_id, registry_root=root / "registry",
+                cancellation_event=cancellation, backend_factory=backend_factory,
+            )
+            self.assertEqual(result["status"], "cancelled")
+            self.assertEqual(result["error"]["code"], "validation_lifecycle_cancelled")
+            backend_factory.assert_not_called()
+            durable = store.load(run["id"])
+            self.assertEqual(durable["validations"][-1]["status"], "cancelled")
+            self.assertEqual(durable["artifact"]["validations"][-1]["status"], "cancelled")
+
+    def test_dependency_install_failure_names_prepared_dependency(self):
+        for dependency in ("cp1b-external", "g++", "libfixture-"):
+            with self.subTest(dependency=dependency), self.assertRaises(artifact_validation.ValidationError) as raised:
+                artifact_validation._raise_install_failure(
+                    {"stdout": "", "stderr": f"{dependency}: dependency is not installable"},
+                    phase="current", target_package="demo",
+                    dependency_packages={dependency},
+                )
+            self.assertEqual(raised.exception.code, "dependency_install_failed")
+
     def test_bookworm_image_satisfies_builtin_debbuilder_runtime_dependencies(self):
         root = Path(__file__).resolve().parents[1]
         dockerfile = (root / "validation/Dockerfile").read_text()
@@ -169,6 +478,40 @@ class ArtifactValidationTests(unittest.TestCase):
             self.assertEqual(permissions["status"], "success")
             self.assertEqual(permissions["details"]["symbolic_links"], "excluded (target permissions apply)")
             self.assertEqual(permissions["details"]["count"], 3)
+
+    def test_runtime_repository_declaration_does_not_change_cp1a_execution(self):
+        configured = recipe()
+        configured["schema_version"] = 4
+        configured["runtime_apt_repositories"] = [{
+            "id": "vendor-runtime",
+            "uri": "https://apt.example.invalid/runtime",
+            "suite": "nodistro",
+            "components": ["main"],
+            "signing_key": {"armored": (
+                "-----BEGIN PGP PUBLIC KEY BLOCK-----\n\n"
+                "dGhpcy1pcy1zdHJ1Y3R1cmFsbHktcHVibGljLWtleS1kYXRh\n"
+                "-----END PGP PUBLIC KEY BLOCK-----\n"
+            )},
+        }]
+        with tempfile.TemporaryDirectory() as temporary:
+            store, run = self.successful_run(temporary, configured)
+            backends = []
+
+            def factory(**kwargs):
+                backend = FakeBackend(**kwargs)
+                backends.append(backend)
+                return backend
+
+            result = artifact_validation.validate_artifact(
+                run["id"], store=store, backend_factory=factory,
+            )
+
+        self.assertEqual(result["status"], "success")
+        self.assertIn(
+            ["dpkg", "--force-confnew", "--install", "/validation/artifacts/demo_1.0-1_all.deb"],
+            backends[0].arguments,
+        )
+        self.assertFalse(any(arguments and arguments[0] in {"apt", "apt-get", "curl"} for arguments in backends[0].arguments))
 
     def test_validation_running_state_is_visible_until_backend_completion(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -265,7 +608,7 @@ class ArtifactValidationTests(unittest.TestCase):
             self.assertIn("systemd_active", failed)
             self.assertIn("systemd_active_after_grace", failed)
             self.assertIn("/usr/bin/node", failed["systemd_active"]["error"])
-            self.assertEqual(result["error"]["code"], "validation_checks_failed")
+            self.assertEqual(result["error"]["code"], "systemd_check_failed")
 
     def test_service_with_declared_node_runtime_keeps_runtime_and_systemd_checks(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -456,6 +799,36 @@ class ArtifactValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(BackendError, "Docker or Podman"):
                 backend.start("validation")
 
+    def test_lifecycle_installs_the_run_resource_identity_context(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = BuildStore(root / "builds")
+            policy = {
+                "memory_max_bytes": 256 * 1024 * 1024,
+                "tasks_max": 64,
+                "cpu_quota_percent": 125,
+                "io_read_bandwidth_max_bytes_per_sec": 32 * 1024 * 1024,
+                "io_write_bandwidth_max_bytes_per_sec": 16 * 1024 * 1024,
+            }
+            capability = {
+                "backend": "systemd_cgroup", "available": True,
+                "requested_controls": requested_controls(policy), "reason": "controlled test",
+            }
+            run = store.create(
+                recipe(), mode="build", run_id="lifecycle-resource-context",
+                resource_contract=admission_contract(policy, {}, capability),
+            )
+
+            def observe(*_args, **_kwargs):
+                recorder = current_recorder()
+                self.assertIsNotNone(recorder)
+                self.assertEqual(recorder.run_id, run["id"])
+                self.assertEqual(recorder.resource_policy, policy)
+                return {"status": "success"}
+
+            with mock.patch("debbuilder.artifact_validation._validate_artifact_locked", side_effect=observe):
+                self.assertEqual(artifact_validation.validate_artifact(run["id"], store=store)["status"], "success")
+
     def test_oci_backend_forces_network_none_and_read_only_workspace(self):
         calls = []
         def runner(command, **kwargs):
@@ -470,6 +843,249 @@ class ArtifactValidationTests(unittest.TestCase):
         self.assertIn("--network none", launch)
         self.assertIn(":/validation:ro", launch)
         self.assertEqual(context["network"], "disabled")
+
+
+@unittest.skipUnless(os.getenv("DEBBUILDER_REAL_OCI_TESTS") == "1", "controlled real OCI tests disabled")
+class RealOfflineLifecycleTests(unittest.TestCase):
+    def test_bookworm_node22_base_satisfied_runtime_remains_compatible(self):
+        from tests.test_dependency_preparation import build_deb
+
+        SUPERVISOR.open_admission()
+        io_enabled = os.getenv("DEBBUILDER_REAL_IO_TESTS") == "1"
+        temporary_parent = os.getenv("DEBBUILDER_BLOCK_TEST_ROOT", "/opt") if io_enabled else None
+        with tempfile.TemporaryDirectory(dir=temporary_parent) as temporary:
+            root = Path(temporary)
+            configured = recipe()
+            configured["artifact"] = {"mode": "upstream_deb", "architecture": "all"}
+            configured["service"] = {"enabled": False, "name": "", "command": ""}
+            store = BuildStore(root / "builds")
+            policy = {
+                "memory_max_bytes": 256 * 1024 * 1024,
+                "tasks_max": 96,
+                "cpu_quota_percent": 150,
+            }
+            if io_enabled:
+                policy.update({
+                    "io_read_bandwidth_max_bytes_per_sec": 100 * 1024 * 1024,
+                    "io_write_bandwidth_max_bytes_per_sec": 100 * 1024 * 1024,
+                })
+            capability = {
+                "backend": "systemd_cgroup", "available": True,
+                "requested_controls": requested_controls(policy), "reason": "controlled real-system test",
+            }
+            run = store.create(
+                configured, mode="build", run_id="offline-node22",
+                resource_contract=admission_contract(policy, {}, capability),
+            )
+            artifact = build_deb(
+                root, Path(run["workspace"]) / "artifacts/demo_1.0-1_all.deb",
+                package="demo", version="1.0-1", depends="nodejs (>= 22)",
+            )
+            persisted = store.load(run["id"])
+            persisted["status"] = "success"
+            persisted["artifact"] = {
+                "path": str(artifact), "name": artifact.name,
+                "inspection": {
+                    "maintainer_scripts": [], "conffiles": [], "files": [], "service_units": [],
+                    "depends": "nodejs (>= 22)",
+                },
+            }
+            store.save(persisted)
+            registry = root / "validation-containers"
+            attempt = prepare_runtime_dependencies(
+                run["id"], "offline-node22-attempt", store=store,
+                current_artifact=artifact, profile_name="bookworm-node22", registry_root=registry,
+            )
+            prepared = attempt["prepared_dependencies"]
+            self.assertEqual(prepared["packages"], [])
+            self.assertIn("nodejs", {row["package"] for row in prepared["base_packages"]})
+            begin_lifecycle_attempt(store, run["id"], attempt["id"], prepared)
+            result = artifact_validation.validate_artifact(
+                run["id"], store=store, profile="bookworm-node22",
+                prepared_dependencies=prepared, attempt_id=attempt["id"], registry_root=registry,
+            )
+            complete_lifecycle_attempt(store, run["id"], attempt["id"], result)
+            self.assertEqual(result["status"], "success", result.get("error"))
+            self.assertEqual(next(row for row in result["checks"] if row["name"] == "runtime_node")["status"], "success")
+            self.assertEqual(list(registry.glob("*.json")), [])
+
+    @unittest.skipUnless(
+        all(shutil.which(tool) for tool in ("apt-ftparchive", "gpg", "openssl", "dpkg-deb", "podman")),
+        "controlled repository tools unavailable",
+    )
+    def test_signed_repository_bundle_installs_with_dependency_and_target_scripts_offline(self):
+        from tests.test_dependency_preparation import (
+            build_deb,
+            controlled_repository,
+            start_https,
+        )
+
+        SUPERVISOR.open_admission()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reservation = socket.socket()
+            reservation.bind(("0.0.0.0", 0))
+            port = reservation.getsockname()[1]
+            reservation.close()
+            denial_script = (
+                "#!/bin/sh\nset -eu\n"
+                "if python3 -c \"import socket; socket.create_connection(('host.containers.internal', PORT), 1)\"; then\n"
+                "  echo 'network unexpectedly available' >&2\n  exit 1\nfi\n"
+            ).replace("PORT", str(port))
+            repo, armored, cert = controlled_repository(root, dependency_postinst=denial_script)
+            server, thread = start_https(repo, cert, root / "server.key", port=port)
+            try:
+                configured = recipe()
+                configured["artifact"] = {"mode": "upstream_deb", "architecture": "all"}
+                configured["service"] = {"enabled": False, "name": "", "command": ""}
+                store = BuildStore(root / "builds")
+                run = store.create(configured, mode="build", run_id="offline-lifecycle")
+                artifact = build_deb(
+                    root,
+                    Path(run["workspace"]) / "artifacts/demo_1.0-1_all.deb",
+                    package="demo",
+                    version="1.0-1",
+                    depends="cp1b-external (= 1.2-1)",
+                    postinst=(
+                        denial_script
+                        + "systemctl daemon-reload\n"
+                        + "systemctl start demo-network-check.service\n"
+                    ),
+                    payload_files={
+                        "/usr/libexec/demo-network-check": (denial_script, 0o755),
+                        "/usr/lib/systemd/system/demo-network-check.service": (
+                            "[Unit]\nDescription=Offline network denial proof\n"
+                            "[Service]\nType=oneshot\nExecStart=/usr/libexec/demo-network-check\nRemainAfterExit=yes\n",
+                            0o644,
+                        ),
+                    },
+                )
+                persisted = store.load(run["id"])
+                persisted["status"] = "success"
+                persisted["artifact"] = {
+                    "path": str(artifact), "name": artifact.name,
+                    "inspection": {
+                        "maintainer_scripts": ["postinst"], "conffiles": [],
+                        "files": [
+                            {"path": "./usr/libexec/demo-network-check"},
+                            {"path": "./usr/lib/systemd/system/demo-network-check.service"},
+                        ],
+                        "service_units": [{"path": "./usr/lib/systemd/system/demo-network-check.service"}],
+                        "depends": "cp1b-external (= 1.2-1)",
+                    },
+                }
+                store.save(persisted)
+                repository = {
+                    "id": "controlled",
+                    "uri": f"https://host.containers.internal:{server.server_address[1]}",
+                    "suite": "bookworm", "components": ["main"],
+                    "signing_key": {"armored": armored},
+                }
+                registry = root / "validation-containers"
+                attempt = prepare_runtime_dependencies(
+                    run["id"], "offline-lifecycle-attempt", store=store,
+                    current_artifact=artifact, repositories=[repository],
+                    registry_root=registry, test_ca_certificate=cert,
+                )
+                prepared = attempt["prepared_dependencies"]
+                begin_lifecycle_attempt(store, run["id"], attempt["id"], prepared)
+                result = artifact_validation.validate_artifact(
+                    run["id"], store=store,
+                    prepared_dependencies=prepared, attempt_id=attempt["id"],
+                    registry_root=registry,
+                )
+                complete_lifecycle_attempt(store, run["id"], attempt["id"], result)
+                self.assertEqual(result["status"], "success", result.get("error"))
+                self.assertEqual(next(row for row in result["checks"] if row["name"] == "lifecycle_network_disabled")["status"], "success")
+                self.assertEqual(next(row for row in result["checks"] if row["name"] == "modeled_state_current")["status"], "success")
+                self.assertTrue(any(row["name"] == "package_remove" for row in result["checks"]))
+                self.assertTrue(any(row["name"] == "package_purge" for row in result["checks"]))
+                self.assertEqual(list(registry.glob("*.json")), [])
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
+    @unittest.skipUnless(
+        all(shutil.which(tool) for tool in ("apt-ftparchive", "gpg", "openssl", "dpkg-deb", "podman")),
+        "controlled repository tools unavailable",
+    )
+    def test_previous_to_current_uses_prepared_dependency_transition(self):
+        from tests.test_dependency_preparation import build_deb, controlled_repository, start_https
+
+        SUPERVISOR.open_admission()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo, armored, cert = controlled_repository(root)
+            server, thread = start_https(repo, cert, root / "server.key")
+            try:
+                configured = recipe()
+                configured["artifact"] = {"mode": "upstream_deb", "architecture": "all"}
+                configured["service"] = {"enabled": False, "name": "", "command": ""}
+                store = BuildStore(root / "builds")
+                run = store.create(configured, mode="build", run_id="offline-upgrade")
+                previous_dir = store.root / "previous-run" / "artifacts"
+                previous_dir.mkdir(parents=True)
+                previous = build_deb(
+                    root, previous_dir / "demo_1.0-1_all.deb",
+                    package="demo", version="1.0-1", depends="cp1b-external (= 1.2-1)",
+                    payload_files={"/etc/demo.conf": ("previous\n", 0o644)},
+                    conffiles=("/etc/demo.conf",),
+                )
+                current = build_deb(
+                    root, Path(run["workspace"]) / "artifacts/demo_2.0-1_all.deb",
+                    package="demo", version="2.0-1", depends="cp1b-provider (= 1.0-2)",
+                    payload_files={"/etc/demo.conf": ("current\n", 0o644)},
+                    conffiles=("/etc/demo.conf",),
+                )
+                persisted = store.load(run["id"])
+                persisted["status"] = "success"
+                persisted["artifact"] = {
+                    "path": str(current), "name": current.name,
+                    "inspection": {
+                        "maintainer_scripts": [], "conffiles": ["/etc/demo.conf"], "files": [], "service_units": [],
+                        "depends": "cp1b-provider (= 1.0-2)",
+                    },
+                }
+                store.save(persisted)
+                repository = {
+                    "id": "controlled",
+                    "uri": f"https://host.containers.internal:{server.server_address[1]}",
+                    "suite": "bookworm", "components": ["main"],
+                    "signing_key": {"armored": armored},
+                }
+                registry = root / "validation-containers"
+                attempt = prepare_runtime_dependencies(
+                    run["id"], "offline-upgrade-attempt", store=store,
+                    current_artifact=current, previous_artifact=previous,
+                    repositories=[repository], registry_root=registry,
+                    test_ca_certificate=cert,
+                )
+                prepared = attempt["prepared_dependencies"]
+                self.assertIn(("cp1b-external", "previous"), {(row["package"], row["role"]) for row in prepared["packages"]})
+                self.assertIn(("cp1b-provider", "current"), {(row["package"], row["role"]) for row in prepared["packages"]})
+                begin_lifecycle_attempt(store, run["id"], attempt["id"], prepared)
+                result = artifact_validation.validate_artifact(
+                    run["id"], store=store, previous_artifact=str(previous),
+                    prepared_dependencies=prepared, attempt_id=attempt["id"], registry_root=registry,
+                )
+                complete_lifecycle_attempt(store, run["id"], attempt["id"], result)
+                self.assertEqual(result["status"], "success", result.get("error"))
+                names = {row["name"] for row in result["checks"]}
+                self.assertIn("modeled_state_previous", names)
+                self.assertIn("modeled_state_current", names)
+                commands = "\n".join(str(row.get("command") or "") for row in result["commands"])
+                self.assertIn("Dpkg::Options::=--force-confnew", commands)
+                self.assertIn("Dpkg::Options::=--force-confold", commands)
+                self.assertEqual(
+                    next(row for row in result["checks"] if row["name"] == "configuration_preserved:/etc/demo.conf")["status"],
+                    "success",
+                )
+                self.assertEqual(list(registry.glob("*.json")), [])
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
 
 
 if __name__ == "__main__":

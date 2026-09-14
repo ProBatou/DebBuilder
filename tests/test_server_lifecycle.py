@@ -114,6 +114,51 @@ class ServerLifecycleTests(unittest.TestCase):
         self.assertTrue(server.closed)
         self.assertFalse(any(thread.name == "storage-maintenance" for thread in threading.enumerate()))
 
+    def test_shutdown_cancels_blocked_validation_before_waiting_for_http_mutations(self):
+        events = []
+        manager = FakeManager(events)
+        cancellation = threading.Event()
+        entered = threading.Event()
+        handler_finished = threading.Event()
+        attempt_id = "blocked-lifecycle"
+
+        def start(http_server, selected, *, prepare_directories, shutdown_check):
+            shutdown_check()
+            selected.worker = object()
+            http_server.execution_manager = selected
+            app.dependency_preparation.SUPERVISOR.open_admission()
+            app.dependency_preparation.SUPERVISOR.register(attempt_id, cancellation)
+            return selected
+
+        def serve(server):
+            def blocked_handler():
+                with server.mutation_gate.lease():
+                    entered.set()
+                    cancellation.wait(2)
+                    events.append("validation_cancelled")
+                    app.dependency_preparation.SUPERVISOR.unregister(attempt_id)
+                handler_finished.set()
+
+            thread = threading.Thread(target=blocked_handler)
+            thread.start()
+            self.assertTrue(entered.wait(2))
+            events.append("serve")
+
+        server = FakeServer(events, lambda: serve(server))
+        with mock.patch("debbuilder.app.prepare_application_directories"), \
+                mock.patch("debbuilder.app.start_execution_manager", side_effect=start):
+            outcome = app.serve_application(
+                object(), server_factory=lambda *_args: server,
+                manager_factory=lambda: manager,
+                retention_target=lambda stop: stop.wait(),
+                install_signal_handlers=False, shutdown_timeout=2,
+            )
+
+        self.assertEqual(outcome, 0)
+        self.assertTrue(cancellation.is_set())
+        self.assertTrue(handler_finished.wait(2))
+        self.assertLess(events.index("validation_cancelled"), events.index("manager_shutdown"))
+
     def test_unexpected_server_exception_is_preserved_when_cleanup_also_incomplete(self):
         failure = RuntimeError("server loop failed")
         incomplete = {

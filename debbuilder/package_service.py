@@ -48,6 +48,7 @@ class PackageService:
         read_workflow: Callable[[Path], dict],
         repo_settings: Callable[[], dict],
         release_lookup: Callable[[str], dict | None],
+        run_projector: Callable[[dict, BuildStore], dict] | None = None,
     ):
         self.data_dir = Path(data_dir)
         self.workspace_root = Path(workspace_root)
@@ -56,6 +57,7 @@ class PackageService:
         self._read_workflow = read_workflow
         self._repo_settings = repo_settings
         self._release_lookup = release_lookup
+        self._run_projector = run_projector
 
     @property
     def packages_file(self) -> Path:
@@ -235,6 +237,8 @@ class PackageService:
         runs_by_package: dict[str, list[dict]] = {}
         build_store = BuildStore(self.data_dir / "builds")
         for stored_run in build_store.list(limit=1000):
+            if self._run_projector is not None:
+                stored_run = self._run_projector(stored_run, build_store)
             run = {
                 **stored_run,
                 "_execution_history_deleted": build_store.execution_history_deleted(str(stored_run["id"]), stored_run),
@@ -287,7 +291,10 @@ class PackageService:
         latest_publication = run_state["latest_publication"]
         verified = bool(
             successful and latest_validation and latest_validation.get("status") == "success"
-            and latest_validation.get("artifact") == successful["artifact"].get("path")
+            and (
+                latest_validation.get("artifact_matches_run") is True
+                or latest_validation.get("artifact") == successful["artifact"].get("path")
+            )
         )
         if include_history:
             package["history"] = run_state["history"][:200]

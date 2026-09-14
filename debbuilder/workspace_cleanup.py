@@ -154,6 +154,20 @@ def read_run(fd: int, root: Path, run_id: str) -> dict:
 
 def require_finished(run: dict) -> None:
     from .build_pipeline import execution_summary
+    # Async validation admission is durable in a manifest before the worker
+    # appends lifecycle history to run.json. Consult that canonical inventory
+    # while the caller holds the Run lease; unreadable inventory fails closed.
+    try:
+        from .build_store import BuildStore
+        from .validation_service import ACTIVE_STATUSES, list_attempts
+
+        workspace = Path(str(run.get("workspace") or ""))
+        manifest_active = any(
+            attempt.get("status") in ACTIVE_STATUSES
+            for attempt in list_attempts(BuildStore(workspace.parent), str(run.get("id") or ""), strict=True)
+        )
+    except (OSError, TypeError, ValueError, RuntimeError) as exc:
+        raise WorkspaceBusyError("Validation attempt inventory is unverifiable; cleanup refused") from exc
     auxiliary_active = any(
         isinstance(record, dict) and record.get("status") == "running"
         for key in ("validations", "publications")
@@ -163,6 +177,7 @@ def require_finished(run: dict) -> None:
         execution_summary(run)["lifecycle_active"]
         or any(step.get("status") == "running" for step in run["steps"])
         or auxiliary_active
+        or manifest_active
     ):
         raise WorkspaceBusyError("Execution is active; deletion/cleanup is not cancellation")
 

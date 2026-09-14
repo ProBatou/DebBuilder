@@ -3,6 +3,7 @@ window.recipeSourceChanges = [];
 window.recipeExtraDependencies = [];
 window.recipeAdvancedFields = {};
 window.recipeResourceLimits = {memory_max_bytes:null,tasks_max:null,cpu_quota_percent:null,io_read_bandwidth_max_bytes_per_sec:null,io_write_bandwidth_max_bytes_per_sec:null};
+window.recipeRuntimeAptRepositories = [];
 window.recipeBuildOutput = {mode:'source', path:'', paths:[]};
 window.recipeSuggestedOutputPaths = [];
 window.recipeInstallMappings = [];
@@ -25,6 +26,14 @@ function environment(value) {
 
 function environmentText(value) {
   return Object.entries(value || {}).map(([key, item]) => `${key}=${item}`).join('\n');
+}
+
+function cloneRuntimeAptRepositories(value) {
+  return (value || []).map(repository => ({
+    ...repository,
+    components: [...(repository.components || [])],
+    signing_key: {...(repository.signing_key || {})},
+  }));
 }
 
 function normalizeInstallMapping(row) {
@@ -182,10 +191,11 @@ function collectWorkflow() {
     artifact.asset_name = '';
   }
   return {
-    schema_version: 3,
+    schema_version: 4,
     name,
     active: !!$('recipeMetaActive')?.checked,
     resource_limits: {...window.recipeResourceLimits},
+    runtime_apt_repositories: cloneRuntimeAptRepositories(window.recipeRuntimeAptRepositories),
     package: {
       name: packageName,
       version_revision: value('recipePackageVersionRevision'),
@@ -291,6 +301,7 @@ function renderWorkflow(wf) {
       io_write_bandwidth_max_bytes_per_sec: null,
       ...(wf.resource_limits || {}),
     };
+    window.recipeRuntimeAptRepositories = cloneRuntimeAptRepositories(wf.runtime_apt_repositories);
     window.recipeAdvancedFields = {inactivity_timeout: Object.prototype.hasOwnProperty.call(build, 'inactivity_timeout') ? build.inactivity_timeout : 300, maximum_runtime: build.maximum_runtime || ''};
     const configuredOutput = build.output || {};
     const outputMode = ['source','path','paths'].includes(configuredOutput.mode) ? configuredOutput.mode : (configuredOutput.path ? 'path' : 'source');

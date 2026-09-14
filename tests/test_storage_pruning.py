@@ -10,7 +10,7 @@ from copy import deepcopy
 from pathlib import Path
 from unittest import mock
 
-from debbuilder import artifact_publication, artifact_validation, package_store, storage_pruning, workspace_cleanup
+from debbuilder import artifact_publication, artifact_validation, package_store, storage_pruning, validation_service, workspace_cleanup
 from debbuilder.build_store import BuildStore
 from debbuilder.repository_lock import repository_lease, repository_lease_held
 
@@ -365,6 +365,36 @@ class StoragePruningTests(unittest.TestCase):
             return_value="runtime cgroup remains",
         ):
             result = self.sweep()
+        self.assertIn(run["id"], result["skipped"])
+        self.assertTrue(artifact.is_file())
+
+    def test_manifest_backed_queued_validation_preserves_prunable_artifact(self):
+        run, _workspace, artifact = self.make_published_run("queued-validation")
+        attempt_id = "queued-attempt"
+        root = validation_service.attempt_root(self.store, run["id"], attempt_id)
+        root.mkdir(parents=True)
+        validation_service._save_attempt(root / "attempt.json", {
+            "contract_version": 1,
+            "id": attempt_id,
+            "build_run_id": run["id"],
+            "inputs": {"profile": "bookworm", "artifact": {
+                "package": "demo", "version": "2.0-1", "architecture": "all",
+                "size": artifact.stat().st_size, "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+            }, "previous_artifact": None},
+            "selected_profile": {"name": "bookworm", "image": {
+                "name": "debbuilder-validation:bookworm", "id": "sha256:" + "b" * 64, "digest": None,
+            }},
+            "created_at": "2026-09-14T10:00:00+00:00",
+            "started_at": None,
+            "finished_at": None,
+            "status": "queued",
+            "prepared_dependencies": None,
+            "result": None,
+            "error": None,
+        })
+
+        result = self.sweep()
+
         self.assertIn(run["id"], result["skipped"])
         self.assertTrue(artifact.is_file())
 

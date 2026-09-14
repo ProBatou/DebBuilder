@@ -351,10 +351,40 @@ class StorageMaintenanceTests(unittest.TestCase):
 
     def test_validation_publication_and_reconciliation_request_destructive_maintenance(self):
         notifier = mock.Mock()
-        with mock.patch.object(app, "notification_service", return_value=notifier), \
-                mock.patch.object(app, "request_maintenance") as request, \
-                mock.patch.object(app.artifact_validation, "validate_artifact", return_value={"status": "success"}):
-            app.validate_build_artifact("run")
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = Path(temp)
+            artifact = workspace / "package.deb"
+            artifact.write_bytes(b"controlled")
+            (workspace / "recipe.json").write_text("{}")
+            run = {
+                "status": "success",
+                "workspace": str(workspace),
+                "artifact": {"path": str(artifact)},
+            }
+            store = mock.Mock()
+            store.load.return_value = run
+            prepared = {
+                "packages": [],
+                "profile_name": "bookworm",
+                "image": {"id": "sha256:" + "a" * 64},
+            }
+            with mock.patch.object(app, "BuildStore", return_value=store), \
+                    mock.patch.object(app, "validate_recipe_metadata", return_value={"runtime_apt_repositories": []}), \
+                    mock.patch.object(app, "notification_service", return_value=notifier), \
+                    mock.patch.object(app, "request_maintenance") as request, \
+                    mock.patch.object(app.dependency_preparation, "prepare_runtime_dependencies", return_value={"prepared_dependencies": prepared}), \
+                    mock.patch.object(app.dependency_preparation, "begin_lifecycle_attempt"), \
+                    mock.patch.object(app.dependency_preparation, "complete_lifecycle_attempt"), \
+                    mock.patch.object(app.dependency_preparation.SUPERVISOR, "register"), \
+                    mock.patch.object(app.dependency_preparation.SUPERVISOR, "unregister"), \
+                    mock.patch.object(app.validation_service, "load_attempt", return_value={
+                        "inputs": {"profile": "bookworm", "previous_artifact": None},
+                    }), \
+                    mock.patch.object(app.validation_service, "load_automation", return_value={
+                        "automatic": False, "publish_after_success": False,
+                    }), \
+                    mock.patch.object(app.artifact_validation, "validate_artifact", return_value={"status": "success"}):
+                app.execute_validation_attempt("run", "attempt", threading.Event(), {})
         request.assert_called_once_with(refresh=True, cleanup=True)
 
         with mock.patch.object(app, "notification_service", return_value=notifier), \

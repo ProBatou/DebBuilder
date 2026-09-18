@@ -14,6 +14,7 @@ from debbuilder.recipe_migrations import (
     migrate_v1_to_v2,
     migrate_v2_to_v3,
     migrate_v3_to_v4,
+    migrate_v4_to_v5,
 )
 from debbuilder.recipe_schema import RecipeDocumentError, recipe_document_for_storage, validate_recipe_metadata
 
@@ -26,14 +27,15 @@ def fixture(name):
 
 
 class RecipeMigrationTests(unittest.TestCase):
-    def test_v0_migrates_sequentially_to_v4_without_mutating_source(self):
+    def test_v0_migrates_sequentially_to_v5_without_mutating_source(self):
         source = fixture("legacy-v0.json")
         original = copy.deepcopy(source)
         result = migrate_recipe_document(source)
         self.assertEqual(result.source_version, 0)
-        self.assertEqual(result.target_version, 4)
-        self.assertEqual(result.applied_migrations, ("v0_to_v1", "v1_to_v2", "v2_to_v3", "v3_to_v4"))
-        self.assertEqual(result.document["schema_version"], 4)
+        self.assertEqual(result.target_version, 5)
+        self.assertEqual(result.applied_migrations, ("v0_to_v1", "v1_to_v2", "v2_to_v3", "v3_to_v4", "v4_to_v5"))
+        self.assertEqual(result.document["schema_version"], 5)
+        self.assertEqual(result.document["automation"], {"enabled": False, "policy": "manual"})
         self.assertEqual(result.document["runtime_apt_repositories"], [])
         self.assertTrue(all(value is None for value in result.document["resource_limits"].values()))
         self.assertNotIn("timeout", result.document["build"])
@@ -41,10 +43,10 @@ class RecipeMigrationTests(unittest.TestCase):
         self.assertNotIn("steps", result.document)
         self.assertEqual(source, original)
 
-    def test_v1_migrates_to_v4_with_known_alias_semantics(self):
+    def test_v1_migrates_to_v5_with_known_alias_semantics(self):
         result = migrate_recipe_document(fixture("legacy-v1-aliases.json"))
         document = result.document
-        self.assertEqual(result.applied_migrations, ("v1_to_v2", "v2_to_v3", "v3_to_v4"))
+        self.assertEqual(result.applied_migrations, ("v1_to_v2", "v2_to_v3", "v3_to_v4", "v4_to_v5"))
         self.assertEqual(document["build"]["inactivity_timeout"], 90)
         self.assertNotIn("configured", document["service"])
         self.assertEqual(document["install"]["config_files"], [{
@@ -61,23 +63,23 @@ class RecipeMigrationTests(unittest.TestCase):
             "legacy_file_layout": "basename",
         })
 
-    def test_current_v4_is_unchanged_and_repeated_migration_is_stable(self):
+    def test_v4_migrates_default_off_and_repeated_migration_is_stable(self):
         source = fixture("current-v4.json")
         first = migrate_recipe_document(source)
         second = migrate_recipe_document(first.document)
-        self.assertFalse(first.migrated)
+        self.assertTrue(first.migrated)
         self.assertFalse(second.migrated)
-        self.assertEqual(first.document, source)
+        self.assertEqual(first.document["automation"], {"enabled": False, "policy": "manual"})
         self.assertEqual(second.document, first.document)
 
-    def test_v2_migrates_deterministically_through_v4(self):
+    def test_v2_migrates_deterministically_through_v5(self):
         source = fixture("current-v2.json")
         original = copy.deepcopy(source)
         first = migrate_recipe_document(source)
         second = migrate_recipe_document(source)
         self.assertEqual(first, second)
-        self.assertEqual(first.applied_migrations, ("v2_to_v3", "v3_to_v4"))
-        self.assertEqual(first.document["schema_version"], 4)
+        self.assertEqual(first.applied_migrations, ("v2_to_v3", "v3_to_v4", "v4_to_v5"))
+        self.assertEqual(first.document["schema_version"], 5)
         self.assertTrue(all(value is None for value in first.document["resource_limits"].values()))
         self.assertEqual(first.document["runtime_apt_repositories"], [])
         self.assertEqual(source, original)
@@ -89,7 +91,7 @@ class RecipeMigrationTests(unittest.TestCase):
         self.assertEqual(migrated["schema_version"], 4)
         self.assertEqual(migrated["runtime_apt_repositories"], [])
         self.assertEqual(source, original)
-        self.assertEqual(migrate_recipe_document(migrated).document, migrated)
+        self.assertEqual(migrate_recipe_document(migrated).document["automation"], {"enabled": False, "policy": "manual"})
         with self.assertRaises(RecipeMigrationError) as raised:
             migrate_v3_to_v4({**source, "runtime_apt_repositories": []})
         self.assertEqual(raised.exception.code, "ambiguous_recipe_fields")
@@ -101,7 +103,7 @@ class RecipeMigrationTests(unittest.TestCase):
 
     def test_future_and_invalid_versions_are_structured_refusals(self):
         cases = [
-            ({"schema_version": 5}, "future_schema_version", 5),
+            ({"schema_version": 6}, "future_schema_version", 6),
             ({"schema_version": True}, "invalid_schema_version", None),
             ({"schema_version": "1"}, "invalid_schema_version", None),
             ({"schema_version": 1.0}, "invalid_schema_version", None),
@@ -130,6 +132,7 @@ class RecipeMigrationTests(unittest.TestCase):
             (migrate_v1_to_v2, {"schema_version": 2}),
             (migrate_v2_to_v3, {"schema_version": 3}),
             (migrate_v3_to_v4, {"schema_version": 4}),
+            (migrate_v4_to_v5, {"schema_version": 5}),
         ):
             with self.subTest(migration=migration.__name__), self.assertRaises(RecipeMigrationError) as raised:
                 migration(document)
@@ -179,7 +182,7 @@ class RecipeMigrationTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "unknown_field")
         self.assertEqual(raised.exception.path, "$.future_meaning")
 
-    def test_frontend_style_v1_is_accepted_and_stored_as_v4(self):
+    def test_frontend_style_v1_is_accepted_and_stored_as_v5(self):
         frontend = {
             "schema_version": 1,
             "name": "frontend",
@@ -191,8 +194,9 @@ class RecipeMigrationTests(unittest.TestCase):
             "service": {"enabled": False},
         }
         stored = recipe_document_for_storage(frontend)
-        self.assertEqual(stored["schema_version"], 4)
-        self.assertEqual(validate_recipe_metadata(frontend)["schema_version"], 4)
+        self.assertEqual(stored["schema_version"], 5)
+        self.assertEqual(validate_recipe_metadata(frontend)["schema_version"], 5)
+        self.assertEqual(stored["automation"], {"enabled": False, "policy": "manual"})
         self.assertEqual(stored["runtime_apt_repositories"], [])
 
     def test_strict_current_schema_validation_rejects_unknown_fields(self):
@@ -202,16 +206,27 @@ class RecipeMigrationTests(unittest.TestCase):
             recipe_document_for_storage(current)
         self.assertEqual(raised.exception.code, "unknown_field")
 
-    def test_current_v4_does_not_reapply_legacy_alias_migrations(self):
+    def test_v4_to_v5_does_not_reapply_legacy_alias_migrations(self):
         current = fixture("current-v4.json")
         current["build"]["timeout"] = 90
         migrated = migrate_recipe_document(current)
-        self.assertFalse(migrated.migrated)
+        self.assertTrue(migrated.migrated)
         self.assertEqual(migrated.document["build"]["timeout"], 90)
         with self.assertRaises(RecipeDocumentError) as raised:
             recipe_document_for_storage(current)
         self.assertEqual(raised.exception.code, "unknown_field")
         self.assertEqual(raised.exception.path, "$.build.timeout")
+
+    def test_v4_to_v5_is_pure_and_rejects_ambiguous_automation(self):
+        source = fixture("current-v4.json")
+        original = copy.deepcopy(source)
+        migrated = migrate_v4_to_v5(source)
+        self.assertEqual(source, original)
+        self.assertEqual(migrated["automation"], {"enabled": False, "policy": "manual"})
+        with self.assertRaises(RecipeMigrationError) as raised:
+            migrate_v4_to_v5({**source, "automation": {"enabled": True, "policy": "full"}})
+        self.assertEqual(raised.exception.code, "ambiguous_recipe_fields")
+        self.assertEqual(raised.exception.path, "$.automation")
 
     def test_historical_snapshot_can_migrate_in_memory_without_changing_bytes(self):
         path = FIXTURES / "legacy-v1-aliases.json"

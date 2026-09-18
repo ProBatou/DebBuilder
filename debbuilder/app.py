@@ -26,13 +26,15 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import artifact_publication, artifact_validation, auth_service, automation_service, build_pipeline, builtin_recipe, command_containment, deb_inspector, dependency_preparation, execution_recovery, execution_service, maintenance, notifications, package_service, recipe_store, release_cache, resource_limits, settings_service, storage, storage_inventory, storage_pruning, upstream_archive, validation_oci, validation_service, workspace_cleanup
+from . import artifact_publication, artifact_validation, auth_service, automation_orchestrator, automation_scheduler, automation_service, automation_status, build_pipeline, builtin_recipe, command_containment, deb_inspector, dependency_preparation, execution_recovery, execution_service, maintenance, notifications, package_service, recipe_store, release_cache, resource_limits, settings_service, storage, storage_inventory, storage_pruning, upstream_archive, validation_oci, validation_service, workspace_cleanup
+from .automation_ledger import AutomationLedger
+from .upstream_detection import AutomationDetectionService
 from .build_models import utc_now
-from .build_store import BuildStore
+from .build_store import BuildStore, canonical_recipe_sha256
 from .execution_manager import DEFAULT_SHUTDOWN_TIMEOUT, ExecutionManager, ExecutionManagerError
 from .http_handler import create_handler
 from .lifecycle import MutationGate, MutationGateClosed
-from .recipe_schema import RecipeDocumentError, normalize_recipe, recipe_document_for_storage, recipe_for_storage, require_safe_name, validate_recipe_metadata
+from .recipe_schema import RecipeDocumentError, automation_eligible, normalize_recipe, recipe_document_for_storage, recipe_for_storage, require_safe_name, validate_recipe_metadata
 from .settings_store import SessionSecretError, cookie_secret, github_token, oidc_client_secret, prepare_cookie_secret
 from .runtime import RuntimeConfig
 
@@ -71,6 +73,8 @@ GITHUB_RELEASE_CACHE_SERVICE = None
 APPLICATION_MUTATION_GATE = None
 APPLICATION_MAINTENANCE_SERVICE = None
 APPLICATION_VALIDATION_MANAGER = None
+APPLICATION_AUTOMATION_SCHEDULER = None
+APPLICATION_AUTOMATION_ORCHESTRATOR = None
 
 
 class RunAdmissionError(RuntimeError):
@@ -302,6 +306,12 @@ def execute_queued_recipe_run(run_id: str, *, store: BuildStore, expected_initia
             lifecycle_callback=notify_lifecycle,
             cancellation_control=cancellation_control,
         )
+        completed_run = store.load(run_id)
+        if isinstance((completed_run or {}).get("automation"), dict):
+            orchestrator = APPLICATION_AUTOMATION_ORCHESTRATOR
+            if orchestrator is not None:
+                orchestrator.on_run_terminal(run_id)
+            return result
         return automation_service.complete_with_automation(
             result,
             dry_run=dry_run,
@@ -332,6 +342,10 @@ def create_validation_manager(*, store: BuildStore | None = None, queue_capacity
         queue_capacity=queue_capacity,
         resume_publication=lambda run_id, attempt_id: continue_validation_publication(
             run_id, attempt_id, store=selected_store,
+        ),
+        on_terminal=lambda run_id, attempt_id: (
+            APPLICATION_AUTOMATION_ORCHESTRATOR.on_validation_terminal(run_id, attempt_id)
+            if APPLICATION_AUTOMATION_ORCHESTRATOR is not None else None
         ),
     )
 
@@ -507,6 +521,59 @@ def _mark_enqueue_failed(store: BuildStore, run_id: str, exc: Exception) -> None
         logging.getLogger(__name__).warning("Could not append enqueue failure log for Run %s (%s)", run_id, type(exc).__name__)
 
 
+def _prepare_run_admission(manager: ExecutionManager, workflow: dict) -> tuple[dict, dict]:
+    """Apply the shared Recipe/resource/containment admission checks."""
+    try:
+        canonical = recipe_document_for_storage(workflow)
+    except RecipeDocumentError as exc:
+        raise RunAdmissionError(exc.code, str(exc), status=422, details={"path": exc.path}) from exc
+    settings_result = settings_service.load_app_settings_result(DATA, settings_defaults())
+    if settings_result.resource_limits_error:
+        raise RunAdmissionError(
+            "resource_settings_invalid",
+            "Build/Test admission is blocked until resource-limit Settings are repaired",
+            status=503,
+            details=settings_result.resource_limits_error,
+        )
+    effective, _origins = resource_limits.resolve_policy(
+        settings_result.settings["resource_limits"], canonical["resource_limits"],
+    )
+    cleanup_blocker = command_containment.containment_cleanup_blocker()
+    if cleanup_blocker:
+        raise RunAdmissionError(
+            "execution_recovery_unresolved",
+            "Build/Test admission is blocked because containment cleanup is unresolved",
+            status=503,
+            details={"backend": "systemd_cgroup", "reason": cleanup_blocker},
+        )
+    probe_root = manager.store.root if manager.store.root.is_dir() else manager.store.root.parent
+    capability = command_containment.resource_limit_capability(
+        effective, workspace=probe_root, refresh=resource_limits.enforcement_required(effective),
+    )
+    cleanup_blocker = command_containment.containment_cleanup_blocker()
+    if cleanup_blocker:
+        raise RunAdmissionError(
+            "execution_recovery_unresolved",
+            "Build/Test admission is blocked because containment cleanup is unresolved",
+            status=503,
+            details={"backend": "systemd_cgroup", "reason": cleanup_blocker},
+        )
+    if resource_limits.enforcement_required(effective) and not capability["available"]:
+        raise RunAdmissionError(
+            "resource_limits_unavailable",
+            "Requested resource limits cannot be enforced on this host",
+            status=503,
+            details={
+                "backend": capability["backend"],
+                "requested_controls": capability["requested_controls"],
+                "reason": capability["reason"],
+            },
+        )
+    return canonical, resource_limits.admission_contract(
+        settings_result.settings["resource_limits"], canonical["resource_limits"], capability,
+    )
+
+
 @command_containment.containment_safety_serialized
 def enqueue_recipe_run(manager: ExecutionManager | None, workflow: dict, *, dry_run: bool = True) -> dict:
     """Reserve capacity, persist exactly one Run, and submit it asynchronously."""
@@ -519,52 +586,7 @@ def enqueue_recipe_run(manager: ExecutionManager | None, workflow: dict, *, dry_
             run_id = manager.store.allocate_run_id()
             reservation.track(run_id)
             try:
-                canonical = recipe_document_for_storage(workflow)
-                settings_result = settings_service.load_app_settings_result(DATA, settings_defaults())
-                if settings_result.resource_limits_error:
-                    raise RunAdmissionError(
-                        "resource_settings_invalid",
-                        "Build/Test admission is blocked until resource-limit Settings are repaired",
-                        status=503,
-                        details=settings_result.resource_limits_error,
-                    )
-                effective, _origins = resource_limits.resolve_policy(
-                    settings_result.settings["resource_limits"], canonical["resource_limits"],
-                )
-                cleanup_blocker = command_containment.containment_cleanup_blocker()
-                if cleanup_blocker:
-                    raise RunAdmissionError(
-                        "execution_recovery_unresolved",
-                        "Build/Test admission is blocked because containment cleanup is unresolved",
-                        status=503,
-                        details={"backend": "systemd_cgroup", "reason": cleanup_blocker},
-                    )
-                probe_root = manager.store.root if manager.store.root.is_dir() else manager.store.root.parent
-                capability = command_containment.resource_limit_capability(
-                    effective, workspace=probe_root, refresh=resource_limits.enforcement_required(effective),
-                )
-                cleanup_blocker = command_containment.containment_cleanup_blocker()
-                if cleanup_blocker:
-                    raise RunAdmissionError(
-                        "execution_recovery_unresolved",
-                        "Build/Test admission is blocked because containment cleanup is unresolved",
-                        status=503,
-                        details={"backend": "systemd_cgroup", "reason": cleanup_blocker},
-                    )
-                if resource_limits.enforcement_required(effective) and not capability["available"]:
-                    raise RunAdmissionError(
-                        "resource_limits_unavailable",
-                        "Requested resource limits cannot be enforced on this host",
-                        status=503,
-                        details={
-                            "backend": capability["backend"],
-                            "requested_controls": capability["requested_controls"],
-                            "reason": capability["reason"],
-                        },
-                    )
-                resource_contract = resource_limits.admission_contract(
-                    settings_result.settings["resource_limits"], canonical["resource_limits"], capability,
-                )
+                canonical, resource_contract = _prepare_run_admission(manager, workflow)
             except RecipeDocumentError as exc:
                 if not reservation.confirm_absent(run_id):
                     reservation.transfer_unresolved(run_id, {
@@ -649,6 +671,85 @@ def enqueue_recipe_run(manager: ExecutionManager | None, workflow: dict, *, dry_
             "execution_manager_unavailable", "Execution manager is unavailable", status=503,
         ) from exc
     return {"run_id": run["id"], "status": "queued"}
+
+
+@command_containment.containment_safety_serialized
+def enqueue_preallocated_recipe_run(
+    manager: ExecutionManager | None,
+    workflow: dict,
+    *,
+    run_id: str,
+    dry_run: bool,
+    origin: dict,
+    automation: dict,
+    created_callback=None,
+) -> dict:
+    """Create/link/submit one preallocated automated Run through canonical owners.
+
+    A queue-full or shutdown rejection deliberately leaves the exact pending
+    Run intact so durable orchestration can retry admission without creating a
+    second workspace.
+    """
+    if manager is None:
+        raise RunAdmissionError("execution_manager_unavailable", "Execution manager is unavailable", status=503)
+    canonical, resource_contract = _prepare_run_admission(manager, workflow)
+    existing = manager.store.load(run_id)
+    if existing is None:
+        try:
+            run = build_pipeline.create_pipeline_run(
+                canonical,
+                store=manager.store,
+                dry_run=dry_run,
+                recipe_id=str(workflow.get("name") or "recipe"),
+                run_id=run_id,
+                resource_contract=resource_contract,
+                origin=origin,
+                automation=automation,
+            )
+        except FileExistsError as exc:
+            existing = manager.store.load(run_id)
+            if existing is None:
+                raise RunAdmissionError(
+                    "execution_creation_persistence_unresolved",
+                    "Preallocated Run workspace exists without a readable Run",
+                    status=503,
+                    details={"run_id": run_id},
+                ) from exc
+            run = existing
+    else:
+        run = existing
+    expected_mode = "dry_run" if dry_run else "build"
+    if (
+        run.get("id") != run_id
+        or run.get("recipe_id") != str(workflow.get("name") or "recipe")
+        or run.get("recipe_sha256") != canonical_recipe_sha256(canonical)
+        or run.get("mode") != expected_mode
+        or run.get("origin") != origin
+        or run.get("automation") != automation
+    ):
+        raise RunAdmissionError(
+            "automation_run_binding_invalid",
+            "Preallocated Run does not match its immutable automation admission",
+            status=409,
+            details={"run_id": run_id},
+        )
+    if run.get("status") not in {"pending", "queued", "running", "cancelling", "prepared", "success", "failed", "cancelled"}:
+        raise RunAdmissionError("automation_run_state_invalid", "Preallocated Run state is invalid", status=409)
+    if created_callback is not None:
+        created_callback(run)
+    if run["status"] != "pending":
+        return {"run_id": run_id, "status": run["status"], "duplicate": True}
+    try:
+        manager.submit(run_id)
+    except ExecutionManagerError as exc:
+        if exc.code == "execution_queue_full":
+            raise RunAdmissionError(exc.code, "The Build/Test queue is full; retry is delayed", status=429, details=exc.details) from exc
+        if exc.code in {"execution_manager_not_accepting", "execution_manager_stopped"}:
+            raise RunAdmissionError("execution_manager_unavailable", "Execution manager is unavailable", status=503) from exc
+        if exc.code == "build_run_already_submitted":
+            return {"run_id": run_id, "status": (manager.store.load(run_id) or run)["status"], "duplicate": True}
+        raise RunAdmissionError("execution_enqueue_failed", "The Build Run could not be submitted", status=500) from exc
+    return {"run_id": run_id, "status": "queued", "duplicate": False}
 
 
 def cleanup_workspaces(*, authorization=None, should_stop=None) -> dict:
@@ -749,6 +850,12 @@ def cancel_execution(manager: ExecutionManager | None, run_id: str, *, maintenan
             details={"run_id": run_id, "status": status},
         )
     if outcome == "queued_cancelled":
+        orchestrator = APPLICATION_AUTOMATION_ORCHESTRATOR
+        if orchestrator is not None:
+            try:
+                orchestrator.on_run_terminal(run_id)
+            except Exception:
+                LOGGER.exception("Automation continuation failed after queued Run cancellation")
         try:
             (maintenance_request or request_maintenance)(cleanup=True)
         except Exception:
@@ -759,6 +866,12 @@ def cancel_execution(manager: ExecutionManager | None, run_id: str, *, maintenan
     if outcome == "active_cancel_requested":
         return _cancellation_result(run_id, "cancelling", result.get("cancellation") or {})
     if outcome == "already_cancelled":
+        orchestrator = APPLICATION_AUTOMATION_ORCHESTRATOR
+        if orchestrator is not None:
+            try:
+                orchestrator.on_run_terminal(run_id)
+            except Exception:
+                LOGGER.exception("Automation continuation failed after cancelled Run replay")
         return _cancellation_result(run_id, "cancelled", result.get("cancellation") or {})
     raise ExecutionCancellationError(
         "execution_cancellation_failed", "Execution manager returned an unknown cancellation result", status=500,
@@ -799,6 +912,47 @@ def create_maintenance_service(http_server):
         cleanup=cleanup,
     )
     return service
+
+
+def create_automation_scheduler(http_server):
+    """Construct the sole application-owned periodic detection scheduler."""
+    global APPLICATION_AUTOMATION_ORCHESTRATOR
+    automation = app_settings().get("automation", {})
+    ledger = AutomationLedger(DATA)
+    detector = AutomationDetectionService(USER_WORKFLOWS, ledger)
+    manager = getattr(http_server, "execution_manager", None)
+
+    orchestrator = automation_orchestrator.AutomationOrchestrator(
+        USER_WORKFLOWS,
+        ledger,
+        manager.store if manager is not None else BuildStore(DATA / "builds"),
+        execution_manager=lambda: getattr(http_server, "execution_manager", None),
+        enqueue_run=enqueue_preallocated_recipe_run,
+        validation_manager=lambda: getattr(http_server, "validation_manager", None),
+        publish=publish_build_artifact,
+        notify_completion=lambda result: notification_service().notify_automatic_completion(result),
+        admission_open=lambda: bool(
+            http_server.mutation_gate.accepting
+            and getattr(http_server, "execution_manager", None) is not None
+            and getattr(http_server.execution_manager, "accepting", False)
+        ),
+        mutation_lease=http_server.mutation_gate.lease,
+    )
+    APPLICATION_AUTOMATION_ORCHESTRATOR = orchestrator
+    return automation_scheduler.AutomationScheduler(
+        USER_WORKFLOWS, detector, ledger, automation_scheduler.AutomationRetryStore(DATA),
+        mutation_gate=http_server.mutation_gate,
+        admission_open=lambda: bool(
+            http_server.mutation_gate.accepting
+            and manager is not None
+            and getattr(manager, "accepting", False)
+        ),
+        token_provider=lambda: github_token(DATA),
+        enabled=automation.get("upstream_checks_enabled", True),
+        interval_seconds=automation.get("upstream_check_interval_seconds", 3600),
+        concurrency=automation.get("upstream_check_concurrency", 4),
+        orchestrator=orchestrator,
+    )
 
 
 def create_storage_inventory():
@@ -873,6 +1027,11 @@ def continue_validation_publication(run_id: str, attempt_id: str, *, store: Buil
         run = selected_store.load(run_id)
         if not run:
             return None
+        if isinstance(run.get("automation"), dict):
+            orchestrator = APPLICATION_AUTOMATION_ORCHESTRATOR
+            if orchestrator is not None:
+                orchestrator.on_validation_terminal(run_id, attempt_id)
+            return None
         payload = {"confirm": automation_service.publication_confirmation(run)}
         gate = APPLICATION_MUTATION_GATE
         lease = gate.lease() if gate is not None else None
@@ -881,7 +1040,8 @@ def continue_validation_publication(run_id: str, attempt_id: str, *, store: Buil
         else:
             with lease:
                 result = publish_build_artifact(run_id, payload)
-        validation_service.complete_publication_intent(selected_store, run_id, attempt_id)
+        if result.get("status") == "success":
+            validation_service.complete_publication_intent(selected_store, run_id, attempt_id)
         return result
     except MutationGateClosed:
         LOGGER.info("Automatic publication remains pending because shutdown has started")
@@ -1049,6 +1209,24 @@ def recipe_json_validation(recipe) -> dict:
     return {"ok": True, "recipe": canonical, "id": canonical["name"], "collision": collision}
 
 
+def _wake_automation_after_recipe_save(previous: dict | None, current: dict) -> None:
+    """Coalesce a wake after an eligible Recipe is durably changed."""
+    if not automation_eligible(current) or (
+        automation_eligible(previous or {})
+        and canonical_recipe_sha256(previous) == canonical_recipe_sha256(current)
+    ):
+        return
+    scheduler = APPLICATION_AUTOMATION_SCHEDULER
+    if scheduler is None:
+        return
+    try:
+        scheduler.request_recipe(current["name"])
+    except (ValueError, automation_scheduler.AutomationSchedulerError):
+        # The Recipe is already durable. A stopped/busy scheduler will
+        # rediscover it on the next normal startup/pass.
+        pass
+
+
 def import_recipe_json(recipe, *, replace: bool = False) -> dict:
     """Create or explicitly replace a user Recipe from canonical JSON."""
     preflight = recipe_document_for_storage(recipe)
@@ -1056,6 +1234,7 @@ def import_recipe_json(recipe, *, replace: bool = False) -> dict:
     builtin_recipe.require_user_recipe_id(workflow_id)
     destination = workflow_path(workflow_id, for_write=True)
     assert destination is not None
+    previous = None
     with storage.locked_path(destination):
         canonical = recipe_document_for_storage(recipe)
         existing = workflow_path(workflow_id)
@@ -1065,8 +1244,10 @@ def import_recipe_json(recipe, *, replace: bool = False) -> dict:
                 raise PermissionError("shipped recipes are read-only and cannot be replaced")
             if not replace:
                 raise FileExistsError("recipe id already exists; explicit replacement is required")
+            previous = read_workflow_file(existing)
         canonical = recipe_store.save_recipe(destination, canonical)
     associate_workflow_package(workflow_id, canonical)
+    _wake_automation_after_recipe_save(previous, canonical)
     return {"ok": True, "id": workflow_id, "recipe": canonical, "created": existing is None, "replaced": existing is not None}
 
 
@@ -1087,6 +1268,13 @@ def save_workflow_recipe(workflow_id: str, workflow: dict, *, previous_id: str =
             "builtin_recipe_reserved", "The application-managed DebBuilder Recipe cannot be renamed",
             path="$.previous_id",
         )
+    previous_recipe = None
+    previous_path = workflow_path(previous_id or workflow_id)
+    if previous_path is not None:
+        try:
+            previous_recipe = read_workflow_file(previous_path)
+        except (OSError, TypeError, ValueError, recipe_store.RecipeStoreError):
+            previous_recipe = None
     destination = workflow_path(workflow_id, for_write=True)
     assert destination is not None
     if builtin_recipe.is_builtin_recipe_id(workflow_id):
@@ -1105,7 +1293,33 @@ def save_workflow_recipe(workflow_id: str, workflow: dict, *, previous_id: str =
         if previous and previous.parent.resolve() == USER_WORKFLOWS.resolve():
             previous.unlink()
     associate_workflow_package(workflow_id, normalized, previous_id)
+    _wake_automation_after_recipe_save(previous_recipe, normalized)
     return {"ok": True, "id": workflow_id, "path": str(destination)}
+
+
+def automation_projection_service() -> automation_status.AutomationStatusService:
+    scheduler = APPLICATION_AUTOMATION_SCHEDULER
+    ledger = getattr(scheduler, "ledger", None) or AutomationLedger(DATA)
+    retry_store = getattr(scheduler, "retry_store", None) or automation_scheduler.AutomationRetryStore(DATA)
+    return automation_status.AutomationStatusService(
+        USER_WORKFLOWS,
+        ledger,
+        retry_store,
+        BuildStore(DATA / "builds"),
+        scheduler=lambda: APPLICATION_AUTOMATION_SCHEDULER,
+    )
+
+
+def get_automation_status(recipe_id: str) -> dict:
+    return automation_projection_service().status(recipe_id)
+
+
+def check_automation_now(recipe_id: str) -> dict:
+    return automation_projection_service().check_now(recipe_id)
+
+
+def retry_automation(recipe_id: str, payload: dict) -> dict:
+    return automation_projection_service().retry(recipe_id, payload)
 
 
 def workflow_listing() -> dict:
@@ -1224,10 +1438,13 @@ def build_run_package(run: dict) -> str:
 
 
 def list_packages(*, include_history: bool = False) -> list[dict]:
-    return package_projection_service().list_packages(
+    packages = package_projection_service().list_packages(
         include_history=include_history,
         live_rows=live_published_index(),
     )
+    recipe_ids = [str(package.get("recipe") or "") for package in packages if package.get("recipe")]
+    statuses = automation_projection_service().statuses(recipe_ids) if recipe_ids else {}
+    return [{**package, "automation": statuses.get(str(package.get("recipe") or ""))} for package in packages]
 
 
 def get_package(name: str) -> dict | None:
@@ -1575,17 +1792,19 @@ def serve_application(
     server_factory=ThreadingHTTPServer,
     manager_factory=create_execution_manager,
     maintenance_factory=create_maintenance_service,
+    automation_scheduler_factory=None,
     retention_target=None,
     install_signal_handlers=True,
     shutdown_timeout=DEFAULT_SHUTDOWN_TIMEOUT,
 ) -> int:
     """Own startup, serving, and shutdown under one diagnostic target."""
-    global APPLICATION_MAINTENANCE_SERVICE, APPLICATION_MUTATION_GATE, APPLICATION_VALIDATION_MANAGER, GITHUB_RELEASE_CACHE_SERVICE
+    global APPLICATION_AUTOMATION_ORCHESTRATOR, APPLICATION_AUTOMATION_SCHEDULER, APPLICATION_MAINTENANCE_SERVICE, APPLICATION_MUTATION_GATE, APPLICATION_VALIDATION_MANAGER, GITHUB_RELEASE_CACHE_SERVICE
     graceful_timeout = _graceful_shutdown_timeout(shutdown_timeout)
     http_server = None
     manager = None
     validation_manager = None
     maintenance_service = None
+    automation_detection_scheduler = None
     cleanup_started = threading.Event()
     shutdown_requested = threading.Event()
     signal_requested_state = [False]
@@ -1602,6 +1821,8 @@ def serve_application(
     mutation_result = None
     previous_mutation_gate = APPLICATION_MUTATION_GATE
     previous_maintenance_service = APPLICATION_MAINTENANCE_SERVICE
+    previous_automation_scheduler = APPLICATION_AUTOMATION_SCHEDULER
+    previous_automation_orchestrator = APPLICATION_AUTOMATION_ORCHESTRATOR
     APPLICATION_MUTATION_GATE = mutation_gate
 
     try:
@@ -1621,6 +1842,12 @@ def serve_application(
                     cleanup_failures.append(("signal shutdown coordination", exc))
                     return
                 shutdown_requested.set()
+                selected_scheduler = automation_detection_scheduler
+                if selected_scheduler is not None:
+                    try:
+                        selected_scheduler.stop()
+                    except BaseException as exc:
+                        cleanup_failures.append(("automation scheduler admission shutdown", exc))
                 mutation_gate.begin_shutdown()
                 selected_manager = manager
                 if selected_manager is not None and selected_manager.worker is not None:
@@ -1676,6 +1903,12 @@ def serve_application(
         )
         validation_manager = getattr(http_server, "validation_manager", None)
         check_shutdown_requested()
+        scheduler_factory = automation_scheduler_factory or create_automation_scheduler
+        automation_detection_scheduler = scheduler_factory(http_server)
+        http_server.automation_scheduler = automation_detection_scheduler
+        APPLICATION_AUTOMATION_SCHEDULER = automation_detection_scheduler
+        automation_detection_scheduler.start()
+        check_shutdown_requested()
         maintenance_service = (
             maintenance.TargetMaintenanceService(retention_target)
             if retention_target is not None
@@ -1700,6 +1933,11 @@ def serve_application(
     except BaseException as exc:
         primary_failure = exc
     finally:
+        if automation_detection_scheduler is not None:
+            try:
+                automation_detection_scheduler.stop()
+            except BaseException as exc:
+                cleanup_failures.append(("automation scheduler admission shutdown", exc))
         mutation_gate.begin_shutdown()
         graceful_deadline = time.monotonic() + graceful_timeout
         cleanup_started.set()
@@ -1723,8 +1961,12 @@ def serve_application(
                 validation_manager.begin_shutdown()
             except BaseException as exc:
                 cleanup_failures.append(("validation admission shutdown", exc))
-        if maintenance_service is not None:
-            maintenance_service.stop()
+        if automation_detection_scheduler is not None and automation_detection_scheduler.is_alive():
+            automation_detection_scheduler.join(_remaining_shutdown_time(graceful_deadline))
+            if automation_detection_scheduler.is_alive():
+                failure = TimeoutError("automation scheduler did not quiesce within the graceful shutdown target")
+                cleanup_failures.append(("automation scheduler shutdown", failure))
+                LOGGER.error("Incomplete automation scheduler shutdown: %s", failure)
         try:
             validation_stopped = dependency_preparation.SUPERVISOR.shutdown(
                 _remaining_shutdown_time(graceful_deadline)
@@ -1793,6 +2035,7 @@ def serve_application(
             if worker is not None and getattr(worker, "is_alive", lambda: False)():
                 worker.join()
         if maintenance_service is not None:
+            maintenance_service.stop()
             if maintenance_service.is_alive():
                 maintenance_service.join(_remaining_shutdown_time(graceful_deadline))
                 if maintenance_service.is_alive():
@@ -1829,6 +2072,8 @@ def serve_application(
                     cleanup_failures.append(("signal wakeup pipe close", exc))
         APPLICATION_MUTATION_GATE = previous_mutation_gate
         APPLICATION_MAINTENANCE_SERVICE = previous_maintenance_service
+        APPLICATION_AUTOMATION_SCHEDULER = previous_automation_scheduler
+        APPLICATION_AUTOMATION_ORCHESTRATOR = previous_automation_orchestrator
         if APPLICATION_VALIDATION_MANAGER is validation_manager:
             APPLICATION_VALIDATION_MANAGER = None
 

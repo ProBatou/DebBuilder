@@ -4,6 +4,7 @@ window.recipeExtraDependencies = [];
 window.recipeAdvancedFields = {};
 window.recipeResourceLimits = {memory_max_bytes:null,tasks_max:null,cpu_quota_percent:null,io_read_bandwidth_max_bytes_per_sec:null,io_write_bandwidth_max_bytes_per_sec:null};
 window.recipeRuntimeAptRepositories = [];
+window.recipeAutomation = {enabled:false, policy:'manual'};
 window.recipeBuildOutput = {mode:'source', path:'', paths:[]};
 window.recipeSuggestedOutputPaths = [];
 window.recipeInstallMappings = [];
@@ -191,9 +192,13 @@ function collectWorkflow() {
     artifact.asset_name = '';
   }
   return {
-    schema_version: 4,
+    schema_version: 5,
     name,
     active: !!$('recipeMetaActive')?.checked,
+    automation: {
+      enabled: !!$('recipeAutomationEnabled')?.checked,
+      policy: $('recipeAutomationPolicy')?.value || 'manual',
+    },
     resource_limits: {...window.recipeResourceLimits},
     runtime_apt_repositories: cloneRuntimeAptRepositories(window.recipeRuntimeAptRepositories),
     package: {
@@ -302,6 +307,7 @@ function renderWorkflow(wf) {
       ...(wf.resource_limits || {}),
     };
     window.recipeRuntimeAptRepositories = cloneRuntimeAptRepositories(wf.runtime_apt_repositories);
+    window.recipeAutomation = {enabled:false, policy:'manual', ...(wf.automation || {})};
     window.recipeAdvancedFields = {inactivity_timeout: Object.prototype.hasOwnProperty.call(build, 'inactivity_timeout') ? build.inactivity_timeout : 300, maximum_runtime: build.maximum_runtime || ''};
     const configuredOutput = build.output || {};
     const outputMode = ['source','path','paths'].includes(configuredOutput.mode) ? configuredOutput.mode : (configuredOutput.path ? 'path' : 'source');
@@ -313,6 +319,8 @@ function renderWorkflow(wf) {
     window.recipeArchiveInspectionMeta = null;
     setValue('recipeArtifactMode', artifact.mode || 'source_build'); setValue('recipeArchiveSource', artifact.archive_source || 'auto'); setValue('recipeArchiveFormat', artifact.archive_format || 'tar.gz'); setValue('recipeAssetSelection', artifact.asset_selection || 'pattern'); setValue('recipeArtifactPattern', artifact.name_pattern || ''); setValue('recipeArtifactName', artifact.asset_name || '');
     $('recipeMetaActive').checked = wf.active !== false;
+    if ($('recipeAutomationEnabled')) $('recipeAutomationEnabled').checked = window.recipeAutomation.enabled === true;
+    setValue('recipeAutomationPolicy', window.recipeAutomation.policy || 'manual');
     if (typeof renderBuildEnvironment === 'function') renderBuildEnvironment({project_type:build.detected_project || '', detected_files:build.detected_files || [], build_dependencies:build.detected_dependencies || [], system_build_dependencies:build.detected_dependencies || [], build_tools:build.detected_tools || []});
     window.recipeExtraDependencies = [...(build.extra_dependencies || [])]; window.recipeSourceChanges = (build.source_changes || []).map(change => ({...change}));
     renderDependencyChips(); renderSourceChanges(); renderBuildCommands(build.commands || []); if (typeof renderArchivePayload === 'function') renderArchivePayload();

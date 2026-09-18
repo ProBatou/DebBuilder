@@ -1,4 +1,5 @@
 import json
+import multiprocessing
 import os
 import stat
 import tempfile
@@ -12,9 +13,21 @@ from debbuilder.recipe_store import (
     RecipeStoreError,
     load_recipe,
     load_recipe_result,
+    locked_recipe,
     migrate_recipe_directory,
     save_recipe,
 )
+
+
+def _hold_recipe_lease(path: str, ready, release) -> None:
+    with locked_recipe(Path(path)):
+        ready.set()
+        release.wait(5)
+
+
+def _save_recipe_in_process(path: str, finished) -> None:
+    save_recipe(Path(path), {"name": Path(path).stem, "active": False})
+    finished.set()
 
 
 def canonical_bytes(document: dict) -> bytes:
@@ -41,10 +54,10 @@ class RecipeStoreTests(unittest.TestCase):
 
         result = load_recipe_result(path)
 
-        self.assertEqual(result.recipe["schema_version"], 4)
+        self.assertEqual(result.recipe["schema_version"], 5)
         self.assertEqual(result.recipe["runtime_apt_repositories"], [])
         self.assertEqual(result.recipe["build"]["inactivity_timeout"], 75)
-        self.assertEqual(result.applied_migrations, ("v1_to_v2", "v2_to_v3", "v3_to_v4"))
+        self.assertEqual(result.applied_migrations, ("v1_to_v2", "v2_to_v3", "v3_to_v4", "v4_to_v5"))
         self.assertTrue(result.rewritten)
         self.assertEqual(path.read_bytes(), canonical_bytes(result.recipe))
 
@@ -55,8 +68,32 @@ class RecipeStoreTests(unittest.TestCase):
 
         loaded = load_recipe(path, write_back=False)
 
-        self.assertEqual(loaded["schema_version"], 4)
+        self.assertEqual(loaded["schema_version"], 5)
         self.assertEqual(path.read_bytes(), original)
+
+    @unittest.skipUnless("fork" in multiprocessing.get_all_start_methods(), "fork multiprocessing is unavailable")
+    def test_recipe_lease_blocks_writers_in_another_process(self):
+        path = self.directory / "leased.json"
+        save_recipe(path, {"name": "leased"})
+        context = multiprocessing.get_context("fork")
+        ready = context.Event()
+        release = context.Event()
+        finished = context.Event()
+        holder = context.Process(target=_hold_recipe_lease, args=(str(path), ready, release))
+        writer = context.Process(target=_save_recipe_in_process, args=(str(path), finished))
+        holder.start()
+        self.assertTrue(ready.wait(2))
+        writer.start()
+        try:
+            self.assertFalse(finished.wait(0.25))
+        finally:
+            release.set()
+            holder.join(5)
+            writer.join(5)
+        self.assertEqual(holder.exitcode, 0)
+        self.assertEqual(writer.exitcode, 0)
+        self.assertTrue(finished.is_set())
+        self.assertFalse(load_recipe(path, write_back=False)["active"])
 
     def test_canonical_current_recipe_is_not_rewritten(self):
         path = self.directory / "current.json"
@@ -78,7 +115,7 @@ class RecipeStoreTests(unittest.TestCase):
             with ThreadPoolExecutor(max_workers=8) as executor:
                 loaded = list(executor.map(lambda _index: load_recipe(path), range(16)))
 
-        self.assertTrue(all(recipe["schema_version"] == 4 for recipe in loaded))
+        self.assertTrue(all(recipe["schema_version"] == 5 for recipe in loaded))
         self.assertEqual(replace.call_count, 1)
 
     def test_save_accepts_frontend_v1_and_is_idempotent(self):
@@ -96,7 +133,7 @@ class RecipeStoreTests(unittest.TestCase):
         with mock.patch("debbuilder.recipe_store.os.replace") as replace:
             repeated = save_recipe(path, frontend)
 
-        self.assertEqual(stored["schema_version"], 4)
+        self.assertEqual(stored["schema_version"], 5)
         self.assertEqual(repeated, stored)
         replace.assert_not_called()
         self.assertEqual(path.stat().st_mtime_ns, before)

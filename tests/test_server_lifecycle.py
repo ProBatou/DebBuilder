@@ -62,12 +62,46 @@ class FakeServer:
         self.events.append("server_shutdown_requested")
 
 
+class FakeAutomationScheduler:
+    def __init__(self, events):
+        self.events = events
+        self.alive = False
+        self.stopped = False
+
+    def start(self):
+        self.alive = True
+        self.events.append("automation_started")
+
+    def stop(self):
+        if not self.stopped:
+            self.stopped = True
+            self.events.append("automation_stopped")
+
+    def join(self, timeout=None):
+        self.events.append("automation_joined")
+        self.alive = False
+
+    def is_alive(self):
+        return self.alive
+
+
 class ServerLifecycleTests(unittest.TestCase):
+    def setUp(self):
+        self.scheduler_patch = mock.patch(
+            "debbuilder.app.create_automation_scheduler",
+            side_effect=lambda _server: FakeAutomationScheduler([]),
+        )
+        self.scheduler_patch.start()
+
+    def tearDown(self):
+        self.scheduler_patch.stop()
+
     def lifecycle(self, *, serve=lambda: None, accepting=True, shutdown_result=None, retention_target=None):
         events = []
         retention_started = threading.Event()
         manager = FakeManager(events, accepting=accepting, shutdown_result=shutdown_result)
         server = FakeServer(events, serve, retention_started=retention_started)
+        automation = FakeAutomationScheduler(events)
 
         def start(http_server, selected, *, prepare_directories, shutdown_check):
             self.assertIs(http_server, server)
@@ -91,6 +125,7 @@ class ServerLifecycleTests(unittest.TestCase):
                 object(),
                 server_factory=lambda *_args: events.append("listener_bound") or server,
                 manager_factory=lambda: events.append("manager_constructed") or manager,
+                automation_scheduler_factory=lambda _server: automation,
                 retention_target=retention_target or retention,
                 install_signal_handlers=False,
                 shutdown_timeout=7,
@@ -101,10 +136,12 @@ class ServerLifecycleTests(unittest.TestCase):
         outcome, events, manager, server = self.lifecycle()
 
         self.assertEqual(outcome, 0)
-        self.assertEqual(events[:6], [
+        self.assertEqual(events[:7], [
             "directories", "manager_constructed", "listener_bound", "manager_started",
-            "retention_started", "serve",
+            "automation_started", "retention_started", "serve",
         ])
+        self.assertLess(events.index("automation_stopped"), events.index("automation_joined"))
+        self.assertLess(events.index("automation_joined"), events.index("manager_shutdown"))
         self.assertLess(events.index("admission_closed"), events.index("manager_shutdown"))
         self.assertLess(events.index("manager_shutdown"), events.index("retention_stopped"))
         self.assertLess(events.index("manager_shutdown"), events.index("listener_closed"))

@@ -41,7 +41,7 @@ class RuntimeAptRepositoryTests(unittest.TestCase):
             components=["extras", "main"],
         )
         stored = recipe_document_for_storage(recipe([repository(), second]))
-        self.assertEqual(stored["schema_version"], 4)
+        self.assertEqual(stored["schema_version"], 5)
         self.assertEqual([row["id"] for row in stored["runtime_apt_repositories"]], ["vendor-runtime", "second"])
         self.assertEqual(stored["runtime_apt_repositories"][1]["components"], ["extras", "main"])
         self.assertEqual(stored["runtime_apt_repositories"][0]["uri"], "https://apt.example.invalid/runtime/path/")

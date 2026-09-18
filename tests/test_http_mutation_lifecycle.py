@@ -134,6 +134,8 @@ class HttpMutationLifecycleTests(AdminApiCase):
             ("POST", "/api/packages"),
             ("POST", "/api/packages/demo"),
             ("POST", "/api/workflows/demo"),
+            ("POST", "/api/recipes/demo/automation/check"),
+            ("POST", "/api/recipes/demo/automation/retry"),
             ("POST", "/api/executions/run/cancel"),
             ("POST", "/api/executions/run/validate"),
             ("POST", "/api/executions/run/publish"),

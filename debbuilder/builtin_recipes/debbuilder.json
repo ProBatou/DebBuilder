@@ -1,7 +1,11 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "name": "debbuilder",
   "active": true,
+  "automation": {
+    "enabled": false,
+    "policy": "manual"
+  },
   "management": {
     "owner": "application",
     "builtin_id": "debbuilder",

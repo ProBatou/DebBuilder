@@ -76,8 +76,10 @@ class BuildStoreTests(unittest.TestCase):
             store = BuildStore(Path(temporary) / "builds")
             run = store.create(recipe(), mode="build", run_id="artifact-run")
             files = [{"path": f"./opt/demo/{index}.js", "size": str(index)} for index in range(2_000)]
-            artifact = {"path": "artifacts/demo.deb", "sha256": "abc", "inspection": {"files": files, "file_count": len(files)}}
+            artifact = {"path": "artifacts/demo.deb", "sha256": "abc", "upstream_identity": {"internal": "seal"}, "inspection": {"files": files, "file_count": len(files)}}
             stored = store.artifact_details_for_storage(run, artifact)
+            self.assertNotIn("upstream_identity", stored)
+            self.assertIn("upstream_identity", artifact)
             self.assertNotIn("files", stored["inspection"])
             self.assertEqual(stored["inspection"]["files_manifest"], "manifests/artifact-files.json")
             self.assertEqual(store.artifact_files(run["id"], stored["inspection"]), files)
@@ -93,7 +95,7 @@ class BuildStoreTests(unittest.TestCase):
             for name in ("source", "staging", "artifacts", "logs", "logs/commands"):
                 self.assertTrue((workspace / name).is_dir())
             snapshot = json.loads((workspace / "recipe.json").read_text())
-            self.assertEqual(snapshot["schema_version"], 4)
+            self.assertEqual(snapshot["schema_version"], 5)
             self.assertEqual(snapshot["runtime_apt_repositories"], [])
             self.assertNotIn("package_name", snapshot)
             source["package"]["name"] = "changed"

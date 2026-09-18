@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import threading
 import time
@@ -30,6 +31,7 @@ AUTOMATION_FILE = "automation.json"
 PUBLICATION_NOT_REQUESTED = "not_requested"
 PUBLICATION_PENDING = "pending"
 PUBLICATION_COMPLETE = "complete"
+PUBLICATION_CANCELLED = "cancelled"
 
 
 class ValidationAdmissionError(RuntimeError):
@@ -316,10 +318,15 @@ def _terminal_failed(attempt: dict, *, code: str, message: str) -> dict:
 
 
 def _normalize_automation(value: dict) -> dict:
-    if not isinstance(value, dict) or set(value) not in (
-        {"automatic", "publish_after_success"},
-        {"automatic", "publish_after_success", "publication_state"},
-    ):
+    if not isinstance(value, dict):
+        raise ValueError("validation automation metadata is invalid")
+    required = {"automatic", "publish_after_success"}
+    optional = {"publication_state", "attempt_key", "generation", "policy"}
+    if not required.issubset(value) or set(value) - required - optional:
+        raise ValueError("validation automation metadata is invalid")
+    coordination_fields = {"attempt_key", "generation", "policy"}
+    present = coordination_fields & set(value)
+    if present and present != coordination_fields:
         raise ValueError("validation automation metadata is invalid")
     if not all(isinstance(value.get(key), bool) for key in ("automatic", "publish_after_success")):
         raise ValueError("validation automation metadata is invalid")
@@ -331,17 +338,34 @@ def _normalize_automation(value: dict) -> dict:
         "publication_state",
         PUBLICATION_PENDING if publish_after_success else PUBLICATION_NOT_REQUESTED,
     )
-    if publication_state not in {PUBLICATION_NOT_REQUESTED, PUBLICATION_PENDING, PUBLICATION_COMPLETE}:
+    if publication_state not in {PUBLICATION_NOT_REQUESTED, PUBLICATION_PENDING, PUBLICATION_COMPLETE, PUBLICATION_CANCELLED}:
         raise ValueError("validation automation metadata is invalid")
     if (not publish_after_success and publication_state != PUBLICATION_NOT_REQUESTED) or (
         publish_after_success and publication_state == PUBLICATION_NOT_REQUESTED
     ):
         raise ValueError("validation automation metadata is invalid")
-    return {
+    result = {
         "automatic": automatic,
         "publish_after_success": publish_after_success,
         "publication_state": publication_state,
     }
+    if present:
+        attempt_key = value.get("attempt_key")
+        generation = value.get("generation")
+        policy = value.get("policy")
+        if (
+            not automatic
+            or not isinstance(attempt_key, str)
+            or not re.fullmatch(r"automation-v1-[0-9a-f]{64}", attempt_key)
+            or isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or not 0 <= generation < 8
+            or policy not in {"build_validate", "full"}
+            or publish_after_success != (policy == "full")
+        ):
+            raise ValueError("validation automation coordination metadata is invalid")
+        result.update({"attempt_key": attempt_key, "generation": generation, "policy": policy})
+    return result
 
 
 def load_automation(store: BuildStore, run_id: str, attempt_id: str) -> dict:
@@ -354,12 +378,24 @@ def load_automation(store: BuildStore, run_id: str, attempt_id: str) -> dict:
 
 
 def complete_publication_intent(store: BuildStore, run_id: str, attempt_id: str) -> dict:
-    """Durably consume one automatic-publication request after it was attempted."""
+    """Durably consume one automatic-publication request after exact success."""
     path = attempt_root(store, run_id, attempt_id) / AUTOMATION_FILE
     with storage.locked_path(path):
         automation = _normalize_automation(load_automation(store, run_id, attempt_id))
         if automation["publication_state"] == PUBLICATION_PENDING:
             automation["publication_state"] = PUBLICATION_COMPLETE
+            storage.save_json(path, automation)
+            path.chmod(0o600)
+        return automation
+
+
+def cancel_publication_intent(store: BuildStore, run_id: str, attempt_id: str) -> dict:
+    """Fail-safe cancellation when policy/Recipe admission closes before publish."""
+    path = attempt_root(store, run_id, attempt_id) / AUTOMATION_FILE
+    with storage.locked_path(path):
+        automation = _normalize_automation(load_automation(store, run_id, attempt_id))
+        if automation["publication_state"] == PUBLICATION_PENDING:
+            automation["publication_state"] = PUBLICATION_CANCELLED
             storage.save_json(path, automation)
             path.chmod(0o600)
         return automation
@@ -379,6 +415,7 @@ class ValidationManager:
         queue_capacity: int = 8,
         runner=dependency_preparation.run_command,
         resume_publication=None,
+        on_terminal=None,
     ):
         self.store = store
         self.execute = execute
@@ -388,6 +425,7 @@ class ValidationManager:
         self.queue_capacity = queue_capacity
         self.runner = runner
         self.resume_publication = resume_publication
+        self.on_terminal = on_terminal
         self._condition = threading.Condition()
         self._queue: deque[tuple[str, str]] = deque()
         self._reservations = 0
@@ -435,6 +473,16 @@ class ValidationManager:
     def _automation(self, run_id: str, attempt_id: str) -> dict:
         return load_automation(self.store, run_id, attempt_id)
 
+    def _notify_terminal_best_effort(self, run_id: str, attempt_id: str, attempt: dict | None = None) -> None:
+        if self.on_terminal is None:
+            return
+        try:
+            current = attempt or load_attempt(self.store, run_id, attempt_id)
+            if current["status"] in TERMINAL_STATUSES:
+                self.on_terminal(run_id, attempt_id)
+        except BaseException:
+            LOGGER.exception("Validation terminal continuation failed for %s/%s", run_id, attempt_id)
+
     def _block_for_recovery(self, run_id: str, attempt_id: str, reason: str) -> None:
         blocker = {
             "code": "validation_container_recovery_required",
@@ -457,6 +505,7 @@ class ValidationManager:
                     code="validation_recovery_cancelled",
                     message="Validation was cancelled because earlier container cleanup is unresolved",
                 )
+                self._notify_terminal_best_effort(queued_run_id, queued_attempt_id)
             except BaseException:
                 LOGGER.exception("Could not cancel validation queued behind unresolved cleanup")
     def _work(self) -> None:
@@ -482,6 +531,7 @@ class ValidationManager:
                     if self._active and self._active[:2] == (run_id, attempt_id):
                         self._active = None
                     self._condition.notify_all()
+                self._notify_terminal_best_effort(run_id, attempt_id)
 
     def _fail_if_active(self, run_id: str, attempt_id: str, exc: BaseException) -> None:
         try:
@@ -526,6 +576,7 @@ class ValidationManager:
         *,
         automatic: bool,
         publish_after_success: bool,
+        automation_context: dict | None = None,
         run: dict | None = None,
     ) -> dict | None:
         active = [row for row in list_attempts(self.store, run_id) if row["status"] in ACTIVE_STATUSES]
@@ -550,6 +601,18 @@ class ValidationManager:
                             else PUBLICATION_PENDING if publish_after_success else PUBLICATION_NOT_REQUESTED
                         ),
                     }
+                    if automation_context:
+                        for key in ("attempt_key", "generation", "policy"):
+                            if key in current and current[key] != automation_context[key]:
+                                raise ValidationAdmissionError(
+                                    "validation_automation_conflict",
+                                    "Active Validation belongs to different automation coordination",
+                                    status=409,
+                                )
+                        upgraded.update(automation_context)
+                    elif "attempt_key" in current:
+                        upgraded.update({key: current[key] for key in ("attempt_key", "generation", "policy")})
+                    upgraded = _normalize_automation(upgraded)
                     storage.save_json(automation_path, upgraded)
                     automation_path.chmod(0o600)
         observed_run = run if run is not None else self.store.load(run_id)
@@ -564,6 +627,7 @@ class ValidationManager:
         *,
         automatic: bool = False,
         publish_after_success: bool = False,
+        automation_context: dict | None = None,
     ) -> dict:
         require_safe_name(run_id, "build run id")
         payload = {} if payload is None else payload
@@ -588,6 +652,7 @@ class ValidationManager:
                 run_id,
                 automatic=automatic,
                 publish_after_success=publish_after_success,
+                automation_context=automation_context,
             )
             if duplicate is not None:
                 return duplicate
@@ -601,6 +666,7 @@ class ValidationManager:
                     run_id,
                     automatic=automatic,
                     publish_after_success=publish_after_success,
+                    automation_context=automation_context,
                     run=run,
                 )
                 if duplicate is not None:
@@ -615,6 +681,7 @@ class ValidationManager:
                     previous_artifact=previous_artifact,
                     automatic=automatic,
                     publish_after_success=publish_after_success,
+                    automation_context=automation_context,
                 )
             with self._condition:
                 self._reservations -= 1
@@ -625,7 +692,11 @@ class ValidationManager:
                     self._queue.append((run_id, admitted["id"]))
                     self._condition.notify_all()
                     return {**public_attempt(admitted, run=run), "duplicate": False}
-            self._cancel_durable(run_id, admitted["id"], code="validation_shutdown_cancelled", message="Validation was cancelled during server shutdown")
+            cancelled = self._cancel_durable(
+                run_id, admitted["id"], code="validation_shutdown_cancelled",
+                message="Validation was cancelled during server shutdown",
+            )
+            self._notify_terminal_best_effort(run_id, admitted["id"], cancelled)
             raise ValidationAdmissionError("validation_manager_shutting_down", "Validation admission closed during submission", status=503)
         except ValidationAdmissionError:
             raise
@@ -649,6 +720,7 @@ class ValidationManager:
         previous_artifact: str,
         automatic: bool,
         publish_after_success: bool,
+        automation_context: dict | None = None,
     ) -> dict:
         artifact = Path(str((run.get("artifact") or {}).get("path") or ""))
         if run.get("status") != "success" or not artifact.is_file() or (run.get("artifact") or {}).get("pruning") is not None:
@@ -711,6 +783,9 @@ class ValidationManager:
                     else PUBLICATION_NOT_REQUESTED
                 ),
             }
+            if automation_context:
+                automation.update(automation_context)
+            automation = _normalize_automation(automation)
             storage.save_json(root / AUTOMATION_FILE, automation)
             (root / AUTOMATION_FILE).chmod(0o600)
             _save_attempt(root / "attempt.json", attempt)
@@ -764,6 +839,7 @@ class ValidationManager:
             code="validation_cancelled",
             message="Validation was cancelled by the user",
         )
+        self._notify_terminal_best_effort(run_id, attempt_id, attempt)
         if attempt["status"] in {"success", "failed"}:
             return {"accepted": False, "validation": public_attempt(attempt, run=self.store.load(run_id))}
         if attempt["status"] == "queued" or (attempt["status"] == "cancelling" and not active):
@@ -788,12 +864,13 @@ class ValidationManager:
             self._condition.notify_all()
         for run_id, attempt_id in queued:
             try:
-                self._cancel_durable(
+                cancelled = self._cancel_durable(
                     run_id,
                     attempt_id,
                     code="validation_shutdown_cancelled",
                     message="Validation was cancelled during server shutdown",
                 )
+                self._notify_terminal_best_effort(run_id, attempt_id, cancelled)
             except BaseException:
                 LOGGER.exception("Could not cancel queued validation during shutdown")
         if active is not None:

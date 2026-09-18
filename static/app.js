@@ -50,6 +50,7 @@ function refreshRecipeApplicability() {
   if ($('serviceEmptyState')) $('serviceEmptyState').hidden = !!window.recipeServiceVisible;
   if ($('serviceConfiguration')) $('serviceConfiguration').hidden = !window.recipeServiceVisible;
   const recipeEnabled = $('recipeMetaActive')?.checked !== false;
+  if (typeof refreshRecipeAutomationControls === 'function') refreshRecipeAutomationControls();
   ['btnDryRun', 'btnBuildReal'].forEach(id => {
     const button = $(id);
     if (!button) return;
@@ -515,6 +516,7 @@ async function saveRecipeNow() {
       }
       setRecipeAutosaveState('saved');
       if (currentRecipeManaged) currentRecipeDocument = await getJson('/api/workflows/' + encodeURIComponent(id));
+      if (typeof loadRecipeAutomationStatus === 'function') loadRecipeAutomationStatus(id).catch(() => {});
     }
   } finally {
     autosaveInFlight = false;
@@ -574,6 +576,7 @@ async function loadSelectedWorkflow() {
   if (title) title.textContent = wf.name || id;
   refreshRecipeApplicability();
   setRecipeAutosaveState('saved');
+  if (typeof loadRecipeAutomationStatus === 'function') await loadRecipeAutomationStatus(id);
 }
 
 document.getElementById('btnDryRun').addEventListener('click', () => dryRun().catch(error => showToast(error.message, {type: 'error'})));
@@ -599,6 +602,14 @@ $('newRecipeVersionSource')?.addEventListener('change',toggleNewVersionExpressio
 $('newRecipeTracking')?.addEventListener('change',toggleNewVersionExpression);
 ['recipeMetaName','recipeMetaPackage','recipeMetaGithub','recipeMetaSourceRef','recipeMetaVersionExpression','recipePackageVersionRevision'].forEach(id => $(id)?.addEventListener('input',event=>{if (['recipeMetaGithub','recipeMetaSourceRef','recipeMetaVersionExpression'].includes(id)) markArchiveInspectionStale();scheduleRecipeAutosave(event);}));
 ['recipeMetaTracking','recipeMetaVersionSource','recipeMetaActive','recipeArtifactMode','recipeArchiveSource','recipeArchiveFormat','recipeAssetSelection'].forEach(id => $(id)?.addEventListener('change',event=>{if (['recipeMetaTracking','recipeMetaVersionSource','recipeArtifactMode','recipeArchiveSource','recipeArchiveFormat','recipeAssetSelection'].includes(id)) markArchiveInspectionStale();toggleVersionExpression();refreshRecipeApplicability();scheduleRecipeAutosave(event);}));
+['recipeAutomationEnabled','recipeAutomationPolicy'].forEach(id => $(id)?.addEventListener('change', event => {
+  window.recipeAutomation = {
+    enabled: !!$('recipeAutomationEnabled')?.checked,
+    policy: $('recipeAutomationPolicy')?.value || 'manual',
+  };
+  refreshRecipeApplicability();
+  scheduleRecipeAutosave(event);
+}));
 ['recipeArtifactPattern','recipeArtifactName'].forEach(id => $(id)?.addEventListener('input',event=>{markArchiveInspectionStale();scheduleRecipeAutosave(event);}));
 $('recipeArchivePayloadField')?.querySelectorAll('input[name="recipeArchivePayloadMode"]').forEach(input => input.addEventListener('change', () => mutateArchivePayload('mode', input.value)));
 $('btnInspectArchive')?.addEventListener('click',()=>inspectArchive().catch(error=>renderArchiveInspectionError({message:error.message})));

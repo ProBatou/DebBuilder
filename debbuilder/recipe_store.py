@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import errno
+import fcntl
 import json
 import os
 import stat
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -106,6 +108,34 @@ class RecipeDirectoryMigrationReport:
 
 class _DuplicateKeyError(ValueError):
     pass
+
+
+@contextmanager
+def _recipe_lease(path: Path):
+    """Serialize Recipe reads/writes across threads and server processes.
+
+    The directory inode is stable across atomic Recipe replacement and avoids
+    creating lock artifacts during read-only loads. All Recipe mutations in
+    this store take the same advisory lease.
+    """
+    path = Path(path)
+    descriptor = None
+    with storage.locked_path(path):
+        try:
+            descriptor = os.open(
+                path.parent,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            )
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        except OSError as exc:
+            raise RecipeStoreError(
+                "recipe_read_failed", "Could not acquire the Recipe directory lease", file=path,
+            ) from exc
+        try:
+            yield
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
 
 
 def _object_without_duplicate_keys(pairs):
@@ -282,7 +312,7 @@ def _migration_error(path: Path, exc: RecipeMigrationError) -> RecipeStoreError:
 def load_recipe_result(path: Path, *, write_back: bool = True) -> RecipeLoadResult:
     """Strictly load one Recipe and optionally persist its canonical current form."""
     path = Path(path)
-    with storage.locked_path(path):
+    with _recipe_lease(path):
         original = _read_bytes(path)
         document = _decode_recipe(path, original)
         try:
@@ -305,6 +335,23 @@ def load_recipe_result(path: Path, *, write_back: bool = True) -> RecipeLoadResu
         )
 
 
+@contextmanager
+def locked_recipe(path: Path):
+    """Yield one canonical Recipe while retaining its path mutation lease."""
+    path = Path(path)
+    with _recipe_lease(path):
+        original = _read_bytes(path)
+        document = _decode_recipe(path, original)
+        try:
+            migration = migrate_recipe_document(document)
+            canonical = recipe_document_for_storage(migration.document)
+        except RecipeMigrationError as exc:
+            raise _migration_error(path, exc) from exc
+        except RecipeDocumentError as exc:
+            raise _document_error(path, exc) from exc
+        yield canonical
+
+
 def load_recipe(path: Path, *, write_back: bool = True) -> dict:
     """Return one canonical current Recipe or raise a structured refusal."""
     return load_recipe_result(path, write_back=write_back).recipe
@@ -325,7 +372,8 @@ def save_recipe(path: Path, document: dict) -> dict:
             path="$.name",
         )
     content = _canonical_bytes(canonical)
-    with storage.locked_path(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _recipe_lease(path):
         try:
             path.lstat()
         except FileNotFoundError:

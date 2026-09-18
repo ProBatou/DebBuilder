@@ -34,6 +34,7 @@ function switchView(name) {
   if (name !== 'settings' && typeof flushSettingsAutosave === 'function') flushSettingsAutosave().catch(() => {});
   if (name !== 'logs') stopLogPolling();
   if (name !== 'packages' && typeof stopPackageValidationPolling === 'function') stopPackageValidationPolling();
+  if (name !== 'recipes' && typeof stopRecipeAutomationPolling === 'function') stopRecipeAutomationPolling();
   document.querySelectorAll('.nav-link').forEach(button => button.classList.toggle('active', button.dataset.view === name));
   document.querySelectorAll('.view').forEach(view => view.classList.toggle('active', view.id === 'view-' + name));
   if (name === 'recipes') scheduleRecipeStepUpdate();
@@ -121,6 +122,8 @@ async function handleAdminAction(element) {
   else if (action === 'open-recipe') await openLinkedRecipe(element.dataset.recipeId);
   else if (action === 'create-recipe') await createRecipeForPackage(packageName);
   else if (action === 'build-package') await buildPackage(packageName, element.dataset.dryRun === 'true');
+  else if (action === 'check-package-automation') await checkPackageAutomation(packageName);
+  else if (action === 'retry-package-automation') await retryPackageAutomation(packageName);
   else if (action === 'validate-package') await validatePackage(packageName);
   else if (action === 'cancel-package-validation') await cancelPackageValidation(packageName);
   else if (action === 'publish-package') await publishPackage(packageName);

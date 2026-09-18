@@ -24,6 +24,7 @@ OPERATOR_OVERRIDE_PATHS = (
     "resource_limits",
 )
 APPLICATION_MANAGED_AREAS = (
+    "automation policy",
     "name and package identity/versioning/dependencies",
     "source repository/tracking/version selection",
     "artifact and build plan/output selection",

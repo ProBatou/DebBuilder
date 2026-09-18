@@ -475,6 +475,16 @@
 .recipe-source-card .recipe-metadata > .span-12,
 .recipe-source-card .recipe-metadata > .archive-inspection { grid-column: 1 / -1; }
 
+.recipe-automation-panel { margin-top: var(--space-4); padding-top: var(--space-4); border-top: 1px solid var(--border); display: grid; gap: var(--space-3); }
+.recipe-automation-controls { display: grid; grid-template-columns: minmax(240px, 1fr) minmax(190px, auto) minmax(220px, auto); gap: var(--space-3); align-items: end; }
+.recipe-automation-controls h3,.recipe-automation-controls p { margin: 0; }
+.recipe-automation-controls p { margin-top: var(--space-1); color: var(--text-muted); font-size: var(--text-help); }
+.recipe-automation-controls > label { display: grid; gap: var(--space-1); }
+.recipe-automation-toggle { display: flex !important; align-items: center; min-height: var(--control-height); }
+.recipe-automation-toggle input { width: auto; height: auto; }
+.recipe-automation-status { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); color: var(--text-muted); font-size: var(--text-help); }
+.recipe-automation-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+
 .recipe-metadata label,
 .recipe-step-fields label,
 .maintainer-script-grid label,
@@ -725,6 +735,8 @@
   .recipe-metadata,.recipe-step-fields,.maintainer-script-grid,.build-advanced-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); }
   .recipe-source-card .recipe-metadata { grid-template-columns: repeat(6, minmax(0, 1fr)); }
   .recipe-source-card .recipe-metadata > label { grid-column: span 3; }
+  .recipe-automation-controls { grid-template-columns: 1fr 1fr; }
+  .recipe-automation-controls > div { grid-column: 1 / -1; }
   .recipe-step-fields > .span-7,.recipe-step-fields > .span-8,.recipe-step-fields > .span-12 { grid-column: 1 / -1; }
   .install-destination-fields > .span-4 { grid-column: span 3; }
   .service-general-fields,.service-unit-fields,.service-environment-fields,.service-dependency-fields,.service-lifecycle-fields,.service-command-hook-fields,.service-output-fields { grid-template-columns: repeat(2, minmax(180px, 1fr)); }
@@ -748,6 +760,8 @@
   .service-general-fields,.service-unit-fields,.service-environment-fields,.service-dependency-fields,.service-lifecycle-fields,.service-command-hook-fields,.service-output-fields { grid-template-columns: 1fr; }
   .recipe-active-toggle { align-self: flex-start; margin-left: 0; }
   .recipe-source-card .recipe-metadata > label,.recipe-step-fields > [class*="span-"],.maintainer-script-grid > label,.source-change-fields > label,.source-change-fields > label:first-child,.change-preview { grid-column: 1; }
+  .recipe-automation-controls { grid-template-columns: 1fr; }
+  .recipe-automation-controls > div { grid-column: 1; }
   .build-section-head,.install-mapping-head,.dependency-row,.build-output-list-head { align-items: stretch; flex-direction: column; }
   .build-output-controls,.build-output-path-row,.build-output-suggestion,.source-change-row,.change-type-picker,.before-after,.service-empty-state { grid-template-columns: 1fr; }
   .change-summary span { white-space: normal; }

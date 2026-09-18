@@ -4,10 +4,10 @@ from tests.ui.showcase import showcase_recipes
 
 
 class UiShowcaseRecipeTests(unittest.TestCase):
-    def test_archive_recipe_uses_canonical_v4_payload(self):
+    def test_archive_recipe_uses_canonical_v5_payload(self):
         recipe = showcase_recipes()["archive-agent"]
 
-        self.assertEqual(recipe["schema_version"], 4)
+        self.assertEqual(recipe["schema_version"], 5)
         self.assertEqual(recipe["artifact"]["payload"], {
             "mode": "paths",
             "include": ["bin/archive-agent", "share/defaults.yml"],

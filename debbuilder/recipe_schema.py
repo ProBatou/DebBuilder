@@ -28,6 +28,7 @@ MANAGEMENT_FIELDS = {"owner", "builtin_id", "definition_version", "operator_over
 OPERATOR_OVERRIDE_FIELDS = {"active", "package", "build", "resource_limits"}
 OPERATOR_PACKAGE_OVERRIDE_FIELDS = {"maintainer"}
 OPERATOR_BUILD_OVERRIDE_FIELDS = {"environment", "inactivity_timeout", "maximum_runtime"}
+AUTOMATION_POLICIES = {"manual", "detect", "test", "build", "build_validate", "full"}
 
 
 class RecipeDocumentError(ValueError):
@@ -83,6 +84,31 @@ def _environment(value, what: str) -> dict[str, str]:
     if any(not isinstance(k, str) or not k or not isinstance(v, str) for k, v in rows.items()):
         raise ValueError(f"{what} must contain string keys and values")
     return rows
+
+
+def normalize_automation_policy(value) -> dict:
+    """Return the inert canonical Recipe automation policy."""
+    policy = _dict(value, "automation")
+    unknown = sorted(set(policy) - {"enabled", "policy"})
+    if unknown:
+        raise ValueError(f"unknown automation field: {unknown[0]}")
+    enabled = policy.get("enabled", False)
+    selected = policy.get("policy", "manual")
+    if not isinstance(enabled, bool):
+        raise ValueError("automation.enabled must be a boolean")
+    if not isinstance(selected, str) or selected not in AUTOMATION_POLICIES:
+        raise ValueError("automation.policy is unsupported")
+    return {"enabled": enabled, "policy": selected}
+
+
+def automation_eligible(recipe: dict) -> bool:
+    """Answer future automation eligibility without performing any action."""
+    try:
+        canonical = validate_recipe_metadata(recipe)
+    except (TypeError, ValueError):
+        return False
+    automation = canonical["automation"]
+    return bool(canonical["active"] and automation["enabled"] and automation["policy"] != "manual")
 
 
 def _positive_int_or_default(value, default: int, what: str) -> int:
@@ -318,6 +344,7 @@ def normalize_recipe(workflow: dict) -> dict:
         "schema_version": SCHEMA_VERSION,
         "name": name,
         "active": workflow.get("active", True),
+        "automation": normalize_automation_policy(workflow.get("automation")),
         **({"management": _management(workflow["management"], name)} if "management" in workflow else {}),
         "resource_limits": normalize_policy(workflow.get("resource_limits", {})),
         "runtime_apt_repositories": normalize_runtime_apt_repositories(
@@ -443,6 +470,7 @@ def validate_recipe_metadata(workflow: dict) -> dict:
         raise ValueError("package.version_revision is invalid")
     if not isinstance(recipe["active"], bool):
         raise ValueError("active must be a boolean")
+    normalize_automation_policy(recipe["automation"])
     source = recipe["source"]
     if source["provider"] != "github":
         raise ValueError("unsupported source provider")
@@ -645,7 +673,18 @@ def recipe_document_for_storage(workflow) -> dict:
         raise
     except ResourceLimitError as exc:
         raise RecipeDocumentError(exc.code, str(exc), path=exc.path) from exc
-    except (TypeError, ValueError, re.error) as exc:
+    except ValueError as exc:
+        automation_errors = {
+            "automation.enabled must be a boolean": ("invalid_automation_enabled", "$.automation.enabled"),
+            "automation.policy is unsupported": ("invalid_automation_policy", "$.automation.policy"),
+            "automation must be an object": ("invalid_automation_configuration", "$.automation"),
+        }
+        code, path = automation_errors.get(str(exc), ("invalid_recipe", "$"))
+        if str(exc).startswith("unknown automation field:"):
+            field = str(exc).partition(":")[2].strip()
+            code, path = "invalid_automation_configuration", f"$.automation.{field}"
+        raise RecipeDocumentError(code, str(exc), path=path) from exc
+    except (TypeError, re.error) as exc:
         raise RecipeDocumentError("invalid_recipe", str(exc)) from exc
     unknown = _find_unknown_field(migrated, normalized)
     if unknown:

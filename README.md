@@ -22,6 +22,17 @@ The canonical lifecycle is:
 Recipe → Build Run → OCI validation → APT publication
 ```
 
+Enabled Recipe automation uses that same lifecycle. `detect` records only the
+exact upstream identity; `test` creates one dry Run; `build` stops after one
+successful Build; `build_validate` continues through canonical Validation; and
+`full` continues through canonical Publication. The policy and upstream
+identity are captured in the immutable Run admission metadata, so later policy
+upgrades never extend an admitted lifecycle and upstream movement never changes
+its input. Disabling automation, deactivating the Recipe, or lowering its policy
+before a not-yet-admitted downstream stage prevents that new stage; an already
+queued or running canonical stage is allowed to reach its normal terminal
+state. Manual Runs remain governed by the existing global post-Build settings.
+
 Validation and publication records belong to the Build Run that produced the
 artifact. There is no separate package-publication endpoint or parallel legacy
 execution model.

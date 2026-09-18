@@ -437,6 +437,103 @@ test('Recipes selects a showcase Recipe, changes step, and closes a safe modal',
   await expect(page.locator('#sourceChangeDialog')).not.toBeVisible();
 });
 
+test('Recipe automation config, Check now, Retry, polling, and reload follow server state', async ({page}) => {
+  const originalResponse = await page.request.get('/api/workflows/bashrc');
+  expect(originalResponse.ok()).toBe(true);
+  let configured = await originalResponse.json();
+  let automationState = 'manual';
+  let generation = null;
+  let revision = 'manual';
+  let checkCalls = 0;
+  let retryCalls = 0;
+  const projection = () => ({
+    recipe_id: 'bashrc', recipe_active: true,
+    automation: configured.automation || {enabled: false, policy: 'manual'},
+    eligible: configured.automation?.enabled === true && configured.automation?.policy !== 'manual',
+    state: automationState, stage: automationState === 'failed' ? 'terminal' : 'detection',
+    result: automationState === 'failed' ? 'failed' : automationState === 'manual' ? 'disabled' : 'active',
+    last_check_at: automationState === 'manual' ? null : '2026-09-15T12:00:00+00:00',
+    detected: {version: automationState === 'manual' ? '' : '5.0.0', ref: automationState === 'manual' ? '' : 'v5.0.0'},
+    attempt_policy: configured.automation?.policy || null,
+    run: null, validation: null, publication: null,
+    retry: {scheduled: false, not_before: null},
+    blocked: null, diagnostic_code: automationState === 'failed' ? 'run_failed' : null,
+    can_check_now: automationState === 'watching',
+    can_retry: automationState === 'failed',
+    generation, revision,
+    state_active: automationState === 'checking',
+    scheduler: {
+      state: 'running', checks_enabled: true, admission_open: true,
+      last_pass_started: null, last_pass_finished: null,
+      next_scheduled_check: '2026-09-15T13:00:00+00:00', active_recipe_checks: automationState === 'checking' ? 1 : 0,
+      blocker: null,
+    },
+  });
+
+  await page.route('**/api/workflows/bashrc', async route => {
+    if (route.request().method() === 'GET') {
+      return route.fulfill({status: 200, contentType: 'application/json', body: JSON.stringify(configured)});
+    }
+    configured = route.request().postDataJSON().workflow;
+    automationState = configured.automation.enabled && configured.automation.policy !== 'manual' ? 'watching' : 'manual';
+    revision = `configured-${configured.automation.policy}`;
+    return route.fulfill({status: 200, contentType: 'application/json', body: JSON.stringify({ok: true, id: 'bashrc'})});
+  });
+  await page.route('**/api/recipes/bashrc/automation', route => route.fulfill({
+    status: 200, contentType: 'application/json', body: JSON.stringify({automation: projection()}),
+  }));
+  await page.route('**/api/recipes/bashrc/automation/check', route => {
+    checkCalls += 1;
+    automationState = 'checking';
+    generation = 0;
+    revision = 'checking-0';
+    return route.fulfill({status: 202, contentType: 'application/json', body: JSON.stringify({
+      ok: true, automation: {accepted: true, created: true, recipe_id: 'bashrc', status: projection()},
+    })});
+  });
+  await page.route('**/api/recipes/bashrc/automation/retry', route => {
+    retryCalls += 1;
+    expect(route.request().postDataJSON()).toEqual({generation: 0, revision: 'failed-0'});
+    automationState = 'checking';
+    generation = 1;
+    revision = 'retry-1';
+    return route.fulfill({status: 202, contentType: 'application/json', body: JSON.stringify({
+      ok: true, automation: {accepted: true, created: true, generation: 1, status: projection()},
+    })});
+  });
+
+  await openView(page, 'recipes');
+  await page.locator('#workflowSelect').selectOption('bashrc');
+  await expect(page.locator('#recipeAutomationStatus')).toContainText('Manual');
+  await expect(page.locator('#btnDryRun')).toBeVisible();
+  await expect(page.locator('#btnBuildReal')).toBeVisible();
+
+  await page.locator('#recipeAutomationEnabled').check();
+  await page.locator('#recipeAutomationPolicy').selectOption('full');
+  await expect(page.locator('#recipeAutosaveStatus')).toHaveAttribute('data-state', 'saved', {timeout: 3000});
+  await expect(page.locator('#recipeAutomationStatus')).toContainText('Watching');
+  expect(configured.automation).toEqual({enabled: true, policy: 'full'});
+
+  await page.locator('#btnAutomationCheckNow').click();
+  await expect(page.locator('#recipeAutomationStatus')).toContainText('Checking');
+  expect(checkCalls).toBe(1);
+  automationState = 'failed';
+  generation = 0;
+  revision = 'failed-0';
+  await expect(page.locator('#recipeAutomationStatus')).toContainText('Failed', {timeout: 4000});
+  await expect(page.locator('#btnAutomationRetry')).toBeVisible();
+  await page.locator('#btnAutomationRetry').click();
+  await expect(page.locator('#recipeAutomationStatus')).toContainText('Checking');
+  expect(retryCalls).toBe(1);
+
+  await page.reload();
+  await openView(page, 'recipes');
+  await page.locator('#workflowSelect').selectOption('bashrc');
+  await expect(page.locator('#recipeAutomationStatus')).toContainText('Checking');
+  await expect(page.locator('#recipeAutomationEnabled')).toBeChecked();
+  await expect(page.locator('#recipeAutomationPolicy')).toHaveValue('full');
+});
+
 test('Recipe JSON stays canonical across view, edit, apply, export, and import', async ({page}, testInfo) => {
   const editedDescription = `Edited through canonical JSON on ${testInfo.project.name}`;
   const importedId = `json-import-${testInfo.project.name}`;

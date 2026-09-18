@@ -122,6 +122,24 @@ class CancellationApiTests(AdminApiCase):
         finally:
             release.set()
 
+    def test_queued_automation_cancel_invokes_terminal_continuation(self):
+        execute, entered, release, _finished = self.blocking_executor()
+        manager = self.replace_manager(execute)
+        active = self.create_run("queued-automation-active")
+        queued = self.create_run("queued-automation-target")
+        manager.submit(active["id"])
+        self.assertTrue(entered.wait(2))
+        manager.submit(queued["id"])
+        owner = mock.Mock()
+        try:
+            with mock.patch.object(server, "APPLICATION_AUTOMATION_ORCHESTRATOR", owner):
+                status, response = self.request("POST", f"/api/executions/{queued['id']}/cancel", {})
+            self.assertEqual(status, 200)
+            self.assertEqual(response["cancellation"]["status"], "cancelled")
+            owner.on_run_terminal.assert_called_once_with(queued["id"])
+        finally:
+            release.set()
+
     def test_maintenance_request_exception_does_not_undo_queued_cancellation(self):
         execute, entered, release, _finished = self.blocking_executor()
         manager = self.replace_manager(execute)

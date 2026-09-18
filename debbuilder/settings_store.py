@@ -17,6 +17,12 @@ _SECRET_WORDS = re.compile(r"(?i)(token|secret|password|passwd|apikey|api_key|cl
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 _ARCHES = {"all", "amd64", "arm64", "armhf", "i386"}
 _MIN_COOKIE_SECRET_LENGTH = 40
+AUTOMATION_POLL_DEFAULT_SECONDS = 3600
+AUTOMATION_POLL_MIN_SECONDS = 60
+AUTOMATION_POLL_MAX_SECONDS = 24 * 60 * 60
+AUTOMATION_CONCURRENCY_DEFAULT = 4
+AUTOMATION_CONCURRENCY_MIN = 1
+AUTOMATION_CONCURRENCY_MAX = 8
 
 
 class SessionSecretError(RuntimeError):
@@ -45,6 +51,9 @@ def default_settings(repo_url: str, suite: str, component: str, architecture: st
         "automation": {
             "auto_validate_after_successful_build": False,
             "auto_publish_after_successful_validation": False,
+            "upstream_checks_enabled": True,
+            "upstream_check_interval_seconds": AUTOMATION_POLL_DEFAULT_SECONDS,
+            "upstream_check_concurrency": AUTOMATION_CONCURRENCY_DEFAULT,
         },
         "resource_limits": empty_policy(),
         "workspace_cleanup": dict(DEFAULT_POLICY),
@@ -110,6 +119,16 @@ def load_settings_result(data_dir: Path, defaults: dict) -> SettingsLoadResult:
                 values[key] = value
             elif key in values and isinstance(values[key], str) and isinstance(value, str):
                 values[key] = value
+    automation = result["automation"]
+    automation_defaults = defaults["automation"]
+    if not isinstance(automation.get("upstream_checks_enabled"), bool):
+        automation["upstream_checks_enabled"] = automation_defaults["upstream_checks_enabled"]
+    interval = automation.get("upstream_check_interval_seconds")
+    if isinstance(interval, bool) or not isinstance(interval, int) or not AUTOMATION_POLL_MIN_SECONDS <= interval <= AUTOMATION_POLL_MAX_SECONDS:
+        automation["upstream_check_interval_seconds"] = automation_defaults["upstream_check_interval_seconds"]
+    concurrency = automation.get("upstream_check_concurrency")
+    if isinstance(concurrency, bool) or not isinstance(concurrency, int) or not AUTOMATION_CONCURRENCY_MIN <= concurrency <= AUTOMATION_CONCURRENCY_MAX:
+        automation["upstream_check_concurrency"] = automation_defaults["upstream_check_concurrency"]
     if "resource_limits" in stored:
         try:
             if not isinstance(stored["resource_limits"], dict):
@@ -377,6 +396,20 @@ def validate_settings(payload: dict, current: dict) -> dict:
             auto_validate = True
         result["automation"]["auto_validate_after_successful_build"] = auto_validate
         result["automation"]["auto_publish_after_successful_validation"] = auto_publish
+        enabled = automation.get("upstream_checks_enabled", result["automation"].get("upstream_checks_enabled", True))
+        interval = automation.get("upstream_check_interval_seconds", result["automation"].get("upstream_check_interval_seconds", AUTOMATION_POLL_DEFAULT_SECONDS))
+        concurrency = automation.get("upstream_check_concurrency", result["automation"].get("upstream_check_concurrency", AUTOMATION_CONCURRENCY_DEFAULT))
+        if not isinstance(enabled, bool):
+            raise ValueError("upstream_checks_enabled must be a boolean")
+        if isinstance(interval, bool) or not isinstance(interval, int) or not AUTOMATION_POLL_MIN_SECONDS <= interval <= AUTOMATION_POLL_MAX_SECONDS:
+            raise ValueError("upstream_check_interval_seconds is outside the supported bounds")
+        if isinstance(concurrency, bool) or not isinstance(concurrency, int) or not AUTOMATION_CONCURRENCY_MIN <= concurrency <= AUTOMATION_CONCURRENCY_MAX:
+            raise ValueError("upstream_check_concurrency is outside the supported bounds")
+        result["automation"].update({
+            "upstream_checks_enabled": enabled,
+            "upstream_check_interval_seconds": interval,
+            "upstream_check_concurrency": concurrency,
+        })
 
     if "workspace_cleanup" in payload:
         policy = payload["workspace_cleanup"]

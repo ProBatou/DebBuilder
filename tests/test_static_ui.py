@@ -185,6 +185,41 @@ class StaticUiTests(unittest.TestCase):
             text=True,
         )
 
+    @unittest.skipUnless(shutil.which("node"), "node unavailable")
+    def test_recipe_automation_polling_actions_and_stale_responses(self):
+        subprocess.run(
+            ["node", "tests/js/test_recipe_automation.js"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["node", "tests/js/test_package_automation.js"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_recipe_automation_controls_and_package_status_surface(self):
+        html = self.read("static/index.html")
+        recipe = self.read("static/js/recipe/automation.js")
+        packages = self.read("static/js/pages/packages.js")
+        for marker in (
+            'id="recipeAutomationEnabled"', 'id="recipeAutomationPolicy"',
+            'value="detect"', 'value="test"', 'value="build"',
+            'value="build_validate"', 'value="full"',
+            'id="btnAutomationCheckNow"', 'id="btnAutomationRetry"',
+        ):
+            self.assertIn(marker, html)
+        self.assertIn("recipeAutomationRequestRevision", recipe)
+        self.assertIn("stopRecipeAutomationPolling", recipe)
+        self.assertIn("state_active", recipe)
+        self.assertIn("check-package-automation", packages)
+        self.assertIn("retry-package-automation", packages)
+        self.assertIn("validationIsActive(validation) || automation.state_active", packages)
+
     def test_multiple_build_output_paths_are_fully_editable(self):
         html = self.read("static/index.html")
         serialization = self.read("static/recipe_serialization.js")

@@ -49,13 +49,14 @@ class ValidationServiceTests(unittest.TestCase):
         self.store.save(run)
         return run
 
-    def manager(self, execute, *, capacity=8):
+    def manager(self, execute, *, capacity=8, on_terminal=None):
         manager = validation_service.ValidationManager(
             self.store,
             execute=execute,
             registry_root=self.root / "validation-containers",
             workspace_root=self.root,
             queue_capacity=capacity,
+            on_terminal=on_terminal,
         )
         manager.start()
         self.managers.append(manager)
@@ -152,6 +153,29 @@ class ValidationServiceTests(unittest.TestCase):
         repeated = manager.cancel(self.run["id"], admitted["attempt_id"])
         self.assertEqual(repeated["validation"]["status"], "cancelled")
         self.assertEqual(self.store.load(self.run["id"])["status"], "success")
+
+    def test_queued_cancellation_invokes_terminal_continuation_immediately(self):
+        second = self.make_run("validation-run-queued-callback")
+        entered = threading.Event()
+        release = threading.Event()
+        callbacks = []
+
+        def execute(_run_id, _attempt_id, event, _automation):
+            entered.set()
+            while not release.is_set() and not event.wait(0.01):
+                pass
+
+        manager = self.manager(
+            execute,
+            on_terminal=lambda run_id, attempt_id: callbacks.append((run_id, attempt_id)),
+        )
+        manager.admit(self.run["id"], {})
+        self.assertTrue(entered.wait(2))
+        queued = manager.admit(second["id"], {})
+        cancelled = manager.cancel(second["id"], queued["attempt_id"])
+        self.assertEqual(cancelled["validation"]["status"], "cancelled")
+        self.assertEqual(callbacks, [(second["id"], queued["attempt_id"])])
+        release.set()
 
     def test_active_cancellation_does_not_wait_for_the_owned_run_lease(self):
         entered = threading.Event()

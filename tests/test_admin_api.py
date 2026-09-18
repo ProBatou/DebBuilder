@@ -11,11 +11,176 @@ import debbuilder.app as server
 from debbuilder import storage
 from debbuilder import dependency_preparation
 from debbuilder.build_store import BuildStore
+from debbuilder.automation_identity import normalize_upstream_identity
+from debbuilder.automation_ledger import AutomationLedger
+from debbuilder.automation_scheduler import AutomationRetryStore
+from debbuilder.build_store import canonical_recipe_sha256
 from debbuilder.lifecycle import MutationGate
 from tests.admin_api_case import AdminApiCase
 
 
 class AdminApiTests(AdminApiCase):
+
+    class AutomationSchedulerStub:
+        def __init__(self):
+            self.requests = []
+            self.wakes = 0
+            self.ledger = AutomationLedger(server.DATA)
+            self.retry_store = AutomationRetryStore(server.DATA)
+
+        def status(self):
+            return {
+                "state": "running", "admission_open": True, "pass_active": False,
+                "last_pass_started": None, "last_pass_finished": None,
+                "next_scheduled_check": "2026-09-15T12:00:00+00:00",
+                "active_recipe_checks": 0, "global_blocker": None,
+            }
+
+        def recipe_activity(self, recipe_id):
+            return {"queued": recipe_id in self.requests, "checking": False}
+
+        def request_recipe(self, recipe_id):
+            created = recipe_id not in self.requests
+            if created:
+                self.requests.append(recipe_id)
+            return {"accepted": True, "created": created, "recipe_id": recipe_id}
+
+        def request(self):
+            self.wakes += 1
+            return True
+
+        def request_orchestration(self):
+            return self.request()
+
+    @staticmethod
+    def automation_identity():
+        return normalize_upstream_identity({
+            "provider": "github", "repository": "example/automatic", "tracking": "latest_release",
+            "source_type": "release_asset", "payload_kind": "deb", "release_id": "10",
+            "asset_id": "20", "asset_name": "automatic_1.2.3_all.deb", "expected_size": 7,
+            "resolved_ref": "v1.2.3", "resolved_version": "1.2.3",
+            "expected_package": "automatic", "expected_architecture": "all",
+        })
+
+    def automatic_recipe(self, *, enabled=True, policy="build", active=True):
+        return {
+            "schema_version": 5, "name": "automatic", "active": active,
+            "automation": {"enabled": enabled, "policy": policy},
+            "package": {"name": "automatic", "architecture": "all", "description": "Automatic"},
+            "source": {"provider": "github", "repository": "example/automatic", "tracking": "latest_release", "version": {"source": "tag"}},
+            "artifact": {"mode": "upstream_deb", "architecture": "all", "name_pattern": "automatic_*_all.deb"},
+        }
+
+    def test_recipe_automation_save_roundtrip_wakes_without_detection(self):
+        scheduler = self.AutomationSchedulerStub()
+        previous = server.APPLICATION_AUTOMATION_SCHEDULER
+        server.APPLICATION_AUTOMATION_SCHEDULER = scheduler
+        try:
+            status, saved = self.request("POST", "/api/workflows/automatic", {"workflow": self.automatic_recipe()})
+            self.assertEqual(status, 200)
+            self.assertTrue(saved["ok"])
+            self.assertEqual(scheduler.requests, ["automatic"])
+            status, loaded = self.request("GET", "/api/workflows/automatic")
+            self.assertEqual(status, 200)
+            self.assertEqual(loaded["automation"], {"enabled": True, "policy": "build"})
+
+            disabled = {**loaded, "automation": {"enabled": False, "policy": "build"}}
+            self.request("POST", "/api/workflows/automatic", {"workflow": disabled, "previous_id": "automatic"})
+            _, reloaded = self.request("GET", "/api/workflows/automatic")
+            self.assertEqual(reloaded["automation"], {"enabled": False, "policy": "build"})
+            self.assertEqual(scheduler.requests, ["automatic"])
+
+            invalid = {**loaded, "automation": {"enabled": True, "policy": "everything"}}
+            with self.assertRaises(urllib.error.HTTPError) as invalid_response:
+                self.request("POST", "/api/workflows/automatic", {"workflow": invalid, "previous_id": "automatic"})
+            self.assertEqual(invalid_response.exception.code, 422)
+            error = json.loads(invalid_response.exception.read())["error"]
+            self.assertEqual(error["code"], "invalid_automation_policy")
+            self.assertEqual(error["path"], "$.automation.policy")
+        finally:
+            server.APPLICATION_AUTOMATION_SCHEDULER = previous
+
+    def test_recipe_automation_policy_matrix_round_trips_exact_values(self):
+        scheduler = self.AutomationSchedulerStub()
+        previous = server.APPLICATION_AUTOMATION_SCHEDULER
+        server.APPLICATION_AUTOMATION_SCHEDULER = scheduler
+        try:
+            for index, policy in enumerate(("manual", "detect", "test", "build", "build_validate", "full")):
+                configured = self.automatic_recipe(enabled=True, policy=policy)
+                body = {"workflow": configured}
+                if index:
+                    body["previous_id"] = "automatic"
+                status, _saved = self.request("POST", "/api/workflows/automatic", body)
+                self.assertEqual(status, 200)
+                _, loaded = self.request("GET", "/api/workflows/automatic")
+                self.assertEqual(loaded["automation"], {"enabled": True, "policy": policy})
+                if policy == "manual":
+                    self.assertEqual(scheduler.requests, [])
+            self.assertEqual(scheduler.requests, ["automatic"])
+        finally:
+            server.APPLICATION_AUTOMATION_SCHEDULER = previous
+
+    def test_automation_status_and_check_now_routes_are_bounded_and_coalesced(self):
+        scheduler = self.AutomationSchedulerStub()
+        previous = server.APPLICATION_AUTOMATION_SCHEDULER
+        server.APPLICATION_AUTOMATION_SCHEDULER = scheduler
+        try:
+            self.request("POST", "/api/workflows/automatic", {"workflow": self.automatic_recipe()})
+            scheduler.requests.clear()
+            status, viewed = self.request("GET", "/api/recipes/automatic/automation")
+            self.assertEqual(status, 200)
+            projection = viewed["automation"]
+            self.assertEqual(projection["state"], "watching")
+            self.assertTrue(projection["can_check_now"])
+            encoded = json.dumps(projection)
+            for forbidden in ("attempt_key", "recipe_sha256", "upstream_identity", "workspace", "asset_url"):
+                self.assertNotIn(forbidden, encoded)
+
+            first_status, first = self.request("POST", "/api/recipes/automatic/automation/check", {})
+            second_status, second = self.request("POST", "/api/recipes/automatic/automation/check", {})
+            self.assertEqual((first_status, second_status), (202, 202))
+            self.assertTrue(first["automation"]["created"])
+            self.assertFalse(second["automation"]["created"])
+            self.assertEqual(scheduler.requests, ["automatic"])
+        finally:
+            server.APPLICATION_AUTOMATION_SCHEDULER = previous
+
+    def test_automation_check_rejects_disabled_and_retry_is_exact(self):
+        scheduler = self.AutomationSchedulerStub()
+        previous = server.APPLICATION_AUTOMATION_SCHEDULER
+        server.APPLICATION_AUTOMATION_SCHEDULER = scheduler
+        try:
+            self.request("POST", "/api/workflows/automatic", {"workflow": self.automatic_recipe(enabled=False)})
+            with self.assertRaises(urllib.error.HTTPError) as disabled:
+                self.request("POST", "/api/recipes/automatic/automation/check", {})
+            self.assertEqual(disabled.exception.code, 409)
+            self.assertEqual(json.loads(disabled.exception.read())["error"]["code"], "automation_disabled")
+
+            configured = self.automatic_recipe()
+            self.request("POST", "/api/workflows/automatic", {"workflow": configured, "previous_id": "automatic"})
+            scheduler.requests.clear()
+            canonical = server.read_workflow_file(server.USER_WORKFLOWS / "automatic.json")
+            claim = scheduler.ledger.claim_current_recipe(
+                server.USER_WORKFLOWS / "automatic.json", "automatic", self.automation_identity(),
+                canonical_recipe_sha256(canonical), "build",
+            )
+            scheduler.ledger.finish(claim.attempt_key, 0, "terminal_failure", diagnostic="run_failed")
+            _, viewed = self.request("GET", "/api/recipes/automatic/automation")
+            projection = viewed["automation"]
+            self.assertTrue(projection["can_retry"])
+            status, retried = self.request("POST", "/api/recipes/automatic/automation/retry", {
+                "generation": projection["generation"], "revision": projection["revision"],
+            })
+            self.assertEqual(status, 202)
+            self.assertEqual(retried["automation"]["generation"], 1)
+            with self.assertRaises(urllib.error.HTTPError) as stale:
+                self.request("POST", "/api/recipes/automatic/automation/retry", {
+                    "generation": projection["generation"], "revision": projection["revision"],
+                })
+            self.assertEqual(stale.exception.code, 409)
+            self.assertEqual(len(scheduler.ledger.read()["attempts"][claim.attempt_key]["generations"]), 2)
+        finally:
+            server.APPLICATION_AUTOMATION_SCHEDULER = previous
 
     def test_resource_settings_api_round_trip_and_structured_validation(self):
         status, initial = self.request("GET", "/api/settings")
@@ -248,6 +413,29 @@ class AdminApiTests(AdminApiCase):
         status, settings = self.request("GET", "/api/settings")
         self.assertNotIn("build", settings["settings"])
         self.assertEqual(settings["settings"]["github"]["token"], "masked")
+
+    def test_execution_detail_hides_historical_source_and_archive_identity(self):
+        store = BuildStore(server.DATA / "builds")
+        for mode in ("source_build", "archive_payload", "upstream_deb"):
+            with self.subTest(mode=mode):
+                run = store.load("20260822-031400")
+                source = next(step for step in run["steps"] if step["name"] == "source")
+                source["details"] = {"artifact_mode": mode, "upstream_identity": self.automation_identity()}
+                if mode == "upstream_deb":
+                    run["artifact"] = {"name": "demo.deb", "upstream_identity": self.automation_identity()}
+                    artifact_step = next(step for step in run["steps"] if step["name"] == "artifact")
+                    artifact_step["details"] = dict(run["artifact"])
+                else:
+                    run["artifact"] = None
+                store.save(run)
+                before = (store.run_dir(run["id"]) / "run.json").read_bytes()
+                _, response = self.request("GET", f"/api/executions/{run['id']}")
+                projected = next(step for step in response["execution"]["steps"] if step["name"] == "source")
+                self.assertEqual(projected["details"], {"artifact_mode": mode})
+                self.assertNotIn("upstream_identity", json.dumps(response))
+                if mode == "upstream_deb":
+                    self.assertEqual(response["execution"]["artifact"], {"name": "demo.deb"})
+                self.assertEqual((store.run_dir(run["id"]) / "run.json").read_bytes(), before)
 
     def test_execution_endpoints_project_every_canonical_lifecycle_transition(self):
         store, run, artifact = self.successful_build_run(run_id="lifecycle-run", package="lifecycle", version="2.0-1")
@@ -980,7 +1168,7 @@ class AdminApiTests(AdminApiCase):
         status, _ = self.request("POST", "/api/workflows/v1-demo", {"workflow": recipe})
         self.assertEqual(status, 200)
         stored = json.loads((server.USER_WORKFLOWS / "v1-demo.json").read_text())
-        self.assertEqual(stored["schema_version"], 4)
+        self.assertEqual(stored["schema_version"], 5)
         self.assertEqual(stored["runtime_apt_repositories"], [])
         self.assertNotIn("package_name", stored)
         self.assertNotIn("github_repository", stored)
@@ -1006,7 +1194,7 @@ class AdminApiTests(AdminApiCase):
         stored = json.loads(path.read_text())
 
         self.assertEqual(status, 200)
-        self.assertEqual(loaded["schema_version"], 4)
+        self.assertEqual(loaded["schema_version"], 5)
         self.assertEqual(stored["schema_version"], 1)
         self.assertEqual(stored["build"]["timeout"], 45)
         self.assertIn("steps", stored)
@@ -1235,7 +1423,7 @@ class AdminApiTests(AdminApiCase):
                 mock.patch("debbuilder.app.dependency_preparation.SUPERVISOR.unregister") as unregister, \
                 mock.patch("debbuilder.app.artifact_validation.validate_artifact", return_value=validation) as lifecycle, \
                 mock.patch("debbuilder.app.validation_service.load_automation", return_value={"automatic": True, "publish_after_success": True}) as load_automation, \
-                mock.patch("debbuilder.app.publish_build_artifact") as publish, \
+                mock.patch("debbuilder.app.publish_build_artifact", return_value={"status": "success"}) as publish, \
                 mock.patch("debbuilder.app.notification_service", return_value=notifier), \
                 mock.patch("debbuilder.app.request_maintenance"):
             admitted = {

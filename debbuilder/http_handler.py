@@ -136,6 +136,18 @@ def create_handler(api):
                 self._get_package(path)
             elif path == "/api/recipes":
                 api.json_response(self, {"recipes": api.list_recipes()})
+            elif self._automation_identity(path) is not None:
+                recipe_id, action = self._automation_identity(path)
+                if action:
+                    return False
+                try:
+                    api.json_response(self, {"automation": api.get_automation_status(recipe_id)})
+                except ValueError as exc:
+                    api.json_response(self, {"error": {
+                        "code": "invalid_recipe_id", "message": str(exc), "details": {},
+                    }}, 400)
+                except api.automation_status.AutomationActionError as exc:
+                    api.json_response(self, {"error": exc.as_dict()}, exc.status)
             elif path == "/api/executions":
                 api.json_response(self, {"executions": api.list_executions()})
             elif path.startswith("/api/executions/"):
@@ -187,6 +199,16 @@ def create_handler(api):
             attempt_id = urllib.parse.unquote(parts[4])
             action = parts[5] if len(parts) == 6 else ""
             return run_id, attempt_id, action
+
+        @staticmethod
+        def _automation_identity(path: str):
+            parts = path.strip("/").split("/")
+            if len(parts) not in {4, 5} or parts[:2] != ["api", "recipes"] or parts[3] != "automation":
+                return None
+            action = parts[4] if len(parts) == 5 else ""
+            if action not in {"", "check", "retry"}:
+                return None
+            return urllib.parse.unquote(parts[2]), action
 
         def _get_package(self, path: str):
             name = urllib.parse.unquote(path.rsplit("/", 1)[-1])
@@ -277,6 +299,31 @@ def create_handler(api):
 
         def _post(self, data: dict):
             parsed_path = urlparse(self.path).path
+            automation_identity = self._automation_identity(parsed_path)
+            if automation_identity is not None and automation_identity[1] in {"check", "retry"}:
+                recipe_id, action = automation_identity
+                try:
+                    if action == "check":
+                        if not isinstance(data, dict) or data:
+                            api.json_response(self, {"error": {
+                                "code": "invalid_automation_check_request",
+                                "message": "Check now does not accept request fields",
+                                "details": {},
+                            }}, 400)
+                            return
+                        result = api.check_automation_now(recipe_id)
+                    else:
+                        result = api.retry_automation(recipe_id, data)
+                except ValueError as exc:
+                    api.json_response(self, {"error": {
+                        "code": "invalid_recipe_id", "message": str(exc), "details": {},
+                    }}, 400)
+                    return
+                except api.automation_status.AutomationActionError as exc:
+                    api.json_response(self, {"error": exc.as_dict()}, exc.status)
+                    return
+                api.json_response(self, {"ok": True, "automation": result}, 202)
+                return
             validation_identity = self._validation_identity(parsed_path)
             if validation_identity is not None and validation_identity[2] == "cancel":
                 run_id, attempt_id, _action = validation_identity

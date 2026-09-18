@@ -35,8 +35,18 @@ function renderExecutions() {
     executionMatchesStatus(execution, status)
       && (!query || JSON.stringify(execution).toLowerCase().includes(query))
   );
-  $('executionList').innerHTML = rows.map(execution => `<div class="item list-row execution-item ${executionIsSelected(execution.id) ? 'active' : ''}" role="option" tabindex="0" aria-selected="${executionIsSelected(execution.id) ? 'true' : 'false'}" data-admin-action="open-execution" data-execution-id="${esc(execution.id)}"><div class="execution-item-body"><div class="item-title"><span>${esc(packageLabelForExecution(execution))} · ${esc(execution.action || 'run')}</span>${badge(execution.lifecycle_status || execution.status)}</div><div class="item-meta">${fmtTime(execution.updated)} · ${esc(shortExecutionId(execution.id))}</div></div></div>`).join('') || '<div class="empty-state logs-empty-message">No logs available.</div>';
+  $('executionList').innerHTML = rows.map(execution => `<div class="item list-row execution-item ${executionIsSelected(execution.id) ? 'active' : ''}" role="option" tabindex="0" aria-selected="${executionIsSelected(execution.id) ? 'true' : 'false'}" data-admin-action="open-execution" data-execution-id="${esc(execution.id)}"><div class="execution-item-body"><div class="item-title"><span>${esc(packageLabelForExecution(execution))} · ${esc(execution.action || 'run')}</span>${badge(execution.lifecycle_status || execution.status)}</div><div class="item-meta">${executionOriginLabel(execution)} · ${fmtTime(execution.updated)} · ${esc(shortExecutionId(execution.id))}</div></div></div>`).join('') || '<div class="empty-state logs-empty-message">No logs available.</div>';
   document.querySelector('.logs-layout')?.classList.toggle('logs-empty', adminState.executions.length === 0);
+}
+
+function executionOriginLabel(execution) {
+  const origin = execution?.origin || {};
+  if (origin.kind === 'automation_check_now') return 'Automation · Check now';
+  if (origin.kind === 'automation') {
+    const reasons = {new_release:'New release', release_asset_changed:'Release asset changed', ref_advanced:'Ref advanced', recipe_revision_changed:'Recipe revision changed'};
+    return `Automation${origin.reason ? ` · ${reasons[origin.reason] || 'Upstream changed'}` : ''}`;
+  }
+  return 'Manual';
 }
 
 function executionIsLive(execution) {
@@ -525,7 +535,7 @@ function renderOpenExecution(execution, {preserveLog = false} = {}) {
   const version = typeof execution.version === 'object' ? execution.version : {debian: execution.version};
   const lifecycle = STATUS_LABELS[execution.lifecycle_status] || execution.lifecycle_status || execution.status || 'Unknown';
   const recovery = validation.recovery_blocker;
-  const meta = [['Run ID', '#' + execution.id], ['Package', execution.package || execution.recipe_id || '—'], ['Lifecycle', lifecycle], ['Mode', execution.mode || execution.action || '—'], ['Build status', execution.build_status || execution.status], ['Date', fmtTime(execution.updated || execution.created_at_epoch)], ['Validation', execution.validation_status || validation.status || 'Not run'], ['Validation recovery', recovery?.message || '—'], ['Publication', execution.publication_status || publication.status || 'Not run']];
+  const meta = [['Run ID', '#' + execution.id], ['Package', execution.package || execution.recipe_id || '—'], ['Origin', executionOriginLabel(execution)], ['Lifecycle', lifecycle], ['Mode', execution.mode || execution.action || '—'], ['Build status', execution.build_status || execution.status], ['Date', fmtTime(execution.updated || execution.created_at_epoch)], ['Validation', execution.validation_status || validation.status || 'Not run'], ['Validation recovery', recovery?.message || '—'], ['Publication', execution.publication_status || publication.status || 'Not run']];
   const moreMeta = [['Recipe', execution.recipe_id || '—'], ['Source', source.repository || '—'], ['Resolved ref', source.ref || source.tag || '—'], ['Source payload', sourcePayload], ['Source asset', sourceAsset.name || '—'], ['Source SHA-256', sourceAsset.sha256 || '—'], ['Upstream', version.upstream || '—'], ['Debian version', version.debian || '—'], ['Artifact', (artifact.path || '').split('/').pop() || '—'], ['Size', artifact.size || '—'], ['SHA-256', artifact.sha256 || '—']];
   const symbols = {pending: '○', running: '◌', success: '✓', failed: '✕', cancelled: '⊘', skipped: '–'};
   if ($('executionMeta')) $('executionMeta').innerHTML = executionMetaHtml(meta);

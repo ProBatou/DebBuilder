@@ -71,6 +71,36 @@ class ResourceSettingsTests(unittest.TestCase):
             validate_settings({"resource_limits": {"memory_max_bytes": False}}, self.defaults())
         self.assertEqual(raised.exception.path, "$.resource_limits.memory_max_bytes")
 
+    def test_scheduler_defaults_and_bounds_are_canonical(self):
+        automation = self.defaults()["automation"]
+        self.assertEqual(automation["upstream_check_interval_seconds"], 3600)
+        self.assertEqual(automation["upstream_check_concurrency"], 4)
+        self.assertTrue(automation["upstream_checks_enabled"])
+        for field, values in (
+            ("upstream_check_interval_seconds", (59, 86401, True)),
+            ("upstream_check_concurrency", (0, 9, True)),
+        ):
+            for value in values:
+                with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                    validate_settings({"automation": {field: value}}, self.defaults())
+        updated = validate_settings({"automation": {
+            "upstream_checks_enabled": False,
+            "upstream_check_interval_seconds": 60,
+            "upstream_check_concurrency": 8,
+        }}, self.defaults())
+        self.assertFalse(updated["automation"]["upstream_checks_enabled"])
+
+    def test_invalid_persisted_scheduler_tuning_falls_back_to_bounded_defaults(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "settings.json").write_text(json.dumps({"automation": {
+                "upstream_check_interval_seconds": 1,
+                "upstream_check_concurrency": 100,
+            }}))
+            loaded = load_settings_result(root, self.defaults()).settings["automation"]
+        self.assertEqual(loaded["upstream_check_interval_seconds"], 3600)
+        self.assertEqual(loaded["upstream_check_concurrency"], 4)
+
 
 if __name__ == "__main__":
     unittest.main()

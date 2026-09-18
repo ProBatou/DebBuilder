@@ -7,7 +7,12 @@ import time
 from datetime import datetime
 
 from .build_models import utc_now
-from .build_store import BuildStore
+from .automation_identity import (
+    UpstreamIdentityError,
+    release_asset_identity,
+    verify_expected_upstream_identity,
+)
+from .build_store import BuildStore, canonical_recipe_sha256
 from .command_identity import clear_identity, persist_identity, recording_identities, update_identity
 from .execution_cancellation import SERVER_SHUTDOWN, CancellationControl, ExecutionCancelled
 from . import build_executor, deb_inspector, debian_packaging, dependency_checker, project_detection, source_acquisition, source_changes, upstream_archive, upstream_artifact
@@ -128,6 +133,20 @@ def _call_with_cancellation(callback, *args, control: CancellationControl, on_ca
     return callback(*args, **kwargs)
 
 
+def _call_with_expected_identity(callback, *args, expected_identity: dict | None, **kwargs):
+    """Pass the pin only through the narrow acquisition callback contract."""
+    parameters = inspect.signature(callback).parameters
+    accepts_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+    if expected_identity is not None and ("expected_identity" in parameters or accepts_kwargs):
+        kwargs["expected_identity"] = expected_identity
+    return callback(*args, **kwargs)
+
+
+def _run_expected_identity(run: dict) -> dict | None:
+    automation = run.get("automation")
+    return automation.get("expected_upstream_identity") if isinstance(automation, dict) else None
+
+
 def _finalize_execution_cancellation(run: dict, store: BuildStore, exc: ExecutionCancelled, lifecycle_callback=None, recipe: dict | None = None) -> dict:
     completed_at = utc_now()
     active = next((step for step in run["steps"] if step.get("status") == "running"), None)
@@ -183,7 +202,7 @@ def _finish_terminal_run(run: dict, store: BuildStore, started: float, control: 
 
 def _archive_source_details(source: dict) -> dict:
     """Keep runtime paths and the file plan out of persisted Run source details."""
-    details = {key: value for key, value in source.items() if key not in {"archive_payload", "source_directory"}}
+    details = {key: value for key, value in source.items() if key not in {"archive_payload", "source_directory", "upstream_identity"}}
     details["archive_payload"] = upstream_archive.payload_plan_summary(source["archive_payload"])
     return details
 
@@ -221,6 +240,12 @@ def _run_upstream_artifact(canonical: dict, run: dict, *, store: BuildStore, dry
         selection_step, selection_started = _start_step(run, store, "detection")
         _cancellation_checkpoint(control, run, store, "detection")
         selected = upstream_artifact.select_asset(release, canonical["artifact"])
+        expected_identity = _run_expected_identity(run)
+        try:
+            actual_identity = release_asset_identity(canonical, release, selected, "deb")
+            verify_expected_upstream_identity(expected_identity, actual_identity)
+        except UpstreamIdentityError as exc:
+            raise upstream_artifact.UpstreamArtifactError(exc.code, str(exc)) from exc
         _cancellation_checkpoint(control, run, store, "detection")
         _finish_step(run, store, selection_step, selection_started, status="success", summary=f"Selected {selected['name']}", details={"project_type": "upstream_deb", "selected_asset": selected})
         for name in ("dependencies", "source_changes", "build", "staging", "debian_metadata", "systemd", "package"):
@@ -234,10 +259,22 @@ def _run_upstream_artifact(canonical: dict, run: dict, *, store: BuildStore, dry
             run.update({"status": "prepared", "version": {"upstream": release["upstream_version"], "debian": ""}})
         else:
             acquire_artifact = acquirer or upstream_artifact.acquire
+            artifact_parameters = inspect.signature(acquire_artifact).parameters
+            artifact_accepts_kwargs = any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD
+                for parameter in artifact_parameters.values()
+            )
+            artifact_kwargs = {"token": github_token}
+            if expected_identity is not None and ("expected_identity" in artifact_parameters or artifact_accepts_kwargs):
+                artifact_kwargs["expected_identity"] = expected_identity
             artifact = _call_with_cancellation(
-                acquire_artifact, canonical, run["workspace"], token=github_token,
+                acquire_artifact, canonical, run["workspace"], **artifact_kwargs,
                 control=control, on_cancel=lambda: _observe_cancellation(control, run, store, "artifact"),
             )
+            try:
+                verify_expected_upstream_identity(expected_identity, artifact.get("upstream_identity", {}))
+            except UpstreamIdentityError as exc:
+                raise upstream_artifact.UpstreamArtifactError(exc.code, str(exc)) from exc
             _cancellation_checkpoint(control, run, store, "artifact")
             # Re-resolution inside the acquisition is intentional: the selected asset and
             # release are validated immediately before downloading.
@@ -256,7 +293,7 @@ def _run_upstream_artifact(canonical: dict, run: dict, *, store: BuildStore, dry
 
 
 def create_pipeline_run(
-    recipe: dict, *, store: BuildStore, dry_run: bool, recipe_id: str = "", run_id: str | None = None, resource_contract: dict | None = None,
+    recipe: dict, *, store: BuildStore, dry_run: bool, recipe_id: str = "", run_id: str | None = None, resource_contract: dict | None = None, origin: dict | None = None, automation: dict | None = None,
 ) -> dict:
     """Validate a Recipe and persist an isolated pending Run without executing it."""
     canonical = validate_recipe_metadata(recipe)
@@ -266,6 +303,8 @@ def create_pipeline_run(
         mode="dry_run" if dry_run else "build",
         run_id=run_id,
         resource_contract=resource_contract,
+        origin=origin,
+        automation=automation,
     )
 
 
@@ -295,6 +334,12 @@ def execute_pipeline_run(run_id: str, *, store: BuildStore, expected_initial_sta
                 "Build Run Recipe snapshot is missing or invalid",
                 details={"run_id": run_id},
             ) from exc
+        if run.get("automation") is not None and canonical_recipe_sha256(canonical) != run.get("recipe_sha256"):
+            raise PipelineRunError(
+                "build_run_recipe_mismatch",
+                "Automated Build Run Recipe snapshot does not match its admitted revision",
+                details={"run_id": run_id},
+            )
         dry_run = run.get("mode") == "dry_run"
         control = cancellation_control or CancellationControl()
         with recording_identities(
@@ -344,11 +389,22 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
     source_step, source_started = _start_step(run, store, "source")
     try:
         _cancellation_checkpoint(control, run, store, "source")
-        source = acquire(canonical, run["workspace"], token=github_token)
+        expected_identity = _run_expected_identity(run)
+        source = _call_with_expected_identity(
+            acquire, canonical, run["workspace"], token=github_token,
+            expected_identity=expected_identity,
+        )
+        try:
+            verify_expected_upstream_identity(expected_identity, source.get("upstream_identity", {}))
+        except UpstreamIdentityError as exc:
+            error_type = upstream_archive.UpstreamArchiveError if archive_mode else source_acquisition.SourceError
+            raise error_type(exc.code, str(exc)) from exc
         _cancellation_checkpoint(control, run, store, "source")
         run["version"] = {"upstream": source["upstream_version"], "debian": source["debian_version"]}
         summary = f"{source['repository']} {source['ref'] or source['tag']} → Debian {source['debian_version']}"
-        source_details = _archive_source_details(source) if archive_mode else source
+        source_details = _archive_source_details(source) if archive_mode else {
+            key: value for key, value in source.items() if key != "upstream_identity"
+        }
         _finish_step(run, store, source_step, source_started, status="success", summary=summary, details=source_details)
     except (source_acquisition.SourceError, upstream_archive.UpstreamArchiveError) as exc:
         details = getattr(exc, "details", {})
@@ -567,6 +623,7 @@ def execution_summary(run: dict) -> dict:
         "action": "dry-run" if run.get("mode") == "dry_run" else "build",
         "version": (run.get("version") or {}).get("debian", ""),
         "status": build_status, "build_status": build_status, "updated": run.get("created_at_epoch"),
+        "origin": run.get("origin") or {"kind": "manual", "trigger": "manual", "reason": None},
         "duration": run.get("duration"), "workspace": run.get("workspace", ""),
         "validation_count": len(validations), "validation_status": validation_status, "publication_status": publication_status,
         "lifecycle_status": lifecycle_status,
@@ -579,6 +636,21 @@ def execution_summary(run: dict) -> dict:
 def execution_detail(run: dict) -> dict:
     summary = execution_summary(run)
     detail = {**summary, **run}
+    # The attempt key and expected-identity seal coordinate internal admission;
+    # they are deliberately absent from existing public execution projections.
+    detail.pop("automation", None)
+    detail.pop("admission_sha256", None)
+    if isinstance(run.get("artifact"), dict):
+        detail["artifact"] = {
+            key: value for key, value in run["artifact"].items() if key != "upstream_identity"
+        }
+    # Historical runs can contain the internal acquisition seal in source details.
+    # Do not mutate the canonical Run while projecting its public representation.
+    detail["steps"] = [
+        {**step, "details": {key: value for key, value in step["details"].items() if key != "upstream_identity"}}
+        if isinstance(step.get("details"), dict) and "upstream_identity" in step["details"] else step
+        for step in run.get("steps", [])
+    ]
     for field in ("build_status", "validation_status", "publication_status", "lifecycle_status", "lifecycle_active", "allowed_actions"):
         detail[field] = summary[field]
     detail["script"] = ""

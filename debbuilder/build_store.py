@@ -32,6 +32,16 @@ def make_run_id() -> str:
     return time.strftime("%Y%m%d-%H%M%S", time.gmtime()) + f"-{time.time_ns() % 1_000_000:06d}-{secrets.token_hex(2)}"
 
 
+def canonical_recipe_snapshot(recipe: dict) -> bytes:
+    """Return the exact immutable Recipe bytes used by every Run."""
+    canonical = recipe_for_storage(recipe)
+    return (json.dumps(canonical, indent=2, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+
+
+def canonical_recipe_sha256(recipe: dict) -> str:
+    return hashlib.sha256(canonical_recipe_snapshot(recipe)).hexdigest()
+
+
 class BuildStore:
     def __init__(self, root: str | Path):
         self.root = Path(root)
@@ -87,23 +97,38 @@ class BuildStore:
             with storage.locked_path(path):
                 yield fd
 
-    def create(self, recipe: dict, *, recipe_id: str = "", mode: str = "dry_run", run_id: str | None = None, resource_contract: dict | None = None) -> dict:
+    def create(self, recipe: dict, *, recipe_id: str = "", mode: str = "dry_run", run_id: str | None = None, resource_contract: dict | None = None, origin: dict | None = None, automation: dict | None = None) -> dict:
         canonical = recipe_for_storage(recipe)
+        if automation is not None:
+            if not isinstance(automation, dict):
+                raise ValueError("Automated Run metadata must be an object")
+            policy = canonical["automation"]
+            if not canonical["active"] or not policy["enabled"] or policy["policy"] == "manual":
+                raise ValueError("Automated Run requires an eligible immutable Recipe snapshot")
+            if policy["policy"] == "detect":
+                raise ValueError("Detect-only automation cannot create a Run")
+            if automation.get("policy") != policy["policy"]:
+                raise ValueError("Run automation policy does not match its immutable Recipe snapshot")
+            expected_mode = "dry_run" if policy["policy"] == "test" else "build"
+            if mode != expected_mode:
+                raise ValueError(f"Automation policy {policy['policy']} requires Run mode {expected_mode}")
         identifier = run_id or make_run_id()
         folder = self.run_dir(identifier)
-        folder.mkdir(parents=True, exist_ok=False, mode=0o700)
-        for name in WORKSPACE_DIRECTORIES:
-            (folder / name).mkdir(mode=0o700)
-        (folder / "logs" / "commands").mkdir(mode=0o700)
-        snapshot = json.dumps(canonical, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
-        snapshot_path = folder / "recipe.json"
-        snapshot_path.write_text(snapshot)
-        snapshot_path.chmod(0o400)
+        snapshot = canonical_recipe_snapshot(canonical).decode("utf-8")
         digest = hashlib.sha256(snapshot.encode()).hexdigest()
         run = new_run(
             identifier, recipe_id or canonical["name"], mode, str(folder.resolve()), digest,
             resource_contract=resource_contract,
+            origin=origin,
+            automation=automation,
         )
+        folder.mkdir(parents=True, exist_ok=False, mode=0o700)
+        for name in WORKSPACE_DIRECTORIES:
+            (folder / name).mkdir(mode=0o700)
+        (folder / "logs" / "commands").mkdir(mode=0o700)
+        snapshot_path = folder / "recipe.json"
+        snapshot_path.write_text(snapshot)
+        snapshot_path.chmod(0o400)
         self.save(run)
         (folder / "logs" / "pipeline.log").touch(mode=0o600)
         return run
@@ -257,6 +282,9 @@ class BuildStore:
 
     def artifact_details_for_storage(self, run: dict, artifact: dict) -> dict:
         stored = deepcopy(artifact)
+        # Exact upstream identity belongs to the automation seal, not public
+        # artifact metadata persisted on a canonical Run.
+        stored.pop("upstream_identity", None)
         inspection = stored.get("inspection") or {}
         files = inspection.pop("files", None)
         if files is not None:

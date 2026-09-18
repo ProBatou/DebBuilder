@@ -203,25 +203,25 @@ button.ghost { border-color: var(--border); background: transparent; color: var(
   white-space: nowrap;
 }
 
-.badge.ready,.badge.up_to_date,.badge.success,.badge.published,.badge.publication_available,.badge.ready_to_publish,.settings-badge.active {
+.badge.ready,.badge.up_to_date,.badge.success,.badge.published,.badge.publication_available,.badge.ready_to_publish,.badge.watching,.settings-badge.active {
   border-color: color-mix(in srgb, var(--success) 42%, transparent);
   background: color-mix(in srgb, var(--success) 9%, transparent);
   color: var(--success-strong);
 }
 
-.badge.recipe_missing,.badge.unknown,.badge.build_available,.badge.build_required,.badge.not_published,.badge.build_success,.badge.validation_needed,.settings-badge.warning {
+.badge.recipe_missing,.badge.unknown,.badge.build_available,.badge.build_required,.badge.not_published,.badge.build_success,.badge.validation_needed,.badge.manual,.badge.inactive,.settings-badge.warning {
   border-color: color-mix(in srgb, var(--warning) 44%, transparent);
   background: color-mix(in srgb, var(--warning) 8%, transparent);
   color: var(--warning-strong);
 }
 
-.badge.failed,.badge.build_failed,.badge.validation_failed,.badge.publication_failed,.settings-badge.locked {
+.badge.failed,.badge.build_failed,.badge.validation_failed,.badge.publication_failed,.badge.blocked,.settings-badge.locked {
   border-color: color-mix(in srgb, var(--danger) 44%, transparent);
   background: color-mix(in srgb, var(--danger) 8%, transparent);
   color: var(--danger-strong);
 }
 
-.badge.update_available,.badge.running,.badge.building,.badge.cancelling,.badge.validating,.badge.publishing {
+.badge.update_available,.badge.running,.badge.building,.badge.cancelling,.badge.validating,.badge.publishing,.badge.checking,.badge.detected,.badge.test_queued,.badge.testing,.badge.build_queued,.badge.validation_pending,.badge.publication_pending,.badge.retry_scheduled {
   border-color: color-mix(in srgb, var(--info) 44%, transparent);
   background: color-mix(in srgb, var(--info) 8%, transparent);
   color: var(--info-strong);

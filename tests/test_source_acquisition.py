@@ -2,6 +2,7 @@ import io
 import tarfile
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -17,6 +18,32 @@ def recipe(tracking="latest_release", ref="", version_source="tag"):
 
 
 class SourceResolutionTests(unittest.TestCase):
+    def test_rate_limit_retry_metadata_is_normalized_without_persisting_headers(self):
+        error = urllib.error.HTTPError(
+            "https://api.github.com/repos/owner/demo", 429, "limited",
+            {"Retry-After": "120", "X-RateLimit-Reset": "2000000180"}, None,
+        )
+        with mock.patch.object(github_client.urllib.request, "urlopen", side_effect=error):
+            with self.assertRaises(github_client.GitHubError) as caught:
+                github_client.request_json("/repos/owner/demo")
+        self.assertEqual(caught.exception.code, "github_rate_limited")
+        self.assertEqual(caught.exception.retry_after_seconds, 120)
+        self.assertEqual(caught.exception.rate_limit_reset, 2000000180)
+        self.assertNotIn("Retry-After", caught.exception.as_dict())
+
+    def test_unbounded_retry_headers_are_ignored(self):
+        headers = {
+            "Retry-After": "9" * 1000,
+            "X-RateLimit-Reset": "8" * 1000,
+        }
+        with mock.patch("urllib.request.urlopen", side_effect=urllib.error.HTTPError(
+            "https://api.github.com/rate", 429, "limited", headers, None,
+        )):
+            with self.assertRaises(github_client.GitHubError) as caught:
+                github_client.request_json("/rate")
+        self.assertIsNone(caught.exception.retry_after_seconds)
+        self.assertIsNone(caught.exception.rate_limit_reset)
+
     def test_latest_release_preserves_bounded_release_and_asset_identity(self):
         response = {
             "id": 123, "tag_name": "v1.2.3", "name": "v1.2.3",
@@ -48,6 +75,55 @@ class SourceResolutionTests(unittest.TestCase):
         self.assertEqual(result["upstream_version"], "1.4.2")
         self.assertEqual(result["debian_version"], "1.4.2-2")
         self.assertEqual(result["strategy"], "latest_release")
+
+    def test_exact_latest_release_pins_generated_archive_to_resolved_commit(self):
+        release = {
+            "release_id": 123, "tag": "v1.4.2", "name": "Demo 1.4.2",
+            "archive_url": "https://api.github.com/repos/owner/demo/tarball/v1.4.2",
+        }
+        commit = "ab" * 20
+        with mock.patch.object(github_client, "repo_info", return_value={"repository": "owner/demo"}), \
+                mock.patch.object(github_client, "latest_release_exact", return_value=release), \
+                mock.patch.object(github_client, "resolve_ref", return_value={
+                    "commit": commit, "ref_object_sha": "cd" * 20,
+                }):
+            result = source_acquisition.resolve_source(recipe(), exact=True)
+        self.assertEqual(result["commit"], commit)
+        self.assertEqual(result["archive_url"], f"https://api.github.com/repos/owner/demo/tarball/{commit}")
+        self.assertEqual(result["upstream_identity"]["release_id"], "123")
+        self.assertEqual(result["upstream_identity"]["commit_sha"], commit)
+
+    def test_release_asset_enumeration_is_bounded_and_complete(self):
+        first = [{
+            "id": index, "name": f"asset-{index}", "size": index,
+            "url": f"https://api.github.com/repos/owner/demo/releases/assets/{index}",
+            "browser_download_url": f"https://github.com/owner/demo/releases/download/v1/asset-{index}",
+        } for index in range(100)]
+        last = [{
+            "id": 100, "name": "asset-100", "size": 100,
+            "url": "https://api.github.com/repos/owner/demo/releases/assets/100",
+            "browser_download_url": "https://github.com/owner/demo/releases/download/v1/asset-100",
+        }]
+        with mock.patch.object(github_client, "request_json", side_effect=[first, last]) as request:
+            assets = github_client.release_assets("owner/demo", 123)
+        self.assertEqual(len(assets), 101)
+        self.assertEqual(request.call_count, 2)
+        with mock.patch.object(github_client, "request_json", return_value=first):
+            with self.assertRaises(github_client.GitHubError):
+                github_client.release_assets("owner/demo", 123, max_pages=2)
+
+    def test_tag_resolution_retains_ref_object_and_peeled_commit(self):
+        ref_object = "cd" * 20
+        commit = "ab" * 20
+        with mock.patch.object(github_client, "request_json", side_effect=[
+            {"object": {"sha": ref_object, "type": "tag"}},
+            {"object": {"sha": commit, "type": "commit"}},
+        ]) as request:
+            result = github_client.resolve_ref("owner/demo", "v1.2.3", kind="tag")
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(result["ref_object_sha"], ref_object)
+        self.assertEqual(result["commit"], commit)
+        self.assertTrue(result["archive_url"].endswith("/" + commit))
 
     def test_explicit_tag_and_manual_ref_use_existing_github_client(self):
         resolved = {"tag": "v2.0.0", "ref": "v2.0.0", "name": "v2.0.0", "archive_url": "https://api.github.com/repos/owner/demo/tarball/v2.0.0"}

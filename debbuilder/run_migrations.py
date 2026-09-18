@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
+import hashlib
+import json
 from typing import Callable
 
 from .resource_limits import historical_contract
 
 
-CURRENT_RUN_SCHEMA_VERSION = 2
+CURRENT_RUN_SCHEMA_VERSION = 3
 
 
 class RunMigrationError(ValueError):
@@ -27,6 +29,20 @@ class RunMigrationResult:
     applied: tuple[int, ...]
 
 
+def admission_metadata_sha256(recipe_id: str, recipe_sha256: str, mode: str, origin: dict, automation: dict | None) -> str:
+    """Seal immutable Run admission metadata with deterministic JSON."""
+    payload = {
+        "schema_version": 1,
+        "recipe_id": recipe_id,
+        "recipe_sha256": recipe_sha256,
+        "mode": mode,
+        "origin": origin,
+        "automation": automation,
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def migrate_v1_to_v2(document: dict) -> dict:
     if document.get("schema_version") != 1:
         raise RunMigrationError("unsupported_run_schema_version", "Run v1 migration requires schema v1")
@@ -36,7 +52,29 @@ def migrate_v1_to_v2(document: dict) -> dict:
     return migrated
 
 
-MIGRATIONS: dict[int, Callable[[dict], dict]] = {1: migrate_v1_to_v2}
+def migrate_v2_to_v3(document: dict) -> dict:
+    """Give historical Runs explicit manual origin without changing behavior."""
+    if document.get("schema_version") != 2:
+        raise RunMigrationError("unsupported_run_schema_version", "Run v2 migration requires schema v2")
+    unexpected = sorted(set(document) & {"origin", "automation", "admission_sha256"})
+    if unexpected:
+        raise RunMigrationError(
+            "ambiguous_run_admission_metadata",
+            f"Historical Run unexpectedly contains {unexpected[0]}",
+            source_version=2,
+        )
+    migrated = copy.deepcopy(document)
+    migrated["schema_version"] = 3
+    migrated["origin"] = {"kind": "manual", "trigger": "manual", "reason": None}
+    migrated["automation"] = None
+    migrated["admission_sha256"] = admission_metadata_sha256(
+        str(migrated.get("recipe_id") or ""), str(migrated.get("recipe_sha256") or ""),
+        str(migrated.get("mode") or ""), migrated["origin"], None,
+    )
+    return migrated
+
+
+MIGRATIONS: dict[int, Callable[[dict], dict]] = {1: migrate_v1_to_v2, 2: migrate_v2_to_v3}
 
 
 def migrate_run_document(document: dict) -> RunMigrationResult:

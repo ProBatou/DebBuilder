@@ -6,6 +6,12 @@ import re
 from pathlib import Path
 
 from . import deb_inspector, github_client
+from .automation_identity import (
+    UpstreamIdentityError,
+    release_asset_identity,
+    verify_acquired_payload,
+    verify_expected_upstream_identity,
+)
 from .execution_cancellation import ExecutionCancelled
 from .recipe_schema import normalize_github_version
 
@@ -30,11 +36,12 @@ def resolve_release(recipe: dict, *, token: str = "") -> dict:
     if source["tracking"] != "latest_release":
         raise UpstreamArtifactError("unsupported_artifact_tracking", "Upstream Debian artifacts currently require latest_release tracking")
     try:
-        release = github_client.latest_release(source["repository"], token=token)
+        repository = github_client.repo_info(source["repository"], token=token)["repository"]
+        release = github_client.latest_release_exact(repository, token=token)
         upstream = normalize_github_version(release["tag"])
     except (github_client.GitHubError, ValueError) as exc:
         raise UpstreamArtifactError(getattr(exc, "code", "invalid_release_version"), str(exc)) from exc
-    return {**release, "repository": source["repository"], "upstream_version": upstream, "ref": release["tag"]}
+    return {**release, "repository": repository, "upstream_version": upstream, "ref": release["tag"]}
 
 
 def select_asset(release: dict, config: dict) -> dict:
@@ -63,18 +70,30 @@ def _expected_digest(asset: dict) -> str:
     return digest.split(":", 1)[1].lower() if re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest) else ""
 
 
-def acquire(recipe: dict, workspace: str | Path, *, token: str = "", release_resolver=resolve_release, downloader=github_client.download_archive, inspector=deb_inspector.inspect_deb, cancellation_event=None, on_cancel=None) -> dict:
+def acquire(recipe: dict, workspace: str | Path, *, token: str = "", expected_identity: dict | None = None, release_resolver=resolve_release, downloader=None, inspector=deb_inspector.inspect_deb, cancellation_event=None, on_cancel=None) -> dict:
     root = Path(workspace).resolve()
     artifacts = (root / "artifacts").resolve()
     artifacts.mkdir(parents=True, exist_ok=True)
     release = release_resolver(recipe, token=token)
     selected = select_asset(release, recipe["artifact"])
+    try:
+        actual_identity = release_asset_identity(recipe, release, selected, "deb")
+        verify_expected_upstream_identity(expected_identity, actual_identity)
+    except UpstreamIdentityError as exc:
+        raise UpstreamArtifactError(exc.code, str(exc)) from exc
     filename = Path(selected["name"]).name
     if filename != selected["name"] or not filename.endswith(".deb"):
         raise UpstreamArtifactError("unsafe_release_asset_name", "Release asset has an unsafe filename")
     destination = artifacts / filename
     try:
-        downloaded = downloader(selected["url"], destination, token=token)
+        selected_downloader = downloader or (
+            github_client.download_release_asset if expected_identity is not None else github_client.download_archive
+        )
+        download_url = (
+            github_client.release_asset_download_url(release["repository"], selected["asset_id"])
+            if expected_identity is not None else selected["url"]
+        )
+        downloaded = selected_downloader(download_url, destination, token=token)
         info = inspector(destination, workspace=root, cancellation_event=cancellation_event, on_cancel=on_cancel)
     except github_client.GitHubError as exc:
         raise UpstreamArtifactError(exc.code, str(exc)) from exc
@@ -87,6 +106,11 @@ def acquire(recipe: dict, workspace: str | Path, *, token: str = "", release_res
     if expected_sha and downloaded["sha256"].lower() != expected_sha:
         destination.unlink(missing_ok=True)
         raise UpstreamArtifactError("artifact_checksum_mismatch", "Downloaded artifact does not match the upstream SHA-256")
+    try:
+        verify_acquired_payload(actual_identity, size=downloaded["size"], sha256=downloaded["sha256"])
+    except UpstreamIdentityError as exc:
+        destination.unlink(missing_ok=True)
+        raise UpstreamArtifactError(exc.code, str(exc)) from exc
     expected_package = recipe["package"]["name"]
     expected_arch = recipe["artifact"]["architecture"]
     upstream = release["upstream_version"]
@@ -101,5 +125,6 @@ def acquire(recipe: dict, workspace: str | Path, *, token: str = "", release_res
         "sha256": downloaded["sha256"], "downloaded_sha256": downloaded["sha256"],
         "upstream_expected_sha256": expected_sha, "checksum_verified": bool(expected_sha),
         "source": "upstream_release", "release": release, "release_asset": selected,
+        "upstream_identity": actual_identity,
         "inspection": deb_inspector.inspection_for_storage(info),
     }

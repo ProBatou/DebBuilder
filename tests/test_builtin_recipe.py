@@ -39,7 +39,8 @@ class BuiltinRecipeTests(unittest.TestCase):
 
         self.assertTrue(path.is_file())
         self.assertEqual(recipe_document_for_storage(raw), raw)
-        self.assertEqual(canonical["schema_version"], 4)
+        self.assertEqual(canonical["schema_version"], 5)
+        self.assertEqual(canonical["automation"], {"enabled": False, "policy": "manual"})
         self.assertEqual(canonical["name"], "debbuilder")
         self.assertEqual(canonical["management"], {
             "owner": "application", "builtin_id": "debbuilder",

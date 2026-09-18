@@ -93,6 +93,10 @@ def is_durable_mutation_route(method: str, path: str) -> bool:
         or path.startswith("/api/packages/")
         or path.startswith("/api/workflows/")
         or (
+            path.startswith("/api/recipes/")
+            and path.endswith(("/automation/check", "/automation/retry"))
+        )
+        or (
             path.startswith("/api/executions/")
             and path.endswith(("/cancel", "/validate", "/publish", "/reconcile-publication"))
         )

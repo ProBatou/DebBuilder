@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 
 class RecipeMigrationError(ValueError):
@@ -187,12 +187,29 @@ def migrate_v3_to_v4(document: dict) -> dict:
     return migrated
 
 
+def migrate_v4_to_v5(document: dict) -> dict:
+    """Add an inert, explicitly disabled per-Recipe automation policy."""
+    _require_source(document, 4)
+    if "automation" in document:
+        raise RecipeMigrationError(
+            "ambiguous_recipe_fields",
+            "Recipe v4 unexpectedly contains automation and cannot be migrated safely",
+            source_version=4,
+            path="$.automation",
+        )
+    migrated = deepcopy(document)
+    migrated["automation"] = {"enabled": False, "policy": "manual"}
+    migrated["schema_version"] = 5
+    return migrated
+
+
 Migration = Callable[[dict], dict]
 MIGRATIONS: dict[int, Migration] = {
     0: migrate_v0_to_v1,
     1: migrate_v1_to_v2,
     2: migrate_v2_to_v3,
     3: migrate_v3_to_v4,
+    4: migrate_v4_to_v5,
 }
 
 

@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>DebBuilder</title>
   <link rel="stylesheet" href="/style.css?v=20260906-2" />
-  <link rel="stylesheet" href="/css/components.css?v=20260906-1" />
-  <link rel="stylesheet" href="/css/pages.css?v=20260908-1" />
+  <link rel="stylesheet" href="/css/components.css?v=20260916-1" />
+  <link rel="stylesheet" href="/css/pages.css?v=20260916-1" />
 </head>
 <body>
   <header class="mobile-topbar" aria-label="Mobile navigation">
@@ -98,6 +98,15 @@
                 <label class="recipe-version-revision"><span>Debian revision</span><input id="recipePackageVersionRevision" type="text" value="1" required></label>
                 <label id="recipeVersionExpressionField" hidden><span>Expression / regex</span><input id="recipeMetaVersionExpression"></label>
               </div>
+              <section class="recipe-automation-panel" aria-labelledby="recipeAutomationTitle">
+                <div class="recipe-automation-controls">
+                  <div><h3 id="recipeAutomationTitle">Automation</h3><p><strong>Recipe enabled</strong> controls whether the Recipe can run. Automation separately controls periodic upstream work.</p></div>
+                  <label class="recipe-automation-toggle"><input id="recipeAutomationEnabled" type="checkbox"><span>Enable periodic automation</span></label>
+                  <label><span>Policy</span><select id="recipeAutomationPolicy"><option value="manual">Manual only</option><option value="detect">Detect changes</option><option value="test">Detect + Test</option><option value="build">Detect + Build</option><option value="build_validate">Detect + Build + Validate</option><option value="full">Full automatic lifecycle</option></select></label>
+                </div>
+                <div id="recipeAutomationStatus" class="recipe-automation-status" aria-live="polite"><span class="badge manual">Manual</span><span>Automation status has not loaded.</span></div>
+                <div class="recipe-automation-actions"><button type="button" class="ghost compact-button" id="btnAutomationCheckNow">Check now</button><button type="button" class="ghost compact-button" id="btnAutomationRetry" hidden>Retry</button><button type="button" class="ghost compact-button" id="btnAutomationRun" hidden>Open Run</button></div>
+              </section>
               <datalist id="packageOptions"></datalist>
             </section>
 
@@ -344,19 +353,20 @@
   </dialog>
 
 
-  <script src="/ui_core.js?v=20260906-2"></script>
+  <script src="/ui_core.js?v=20260916-1"></script>
   <script src="/settings.js?v=20260909-2"></script>
   <script src="/js/recipe/archive_tree.js?v=20260906-1"></script>
-  <script src="/recipe_serialization.js?v=20260906-2"></script>
+  <script src="/recipe_serialization.js?v=20260916-1"></script>
   <script src="/js/build_insight.js?v=20260906-4"></script>
   <script src="/js/recipe/test_run_modal.js?v=20260906-4"></script>
-  <script src="/app.js?v=20260906-4"></script>
+  <script src="/app.js?v=20260916-1"></script>
+  <script src="/js/recipe/automation.js?v=20260916-1"></script>
   <script src="/js/pages/dashboard.js?v=20260905-2"></script>
-  <script src="/js/pages/packages.js?v=20260906-3"></script>
-  <script src="/js/pages/logs.js?v=20260906-1"></script>
+  <script src="/js/pages/packages.js?v=20260916-1"></script>
+  <script src="/js/pages/logs.js?v=20260916-1"></script>
   <script src="/js/recipe/source_changes.js?v=20260904-1"></script>
   <script src="/js/recipe/stepper.js?v=20260905-2"></script>
   <script src="/js/recipe/json_editor.js?v=20260905-1"></script>
-  <script src="/js/admin.js?v=20260906-1"></script>
+  <script src="/js/admin.js?v=20260916-1"></script>
 </body>
 </html>

@@ -304,9 +304,13 @@ class NotificationService:
         return {"ok": False, "skipped": True, "reason": "publication not terminal"}
 
     def notify_automatic_completion(self, result: dict) -> dict:
+        lifecycle = result.get("automation_lifecycle") or {}
         automation = result.get("automation") or {}
         publication = automation.get("publication") or result.get("publication") or {}
-        if publication.get("status") != "success":
+        lifecycle_success = lifecycle.get("classification") == "success" and lifecycle.get("policy") in {
+            "test", "build", "build_validate", "full",
+        }
+        if not lifecycle_success and publication.get("status") != "success":
             return {"ok": False, "skipped": True, "reason": "automatic publication not completed"}
         rid = str(result.get("run_id") or publication.get("build_run_id") or "")
         run = self._load_run(rid)
@@ -317,11 +321,12 @@ class NotificationService:
         if (state["recipes"].get(recipe_key) or {}).get("last_recovered_run_id") == rid:
             return {"ok": False, "skipped": True, "reason": "recovery already reported"}
         url = _run_url(self._settings(), rid)
+        policy = str(lifecycle.get("policy") or "full")
         lines = [
             f"Recipe/package: {package}",
             f"Version: {version}",
             f"Run: {rid or 'unknown'}",
-            "Automatic update completed successfully.",
+            f"Automatic {policy.replace('_', ' + ')} lifecycle completed successfully.",
         ]
         if url:
             lines.append(f"Open run: {url}")

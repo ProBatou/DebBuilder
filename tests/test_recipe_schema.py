@@ -2,7 +2,7 @@ import json
 import unittest
 from pathlib import Path
 
-from debbuilder.recipe_schema import RecipeDocumentError, normalize_recipe, recipe_document_for_storage, recipe_for_storage, validate_recipe_metadata
+from debbuilder.recipe_schema import RecipeDocumentError, automation_eligible, normalize_recipe, recipe_document_for_storage, recipe_for_storage, validate_recipe_metadata
 
 
 class RecipeSchemaTests(unittest.TestCase):
@@ -100,7 +100,7 @@ class RecipeSchemaTests(unittest.TestCase):
             },
         }
         stored = recipe_document_for_storage(document)
-        self.assertEqual(stored["schema_version"], 4)
+        self.assertEqual(stored["schema_version"], 5)
         self.assertEqual(stored["artifact"]["payload"], {
             "mode": "paths", "include": ["server.py", "static/"], "exclude": ["static/dev/"],
         })
@@ -119,7 +119,7 @@ class RecipeSchemaTests(unittest.TestCase):
             },
         }
         stored = recipe_document_for_storage(legacy)
-        self.assertEqual(stored["schema_version"], 4)
+        self.assertEqual(stored["schema_version"], 5)
         self.assertEqual(stored["artifact"]["payload"], {
             "mode": "paths",
             "include": ["share/defaults.yml", "bin/tool"],
@@ -143,7 +143,7 @@ class RecipeSchemaTests(unittest.TestCase):
             "build": {"timeout": 120, "output": {"mode": "source"}},
         }
         loaded = validate_recipe_metadata(historical)
-        self.assertEqual(loaded["schema_version"], 4)
+        self.assertEqual(loaded["schema_version"], 5)
         self.assertEqual(loaded["runtime_apt_repositories"], [])
         self.assertEqual(loaded["build"]["inactivity_timeout"], 120)
         self.assertEqual(loaded["artifact"]["payload"]["include"], ["snapshot"])
@@ -197,7 +197,8 @@ class RecipeSchemaTests(unittest.TestCase):
             "name": "demo-recipe", "package": {"name": "demo"},
             "source": {"repository": "owner/demo", "tracking": "latest_release", "version": {"source": "tag"}},
         })
-        self.assertEqual(recipe["schema_version"], 4)
+        self.assertEqual(recipe["schema_version"], 5)
+        self.assertEqual(recipe["automation"], {"enabled": False, "policy": "manual"})
         self.assertEqual(recipe["runtime_apt_repositories"], [])
         self.assertEqual(recipe["package"]["name"], "demo")
         self.assertEqual(recipe["package"]["version_revision"], "1")
@@ -368,6 +369,39 @@ class RecipeSchemaTests(unittest.TestCase):
         partial = validate_recipe_metadata({"name": "demo", "service": {"configured": True, "user": "demo"}})
         self.assertFalse(partial["service"]["configured"])
         self.assertEqual(partial["service"]["user"], "demo")
+
+    def test_automation_policy_defaults_off_and_round_trips(self):
+        defaulted = recipe_document_for_storage({"name": "manual"})
+        self.assertEqual(defaulted["automation"], {"enabled": False, "policy": "manual"})
+        configured = recipe_document_for_storage({
+            "schema_version": 5, "name": "automated", "active": True,
+            "automation": {"enabled": True, "policy": "full"},
+        })
+        self.assertEqual(configured["automation"], {"enabled": True, "policy": "full"})
+        self.assertEqual(recipe_document_for_storage(configured), configured)
+
+    def test_automation_policy_enum_and_shape_are_strict(self):
+        for automation in (
+            {"enabled": "yes", "policy": "build"},
+            {"enabled": True, "policy": "everything"},
+            {"enabled": True, "policy": "build", "interval": 60},
+            [],
+        ):
+            with self.subTest(automation=automation), self.assertRaises(RecipeDocumentError):
+                recipe_document_for_storage({"schema_version": 5, "name": "invalid", "automation": automation})
+        with self.assertRaises(RecipeDocumentError) as raised:
+            recipe_document_for_storage({
+                "schema_version": 5, "name": "invalid",
+                "automation": {"enabled": True, "policy": "everything"},
+            })
+        self.assertEqual(raised.exception.code, "invalid_automation_policy")
+        self.assertEqual(raised.exception.path, "$.automation.policy")
+
+    def test_automation_eligibility_keeps_active_as_master_switch(self):
+        self.assertTrue(automation_eligible({"schema_version": 5, "name": "eligible", "active": True, "automation": {"enabled": True, "policy": "detect"}}))
+        self.assertFalse(automation_eligible({"schema_version": 5, "name": "inactive", "active": False, "automation": {"enabled": True, "policy": "full"}}))
+        self.assertFalse(automation_eligible({"schema_version": 5, "name": "disabled", "active": True, "automation": {"enabled": False, "policy": "full"}}))
+        self.assertFalse(automation_eligible({"schema_version": 5, "name": "manual", "active": True, "automation": {"enabled": True, "policy": "manual"}}))
 
 
 if __name__ == "__main__":

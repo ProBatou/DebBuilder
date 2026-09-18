@@ -8,6 +8,11 @@ import tarfile
 from pathlib import Path, PurePosixPath
 
 from . import github_client
+from .automation_identity import (
+    UpstreamIdentityError,
+    source_archive_identity,
+    verify_expected_upstream_identity,
+)
 from .recipe_schema import normalize_github_version
 
 
@@ -42,7 +47,7 @@ def version_from_resolution(recipe: dict, resolved: dict) -> tuple[str, str]:
     return upstream, f"{upstream}-{revision}" if revision else upstream
 
 
-def resolve_source(recipe: dict, *, token: str = "") -> dict:
+def resolve_source(recipe: dict, *, token: str = "", exact: bool = False) -> dict:
     source = recipe["source"]
     repository = source["repository"]
     if not repository:
@@ -50,20 +55,28 @@ def resolve_source(recipe: dict, *, token: str = "") -> dict:
     try:
         info = github_client.repo_info(repository, token=token)
         if source["tracking"] == "latest_release":
-            resolved = github_client.latest_release(repository, token=token)
+            resolved = (
+                github_client.latest_release_exact(info["repository"], token=token)
+                if exact else github_client.latest_release(info["repository"], token=token)
+            )
+            if exact:
+                target = github_client.resolve_ref(info["repository"], resolved.get("tag", ""), kind="tag", token=token)
+                resolved = {**resolved, "commit": target["commit"], "ref_object_sha": target.get("ref_object_sha", "")}
         elif source["tracking"] == "tag":
-            resolved = github_client.resolve_ref(repository, source["ref"], kind="tag", token=token)
+            resolved = github_client.resolve_ref(info["repository"], source["ref"], kind="tag", token=token)
         else:
-            resolved = github_client.resolve_ref(repository, source["ref"], kind="manual", token=token)
+            resolved = github_client.resolve_ref(info["repository"], source["ref"], kind="manual", token=token)
     except github_client.GitHubError as exc:
         raise SourceError(exc.code, str(exc)) from exc
     upstream, debian = version_from_resolution(recipe, resolved)
     archive_url = str(resolved.get("archive_url") or "")
+    if exact and resolved.get("commit"):
+        archive_url = f"https://api.github.com/repos/{info['repository']}/tarball/{resolved['commit']}"
     try:
         github_client.validate_download_url(archive_url)
     except github_client.GitHubError as exc:
         raise SourceError(exc.code, str(exc)) from exc
-    return {
+    result = {
         "repository": info["repository"],
         "strategy": source["tracking"],
         "ref": str(resolved.get("ref") or resolved.get("tag") or ""),
@@ -74,7 +87,17 @@ def resolve_source(recipe: dict, *, token: str = "") -> dict:
         "archive_url": archive_url,
         "upstream_version": upstream,
         "debian_version": debian,
+        "release_id": resolved.get("release_id"),
+        "ref_object_sha": str(resolved.get("ref_object_sha") or ""),
     }
+    try:
+        result["upstream_identity"] = source_archive_identity(
+            recipe, result, generated_release=source["tracking"] == "latest_release",
+        )
+    except UpstreamIdentityError:
+        if exact:
+            raise
+    return result
 
 
 def _safe_member_parts(name: str) -> tuple[str, ...]:
@@ -131,14 +154,18 @@ def extract_tar_archive(archive: str | Path, destination: str | Path, *, max_mem
         raise SourceError("source_extract_failed", "Source archive extraction failed") from exc
 
 
-def acquire_source(recipe: dict, workspace: str | Path, *, token: str = "") -> dict:
+def acquire_source(recipe: dict, workspace: str | Path, *, token: str = "", expected_identity: dict | None = None) -> dict:
     root = Path(workspace).resolve()
     source_dir = (root / "source").resolve()
     try:
         source_dir.relative_to(root)
     except ValueError as exc:
         raise SourceError("source_extract_failed", "Source destination escapes the build workspace") from exc
-    resolution = resolve_source(recipe, token=token)
+    try:
+        resolution = resolve_source(recipe, token=token, exact=expected_identity is not None)
+        verify_expected_upstream_identity(expected_identity, resolution.get("upstream_identity", {}))
+    except UpstreamIdentityError as exc:
+        raise SourceError(exc.code, str(exc)) from exc
     archive = root / "source.tar.gz"
     try:
         download = github_client.download_archive(resolution["archive_url"], archive, token=token)

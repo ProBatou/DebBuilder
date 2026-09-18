@@ -9,7 +9,8 @@ function control(id) {
 const controls = [
   control('recipeMetaActive'), control('packageMaintainer'), control('buildEnvironment'),
   control('buildInactivityTimeout'), control('buildMaximumRuntime'), control('recipeMetaGithub'),
-  control('btnAddBuildDependency'),
+  control('recipeAutomationEnabled'), control('recipeAutomationPolicy'),
+  control('btnAutomationCheckNow'), control('btnAutomationRetry'), control('btnAddBuildDependency'),
 ];
 const nodes = Object.fromEntries(controls.map(node => [node.id, node]));
 Object.assign(nodes, {
@@ -37,6 +38,7 @@ const effective = {
   resource_limits: {memory_max_bytes: null, tasks_max: 128, cpu_quota_percent: null, io_read_bandwidth_max_bytes_per_sec: null, io_write_bandwidth_max_bytes_per_sec: null},
   package: {name: 'debbuilder', maintainer: 'Default <default@example.test>'},
   source: {repository: 'ProBatou/DebBuilder'},
+  automation: {enabled: false, policy: 'manual'},
   build: {environment: {}, inactivity_timeout: 300, maximum_runtime: null, detected_project: 'python'},
   management: {owner: 'application', definition_version: 1},
 };
@@ -45,6 +47,7 @@ const form = {
   active: false,
   package: {...effective.package, maintainer: 'Ops <ops@example.test>'},
   source: {repository: 'stale/form-value'},
+  automation: {enabled: true, policy: 'full'},
   build: {...effective.build, environment: {HTTP_PROXY: 'http://proxy'}, detected_project: null},
   resource_limits: {...effective.resource_limits, tasks_max: 64},
 };
@@ -72,6 +75,9 @@ for (const id of ['recipeMetaActive', 'packageMaintainer', 'buildEnvironment', '
   assert.equal(nodes[id].disabled, false, `${id} should remain editable`);
 }
 assert.equal(nodes.recipeMetaGithub.disabled, true);
+assert.equal(nodes.recipeAutomationEnabled.disabled, true);
+assert.equal(nodes.recipeAutomationPolicy.disabled, true);
+assert.equal(nodes.btnAutomationCheckNow.disabled, true);
 assert.equal(nodes.btnAddBuildDependency.disabled, true);
 assert.equal(nodes.recipeManagedBadge.hidden, false);
 assert.equal(nodes.recipeManagedNotice.hidden, false);
@@ -83,6 +89,7 @@ assert.equal(submitted.active, false);
 assert.equal(submitted.package.maintainer, 'Ops <ops@example.test>');
 assert.deepEqual({...submitted.build.environment}, {HTTP_PROXY: 'http://proxy'});
 assert.equal(submitted.source.repository, 'ProBatou/DebBuilder');
+assert.deepEqual({...submitted.automation}, {enabled: false, policy: 'manual'});
 assert.equal(submitted.build.detected_project, 'python');
 assert.deepEqual({...submitted.management}, effective.management);
 assert.equal(submitted.resource_limits.tasks_max, 64);

@@ -14,6 +14,13 @@ from urllib.parse import urlparse
 
 from . import github_client, source_acquisition, upstream_artifact
 from .archive_payload import parse_archive_path, selectors_match
+from .automation_identity import (
+    UpstreamIdentityError,
+    release_asset_identity,
+    source_archive_identity,
+    verify_acquired_payload,
+    verify_expected_upstream_identity,
+)
 
 
 class UpstreamArchiveError(RuntimeError):
@@ -62,6 +69,8 @@ def resolve_release(recipe: dict, *, token: str = "") -> dict:
         "name": resolved["release_name"],
         "url": resolved["release_url"],
         "upstream_version": resolved["upstream_version"],
+        "commit": resolved.get("commit", ""),
+        "ref_object_sha": resolved.get("ref_object_sha", ""),
         "archive_url": resolved["archive_url"],
         "tarball_url": resolved["archive_url"],
         "zipball_url": resolved["archive_url"].replace("/tarball/", "/zipball/"),
@@ -407,11 +416,46 @@ def _expected_digest(asset: dict) -> str:
     return digest.split(":", 1)[1].lower() if digest.lower().startswith("sha256:") and len(digest) == 71 else ""
 
 
-def resolve_and_extract(recipe: dict, workspace: str | Path, *, token: str = "", release_resolver=resolve_release, downloader=github_client.download_archive) -> dict:
+def resolve_and_extract(recipe: dict, workspace: str | Path, *, token: str = "", expected_identity: dict | None = None, release_resolver=resolve_release, downloader=None) -> dict:
     root = Path(workspace).resolve()
     release = release_resolver(recipe, token=token)
     selected_asset = select_archive(release, recipe["artifact"])
     name = _safe_asset_name(selected_asset["name"])
+    try:
+        if selected_asset.get("source") == "release_asset":
+            actual_identity = release_asset_identity(
+                recipe, release, selected_asset, str(selected_asset.get("payload_kind") or "archive"),
+            )
+        else:
+            if expected_identity is not None and not release.get("commit"):
+                target = github_client.resolve_ref(
+                    release["repository"], release.get("tag") or release.get("ref"), kind="tag", token=token,
+                )
+                release = {**release, "commit": target["commit"], "ref_object_sha": target.get("ref_object_sha", "")}
+            actual_identity = source_archive_identity(
+                recipe, release,
+                generated_release=recipe["source"]["tracking"] == "latest_release",
+                archive_format=str(selected_asset.get("archive_format") or "tar.gz"),
+            )
+        verify_expected_upstream_identity(expected_identity, actual_identity)
+    except (UpstreamIdentityError, github_client.GitHubError) as exc:
+        raise UpstreamArchiveError(getattr(exc, "code", "incomplete_upstream_identity"), str(exc)) from exc
+    if selected_asset.get("source") == "github_source" and actual_identity.get("commit_sha"):
+        suffix = "zipball" if selected_asset.get("archive_format") == "zip" else "tarball"
+        selected_asset = {
+            **selected_asset,
+            "url": f"https://api.github.com/repos/{release['repository']}/{suffix}/{actual_identity['commit_sha']}",
+        }
+    if selected_asset.get("source") == "release_asset" and expected_identity is not None:
+        selected_asset = {
+            **selected_asset,
+            "url": github_client.release_asset_download_url(release["repository"], selected_asset["asset_id"]),
+        }
+    selected_downloader = downloader or (
+        github_client.download_release_asset
+        if selected_asset.get("source") == "release_asset"
+        else github_client.download_archive
+    )
     payload_kind = str(selected_asset.get("payload_kind") or "archive")
     kind = str(selected_asset.get("archive_format") or "")
     downloads = root / "downloads"
@@ -438,10 +482,10 @@ def resolve_and_extract(recipe: dict, workspace: str | Path, *, token: str = "",
     try:
         download_destination = (
             Path(f"/proc/self/fd/{raw_directory_descriptor}") / name
-            if raw_directory_descriptor is not None and downloader is github_client.download_archive
+            if raw_directory_descriptor is not None and selected_downloader in {github_client.download_archive, github_client.download_release_asset}
             else downloaded_path
         )
-        download = downloader(selected_asset["url"], download_destination, token=token)
+        download = selected_downloader(selected_asset["url"], download_destination, token=token)
         if payload_kind == "raw_file":
             raw_file_descriptor = _open_verified_raw_file(source, name, raw_directory_descriptor)
             os.fchmod(raw_file_descriptor, 0o644)
@@ -479,6 +523,11 @@ def resolve_and_extract(recipe: dict, workspace: str | Path, *, token: str = "",
             _remove_raw_download(name, raw_directory_descriptor) if payload_kind == "raw_file" else _remove_download(downloaded_path)
             code = "archive_checksum_mismatch" if payload_kind == "archive" else "asset_checksum_mismatch"
             raise UpstreamArchiveError(code, "Downloaded Release asset does not match its GitHub SHA-256", details={"expected": expected, "actual": actual, "asset": name})
+        try:
+            verify_acquired_payload(actual_identity, size=actual_size, sha256=actual)
+        except UpstreamIdentityError as exc:
+            _remove_raw_download(name, raw_directory_descriptor) if payload_kind == "raw_file" else _remove_download(downloaded_path)
+            raise UpstreamArchiveError(exc.code, str(exc)) from exc
         if payload_kind == "raw_file":
             anchored_file = os.fstat(raw_file_descriptor)
             anchored_directory = os.fstat(raw_directory_descriptor)
@@ -518,6 +567,7 @@ def resolve_and_extract(recipe: dict, workspace: str | Path, *, token: str = "",
         "release_name": release.get("name", ""), "release_url": release.get("url", ""), "upstream_version": release["upstream_version"],
         "debian_version": f"{release['upstream_version']}-{recipe['package']['version_revision']}" if recipe["package"]["version_revision"] else release["upstream_version"],
         "source_directory": str(source), "artifact_mode": "upstream_archive", "payload_kind": payload_kind,
+        "upstream_identity": actual_identity,
         "file_count": extraction["files"] if extraction else 1,
         "asset": {
             "asset_id": selected_asset.get("asset_id"), "api_url": _stable_identity_url(selected_asset.get("api_url", "")),
@@ -715,8 +765,11 @@ def selected_file_records(recipe: dict, source_directory: str | Path) -> list[di
     return resolve_payload(recipe, source_directory)["files"]
 
 
-def acquire(recipe: dict, workspace: str | Path, *, token: str = "", release_resolver=resolve_release, downloader=github_client.download_archive) -> dict:
-    result = resolve_and_extract(recipe, workspace, token=token, release_resolver=release_resolver, downloader=downloader)
+def acquire(recipe: dict, workspace: str | Path, *, token: str = "", expected_identity: dict | None = None, release_resolver=resolve_release, downloader=None) -> dict:
+    result = resolve_and_extract(
+        recipe, workspace, token=token, expected_identity=expected_identity,
+        release_resolver=release_resolver, downloader=downloader,
+    )
     raw_file_identity = result.pop("_raw_file_identity", None)
     payload = (
         resolve_raw_payload(result["source_directory"], result["asset"]["name"], raw_file_identity)
@@ -726,7 +779,7 @@ def acquire(recipe: dict, workspace: str | Path, *, token: str = "", release_res
     return {**result, "archive_payload": payload}
 
 
-def inspect(recipe: dict, *, token: str = "", release_resolver=resolve_release, downloader=github_client.download_archive) -> dict:
+def inspect(recipe: dict, *, token: str = "", release_resolver=resolve_release, downloader=None) -> dict:
     with tempfile.TemporaryDirectory(prefix="debbuilder-archive-inspect-") as temporary:
         try:
             result = resolve_and_extract(recipe, temporary, token=token, release_resolver=release_resolver, downloader=downloader)

@@ -26,9 +26,18 @@ def recipe(policy=None):
 
 class ResourceAdmissionTests(unittest.TestCase):
     def setUp(self):
-        runtime_blocker = mock.patch.object(containment, "_RUNTIME_CLEANUP_ERROR", "")
+        runtime_blocker = mock.patch.object(containment, "_CLEANUP_BLOCKERS", {})
         runtime_blocker.start()
         self.addCleanup(runtime_blocker.stop)
+        generations = mock.patch.object(containment, "_CLEANUP_BLOCKER_GENERATIONS", {})
+        generations.start()
+        self.addCleanup(generations.stop)
+        revision = mock.patch.object(containment, "_CLEANUP_BLOCKER_REVISION", 0)
+        revision.start()
+        self.addCleanup(revision.stop)
+        saturation = mock.patch.object(containment, "_CLEANUP_BLOCKERS_SATURATED", False)
+        saturation.start()
+        self.addCleanup(saturation.stop)
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.data = Path(self.temporary.name) / "data"
@@ -114,27 +123,43 @@ class ResourceAdmissionTests(unittest.TestCase):
 
     def test_unresolved_probe_cleanup_blocks_even_unlimited_admission_without_a_run(self):
         manager = self.manager()
+        containment._publish_cleanup_blocker(
+            "probe", "probe cgroup remains",
+            containment.starting_metadata("resource-limit-capability-probe", "a" * 32),
+        )
         with mock.patch(
             "debbuilder.app.command_containment.resource_limit_capability",
             return_value=self.capability([]),
         ), mock.patch(
-            "debbuilder.app.command_containment.probe_cleanup_blocker",
-            return_value="probe cgroup remains",
+            "debbuilder.app.command_containment.prove_containment_absent",
+            return_value=containment.AbsenceProof(
+                containment.AbsenceStatus.PRESENT_BUT_IDENTITY_AMBIGUOUS, "probe remains",
+            ),
         ), self.assertRaises(app.RunAdmissionError) as raised:
             app.enqueue_recipe_run(manager, recipe(), dry_run=True)
         self.assertEqual(raised.exception.code, "execution_recovery_unresolved")
+        self.assertEqual(raised.exception.details["reason"], "1 containment cleanup object(s) unresolved")
+        self.assertNotIn("debbuilder-command-", json.dumps(raised.exception.details))
         self.assertFalse(self.store.root.exists())
         self.assertEqual(manager.queued_run_ids, ())
 
     def test_unresolved_runtime_cleanup_blocks_the_next_admission_without_a_run(self):
         manager = self.manager()
-        containment.latch_runtime_cleanup_blocker("prior runtime cgroup remains")
+        containment.latch_runtime_cleanup_blocker(
+            "prior runtime cgroup remains", containment.starting_metadata("resource-admission", "b" * 32))
         with mock.patch(
             "debbuilder.app.command_containment.resource_limit_capability",
             return_value=self.capability([]),
-        ) as capability, self.assertRaises(app.RunAdmissionError) as raised:
+        ) as capability, mock.patch(
+            "debbuilder.app.command_containment.prove_containment_absent",
+            return_value=containment.AbsenceProof(
+                containment.AbsenceStatus.STILL_PRESENT_AND_OWNED, "runtime remains",
+            ),
+        ), self.assertRaises(app.RunAdmissionError) as raised:
             app.enqueue_recipe_run(manager, recipe(), dry_run=True)
         self.assertEqual(raised.exception.code, "execution_recovery_unresolved")
+        self.assertEqual(raised.exception.details["reason"], "1 containment cleanup object(s) unresolved")
+        self.assertNotIn("debbuilder-command-", json.dumps(raised.exception.details))
         capability.assert_not_called()
         self.assertFalse(self.store.root.exists())
         self.assertEqual(manager.queued_run_ids, ())

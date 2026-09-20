@@ -215,14 +215,46 @@ class StartupRecoveryTests(unittest.TestCase):
         self.save_identity(strong["id"], self.systemd_identity(strong["id"], "active", boot_id=old_boot))
         self.save_identity(weak["id"], self.process_identity(weak["id"], boot_id=old_boot))
 
-        with mock.patch("debbuilder.execution_recovery.recover_systemd_containment") as systemd, \
+        absent = ContainmentRecovery(
+            VerificationResult(VerificationStatus.NOT_RUNNING, "unit and cgroup are absent"),
+            gone=True,
+        )
+        with mock.patch(
+                "debbuilder.execution_recovery.recover_systemd_containment", return_value=absent,
+        ) as systemd, \
                 mock.patch("debbuilder.execution_recovery.terminate_verified_process_group") as process:
             result = recover_startup(self.store)
 
         self.assertIsNone(result.admission_blocker)
         self.assertEqual(sorted(result.recovered_run_ids), sorted([strong["id"], weak["id"]]))
-        systemd.assert_not_called()
+        systemd.assert_called_once()
         process.assert_not_called()
+
+    def test_old_boot_same_name_unit_is_bound_and_never_cleaned_as_an_orphan(self):
+        run = self.create("old-boot-aba", "running")
+        old_boot = "00000000-0000-0000-0000-000000000000"
+        identity = self.systemd_identity(run["id"], "active", boot_id=old_boot)
+        self.save_identity(run["id"], identity)
+        ambiguous = ContainmentRecovery(VerificationResult(
+            VerificationStatus.MISMATCH,
+            "unit name is present without the recorded boot/invocation identity",
+        ))
+
+        with mock.patch(
+            "debbuilder.execution_recovery.recover_systemd_containment",
+            return_value=ambiguous,
+        ), mock.patch(
+            "debbuilder.execution_recovery.loaded_command_units",
+            return_value={identity["unit_name"]},
+        ), mock.patch(
+            "debbuilder.execution_recovery.recover_orphan_systemd_containment",
+        ) as orphan:
+            result = recover_startup(self.store)
+
+        orphan.assert_not_called()
+        self.assertEqual(result.admission_blocker["details"]["unresolved_run_ids"], [run["id"]])
+        self.assertEqual(result.stray_units, [])
+        self.assertEqual(self.store.load(run["id"])["status"], "running")
 
     def test_each_systemd_state_uses_strong_recovery_and_terminalizes_only_absence(self):
         runs = [self.create(f"strong-{state}", "running") for state in ("starting", "active", "stopping")]

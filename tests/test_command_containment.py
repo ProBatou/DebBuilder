@@ -64,9 +64,18 @@ class SystemdCommandContainmentTests(unittest.TestCase):
             raise unittest.SkipTest(cls.capability.reason)
 
     def setUp(self):
-        runtime_blocker = mock.patch.object(containment_module, "_RUNTIME_CLEANUP_ERROR", "")
+        runtime_blocker = mock.patch.object(containment_module, "_CLEANUP_BLOCKERS", {})
         runtime_blocker.start()
         self.addCleanup(runtime_blocker.stop)
+        generations = mock.patch.object(containment_module, "_CLEANUP_BLOCKER_GENERATIONS", {})
+        generations.start()
+        self.addCleanup(generations.stop)
+        revision = mock.patch.object(containment_module, "_CLEANUP_BLOCKER_REVISION", 0)
+        revision.start()
+        self.addCleanup(revision.stop)
+        saturation = mock.patch.object(containment_module, "_CLEANUP_BLOCKERS_SATURATED", False)
+        saturation.start()
+        self.addCleanup(saturation.stop)
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.store = BuildStore(Path(self.temporary.name) / "builds")
@@ -347,6 +356,36 @@ class SystemdCommandContainmentTests(unittest.TestCase):
             self.assertIsNone(connection.snapshot(transitions[-1]["unit_name"]))
         finally:
             connection.close()
+
+    def test_post_activation_cleanup_failure_blocker_keeps_invocation(self):
+        run = self.create_run("post-activation-blocker")
+        with mock.patch.object(
+            SystemdCommandContainment, "_start_resource_event_watchers",
+            side_effect=ContainmentError("injected post-activation failure"),
+        ), mock.patch.object(
+            SystemdCommandContainment, "_terminate_record",
+            return_value=ContainmentTermination(None, False, False, "injected cleanup uncertainty"),
+        ):
+            result, transitions, remaining = self.run_strong(run, "sleep 30")
+        try:
+            self.assertEqual(result["error_code"], "command_containment_termination_failed")
+            self.assertEqual(remaining, transitions[-1])
+            self.assertEqual(transitions[-1]["containment_state"], "active")
+            blockers = containment_module.cleanup_blockers()
+            self.assertEqual(len(blockers), 1)
+            self.assertEqual(blockers[0].invocation_id, transitions[-1]["invocation_id"])
+            self.assertEqual(blockers[0].control_group, transitions[-1]["control_group"])
+        finally:
+            # The injected teardown leaves a real unit. Authenticate its
+            # invocation before test-only cleanup; tearDown is a second guard.
+            if transitions:
+                connection = _SystemdConnection()
+                try:
+                    snapshot = connection.snapshot(transitions[-1]["unit_name"])
+                    if snapshot is not None and snapshot.invocation_id == transitions[-1].get("invocation_id"):
+                        connection.stop(snapshot.unit_name)
+                finally:
+                    connection.close()
 
     def test_watcher_thread_start_failure_still_removes_unit_before_identity_clear(self):
         run = self.create_run("watcher-thread-start-failure")
@@ -644,6 +683,61 @@ with store.locked_run(run_id) as fd:
                 units.append(transitions[0]["unit_name"])
         self.assertEqual(len(set(units)), 4)
         self.assertTrue(all(name.startswith("debbuilder-command-") for name in units))
+
+    def test_runtime_blocker_reconciles_after_real_unit_and_cgroup_disappear(self):
+        run = self.create_run("runtime-reconciliation")
+        metadata = starting_metadata(run["id"], "f" * 32)
+        self.units.add(metadata["unit_name"])
+        connection = _SystemdConnection()
+        read_fd, write_fd = os.pipe()
+        try:
+            connection.start_transient(
+                metadata["unit_name"], arguments=["/usr/bin/sleep", "30"],
+                executable="/usr/bin/sleep", cwd=Path("/"),
+                environment={"PATH": "/usr/bin:/bin"},
+                stdout_fd=write_fd, stderr_fd=write_fd,
+                description=unit_description(run["id"], metadata["command_id"]),
+            )
+            os.close(write_fd)
+            write_fd = -1
+            deadline = time.monotonic() + 2
+            snapshot = None
+            while time.monotonic() < deadline:
+                snapshot = connection.snapshot(metadata["unit_name"])
+                if snapshot is not None and snapshot.invocation_id:
+                    break
+                time.sleep(0.02)
+            self.assertIsNotNone(snapshot)
+            active = {
+                **metadata,
+                "invocation_id": snapshot.invocation_id,
+                "control_group": expected_control_group(metadata["unit_name"]),
+                "containment_state": "active",
+            }
+            containment_module.latch_runtime_cleanup_blocker("real unit remains", active)
+            present = containment_module.reconcile_cleanup_blockers()
+            self.assertEqual((present.removed, present.remaining), (0, 1))
+
+            # Model cleanup completing independently after the original
+            # teardown failure.  Runtime reconciliation itself never stops it.
+            connection.stop(metadata["unit_name"])
+            deadline = time.monotonic() + 3
+            absence = None
+            while time.monotonic() < deadline:
+                absence = containment_module.prove_containment_absent(active)
+                if absence.status is containment_module.AbsenceStatus.PROVEN_GONE:
+                    break
+                time.sleep(0.02)
+            self.assertIsNotNone(absence)
+            self.assertEqual(absence.status, containment_module.AbsenceStatus.PROVEN_GONE)
+            reconciled = containment_module.reconcile_cleanup_blockers()
+            self.assertEqual((reconciled.removed, reconciled.remaining), (1, 0))
+            self.assertFalse(containment_module.containment_cleanup_blocker())
+        finally:
+            connection.close()
+            os.close(read_fd)
+            if write_fd >= 0:
+                os.close(write_fd)
 
     def test_unit_name_is_bounded_and_never_contains_the_raw_run_id(self):
         command_id = "a" * 32

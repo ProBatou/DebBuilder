@@ -492,6 +492,7 @@ def _stream_systemd_cgroup(arguments: list[str], *, cwd: Path, env: dict[str, st
                     "killed": terminated.killed,
                     "termination_error": terminated.error or None,
                     "containment_gone": terminated.gone,
+                    "containment_identity": containment.metadata,
                     "cancellation_requested": True,
                     "cancelled": terminated.gone and not bool(terminated.error),
                     "cancellation": cancellation or {},
@@ -537,6 +538,7 @@ def _stream_systemd_cgroup(arguments: list[str], *, cwd: Path, env: dict[str, st
                 "killed": terminated.killed,
                 "termination_error": terminated.error,
                 "containment_gone": terminated.gone,
+                "containment_identity": containment.metadata,
                 "cancellation_requested": False,
                 "cancelled": False,
                 "resource_control": containment.resource_control(),
@@ -558,6 +560,7 @@ def _stream_systemd_cgroup(arguments: list[str], *, cwd: Path, env: dict[str, st
                 "killed": finished.killed,
                 "termination_error": finished.error or ("transient containment disappearance was not proved" if not finished.gone else ""),
                 "containment_gone": finished.gone,
+                "containment_identity": containment.metadata,
                 "cancellation_requested": False,
                 "cancelled": False,
                 "resource_control": resource_control,
@@ -580,10 +583,11 @@ def _stream_systemd_cgroup(arguments: list[str], *, cwd: Path, env: dict[str, st
             terminated = containment.clear_after_termination(terminated)
             drain_remaining(emit=False)
         except BaseException as cleanup:
-            raise ContainmentCleanupError(f"command callback failed and containment cleanup also failed: {cleanup}") from original
+            raise ContainmentCleanupError(f"command callback failed and containment cleanup also failed: {cleanup}", identity=containment.metadata) from original
         if not terminated.gone:
             raise ContainmentCleanupError(
-                f"command callback failed and containment cleanup could not be proved: {terminated.error or 'unit remains'}"
+                f"command callback failed and containment cleanup could not be proved: {terminated.error or 'unit remains'}",
+                identity=containment.metadata,
             ) from original
         raise
     finally:
@@ -672,7 +676,7 @@ def run_command(command: str, *, workspace: str | Path, working_directory: str =
             and completed.get("termination_error")
             and not completed.get("containment_gone", False)
         ):
-            latch_runtime_cleanup_blocker(str(completed["termination_error"]))
+            latch_runtime_cleanup_blocker(str(completed["termination_error"]), completed["containment_identity"])
         if not completed.get("resource_control"):
             completed["resource_control"] = {
                 "backend": "process_group",
@@ -705,7 +709,8 @@ def run_command(command: str, *, workspace: str | Path, working_directory: str =
         result["stderr"] = str(exc)
         if isinstance(exc, ContainmentCleanupError):
             if locals().get("uses_systemd_containment", False):
-                latch_runtime_cleanup_blocker(str(exc))
+                if exc.identity is not None:
+                    latch_runtime_cleanup_blocker(str(exc), exc.identity)
             result["error_code"] = "command_containment_termination_failed"
         elif isinstance(exc, (ContainmentError, ResourceLimitError)) and enforcement_required(locals().get("resource_policy", empty_policy())):
             result["error_code"] = "resource_limit_enforcement_failed"

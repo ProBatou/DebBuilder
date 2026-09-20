@@ -402,7 +402,11 @@ def recover_startup(store: BuildStore) -> StartupRecoveryResult:
                     result.processed_run_ids.append(run_id)
                     continue
 
-                if identity and identity.get("backend") == "systemd_cgroup" and identity.get("boot_id") == boot_id:
+                # Bind every durable systemd name, including previous-boot
+                # identities. A current same-name incarnation must be judged
+                # against that identity, never downgraded to provenance-only
+                # orphan cleanup.
+                if identity and identity.get("backend") == "systemd_cgroup":
                     unit_bindings[str(identity["unit_name"])] = run_id
 
                 if status not in NON_TERMINAL_STATUSES:
@@ -421,7 +425,7 @@ def recover_startup(store: BuildStore) -> StartupRecoveryResult:
                     elif identity is not None:
                         result.processed_run_ids.append(run_id)
                         backend = str(identity.get("backend") or "process_group")
-                        if identity["boot_id"] != boot_id and boot_id:
+                        if identity["boot_id"] != boot_id and boot_id and backend != "systemd_cgroup":
                             reason = "durable command identity belongs to a previous boot"
                             _clear_resolved_identity(workspace_fd, run_id)
                             _record_terminal_resolution(store, run, backend=backend, reason=reason)
@@ -457,7 +461,7 @@ def recover_startup(store: BuildStore) -> StartupRecoveryResult:
                     continue
 
                 backend = str(identity.get("backend") or "process_group")
-                if identity["boot_id"] != boot_id and boot_id:
+                if identity["boot_id"] != boot_id and boot_id and backend != "systemd_cgroup":
                     ambiguity = _terminalization_ambiguity(run)
                     if ambiguity:
                         blocker = _record_blocker(store, run, backend=backend, reason=ambiguity)

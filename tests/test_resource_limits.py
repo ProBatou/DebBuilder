@@ -279,7 +279,7 @@ class ResourceLimitPolicyTests(unittest.TestCase):
             cgroup.mkdir(parents=True)
             (cgroup / "cgroup.events").write_text("populated 1\n", encoding="ascii")
             with (
-                mock.patch.object(containment, "_PROBE_CLEANUP_ERROR", ""),
+                mock.patch.object(containment, "_CLEANUP_BLOCKERS", {}),
                 mock.patch.object(containment, "_cgroup2_is_unified", return_value=True),
                 mock.patch.object(containment, "_SystemdConnection", return_value=Connection()),
                 mock.patch.object(containment, "CGROUP_ROOT", root),
@@ -287,9 +287,10 @@ class ResourceLimitPolicyTests(unittest.TestCase):
             ):
                 capability = containment._probe_capability()
                 blocker = containment.probe_cleanup_blocker()
+                blocker_reason = containment.cleanup_blockers()[0].reason
         self.assertEqual(capability.backend, "unresolved")
         self.assertFalse(capability.available)
-        self.assertIn("StopUnit failure", blocker)
+        self.assertIn("StopUnit failure", blocker_reason)
 
     def test_base_probe_cleans_its_bound_unit_while_an_unrelated_owner_is_live(self):
         command_id = "e" * 32
@@ -333,7 +334,7 @@ class ResourceLimitPolicyTests(unittest.TestCase):
                 owner_fd = containment._acquire_namespace_lease(exclusive=False)
                 try:
                     with (
-                        mock.patch.object(containment, "_PROBE_CLEANUP_ERROR", ""),
+                        mock.patch.object(containment, "_CLEANUP_BLOCKERS", {}),
                         mock.patch.object(containment, "_cgroup2_is_unified", return_value=True),
                         mock.patch.object(containment, "_SystemdConnection", return_value=connection),
                         mock.patch.object(containment, "CGROUP_ROOT", root),
@@ -382,7 +383,7 @@ class ResourceLimitPolicyTests(unittest.TestCase):
         connection = Connection()
         with (
             tempfile.TemporaryDirectory() as temporary,
-            mock.patch.object(containment, "_PROBE_CLEANUP_ERROR", ""),
+            mock.patch.object(containment, "_CLEANUP_BLOCKERS", {}),
             mock.patch.object(containment, "containment_capability", return_value=base),
             mock.patch.object(containment, "_SystemdConnection", return_value=connection) as factory,
             mock.patch.object(containment.os, "urandom", return_value=b"\xcc" * 16),
@@ -394,10 +395,11 @@ class ResourceLimitPolicyTests(unittest.TestCase):
                 {"memory_max_bytes": 64 * 1024 * 1024}, workspace=temporary,
             )
             blocker = containment.probe_cleanup_blocker()
+            blocker_reason = containment.cleanup_blockers()[0].reason
         self.assertFalse(first["available"])
         self.assertEqual(second["reason"], blocker)
         self.assertEqual(factory.call_count, 1)
-        self.assertIn("resource-probe stop failure", blocker)
+        self.assertIn("resource-probe stop failure", blocker_reason)
 
     def test_resource_probe_cleans_its_bound_unit_while_an_unrelated_owner_is_live(self):
         command_id = "d" * 32
@@ -442,7 +444,7 @@ class ResourceLimitPolicyTests(unittest.TestCase):
                 owner_fd = containment._acquire_namespace_lease(exclusive=False)
                 try:
                     with (
-                        mock.patch.object(containment, "_PROBE_CLEANUP_ERROR", ""),
+                        mock.patch.object(containment, "_CLEANUP_BLOCKERS", {}),
                         mock.patch.object(containment, "containment_capability", return_value=base),
                         mock.patch.object(containment, "_SystemdConnection", return_value=connection),
                         mock.patch.object(containment, "_cgroup_is_absent", side_effect=lambda _group: connection.stopped),

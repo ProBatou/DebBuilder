@@ -44,9 +44,18 @@ class _Recorder:
 
 class ResourceEnforcementFallbackTests(unittest.TestCase):
     def setUp(self):
-        runtime_blocker = mock.patch.object(containment, "_RUNTIME_CLEANUP_ERROR", "")
+        runtime_blocker = mock.patch.object(containment, "_CLEANUP_BLOCKERS", {})
         runtime_blocker.start()
         self.addCleanup(runtime_blocker.stop)
+        generations = mock.patch.object(containment, "_CLEANUP_BLOCKER_GENERATIONS", {})
+        generations.start()
+        self.addCleanup(generations.stop)
+        revision = mock.patch.object(containment, "_CLEANUP_BLOCKER_REVISION", 0)
+        revision.start()
+        self.addCleanup(revision.stop)
+        saturation = mock.patch.object(containment, "_CLEANUP_BLOCKERS_SATURATED", False)
+        saturation.start()
+        self.addCleanup(saturation.stop)
 
     def run_with_completed(self, completed):
         temporary = tempfile.TemporaryDirectory()
@@ -56,6 +65,8 @@ class ResourceEnforcementFallbackTests(unittest.TestCase):
             "backend": "systemd_cgroup", "available": True,
             "requested_controls": ["memory"], "reason": "verified",
         }
+        completed = {"containment_identity": containment.starting_metadata(
+            "resource-precedence", "a" * 32), **completed}
         with recording_identities(
             "resource-precedence", record=recorder.record, update=recorder.update,
             clear=recorder.clear, resource_policy={"memory_max_bytes": 1024},
@@ -213,7 +224,8 @@ class ResourceEnforcementFallbackTests(unittest.TestCase):
         }
         first = self.run_with_completed(unresolved)
         self.assertEqual(first["error_code"], "command_containment_termination_failed")
-        self.assertEqual(containment.runtime_cleanup_blocker(), "runtime cgroup remains")
+        self.assertEqual(len(containment.cleanup_blockers()), 1)
+        self.assertEqual(containment.cleanup_blockers()[0].reason, "runtime cgroup remains")
 
         second = self.run_with_completed({
             **unresolved, "exit_code": 0, "process_exit_code": 0, "timed_out": False,
@@ -240,7 +252,8 @@ class ResourceEnforcementFallbackTests(unittest.TestCase):
 
         def latch():
             attempting.set()
-            containment.latch_runtime_cleanup_blocker("runtime cgroup remains")
+            containment.latch_runtime_cleanup_blocker(
+                "runtime cgroup remains", containment.starting_metadata("resource-precedence", "b" * 32))
             published.set()
 
         thread = threading.Thread(target=latch)

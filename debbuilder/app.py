@@ -522,7 +522,7 @@ def _mark_enqueue_failed(store: BuildStore, run_id: str, exc: Exception) -> None
 
 
 def _prepare_run_admission(manager: ExecutionManager, workflow: dict) -> tuple[dict, dict]:
-    """Apply the shared Recipe/resource/containment admission checks."""
+    """Perform slow shared checks without holding the containment gate."""
     try:
         canonical = recipe_document_for_storage(workflow)
     except RecipeDocumentError as exc:
@@ -538,26 +538,12 @@ def _prepare_run_admission(manager: ExecutionManager, workflow: dict) -> tuple[d
     effective, _origins = resource_limits.resolve_policy(
         settings_result.settings["resource_limits"], canonical["resource_limits"],
     )
-    cleanup_blocker = command_containment.containment_cleanup_blocker()
-    if cleanup_blocker:
-        raise RunAdmissionError(
-            "execution_recovery_unresolved",
-            "Build/Test admission is blocked because containment cleanup is unresolved",
-            status=503,
-            details={"backend": "systemd_cgroup", "reason": cleanup_blocker},
-        )
+    reconciled = _reconcile_cleanup_for_admission(False)
     probe_root = manager.store.root if manager.store.root.is_dir() else manager.store.root.parent
     capability = command_containment.resource_limit_capability(
         effective, workspace=probe_root, refresh=resource_limits.enforcement_required(effective),
     )
-    cleanup_blocker = command_containment.containment_cleanup_blocker()
-    if cleanup_blocker:
-        raise RunAdmissionError(
-            "execution_recovery_unresolved",
-            "Build/Test admission is blocked because containment cleanup is unresolved",
-            status=503,
-            details={"backend": "systemd_cgroup", "reason": cleanup_blocker},
-        )
+    _reconcile_cleanup_for_admission(reconciled)
     if resource_limits.enforcement_required(effective) and not capability["available"]:
         raise RunAdmissionError(
             "resource_limits_unavailable",
@@ -574,43 +560,71 @@ def _prepare_run_admission(manager: ExecutionManager, workflow: dict) -> tuple[d
     )
 
 
-@command_containment.containment_safety_serialized
+def _cleanup_admission_error(reason: str) -> RunAdmissionError:
+    return RunAdmissionError(
+        "execution_recovery_unresolved",
+        "Build/Test admission is blocked because containment cleanup is unresolved",
+        status=503,
+        details={"backend": "systemd_cgroup", "reason": reason},
+    )
+
+
+def _reconcile_cleanup_for_admission(already_reconciled: bool) -> bool:
+    """Attempt at most one bounded reconciliation for this admission."""
+    cleanup_blocker = command_containment.containment_cleanup_blocker()
+    if cleanup_blocker and not already_reconciled:
+        try:
+            command_containment.reconcile_cleanup_blockers()
+        except Exception:
+            # The registry remains the authority.  Any unexpected failure is
+            # fail-closed and exposed only through the canonical bounded error.
+            LOGGER.exception("Containment cleanup reconciliation failed during admission")
+        already_reconciled = True
+        cleanup_blocker = command_containment.containment_cleanup_blocker()
+    if cleanup_blocker:
+        raise _cleanup_admission_error(cleanup_blocker)
+    return already_reconciled
+
+
+def _require_cleanup_admission_clear() -> None:
+    """Final gate-held check immediately before durable Run admission."""
+    cleanup_blocker = command_containment.containment_cleanup_blocker()
+    if cleanup_blocker:
+        raise _cleanup_admission_error(cleanup_blocker)
+
+
 def enqueue_recipe_run(manager: ExecutionManager | None, workflow: dict, *, dry_run: bool = True) -> dict:
     """Reserve capacity, persist exactly one Run, and submit it asynchronously."""
     if manager is None:
         raise RunAdmissionError(
             "execution_manager_unavailable", "Execution manager is unavailable", status=503,
         )
+    canonical, resource_contract = _prepare_run_admission(manager, workflow)
+    return _enqueue_prepared_recipe_run(
+        manager, canonical, resource_contract, dry_run=dry_run,
+    )
+
+
+@command_containment.containment_safety_serialized
+def _enqueue_prepared_recipe_run(
+    manager: ExecutionManager,
+    canonical: dict,
+    resource_contract: dict,
+    *,
+    dry_run: bool,
+) -> dict:
+    """Atomically check blocker state and perform the normal admission path."""
+    _require_cleanup_admission_clear()
     try:
         with manager.reserve() as reservation:
             run_id = manager.store.allocate_run_id()
             reservation.track(run_id)
             try:
-                canonical, resource_contract = _prepare_run_admission(manager, workflow)
-            except RecipeDocumentError as exc:
-                if not reservation.confirm_absent(run_id):
-                    reservation.transfer_unresolved(run_id, {
-                        "code": "execution_admission_absence_unresolved",
-                        "message": "Rejected admission could not prove that no Run workspace exists",
-                        **_enqueue_failure_details(exc, run_id),
-                    })
-                raise RunAdmissionError(
-                    exc.code, str(exc), status=422, details={"path": exc.path},
-                ) from exc
-            except BaseException as exc:
-                if not reservation.confirm_absent(run_id):
-                    reservation.transfer_unresolved(run_id, {
-                        "code": "execution_admission_absence_unresolved",
-                        "message": "Rejected admission could not prove that no Run workspace exists",
-                        **_enqueue_failure_details(exc, run_id),
-                    })
-                raise
-            try:
                 run = build_pipeline.create_pipeline_run(
                     canonical,
                     store=manager.store,
                     dry_run=dry_run,
-                    recipe_id=str(workflow.get("name") or "recipe"),
+                    recipe_id=canonical["name"],
                     run_id=run_id,
                     resource_contract=resource_contract,
                 )
@@ -673,7 +687,6 @@ def enqueue_recipe_run(manager: ExecutionManager | None, workflow: dict, *, dry_
     return {"run_id": run["id"], "status": "queued"}
 
 
-@command_containment.containment_safety_serialized
 def enqueue_preallocated_recipe_run(
     manager: ExecutionManager | None,
     workflow: dict,
@@ -693,6 +706,27 @@ def enqueue_preallocated_recipe_run(
     if manager is None:
         raise RunAdmissionError("execution_manager_unavailable", "Execution manager is unavailable", status=503)
     canonical, resource_contract = _prepare_run_admission(manager, workflow)
+    return _enqueue_prepared_preallocated_recipe_run(
+        manager, canonical, resource_contract,
+        run_id=run_id, dry_run=dry_run, origin=origin, automation=automation,
+        created_callback=created_callback,
+    )
+
+
+@command_containment.containment_safety_serialized
+def _enqueue_prepared_preallocated_recipe_run(
+    manager: ExecutionManager,
+    canonical: dict,
+    resource_contract: dict,
+    *,
+    run_id: str,
+    dry_run: bool,
+    origin: dict,
+    automation: dict,
+    created_callback=None,
+) -> dict:
+    """Atomically check blocker state and admit the exact preallocated Run."""
+    _require_cleanup_admission_clear()
     existing = manager.store.load(run_id)
     if existing is None:
         try:
@@ -700,7 +734,7 @@ def enqueue_preallocated_recipe_run(
                 canonical,
                 store=manager.store,
                 dry_run=dry_run,
-                recipe_id=str(workflow.get("name") or "recipe"),
+                recipe_id=canonical["name"],
                 run_id=run_id,
                 resource_contract=resource_contract,
                 origin=origin,
@@ -721,7 +755,7 @@ def enqueue_preallocated_recipe_run(
     expected_mode = "dry_run" if dry_run else "build"
     if (
         run.get("id") != run_id
-        or run.get("recipe_id") != str(workflow.get("name") or "recipe")
+        or run.get("recipe_id") != canonical["name"]
         or run.get("recipe_sha256") != canonical_recipe_sha256(canonical)
         or run.get("mode") != expected_mode
         or run.get("origin") != origin

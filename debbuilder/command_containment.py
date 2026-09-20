@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import fcntl
+import logging
 import os
 import re
 import select
@@ -23,6 +24,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from enum import Enum
 from functools import wraps
 from pathlib import Path
 from typing import Callable
@@ -66,6 +68,7 @@ STOP_TIMEOUT_USEC = 200_000
 OPERATION_TIMEOUT = 3.0
 POLL_INTERVAL = 0.02
 NAMESPACE_LEASE_PATH = Path("/run/lock/debbuilder-command-namespace.lock")
+LOGGER = logging.getLogger(__name__)
 
 
 class ContainmentError(RuntimeError):
@@ -74,6 +77,10 @@ class ContainmentError(RuntimeError):
 
 class ContainmentCleanupError(ContainmentError):
     """An owned transient workload could not be proved gone."""
+
+    def __init__(self, message: str, *, identity: dict | None = None):
+        super().__init__(message)
+        self.identity = identity
 
 
 def _acquire_namespace_lease(*, exclusive: bool) -> int:
@@ -192,49 +199,200 @@ class OrphanContainmentRecovery:
 _CAPABILITY_LOCK = threading.Lock()
 _CAPABILITY: ContainmentCapability | None = None
 _CLEANUP_GATE_LOCK = threading.RLock()
-_PROBE_CLEANUP_LOCK = threading.Lock()
-_PROBE_CLEANUP_ERROR = ""
-_RUNTIME_CLEANUP_LOCK = threading.Lock()
-_RUNTIME_CLEANUP_ERROR = ""
+MAX_CLEANUP_BLOCKERS = 256
 
 
-def _latch_probe_cleanup_blocker(reason: str) -> str:
-    global _PROBE_CLEANUP_ERROR
-    bounded = str(reason or "transient capability probe cleanup is unresolved")[:500]
+class AbsenceStatus(str, Enum):
+    PROVEN_GONE = "proven_gone"
+    STILL_PRESENT_AND_OWNED = "still_present_and_owned"
+    PRESENT_BUT_IDENTITY_AMBIGUOUS = "present_but_identity_ambiguous"
+    PROOF_UNAVAILABLE = "proof_unavailable"
+
+
+@dataclass(frozen=True)
+class AbsenceProof:
+    status: AbsenceStatus
+    reason: str
+
+
+@dataclass(frozen=True)
+class CleanupBlocker:
+    kind: str
+    reason: str
+    boot_id: str
+    run_id: str
+    command_id: str
+    unit_name: str
+    invocation_id: str
+    control_group: str
+    state: str = "uncertain"
+
+
+@dataclass(frozen=True)
+class CleanupReconciliation:
+    """Bounded, identity-free result of one runtime reconciliation pass."""
+
+    examined: int
+    proven_gone: int
+    still_present: int
+    ambiguous: int
+    unavailable: int
+    removed: int
+    stale: int
+    remaining: int
+    saturated: bool
+
+    @property
+    def admission_blocked(self) -> bool:
+        return self.saturated or self.remaining > 0
+
+
+# The gate owns this collection. Saturation is sticky and fails closed; no
+# unresolved identity is silently evicted. Reconciliation transitions run
+# under the same gate.
+# Runtime identities are already durable in each Run. Probe identities need
+# no second on-disk schema: startup inventories *both* the reserved systemd
+# unit namespace and canonical cgroup directories before opening admission.
+# Thus a surviving probe is rediscovered as an orphan, and uncertain inventory
+# blocks startup. Neither kind is silently trusted after a process restart.
+_CLEANUP_BLOCKERS: dict[tuple[str, str, str, str], CleanupBlocker] = {}
+_CLEANUP_BLOCKER_GENERATIONS: dict[tuple[str, str, str, str], int] = {}
+_CLEANUP_BLOCKER_REVISION = 0
+_CLEANUP_BLOCKERS_SATURATED = False
+
+
+def cleanup_blockers() -> tuple[CleanupBlocker, ...]:
     with _CLEANUP_GATE_LOCK:
-        with _PROBE_CLEANUP_LOCK:
-            if not _PROBE_CLEANUP_ERROR:
-                _PROBE_CLEANUP_ERROR = bounded
-            return _PROBE_CLEANUP_ERROR
+        return tuple(_CLEANUP_BLOCKERS[key] for key in sorted(_CLEANUP_BLOCKERS))
+
+
+def _publish_cleanup_blocker(kind: str, reason: str, identity: dict) -> str:
+    global _CLEANUP_BLOCKER_REVISION, _CLEANUP_BLOCKERS_SATURATED
+    if kind not in {"runtime", "probe"}:
+        raise ValueError("invalid cleanup blocker kind")
+    # The unit name is derived from the existing durable command identity.
+    run_id, command_id = identity["run_id"], identity["command_id"]
+    unit_name = command_unit_name(run_id, command_id)
+    if identity.get("unit_name") != unit_name:
+        raise ContainmentError("cleanup blocker unit identity is invalid")
+    group = identity.get("control_group") or expected_control_group(unit_name)
+    if group != expected_control_group(unit_name):
+        raise ContainmentError("cleanup blocker cgroup identity is invalid")
+    blocker = CleanupBlocker(
+        kind, str(reason or "containment cleanup is unresolved")[:500],
+        identity["boot_id"], run_id, command_id, unit_name,
+        identity.get("invocation_id") or "", group,
+    )
+    # A name can be reused after an earlier incarnation disappears. Keep both
+    # uncertain objects until CP2 proves each one independently.
+    key = (kind, blocker.boot_id, unit_name, blocker.invocation_id)
+    with _CLEANUP_GATE_LOCK:
+        if key not in _CLEANUP_BLOCKERS and len(_CLEANUP_BLOCKERS) >= MAX_CLEANUP_BLOCKERS:
+            _CLEANUP_BLOCKERS_SATURATED = True
+        else:
+            _CLEANUP_BLOCKER_REVISION += 1
+            _CLEANUP_BLOCKERS.setdefault(key, blocker)
+            _CLEANUP_BLOCKER_GENERATIONS[key] = _CLEANUP_BLOCKER_REVISION
+        return _cleanup_blocker_summary(kind)
+
+
+def _cleanup_blocker_summary(kind: str | None = None) -> str:
+    if _CLEANUP_BLOCKERS_SATURATED:
+        return "containment cleanup blocker capacity exceeded"
+    blockers = [b for b in _CLEANUP_BLOCKERS.values() if kind is None or b.kind == kind]
+    if not blockers:
+        return ""
+    return f"{len(blockers)} containment cleanup object(s) unresolved"
+
+
+def _latch_probe_cleanup_blocker(reason: str, identity: dict) -> str:
+    return _publish_cleanup_blocker("probe", reason, identity)
 
 
 def probe_cleanup_blocker() -> str:
-    """Return the process-lifetime blocker created by an unproved probe teardown."""
-    with _PROBE_CLEANUP_LOCK:
-        return _PROBE_CLEANUP_ERROR
-
-
-def latch_runtime_cleanup_blocker(reason: str) -> str:
-    """Latch an unproved runtime command teardown for the process lifetime."""
-    global _RUNTIME_CLEANUP_ERROR
-    bounded = str(reason or "transient runtime command cleanup is unresolved")[:500]
     with _CLEANUP_GATE_LOCK:
-        with _RUNTIME_CLEANUP_LOCK:
-            if not _RUNTIME_CLEANUP_ERROR:
-                _RUNTIME_CLEANUP_ERROR = bounded
-            return _RUNTIME_CLEANUP_ERROR
+        return _cleanup_blocker_summary("probe")
+
+
+def latch_runtime_cleanup_blocker(reason: str, identity: dict) -> str:
+    return _publish_cleanup_blocker("runtime", reason, identity)
 
 
 def runtime_cleanup_blocker() -> str:
-    """Return the process-lifetime blocker created by an unproved command teardown."""
-    with _RUNTIME_CLEANUP_LOCK:
-        return _RUNTIME_CLEANUP_ERROR
+    with _CLEANUP_GATE_LOCK:
+        return _cleanup_blocker_summary("runtime")
 
 
 def containment_cleanup_blocker() -> str:
-    """Return any process-lifetime blocker that makes further mutation unsafe."""
     with _CLEANUP_GATE_LOCK:
-        return probe_cleanup_blocker() or runtime_cleanup_blocker()
+        return _cleanup_blocker_summary()
+
+
+def reconcile_cleanup_blockers() -> CleanupReconciliation:
+    """Re-prove and CAS-remove exact blockers that are now proven absent.
+
+    Slow systemd and cgroup inspection deliberately runs without the safety
+    gate.  Applying an old proof requires both the original dictionary key and
+    the complete immutable blocker value to remain current.
+    """
+    with _CLEANUP_GATE_LOCK:
+        snapshot = tuple(
+            (key, _CLEANUP_BLOCKERS[key], _CLEANUP_BLOCKER_GENERATIONS.get(key, 0))
+            for key in sorted(_CLEANUP_BLOCKERS)
+        )
+    LOGGER.info("Containment cleanup reconciliation started (%d blocker(s))", len(snapshot))
+
+    outcomes: list[tuple[tuple[str, str, str, str], CleanupBlocker, int, AbsenceStatus]] = []
+    counts = {status: 0 for status in AbsenceStatus}
+    for key, blocker, generation in snapshot:
+        try:
+            proof = prove_containment_absent(blocker)
+            status = proof.status if isinstance(proof, AbsenceProof) else AbsenceStatus.PROOF_UNAVAILABLE
+        except Exception:
+            # An implementation or dependency failure must never turn proof
+            # into absence.  Other independently proven blockers may still be
+            # committed below.
+            LOGGER.exception("Containment cleanup absence proof failed unexpectedly")
+            status = AbsenceStatus.PROOF_UNAVAILABLE
+        counts[status] += 1
+        outcomes.append((key, blocker, generation, status))
+        LOGGER.info("Containment cleanup blocker proof result: kind=%s status=%s", blocker.kind, status.value)
+
+    removed = stale = 0
+    with _CLEANUP_GATE_LOCK:
+        for key, blocker, generation, status in outcomes:
+            if status is not AbsenceStatus.PROVEN_GONE:
+                continue
+            if (
+                _CLEANUP_BLOCKERS.get(key) == blocker
+                and _CLEANUP_BLOCKER_GENERATIONS.get(key, 0) == generation
+            ):
+                del _CLEANUP_BLOCKERS[key]
+                _CLEANUP_BLOCKER_GENERATIONS.pop(key, None)
+                removed += 1
+            else:
+                stale += 1
+        remaining = len(_CLEANUP_BLOCKERS)
+        saturated = _CLEANUP_BLOCKERS_SATURATED
+
+    if snapshot and not remaining and not saturated:
+        LOGGER.info("Containment cleanup reconciliation reopened admission")
+    else:
+        LOGGER.info(
+            "Containment cleanup reconciliation completed (removed=%d stale=%d remaining=%d saturated=%s)",
+            removed, stale, remaining, saturated,
+        )
+    return CleanupReconciliation(
+        examined=len(snapshot),
+        proven_gone=counts[AbsenceStatus.PROVEN_GONE],
+        still_present=counts[AbsenceStatus.STILL_PRESENT_AND_OWNED],
+        ambiguous=counts[AbsenceStatus.PRESENT_BUT_IDENTITY_AMBIGUOUS],
+        unavailable=counts[AbsenceStatus.PROOF_UNAVAILABLE],
+        removed=removed,
+        stale=stale,
+        remaining=remaining,
+        saturated=saturated,
+    )
 
 
 @contextmanager
@@ -450,18 +608,20 @@ class _SystemdConnection:
 
         try:
             path = self.manager.GetUnit(unit_name)
+        except dbus.DBusException as exc:
+            if exc.get_dbus_name() == "org.freedesktop.systemd1.NoSuchUnit":
+                return None
+            raise ContainmentError("transient unit lookup failed") from exc
+        try:
             properties = dbus.Interface(
                 self.bus.get_object(SYSTEMD_DESTINATION, path), PROPERTIES_INTERFACE,
             )
             unit = properties.GetAll(UNIT_INTERFACE)
             service = properties.GetAll(SERVICE_INTERFACE)
         except dbus.DBusException as exc:
-            if exc.get_dbus_name() in {
-                "org.freedesktop.systemd1.NoSuchUnit",
-                "org.freedesktop.DBus.Error.UnknownObject",
-            }:
-                return None
-            raise ContainmentError(f"transient unit could not be inspected: {exc}") from exc
+            # Unit and Service are separate D-Bus reads. If unloading occurs
+            # between them, this is a mixed read, not proof of disappearance.
+            raise ContainmentError("transient unit properties changed during inspection") from exc
         try:
             invocation_id = bytes(unit["InvocationID"]).hex()
             return UnitSnapshot(
@@ -564,8 +724,17 @@ def _snapshot_matches_ownership(snapshot: UnitSnapshot, metadata: dict) -> Verif
         return VerificationResult(VerificationStatus.MISMATCH, "unit is not transient")
     if snapshot.description != expected_description:
         return VerificationResult(VerificationStatus.MISMATCH, "transient unit description binding does not match")
-    if (snapshot.service_type, snapshot.exit_type, snapshot.kill_mode) != ("exec", "cgroup", "control-group"):
-        return VerificationResult(VerificationStatus.MISMATCH, "transient service containment properties do not match")
+    for name, actual, expected in (
+        ("Type", snapshot.service_type, "exec"),
+        ("ExitType", snapshot.exit_type, "cgroup"),
+        ("KillMode", snapshot.kill_mode, "control-group"),
+    ):
+        if actual != expected:
+            # Only fixed systemd enum values are exposed; arbitrary properties
+            # (Description, paths, environment) never enter this diagnostic.
+            observed = actual if re.fullmatch(r"[a-z-]{1,32}", actual) else "<invalid>"
+            return VerificationResult(VerificationStatus.MISMATCH,
+                f"containment property mismatch: {name} expected={expected} observed={observed}")
     if snapshot.control_group and snapshot.control_group != expected_group:
         return VerificationResult(VerificationStatus.MISMATCH, "transient unit control group is outside its expected boundary")
     return VerificationResult(VerificationStatus.MATCH, "precommitted transient unit ownership matches")
@@ -584,8 +753,15 @@ def _snapshot_matches_orphan_provenance(snapshot: UnitSnapshot, unit_name: str) 
         return VerificationResult(VerificationStatus.MISMATCH, "orphan unit is not transient")
     if snapshot.description != f"DebBuilder command {run_digest}/{command_id}":
         return VerificationResult(VerificationStatus.MISMATCH, "orphan unit Description does not match its canonical name")
-    if (snapshot.service_type, snapshot.exit_type, snapshot.kill_mode) != ("exec", "cgroup", "control-group"):
-        return VerificationResult(VerificationStatus.MISMATCH, "orphan unit containment properties do not match")
+    for name, actual, expected in (
+        ("Type", snapshot.service_type, "exec"),
+        ("ExitType", snapshot.exit_type, "cgroup"),
+        ("KillMode", snapshot.kill_mode, "control-group"),
+    ):
+        if actual != expected:
+            observed = actual if re.fullmatch(r"[a-z-]{1,32}", actual) else "<invalid>"
+            return VerificationResult(VerificationStatus.MISMATCH,
+                f"orphan containment property mismatch: {name} expected={expected} observed={observed}")
     if not re.fullmatch(r"[0-9a-f]{32}", snapshot.invocation_id or ""):
         return VerificationResult(VerificationStatus.UNVERIFIABLE, "orphan unit invocation identity is unavailable")
     if snapshot.control_group:
@@ -699,10 +875,17 @@ def recover_systemd_containment(
         if value.get("backend") != "systemd_cgroup":
             raise ContainmentError("active command does not use systemd containment")
         if value["boot_id"] != _read_boot_id():
-            return ContainmentRecovery(VerificationResult(
-                VerificationStatus.NOT_RUNNING,
-                "recorded transient service belongs to a previous boot",
-            ), gone=True)
+            proof = prove_containment_absent(value, connection_factory=connection_factory)
+            if proof.status is AbsenceStatus.PROVEN_GONE:
+                return ContainmentRecovery(VerificationResult(
+                    VerificationStatus.NOT_RUNNING, proof.reason,
+                ), gone=True)
+            status = (
+                VerificationStatus.MISMATCH
+                if proof.status is AbsenceStatus.PRESENT_BUT_IDENTITY_AMBIGUOUS
+                else VerificationStatus.UNVERIFIABLE
+            )
+            return ContainmentRecovery(VerificationResult(status, proof.reason))
     except (CommandIdentityError, ContainmentError, OSError, TypeError, ValueError) as exc:
         return ContainmentRecovery(VerificationResult(VerificationStatus.UNVERIFIABLE, str(exc)))
 
@@ -711,17 +894,17 @@ def recover_systemd_containment(
         connection = connection_factory()
         snapshot, verification = verify_unit(connection, value, verify_resources=False)
         if verification.status is VerificationStatus.NOT_RUNNING:
-            control_group = value.get("control_group") or expected_control_group(value["unit_name"])
-            try:
-                gone = _cgroup_is_absent(control_group)
-            except (ContainmentError, OSError) as exc:
-                return ContainmentRecovery(VerificationResult(VerificationStatus.UNVERIFIABLE, str(exc)))
-            if gone:
-                return ContainmentRecovery(verification, gone=True)
-            return ContainmentRecovery(VerificationResult(
-                VerificationStatus.UNVERIFIABLE,
-                "transient service is absent but its canonical cgroup remains",
-            ))
+            proof = prove_containment_absent(value, connection_factory=connection_factory)
+            if proof.status is AbsenceStatus.PROVEN_GONE:
+                return ContainmentRecovery(VerificationResult(
+                    VerificationStatus.NOT_RUNNING, proof.reason,
+                ), gone=True)
+            status = (
+                VerificationStatus.MISMATCH
+                if proof.status is AbsenceStatus.PRESENT_BUT_IDENTITY_AMBIGUOUS
+                else VerificationStatus.UNVERIFIABLE
+            )
+            return ContainmentRecovery(VerificationResult(status, proof.reason))
         if verification.status is not VerificationStatus.MATCH or snapshot is None:
             return ContainmentRecovery(verification)
 
@@ -894,9 +1077,15 @@ def _command_cgroup_units() -> set[str]:
 
 def loaded_command_units(*, connection_factory=_SystemdConnection) -> set[str]:
     """Return all loaded/cgroup namespace members, failing if either inventory is uncertain."""
-    cgroup_units = _command_cgroup_units()
     connection = None
+    lease_fd = -1
     try:
+        # Startup may use an empty complete inventory as the only safe reset
+        # boundary for process-local saturation. Hold the exclusive lease
+        # across both sources so no cooperating owner can mutate the command
+        # namespace between the cgroup and systemd observations.
+        lease_fd = _acquire_namespace_lease(exclusive=True)
+        cgroup_units = _command_cgroup_units()
         connection = connection_factory()
         loaded = (
             connection.command_unit_names()
@@ -907,8 +1096,12 @@ def loaded_command_units(*, connection_factory=_SystemdConnection) -> set[str]:
     except Exception as exc:
         raise ContainmentError(f"DebBuilder transient-unit inventory is unavailable: {exc}") from exc
     finally:
-        if connection is not None:
-            connection.close()
+        try:
+            if connection is not None:
+                connection.close()
+        finally:
+            if lease_fd >= 0:
+                os.close(lease_fd)
 
 
 def matching_run_command_units(
@@ -939,6 +1132,66 @@ def _cgroup_is_absent(control_group: str) -> bool:
     except FileNotFoundError:
         return True
     return False
+
+
+def prove_containment_absent(identity: dict | CleanupBlocker, *, connection_factory=_SystemdConnection) -> AbsenceProof:
+    """Read-only proof for a previously owned unit and its canonical cgroup.
+
+    Startup recovery and CP2 runtime reconciliation can use the same predicate.
+    A previous boot is not itself proof: names and cgroups are checked again.
+    """
+    def field(name: str, default=""):
+        return identity.get(name, default) if isinstance(identity, dict) else getattr(identity, name, default)
+
+    connection = None
+    lease_fd = -1
+    try:
+        unit_name = command_unit_name(field("run_id"), field("command_id"))
+        group = expected_control_group(unit_name)
+        if field("unit_name") != unit_name or field("control_group", group) != group:
+            return AbsenceProof(AbsenceStatus.PROOF_UNAVAILABLE, "recorded containment identity is invalid")
+        current_boot = _read_boot_id()
+        # A nonblocking exclusive lease prevents every cooperating DebBuilder
+        # command start and provenance cleanup from changing this namespace
+        # while absence is observed.  An unrelated live command therefore
+        # makes this pass unavailable rather than making admission wait.
+        lease_fd = _acquire_namespace_lease(exclusive=True)
+        connection = connection_factory()
+
+        def present_proof(snapshot: UnitSnapshot) -> AbsenceProof:
+            invocation = field("invocation_id")
+            if field("boot_id") != current_boot or not invocation or snapshot.invocation_id != invocation:
+                return AbsenceProof(AbsenceStatus.PRESENT_BUT_IDENTITY_AMBIGUOUS,
+                    "unit name is present without the recorded boot/invocation identity")
+            verification = _snapshot_matches_ownership(snapshot, {
+                "run_id": field("run_id"), "command_id": field("command_id"), "unit_name": unit_name,
+            })
+            if verification.status is not VerificationStatus.MATCH:
+                return AbsenceProof(AbsenceStatus.PRESENT_BUT_IDENTITY_AMBIGUOUS, verification.reason)
+            return AbsenceProof(AbsenceStatus.STILL_PRESENT_AND_OWNED, "recorded unit remains loaded")
+
+        # A loaded unit, including an unloading stub, prevents an absence
+        # result. GetAll(Unit) and GetAll(Service) are separate D-Bus calls;
+        # any contradictory mixed read therefore remains ambiguous. Sandwich
+        # both filesystem observations between unit reads so a same-name
+        # incarnation appearing during proof is classified, never missed.
+        for observation in range(2):
+            snapshot = connection.snapshot(unit_name)
+            if snapshot is not None:
+                return present_proof(snapshot)
+            if not _cgroup_is_absent(group):
+                return AbsenceProof(AbsenceStatus.PRESENT_BUT_IDENTITY_AMBIGUOUS,
+                    "unit is absent but canonical cgroup remains")
+        return AbsenceProof(AbsenceStatus.PROVEN_GONE, "unit and canonical cgroup are absent")
+    except (ContainmentError, CommandIdentityError, OSError, KeyError, TypeError, ValueError) as exc:
+        return AbsenceProof(AbsenceStatus.PROOF_UNAVAILABLE, str(exc)[:300])
+    finally:
+        try:
+            if connection is not None:
+                connection.close()
+        finally:
+            if lease_fd >= 0:
+                os.close(lease_fd)
 
 
 def _resolve_executable(argument: str, *, cwd: Path, environment: dict[str, str]) -> str:
@@ -1005,6 +1258,9 @@ def _probe_capability() -> ContainmentCapability:
             time.sleep(POLL_INTERVAL)
         if snapshot is None:
             raise ContainmentError("transient-service probe unit was not observable")
+        if re.fullmatch(r"[0-9a-f]{32}", snapshot.invocation_id):
+            metadata = {**metadata, "invocation_id": snapshot.invocation_id,
+                        "control_group": control_group, "containment_state": "active"}
         matched = _snapshot_matches_intent(snapshot, metadata)
         if matched.status is not VerificationStatus.MATCH:
             raise ContainmentError(matched.reason)
@@ -1029,7 +1285,8 @@ def _probe_capability() -> ContainmentCapability:
             cleanup_reason = recovered.error
         if start_attempted and not cleanup_gone:
             reason = _latch_probe_cleanup_blocker(
-                f"{exc}; capability probe cleanup unresolved: {cleanup_reason or 'absence could not be proved'}"
+                f"{exc}; capability probe cleanup unresolved: {cleanup_reason or 'absence could not be proved'}",
+                metadata,
             )
             return ContainmentCapability("unresolved", False, reason)
         return ContainmentCapability("process_group", False, str(exc))
@@ -1048,14 +1305,16 @@ def _probe_capability() -> ContainmentCapability:
                 os.close(lease_fd)
 
 
-@containment_safety_serialized
 def containment_capability(*, refresh: bool = False) -> ContainmentCapability:
     global _CAPABILITY
     unresolved_cleanup = containment_cleanup_blocker()
     if unresolved_cleanup:
         return ContainmentCapability("unresolved", False, unresolved_cleanup)
     with _CAPABILITY_LOCK:
-        if refresh or _CAPABILITY is None:
+        # A cleanup blocker may have been published by the previous probe.
+        # Once CP2 proves that exact object gone, the cached unresolved result
+        # cannot establish the backend for a new command and must be re-probed.
+        if refresh or _CAPABILITY is None or _CAPABILITY.backend == "unresolved":
             _CAPABILITY = _probe_capability()
         unresolved_cleanup = containment_cleanup_blocker()
         if unresolved_cleanup:
@@ -1063,7 +1322,6 @@ def containment_capability(*, refresh: bool = False) -> ContainmentCapability:
         return _CAPABILITY
 
 
-@containment_safety_serialized
 def cached_containment_capability() -> ContainmentCapability:
     """Return the last probe result without causing a transient-unit probe."""
     unresolved_cleanup = containment_cleanup_blocker()
@@ -1075,7 +1333,6 @@ def cached_containment_capability() -> ContainmentCapability:
         )
 
 
-@containment_safety_serialized
 def resource_limit_capability(policy: dict, *, workspace: str | Path, refresh: bool = False) -> dict:
     """Prove the exact finite property subset with a disposable transient unit."""
     canonical = normalize_policy(policy)
@@ -1144,6 +1401,10 @@ def resource_limit_capability(policy: dict, *, workspace: str | Path, refresh: b
         while time.monotonic() < deadline:
             snapshot = connection.snapshot(unit_name)
             if snapshot is not None:
+                if re.fullmatch(r"[0-9a-f]{32}", snapshot.invocation_id):
+                    metadata = {**metadata, "invocation_id": snapshot.invocation_id,
+                                "control_group": expected_control_group(unit_name),
+                                "containment_state": "active"}
                 verification = _snapshot_matches_intent(snapshot, metadata)
                 if verification.status is VerificationStatus.MATCH:
                     break
@@ -1173,7 +1434,8 @@ def resource_limit_capability(policy: dict, *, workspace: str | Path, refresh: b
             cleanup_reason = recovered.error
         if start_attempted and not cleanup_gone:
             reason = _latch_probe_cleanup_blocker(
-                f"{exc}; resource probe cleanup unresolved: {cleanup_reason or 'absence could not be proved'}"
+                f"{exc}; resource probe cleanup unresolved: {cleanup_reason or 'absence could not be proved'}",
+                metadata,
             )
         else:
             reason = str(exc)
@@ -1631,8 +1893,12 @@ class SystemdCommandContainment:
                 except Exception:
                     pass
             if cleanup_error:
+                cleanup_identity = (
+                    command.metadata if "command" in locals() else locals().get("active", intent)
+                )
                 raise ContainmentCleanupError(
-                    f"{original}; containment cleanup failed: {cleanup_error}"
+                    f"{original}; containment cleanup failed: {cleanup_error}",
+                    identity=cleanup_identity,
                 ) from original
             raise original
         finally:

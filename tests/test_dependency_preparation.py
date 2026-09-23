@@ -1,7 +1,9 @@
 import hashlib
 import functools
 import gzip
+import json
 import os
+import shlex
 import shutil
 import ssl
 import subprocess
@@ -15,12 +17,15 @@ from pathlib import Path
 from debbuilder.build_store import BuildStore
 from debbuilder.dependency_preparation import (
     ArtifactMetadata,
+    AptDecision,
     DependencyPreparationError,
     SUPERVISOR,
     _snapshot_artifact,
     _download,
+    _list_archives,
     _origin,
     _solve,
+    _verify_downloads,
     begin_lifecycle_attempt,
     complete_lifecycle_attempt,
     inspect_artifact,
@@ -259,6 +264,76 @@ class DependencyPreparationUnitTests(unittest.TestCase):
         self.assertEqual(parse_print_uris("'https://repo.invalid/a.deb' 'a.deb' 42 SHA256:abcd\n")[0]["size"], 42)
         with self.assertRaises(DependencyPreparationError):
             parse_print_uris("'https://repo.invalid/a.deb' 'a.deb' 999999999 SHA256:abcd\n")
+
+    def test_archive_inventory_accepts_only_complete_percent_escapes_and_safe_names(self):
+        class Container:
+            def __init__(self, name):
+                self.name = name
+
+            def exec(self, _arguments, *, timeout):
+                return {"stdout": json.dumps([[self.name, 1]]), "stderr": ""}
+
+        for name in (
+            "foo_1%3a2.0_amd64.deb", "foo_1%3A2.0_amd64.deb",
+            "foo_1%2fbar_amd64.deb", "foo_1%2Fbar_amd64.deb",
+            "foo_1%5cbar_amd64.deb", "foo_1%2e2.0_amd64.deb",
+            "f" + "a" * 251 + "%3a.deb",  # 259 characters, the existing maximum.
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(_list_archives(Container(name)), [{"name": name, "size": 1}])
+        for name in (
+            "foo_1%_amd64.deb", "foo_1%G0_amd64.deb", "foo_1%0G_amd64.deb",
+            "foo_1%GG_amd64.deb", "foo_1%3_amd64.deb", "../foo.deb",
+            "foo/bar.deb", "foo\\bar.deb", "foo\x00bar.deb",
+            "f" + "a" * 252 + "%3a.deb",
+        ):
+            with self.subTest(name=name), self.assertRaises(DependencyPreparationError) as raised:
+                _list_archives(Container(name))
+            self.assertEqual(raised.exception.code, "apt_archive_inventory_invalid")
+
+    @unittest.skipUnless(shutil.which("dpkg-deb"), "dpkg-deb unavailable")
+    def test_epoch_download_plan_inventory_and_artifact_inspection(self):
+        name = "libjpeg62-turbo_1%3a2.1.5-2_amd64.deb"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = build_deb(
+                root, root / name, package="libjpeg62-turbo", version="1:2.1.5-2", architecture="amd64",
+            )
+
+            class Runtime:
+                def run(self, arguments, *, timeout, workload):
+                    shutil.copyfile(archive, arguments[-1])
+                    return {"status": "success", "stdout": "", "stderr": "", "exit_code": 0}
+
+            class Container:
+                identity = {"container_id": "fixture"}
+                runtime = Runtime()
+
+                def exec(self, arguments, *, timeout):
+                    if "--print-uris" in arguments:
+                        return {"stdout": f"'https://repo.invalid/{name}' '{name}' {archive.stat().st_size} SHA256:abcd\n", "stderr": ""}
+                    if arguments[:2] == ["python3", "-c"]:
+                        return {"stdout": json.dumps([[name, archive.stat().st_size]]), "stderr": ""}
+                    return {"stdout": "", "stderr": ""}
+
+            def runner(command, **_kwargs):
+                result = subprocess.run(shlex.split(command), check=True, capture_output=True, text=True)
+                return {"status": "success", "stdout": result.stdout, "stderr": result.stderr}
+
+            container = Container()
+            plans = [{**row, "role": "current"} for row in _download(
+                container, "current.deb", status_path="/var/lib/dpkg/status", timeout=1,
+            )]
+            decision = AptDecision("libjpeg62-turbo", None, "1:2.1.5-2", "amd64", "")
+            with mock.patch("debbuilder.dependency_preparation.inspect_artifact", wraps=inspect_artifact) as inspected:
+                packages = _verify_downloads(
+                    container, root / "packages", [("current", decision)], [], plans,
+                    native_architecture="amd64", workspace=root, runner=runner, cancellation_event=None,
+                )
+            self.assertEqual(inspected.call_count, 1)
+            self.assertEqual(inspected.call_args.args[0].name, name)
+            self.assertEqual((packages[0]["package"], packages[0]["version"]), ("libjpeg62-turbo", "1:2.1.5-2"))
+            self.assertEqual(plans[0]["filename"], name)
 
     @unittest.skipUnless(shutil.which("dpkg-deb"), "dpkg-deb unavailable")
     def test_artifact_identity_comes_from_actual_deb(self):
@@ -670,6 +745,25 @@ class DependencyPreparationUnitTests(unittest.TestCase):
 
 @unittest.skipUnless(os.getenv("DEBBUILDER_REAL_OCI_TESTS") == "1", "controlled real OCI tests disabled")
 class RealDependencyPreparationTests(unittest.TestCase):
+    def test_bookworm_downloads_epoch_version_archive(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = BuildStore(root / "builds")
+            run = store.create(recipe("epoch-preparation"), mode="build", run_id="real-epoch-preparation")
+            artifact = build_deb(
+                root, Path(run["workspace"]) / "artifacts/epoch-preparation_1.0-1_all.deb",
+                package="epoch-preparation", version="1.0-1", depends="libjpeg62-turbo",
+            )
+            attempt = prepare_admitted_for_test(
+                run["id"], store=store, current_artifact=artifact,
+                registry_root=root / "validation-containers",
+            )
+            self.assertEqual(attempt["status"], "running")
+            packages = [row for row in attempt["prepared"]["packages"] if row["package"] == "libjpeg62-turbo"]
+            self.assertEqual(len(packages), 1)
+            self.assertTrue(packages[0]["version"].startswith("1:"), packages)
+            self.assertEqual(list((root / "validation-containers").glob("*.json")), [])
+
     def test_bookworm_resolves_downloads_and_removes_preparation_container(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

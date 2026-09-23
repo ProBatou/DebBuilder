@@ -53,7 +53,7 @@ MAX_INDIVIDUAL_PACKAGE_BYTES = 128 * 1024 * 1024
 MAX_SOLVER_OUTPUT_BYTES = 1024 * 1024
 MAX_RECOVERY_ATTEMPTS = 512
 MAX_RECOVERY_RUN_ENTRIES = 4096
-SAFE_ARCHIVE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+_~:-]{0,254}\.deb$")
+SAFE_ARCHIVE_NAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.+_~:-]|%[0-9A-Fa-f]{2}){0,254}\.deb$")
 INST = re.compile(r"^Inst\s+(\S+)(?:\s+\[([^\]]+)\])?\s+\((\S+)(?:\s+(.*?))?\s+\[([^\]]+)\]\)\s*$")
 PRINT_URI = re.compile(r"^'([^']+)'\s+(?:'([^']+)'|(\S+))\s+(\d+)(?:\s+\S+)?\s*$")
 MARK_KEEP = re.compile(r"^\s+MarkInstall ([a-z0-9][a-z0-9+.-]{0,127}):([a-z0-9-]{1,32}) < (\S+) @ii .* > FU=0\s*$")
@@ -533,7 +533,8 @@ def _list_archives(container: OwnedContainer) -> list[dict]:
         raise DependencyPreparationError("apt_archive_inventory_invalid", "Downloaded archive inventory is malformed") from exc
     if not isinstance(rows, list) or len(rows) > MAX_PACKAGES or any(
         not isinstance(row, list) or len(row) != 2 or not isinstance(row[0], str)
-        or not SAFE_ARCHIVE_NAME.fullmatch(row[0]) or isinstance(row[1], bool) or not isinstance(row[1], int)
+        or len(row[0]) > 259 or not SAFE_ARCHIVE_NAME.fullmatch(row[0])
+        or isinstance(row[1], bool) or not isinstance(row[1], int)
         or row[1] <= 0 or row[1] > MAX_INDIVIDUAL_PACKAGE_BYTES
         for row in rows
     ):

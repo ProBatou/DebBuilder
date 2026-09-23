@@ -56,11 +56,6 @@ def _recover_interrupted_publications(store: BuildStore, run: dict) -> bool:
         recovered.append(str(attempt.get("id") or ""))
     if not recovered:
         return False
-    compact_rows = (run.get("artifact") or {}).get("publications") or []
-    for compact in compact_rows:
-        if not isinstance(compact, dict) or str(compact.get("id") or "") not in recovered:
-            continue
-        compact.update({"status": "failed", "finished_at": finished_at, "published_version": ""})
     store.append_event(
         run,
         f"Recovered {len(recovered)} interrupted publication attempt(s)",
@@ -282,7 +277,7 @@ def _terminalize_interrupted(store: BuildStore, run: dict, *, backend: str, reas
 def _terminalization_ambiguity(run: dict) -> str:
     active_steps = [step for step in run["steps"] if step.get("status") == "running"]
     if len(active_steps) > 1:
-        return "persisted Run has multiple running steps; historical lifecycle mutation is ambiguous"
+        return "persisted Run has multiple running steps; lifecycle mutation is ambiguous"
     return ""
 
 
@@ -311,8 +306,8 @@ def _reconcile_current_boot_identity(
     identity: dict, *, run_id: str, workspace_fd: int, admitted_policy: dict | None = None,
 ) -> tuple[bool, str, str, dict | None]:
     """Return (absence_proved, backend, reason, bounded resource observation)."""
-    backend = str(identity.get("backend") or "process_group")
-    policy_mismatch = identity.get("schema_version") == 3 and identity.get("resource_limits") != admitted_policy
+    backend = identity["backend"]
+    policy_mismatch = identity["resource_limits"] != admitted_policy
     if backend == "systemd_cgroup":
         recorder = IdentityRecorder(
             run_id,
@@ -406,7 +401,7 @@ def recover_startup(store: BuildStore) -> StartupRecoveryResult:
                 # identities. A current same-name incarnation must be judged
                 # against that identity, never downgraded to provenance-only
                 # orphan cleanup.
-                if identity and identity.get("backend") == "systemd_cgroup":
+                if identity and identity["backend"] == "systemd_cgroup":
                     unit_bindings[str(identity["unit_name"])] = run_id
 
                 if status not in NON_TERMINAL_STATUSES:
@@ -424,7 +419,7 @@ def recover_startup(store: BuildStore) -> StartupRecoveryResult:
                         blocked_ids.add(run_id)
                     elif identity is not None:
                         result.processed_run_ids.append(run_id)
-                        backend = str(identity.get("backend") or "process_group")
+                        backend = identity["backend"]
                         if identity["boot_id"] != boot_id and boot_id and backend != "systemd_cgroup":
                             reason = "durable command identity belongs to a previous boot"
                             _clear_resolved_identity(workspace_fd, run_id)
@@ -454,13 +449,13 @@ def recover_startup(store: BuildStore) -> StartupRecoveryResult:
                     else:
                         blocker = _record_blocker(
                             store, run, backend="none",
-                            reason="no durable command identity can prove historical workload absence",
+                            reason="no durable command identity can prove interrupted workload absence",
                         )
                         result.blockers.append(blocker)
                         blocked_ids.add(run_id)
                     continue
 
-                backend = str(identity.get("backend") or "process_group")
+                backend = identity["backend"]
                 if identity["boot_id"] != boot_id and boot_id and backend != "systemd_cgroup":
                     ambiguity = _terminalization_ambiguity(run)
                     if ambiguity:

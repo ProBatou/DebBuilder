@@ -38,8 +38,8 @@ function stepDetails(result, name) {
 
 function preflightArchivePayload(result, workflow = {}) {
   if ((workflow.artifact?.mode || '') !== 'upstream_archive') return '';
-  const source = result.source || stepDetails(result, 'source');
-  const detection = result.detection || stepDetails(result, 'detection');
+  const source = result.source || {};
+  const detection = stepDetails(result, 'detection');
   const payload = detection.archive_payload || source.archive_payload || {};
   if (!payload.mode) return '';
   const selected = detection.selected_asset || source.asset || {};
@@ -96,34 +96,34 @@ function setExecutionDiagnosticExpanded(expanded) {
 }
 
 function preflightSourceSection(result, workflow = {}) {
-  const source = result.source || stepDetails(result, 'source');
-  const detection = result.detection || stepDetails(result, 'detection');
+  const source = result.source || {};
+  const detection = stepDetails(result, 'detection');
   const selected = detection.selected_asset || source.asset || {};
-  const artifactMode = workflow.artifact?.mode || source.artifact_mode || result.artifact?.mode;
+  const artifactMode = workflow.artifact?.mode || source.mode || result.artifact?.mode;
   const sourceBuildRequired = artifactMode !== 'upstream_deb' && artifactMode !== 'upstream_archive';
-  const version = source.upstream_version || result.versions?.upstream || result.version;
+  const version = source.upstream_version || result.version?.upstream;
   return `<section class="insight-section"><div class="insight-section-head">${insightSectionHeading('Source & project')}</div><div class="preflight-overview"><div class="preflight-overview-identity"><span>Repository</span><strong>${esc(insightValue(source.repository))}</strong>${version ? `<p>${esc(version)}</p>` : ''}</div>${preflightFacts([
-    {label:'Source', value:source.strategy || source.archive_source || source.artifact_mode},
+    {label:'Source', value:source.strategy || source.source || source.mode},
     {label:'Project', value:sourceBuildRequired ? detection.display_name || detection.project_type : 'No source build required'},
     {label:'Selected payload', value:selected.name},
   ])}</div>${preflightArchivePayload(result, workflow)}${preflightTechnicalDetails('Source details', [
-    {label:'Ref / tag', value:source.ref || source.tag}, {label:'Archive source', value:source.archive_source || source.source},
+    {label:'Ref / tag', value:source.ref || source.tag}, {label:'Archive source', value:source.source},
     {label:'Detected from', value:detection.detected_files}, {label:'Detected build tools', value:detection.build_tools},
   ])}</section>`;
 }
 
 function outputRows(output = {}) {
-  if (output.mode === 'paths') return (output.paths || []).map(row => row.configured_path || row.path);
-  return [output.configured_path || output.path || output.mode].filter(Boolean);
+  if (output.mode === 'paths') return (output.paths || []).map(row => row.configured_path).filter(Boolean);
+  return [output.configured_path || output.mode].filter(Boolean);
 }
 
 function preflightBuildSection(result, workflow = {}) {
-  const dependencies = result.dependencies || stepDetails(result, 'dependencies');
-  const build = result.build || stepDetails(result, 'build');
+  const dependencies = stepDetails(result, 'dependencies');
+  const build = stepDetails(result, 'build');
   const plan = build.plan || {};
   const selection = plan.selection || {};
   const artifactMode = workflow.artifact?.mode || 'source_build';
-  const commands = plan.commands || [];
+  const commandCount = Number(plan.command_count || 0);
   const noCommands = !selection.source
     ? 'No build command decision was recorded.'
     : artifactMode !== 'source_build'
@@ -138,13 +138,10 @@ function preflightBuildSection(result, workflow = {}) {
   ];
   const hasRequirements = requirementFacts.some(row => Array.isArray(row.value) ? row.value.length : row.value);
   const missing = [...missingTools, ...missingPackages];
-  const commandCaption = selection.source === 'detection_proposal' ? 'Detected suggestion; save it in the Recipe before a real Build.' : selection.source === 'recipe' ? 'Saved in the Recipe.' : '';
-  return `<section class="insight-section"><div class="insight-section-head">${insightSectionHeading('Build requirements & plan', 'Build commands are not executed during a Test.')}</div>${hasRequirements ? preflightFacts(requirementFacts) : '<p class="preflight-healthy-state">No additional build requirements were found.</p>'}${missing.length ? `<div class="preflight-requirement-problem"><strong>Missing requirements</strong><p>${esc(missing.join(', '))}</p></div>` : ''}<div class="preflight-command-list"><div class="preflight-subhead"><strong>Build commands</strong></div>${commands.length ? commands.map((row, index) => {
-    const command = row.command || (row.arguments || []).join(' ');
-    const copy = selection.source === 'detection_proposal' ? `<button type="button" class="btn btn--ghost btn--sm" data-copy-preflight-command="${esc(command)}">Copy suggestion</button>` : '';
-    return `<div class="preflight-command"><span>${index + 1}</span>${insightCode(command)}${copy}</div>`;
-  }).join('') : `<p class="preflight-build-decision">${esc(noCommands)}</p>`}${commandCaption ? `<p class="preflight-command-caption">${esc(commandCaption)}</p>` : ''}</div>${preflightTechnicalDetails('Build details', [
-    {label:'Working directory', value:plan.configured_working_directory || plan.working_directory},
+  const commandSummary = commandCount ? `${preflightCount('configured command', commandCount)}. Review the Recipe to inspect or edit command text.` : noCommands;
+  const commandCaption = selection.source === 'detection_proposal' ? 'Detected suggestions must be reviewed and saved in the Recipe before a real Build.' : selection.source === 'recipe' ? 'The command plan comes from the saved Recipe.' : '';
+  return `<section class="insight-section"><div class="insight-section-head">${insightSectionHeading('Build requirements & plan', 'Build commands are not executed during a Test.')}</div>${hasRequirements ? preflightFacts(requirementFacts) : '<p class="preflight-healthy-state">No additional build requirements were found.</p>'}${missing.length ? `<div class="preflight-requirement-problem"><strong>Missing requirements</strong><p>${esc(missing.join(', '))}</p></div>` : ''}<div class="preflight-command-list"><div class="preflight-subhead"><strong>Build commands</strong></div><p class="preflight-build-decision">${esc(commandSummary)}</p>${commandCaption ? `<p class="preflight-command-caption">${esc(commandCaption)}</p>` : ''}</div>${preflightTechnicalDetails('Build details', [
+    {label:'Working directory', value:plan.configured_working_directory},
     {label:'Environment keys', value:plan.environment_keys},
     {label:'Inactivity timeout', value:plan.inactivity_timeout === null ? 'Disabled' : plan.inactivity_timeout ? `${plan.inactivity_timeout}s` : ''},
     {label:'Maximum runtime', value:plan.maximum_runtime === null ? 'Unlimited' : plan.maximum_runtime ? `${plan.maximum_runtime}s` : ''},
@@ -153,7 +150,7 @@ function preflightBuildSection(result, workflow = {}) {
 }
 
 function preflightChangesSection(result, workflow) {
-  const details = result.source_changes || stepDetails(result, 'source_changes');
+  const details = stepDetails(result, 'source_changes');
   const configured = workflow.build?.source_changes || [];
   const applied = details.applied || details.failed?.applied || [];
   const failed = details.failed?.failed || details.failed || (details.failed_index ? details : null);
@@ -164,7 +161,7 @@ function preflightChangesSection(result, workflow) {
     const outcome = byIndex.get(index) || (Number(failed?.index || details.failed_index) === index ? failed : null);
     const status = outcome?.status === 'applied' ? 'Applied' : outcome ? 'Blocked' : 'Not reached';
     const state = status === 'Applied' ? 'applied' : status === 'Blocked' ? 'blocked' : 'pending';
-    return `<article class="preflight-change preflight-change--${state}"><span class="preflight-change-state">${esc(status)}</span><div><strong>${index}. ${esc(change.operation || 'change')} · ${esc(change.path || '')}</strong><p>${outcome?.matches === null || outcome?.matches === undefined ? 'No text match required' : `${esc(outcome.matches)} exact match${outcome.matches === 1 ? '' : 'es'}`}${outcome?.anchor ? ` · anchor “${esc(outcome.anchor)}${outcome.anchor_truncated ? '…' : ''}”` : ''}</p></div></article>`;
+    return `<article class="preflight-change preflight-change--${state}"><span class="preflight-change-state">${esc(status)}</span><div><strong>${index}. ${esc(change.operation || 'change')} · ${esc(change.path || '')}</strong><p>${outcome?.matches === null || outcome?.matches === undefined ? 'No text match required' : `${esc(outcome.matches)} exact match${outcome.matches === 1 ? '' : 'es'}`}</p></div></article>`;
   }).join('')}</div></details>`;
 }
 
@@ -174,24 +171,22 @@ function disclosure(title, content) {
 }
 
 function preflightDebianSection(result, workflow) {
-  const staging = result.staging || stepDetails(result, 'staging');
+  const staging = stepDetails(result, 'staging');
   const metadata = stepDetails(result, 'debian_metadata');
   const mappings = staging.configurations || metadata.configurations || [];
   const directories = staging.directories || [];
-  const scripts = staging.maintainer_scripts || metadata.maintainer_scripts || {};
-  const control = staging.control || metadata.control || '';
   const packageData = workflow.package || {};
   const payloadSummary = mappings.length ? preflightCount('payload mapping', mappings.length) : staging.content_file_count === undefined ? 'No additional payload mappings' : preflightCount('payload file', staging.content_file_count);
-  return `<section class="insight-section insight-section--wide"><div class="insight-section-head">${insightSectionHeading('Debian package plan')}</div><div class="preflight-package-overview"><div><span>Debian package</span><strong>${esc(insightValue(packageData.name))}</strong><p>${esc([staging.version || result.version, packageData.architecture].filter(Boolean).join(' · '))}</p></div><div><span>Payload</span><strong>${esc(payloadSummary)}</strong><p>${mappings.length ? 'Review the install mapping below.' : 'No additional mapping is needed.'}</p></div></div>${mappings.length ? `<div class="preflight-payload-mappings"><strong>Payload mappings</strong><div class="preflight-table" role="table" aria-label="Debian install mappings">${mappings.map((row, index) => `<div class="preflight-table-row" role="row"><strong>${index + 1}</strong><code>${esc(row.source)}</code><span class="preflight-arrow">→</span><code class="preflight-destination">${esc(row.destination)}</code><span class="preflight-mapping-meta">${esc(row.policy)} · ${esc(row.owner)}:${esc(row.group)} · ${esc(row.mode)}</span></div>`).join('')}</div></div>` : ''}${preflightTechnicalDetails('Package details', [
+  return `<section class="insight-section insight-section--wide"><div class="insight-section-head">${insightSectionHeading('Debian package plan')}</div><div class="preflight-package-overview"><div><span>Debian package</span><strong>${esc(insightValue(packageData.name))}</strong><p>${esc([staging.version || result.version?.debian, packageData.architecture].filter(Boolean).join(' · '))}</p></div><div><span>Payload</span><strong>${esc(payloadSummary)}</strong><p>${mappings.length ? 'Review the install mapping below.' : 'No additional mapping is needed.'}</p></div></div>${mappings.length ? `<div class="preflight-payload-mappings"><strong>Payload mappings</strong><div class="preflight-table" role="table" aria-label="Debian install mappings">${mappings.map((row, index) => `<div class="preflight-table-row" role="row"><strong>${index + 1}</strong><code>${esc(row.source)}</code><span class="preflight-arrow">→</span><code class="preflight-destination">${esc(row.destination)}</code><span class="preflight-mapping-meta">${esc(row.policy)} · ${esc(row.owner)}:${esc(row.group)} · ${esc(row.mode)}</span></div>`).join('')}</div></div>` : ''}${preflightTechnicalDetails('Package details', [
     {label:'Install destination', value:staging.install_destination}, {label:'Payload owner', value:staging.ownership ? `${staging.ownership.user}:${staging.ownership.group}` : ''},
     {label:'Default modes', value:staging.permissions ? `directories ${staging.permissions.directories} · files ${staging.permissions.files}` : ''},
     {label:'Account', value:staging.account ? `${staging.account.user}:${staging.account.group} · user ${staging.account.create_user ? 'created' : 'existing'} · group ${staging.account.create_group ? 'created' : 'existing'}` : ''},
     {label:'Persistent directories', value:directories.map(row => `${row.path} · ${row.owner}:${row.group} · ${row.mode}`)},
-  ])}<div class="insight-disclosures">${disclosure('Prepared DEBIAN/control', control)}${Object.entries(scripts).map(([name, content]) => disclosure(`Prepared ${name}`, content)).join('')}</div></section>`;
+  ])}</section>`;
 }
 
 function preflightServiceSection(result, workflow) {
-  const staging = result.staging || stepDetails(result, 'staging');
+  const staging = stepDetails(result, 'staging');
   const systemd = staging.systemd || stepDetails(result, 'systemd');
   const service = workflow.service || {};
   if (!systemd.configured && !service.configured && !service.name) return '';
@@ -200,14 +195,14 @@ function preflightServiceSection(result, workflow) {
     {label:'User / group', value:[service.user, service.group].filter(Boolean).join(':')}, {label:'WorkingDirectory', value:service.working_directory},
     {label:'Restart', value:service.restart}, {label:'After', value:service.after}, {label:'Wants', value:service.wants},
     {label:'Requires', value:service.requires}, {label:'Environment keys', value:Object.keys(service.environment || {})},
-  ])}<div class="insight-disclosures">${disclosure('Prepared systemd unit', systemd.content || '')}</div></section>`;
+  ])}</section>`;
 }
 
 function preflightFindings(result, workflow = {}) {
-  const detection = result.detection || stepDetails(result, 'detection');
-  const dependencies = result.dependencies || stepDetails(result, 'dependencies');
-  const build = result.build || stepDetails(result, 'build');
-  const staging = result.staging || stepDetails(result, 'staging');
+  const detection = stepDetails(result, 'detection');
+  const dependencies = stepDetails(result, 'dependencies');
+  const build = stepDetails(result, 'build');
+  const staging = stepDetails(result, 'staging');
   const findings = [{level:'information', text:'Build commands and dpkg-deb were not executed during this Test.'}];
   (detection.warnings || []).forEach(text => findings.push({level:'warning', text}));
   (staging.warnings || []).forEach(text => findings.push({

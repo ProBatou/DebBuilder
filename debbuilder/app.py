@@ -4,13 +4,11 @@
 Stdlib backend:
 - serves the admin UI from ./static
 - keeps shipped examples separate from user workflows
-- executes Recipe v1 through auditable Build Runs
+- executes Recipe v5 through auditable Build Runs
 - validates artifacts before publication
 """
 from __future__ import annotations
 
-import base64
-import hashlib
 import json
 import logging
 import math
@@ -26,7 +24,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import artifact_publication, artifact_validation, auth_service, automation_orchestrator, automation_scheduler, automation_service, automation_status, build_pipeline, builtin_recipe, command_containment, deb_inspector, dependency_preparation, execution_recovery, execution_service, maintenance, notifications, package_service, recipe_store, release_cache, resource_limits, settings_service, storage, storage_inventory, storage_pruning, upstream_archive, validation_oci, validation_service, workspace_cleanup
+from . import apt_repo, artifact_publication, artifact_validation, auth_service, automation_orchestrator, automation_scheduler, automation_service, automation_status, build_pipeline, builtin_recipe, command_containment, deb_inspector, dependency_preparation, execution_projection, execution_recovery, execution_service, maintenance, notifications, package_service, recipe_store, resource_limits, settings_service, storage, storage_inventory, storage_pruning, upstream_archive, upstream_detection, upstream_observation, validation_oci, validation_service, workspace_cleanup
 from .automation_ledger import AutomationLedger
 from .upstream_detection import AutomationDetectionService
 from .build_models import utc_now
@@ -34,18 +32,12 @@ from .build_store import BuildStore, canonical_recipe_sha256
 from .execution_manager import DEFAULT_SHUTDOWN_TIMEOUT, ExecutionManager, ExecutionManagerError
 from .http_handler import create_handler
 from .lifecycle import MutationGate, MutationGateClosed
-from .recipe_schema import RecipeDocumentError, automation_eligible, normalize_recipe, recipe_document_for_storage, recipe_for_storage, require_safe_name, validate_recipe_metadata
-from .settings_store import SessionSecretError, cookie_secret, github_token, oidc_client_secret, prepare_cookie_secret
+from .recipe_schema import RecipeDocumentError, recipe_document_for_storage, require_safe_name, validate_recipe_metadata
+from .settings_store import SettingsDocumentError, SessionSecretError, cookie_secret, github_token, load_settings, oidc_client_secret, prepare_cookie_secret, resource_repair_security
 from .runtime import RuntimeConfig
 
 ROOT = Path(__file__).resolve().parents[1]
 LOGGER = logging.getLogger(__name__)
-
-
-def application_data_dir(root: Path, environ: dict[str, str] | None = None) -> Path:
-    """Resolve mutable application data independently from the code directory."""
-    environment = os.environ if environ is None else environ
-    return RuntimeConfig.from_environment(root, environment).data
 
 
 RUNTIME = RuntimeConfig.from_environment(ROOT, os.environ)
@@ -69,7 +61,7 @@ PUBLIC_REPO_PREFIXES = ("/dists/", "/pool/")
 PUBLIC_REPO_FILES = {"/repository.gpg", "/install.sh"}
 
 NOTIFICATION_SERVICE = None
-GITHUB_RELEASE_CACHE_SERVICE = None
+UPSTREAM_OBSERVATION_SERVICE = None
 APPLICATION_MUTATION_GATE = None
 APPLICATION_MAINTENANCE_SERVICE = None
 APPLICATION_VALIDATION_MANAGER = None
@@ -90,16 +82,16 @@ class RunAdmissionError(RuntimeError):
         return {"code": self.code, "message": str(self), "details": self.details}
 
 
-class RecipeStartupError(RuntimeError):
+class RecipeStartupValidationError(RuntimeError):
     """Fail-closed startup refusal when persisted Recipes are not all usable."""
 
-    def __init__(self, report: recipe_store.RecipeDirectoryMigrationReport):
-        super().__init__("Recipe migration failed; Build/Test admission remains closed")
-        self.code = "recipe_migration_failed"
+    def __init__(self, report: recipe_store.RecipeDirectoryValidationReport):
+        super().__init__("Persisted Recipe validation failed; Build/Test admission remains closed")
+        self.code = "recipe_validation_failed"
         self.report = report
 
     def as_dict(self) -> dict:
-        return {"code": self.code, "message": str(self), "migration": self.report.as_dict()}
+        return {"code": self.code, "message": str(self), "validation": self.report.as_dict()}
 
 
 def _bounded_startup_value(value, *, limit: int) -> str:
@@ -111,7 +103,7 @@ def _bounded_startup_value(value, *, limit: int) -> str:
 def recipe_startup_diagnostic(exc: Exception) -> dict:
     """Return operator-useful Recipe startup details without paths or contents."""
     failures: list[dict] = []
-    if isinstance(exc, RecipeStartupError):
+    if isinstance(exc, RecipeStartupValidationError):
         for row in exc.report.files:
             if row.status != "failed" or not row.error:
                 continue
@@ -213,26 +205,24 @@ def oidc_session_user(headers: dict) -> str:
 
 
 def is_request_authorized(headers: dict, auth_mode: str | None = None) -> bool:
+    security = effective_security() if auth_mode is None else {"auth_mode": auth_mode}
     return auth_service.is_request_authorized(
         headers,
         auth_mode=auth_mode,
-        effective_security=effective_security(),
+        effective_security=security,
         auth_header=AUTH_HEADER,
         session_user=oidc_session_user,
     )
 
 
+def is_settings_repair_authorized(headers: dict) -> bool:
+    """Authorize only the bounded resource repair path from current-v1 state."""
+    security = resource_repair_security(DATA)
+    return is_request_authorized(headers, auth_mode=security["auth_mode"])
+
+
 def notify_lifecycle(event: str, **payload) -> None:
     notification_service().notify_build_lifecycle(event, **payload)
-
-
-def run_recipe_pipeline(workflow: dict, *, dry_run: bool = True) -> dict:
-    """Delegate the connected pipeline stages to the build engine."""
-    return build_pipeline.run_pipeline(
-        workflow, store=BuildStore(DATA / "builds"), dry_run=dry_run,
-        recipe_id=str(workflow.get("name") or "recipe"), github_token=github_token(DATA),
-        lifecycle_callback=notify_lifecycle,
-    )
 
 
 def run_post_build_automation(run_id: str, *, dry_run: bool, settings: dict | None = None, store: BuildStore | None = None) -> dict:
@@ -278,19 +268,6 @@ def run_post_build_automation(run_id: str, *, dry_run: bool, settings: dict | No
         validate=admit_automatic_validation,
         publish=publish_with_lifecycle_lease,
     )
-
-
-def run_recipe_pipeline_with_automation(workflow: dict, *, dry_run: bool = True) -> dict:
-    try:
-        return automation_service.run_with_automation(
-            workflow,
-            dry_run=dry_run,
-            pipeline=run_recipe_pipeline,
-            automate=run_post_build_automation,
-            notify_completion=lambda result: notification_service().notify_automatic_completion(result),
-        )
-    finally:
-        request_maintenance(cleanup=True)
 
 
 def execute_queued_recipe_run(run_id: str, *, store: BuildStore, expected_initial_status: str, cancellation_control=None) -> dict:
@@ -356,22 +333,27 @@ def prepare_application_directories() -> None:
 
 
 def prepare_recipes_for_startup(*, shutdown_check=None):
-    """Eagerly migrate user Recipes, then reconcile the managed built-in."""
-    migration = recipe_store.migrate_recipe_directory(USER_WORKFLOWS)
-    if not migration.ok:
-        raise RecipeStartupError(migration)
+    """Validate canonical v5 user Recipes, then reconcile the managed built-in."""
+    validation = recipe_store.validate_recipe_directory(USER_WORKFLOWS)
+    if not validation.ok:
+        raise RecipeStartupValidationError(validation)
     if shutdown_check is not None:
         shutdown_check()
     reconciliation = builtin_recipe.reconcile_builtin_recipe(USER_WORKFLOWS)
     if shutdown_check is not None:
         shutdown_check()
-    return migration, reconciliation
+    return validation, reconciliation
 
 
 def prepare_authentication_for_startup() -> None:
     """Prepare OIDC signing state after recovery and before HTTP serving."""
     if effective_security().get("auth_mode") == "oidc":
         prepare_cookie_secret(DATA)
+
+
+def prepare_settings_for_startup() -> dict:
+    """Validate canonical v1 Settings and secrets without writing either store."""
+    return settings_service.validate_app_settings_storage(DATA, settings_defaults())
 
 
 def start_execution_manager(
@@ -430,12 +412,15 @@ def start_execution_manager(
         http_server.storage_inventory = create_storage_inventory()
     if shutdown_check is not None:
         shutdown_check()
+    prepare_settings_for_startup()
+    if shutdown_check is not None:
+        shutdown_check()
     prepare_authentication_for_startup()
     if shutdown_check is not None:
         shutdown_check()
     try:
-        migration, reconciliation = prepare_recipes_for_startup(shutdown_check=shutdown_check)
-    except (RecipeStartupError, recipe_store.RecipeStoreError, builtin_recipe.BuiltinRecipeError) as exc:
+        recipe_validation, reconciliation = prepare_recipes_for_startup(shutdown_check=shutdown_check)
+    except (RecipeStartupValidationError, recipe_store.RecipeStoreError, builtin_recipe.BuiltinRecipeError) as exc:
         LOGGER.error("Recipe startup failure: %s", json.dumps(recipe_startup_diagnostic(exc), sort_keys=True))
         raise
     if admission_blocker is None:
@@ -453,7 +438,7 @@ def start_execution_manager(
     selected.start(admission_blocker=admission_blocker)
     if shutdown_check is not None:
         shutdown_check()
-    http_server.recipe_migration = migration.as_dict()
+    http_server.recipe_validation = recipe_validation.as_dict()
     http_server.builtin_recipe_reconciliation = {
         "action": reconciliation.action,
         "definition_version": reconciliation.definition_version,
@@ -465,34 +450,6 @@ def start_execution_manager(
     http_server.execution_manager = selected
     http_server.validation_manager = selected_validation
     return selected
-
-
-def stop_execution_manager(http_server, *, timeout: float | None = None) -> None:
-    """Stop and detach the HTTP server's manager after submitted work drains."""
-    global APPLICATION_VALIDATION_MANAGER
-    validation_manager = getattr(http_server, "validation_manager", None)
-    if validation_manager is not None:
-        validation_manager.begin_shutdown()
-    if not dependency_preparation.SUPERVISOR.shutdown(timeout):
-        raise TimeoutError("Validation dependency preparations did not stop before the timeout")
-    if validation_manager is not None and not validation_manager.shutdown(timeout):
-        raise TimeoutError("Validation manager did not stop before the timeout")
-    mutation_gate = getattr(http_server, "mutation_gate", None)
-    if mutation_gate is not None:
-        mutation_gate.begin_shutdown()
-        result = mutation_gate.wait_for_quiescence(timeout)
-        if not result["complete"]:
-            raise TimeoutError("Durable HTTP mutations did not stop before the timeout")
-    manager = getattr(http_server, "execution_manager", None)
-    if manager is not None:
-        manager.stop(timeout=timeout)
-    http_server.execution_manager = None
-    http_server.validation_manager = None
-    if APPLICATION_VALIDATION_MANAGER is validation_manager:
-        APPLICATION_VALIDATION_MANAGER = None
-    # This helper stops only the replaceable manager, not the shared server
-    # lifecycle.  A later manager start therefore receives a fresh open gate.
-    http_server.mutation_gate = MutationGate()
 
 
 def _enqueue_failure_details(exc: BaseException, run_id: str) -> dict:
@@ -527,16 +484,20 @@ def _prepare_run_admission(manager: ExecutionManager, workflow: dict) -> tuple[d
         canonical = recipe_document_for_storage(workflow)
     except RecipeDocumentError as exc:
         raise RunAdmissionError(exc.code, str(exc), status=422, details={"path": exc.path}) from exc
-    settings_result = settings_service.load_app_settings_result(DATA, settings_defaults())
-    if settings_result.resource_limits_error:
+    try:
+        selected_settings = app_settings()
+    except (SettingsDocumentError, resource_limits.ResourceLimitError, ValueError) as exc:
+        diagnostic = exc.as_dict() if hasattr(exc, "as_dict") else {
+            "code": "invalid_settings", "message": str(exc), "path": "$", "details": {},
+        }
         raise RunAdmissionError(
-            "resource_settings_invalid",
-            "Build/Test admission is blocked until resource-limit Settings are repaired",
+            "settings_invalid",
+            "Build/Test admission is blocked because stored Settings are invalid",
             status=503,
-            details=settings_result.resource_limits_error,
-        )
+            details=diagnostic,
+        ) from exc
     effective, _origins = resource_limits.resolve_policy(
-        settings_result.settings["resource_limits"], canonical["resource_limits"],
+        selected_settings["resource_limits"], canonical["resource_limits"],
     )
     reconciled = _reconcile_cleanup_for_admission(False)
     probe_root = manager.store.root if manager.store.root.is_dir() else manager.store.root.parent
@@ -556,7 +517,7 @@ def _prepare_run_admission(manager: ExecutionManager, workflow: dict) -> tuple[d
             },
         )
     return canonical, resource_limits.admission_contract(
-        settings_result.settings["resource_limits"], canonical["resource_limits"], capability,
+        selected_settings["resource_limits"], canonical["resource_limits"], capability,
     )
 
 
@@ -600,9 +561,29 @@ def enqueue_recipe_run(manager: ExecutionManager | None, workflow: dict, *, dry_
             "execution_manager_unavailable", "Execution manager is unavailable", status=503,
         )
     canonical, resource_contract = _prepare_run_admission(manager, workflow)
+    manual_source_provenance = _resolve_manual_source_provenance(canonical)
     return _enqueue_prepared_recipe_run(
         manager, canonical, resource_contract, dry_run=dry_run,
+        manual_source_provenance=manual_source_provenance,
     )
+
+
+def _resolve_manual_source_provenance(canonical: dict) -> dict | None:
+    """Resolve exact latest-release identity without consulting display observations."""
+    if canonical["source"]["tracking"] != "latest_release":
+        return None
+    try:
+        return upstream_detection.detect_upstream(
+            canonical, token=github_token(DATA),
+        )["identity"]
+    except upstream_detection.UpstreamDetectionError as exc:
+        unavailable = exc.classification in {"rate_limited", "upstream_unavailable"}
+        raise RunAdmissionError(
+            exc.code,
+            "Build/Test admission could not establish immutable upstream provenance",
+            status=503 if unavailable else 422,
+            details={"classification": exc.classification},
+        ) from exc
 
 
 @command_containment.containment_safety_serialized
@@ -612,6 +593,7 @@ def _enqueue_prepared_recipe_run(
     resource_contract: dict,
     *,
     dry_run: bool,
+    manual_source_provenance: dict | None = None,
 ) -> dict:
     """Atomically check blocker state and perform the normal admission path."""
     _require_cleanup_admission_clear()
@@ -627,6 +609,7 @@ def _enqueue_prepared_recipe_run(
                     recipe_id=canonical["name"],
                     run_id=run_id,
                     resource_contract=resource_contract,
+                    manual_source_provenance=manual_source_provenance,
                 )
             except BaseException as exc:
                 failure = {
@@ -833,9 +816,12 @@ def maintain_run_storage(*, authorization=None, should_stop=None) -> dict:
 def _cancellation_result(run_id: str, status: str, metadata: dict) -> dict:
     allowed = ("code", "reason", "phase", "stage", "requested_at", "completed_at")
     return {
-        "run_id": run_id,
-        "status": status,
-        **{key: metadata[key] for key in allowed if metadata.get(key) is not None},
+        "run_id": execution_projection.safe_text(run_id, limit=256),
+        "status": execution_projection.safe_text(status, limit=32),
+        **{
+            key: execution_projection.safe_text(metadata[key], limit=128)
+            for key in allowed if metadata.get(key) is not None
+        },
     }
 
 
@@ -953,7 +939,9 @@ def create_automation_scheduler(http_server):
     global APPLICATION_AUTOMATION_ORCHESTRATOR
     automation = app_settings().get("automation", {})
     ledger = AutomationLedger(DATA)
-    detector = AutomationDetectionService(USER_WORKFLOWS, ledger)
+    detector = AutomationDetectionService(
+        USER_WORKFLOWS, ledger, observation_service=upstream_observation_service(),
+    )
     manager = getattr(http_server, "execution_manager", None)
 
     orchestrator = automation_orchestrator.AutomationOrchestrator(
@@ -1014,7 +1002,7 @@ def get_validation_attempt(run_id: str, attempt_id: str, *, manager=None) -> dic
         )
     attempt = validation_service.load_attempt(store, run_id, attempt_id)
     blocker = manager.blocker if manager is not None else None
-    return validation_service.public_attempt(attempt, run=run, blocker=blocker)
+    return validation_service.public_attempt(attempt, run=run, store=store, blocker=blocker)
 
 
 def cancel_validation_attempt(manager, run_id: str, attempt_id: str) -> dict:
@@ -1114,11 +1102,10 @@ def execute_validation_attempt(run_id: str, attempt_id: str, event: threading.Ev
             repositories=recipe.get("runtime_apt_repositories") or [],
             registry_root=DATA / "validation-containers",
             cancellation_event=event,
-            admitted=True,
         )
     except Exception as exc:
         current = validation_service.load_attempt(store, run_id, attempt_id)
-        projected = validation_service.public_attempt(current, run=store.load(run_id))
+        projected = validation_service.public_attempt(current, run=store.load(run_id), store=store)
         _notify_validation_best_effort(projected)
         request_maintenance(refresh=True, cleanup=True)
         if current["status"] in {"failed", "cancelled", "cancelling"}:
@@ -1126,7 +1113,8 @@ def execute_validation_attempt(run_id: str, attempt_id: str, event: threading.Ev
             return projected
         code = str(getattr(exc, "code", "validation_preparation_failed"))
         raise artifact_validation.ValidationError(code, str(exc), details=getattr(exc, "details", {})) from exc
-    prepared = attempt["prepared_dependencies"]
+    attempt = validation_service.load_attempt(store, run_id, attempt_id)
+    prepared = validation_service.load_prepared(store, run_id, attempt_id, attempt=attempt)
     registered = False
     lifecycle_started = False
     lifecycle_completion_attempted = False
@@ -1165,7 +1153,7 @@ def execute_validation_attempt(run_id: str, attempt_id: str, event: threading.Ev
                 "error": {"code": code, "message": str(exc), "details": getattr(exc, "details", {})},
             })
             if completed["status"] == "cancelled":
-                projected = validation_service.public_attempt(completed, run=store.load(run_id))
+                projected = validation_service.public_attempt(completed, run=store.load(run_id), store=store)
                 _notify_validation_best_effort(projected)
                 _append_validation_log_best_effort(store, run_id, attempt_id, "cancelled")
                 request_maintenance(refresh=True, cleanup=True)
@@ -1203,13 +1191,17 @@ def publish_build_artifact(run_id: str, payload: dict | None = None) -> dict:
         run_id, store=BuildStore(DATA / "builds"), repo_root=REPOSITORY_ROOT,
         distribution=apt["distribution"], component=apt["component"],
         confirm=str(payload.get("confirm") or ""),
+        validation_recovery_blocker=(
+            APPLICATION_VALIDATION_MANAGER.blocker
+            if APPLICATION_VALIDATION_MANAGER is not None else None
+        ),
     )
     try:
         notification_service().notify_publication_result(result)
     except Exception:
         LOGGER.exception("Publication notification failed after durable completion")
     request_maintenance(refresh=True, cleanup=True)
-    return result
+    return execution_projection.public_publication(result)
 
 
 def reconcile_build_publication(run_id: str, payload: dict | None = None) -> dict:
@@ -1219,13 +1211,11 @@ def reconcile_build_publication(run_id: str, payload: dict | None = None) -> dic
         distribution=apt["distribution"], component=apt["component"],
     )
     request_maintenance(refresh=True, cleanup=True)
-    return result
+    return execution_projection.public_publication(result)
 
 
 def read_workflow_file(path: Path) -> dict:
-    # Startup owns durable Recipe migration before HTTP serving.  GET paths
-    # canonicalize in memory only, so they remain lifecycle-read-only.
-    return validate_recipe_metadata(recipe_store.load_recipe(path, write_back=False))
+    return recipe_store.load_recipe(path)
 
 
 def recipe_json_validation(recipe) -> dict:
@@ -1244,17 +1234,14 @@ def recipe_json_validation(recipe) -> dict:
 
 
 def _wake_automation_after_recipe_save(previous: dict | None, current: dict) -> None:
-    """Coalesce a wake after an eligible Recipe is durably changed."""
-    if not automation_eligible(current) or (
-        automation_eligible(previous or {})
-        and canonical_recipe_sha256(previous) == canonical_recipe_sha256(current)
-    ):
+    """Coalesce advisory observation after a canonical Recipe changes."""
+    if previous and canonical_recipe_sha256(previous) == canonical_recipe_sha256(current):
         return
     scheduler = APPLICATION_AUTOMATION_SCHEDULER
     if scheduler is None:
         return
     try:
-        scheduler.request_recipe(current["name"])
+        scheduler.request_observation(current["name"])
     except (ValueError, automation_scheduler.AutomationSchedulerError):
         # The Recipe is already durable. A stopped/busy scheduler will
         # rediscover it on the next normal startup/pass.
@@ -1316,7 +1303,7 @@ def save_workflow_recipe(workflow_id: str, workflow: dict, *, previous_id: str =
         normalized = validate_recipe_metadata(stored)
     else:
         normalized = validate_recipe_metadata(canonical)
-        stored = recipe_for_storage(normalized)
+        stored = canonical
         with storage.locked_path(destination):
             existing = workflow_path(workflow_id)
             if existing and existing.resolve().parent != USER_WORKFLOWS.resolve():
@@ -1426,23 +1413,29 @@ def delete_workflow(wid: str) -> None:
     package_projection_service().unlink_recipe(wid)
 
 
-def github_release_cache():
-    global GITHUB_RELEASE_CACHE_SERVICE
-    current = GITHUB_RELEASE_CACHE_SERVICE
-    if (
-        current is None
-        or current.data_dir.resolve() != DATA.resolve()
-        or getattr(current, "mutation_gate", None) is not APPLICATION_MUTATION_GATE
-    ):
-        if current is not None:
-            current.close()
-        GITHUB_RELEASE_CACHE_SERVICE = release_cache.GitHubReleaseCache(
-            DATA, lambda: github_token(DATA), mutation_gate=APPLICATION_MUTATION_GATE,
+def upstream_observation_service() -> upstream_observation.UpstreamObservationService:
+    global UPSTREAM_OBSERVATION_SERVICE
+    current = UPSTREAM_OBSERVATION_SERVICE
+    if current is None or current.store.data_dir.resolve() != DATA.resolve():
+        UPSTREAM_OBSERVATION_SERVICE = upstream_observation.UpstreamObservationService(
+            upstream_observation.UpstreamObservationStore(DATA),
+            resolver=upstream_detection.detect_upstream,
         )
-    return GITHUB_RELEASE_CACHE_SERVICE
+    return UPSTREAM_OBSERVATION_SERVICE
 
 
 def package_projection_service() -> package_service.PackageService:
+    try:
+        observation_rows = upstream_observation_service().store.read()["recipes"]
+    except upstream_observation.UpstreamObservationError:
+        observation_rows = {}
+
+    def observation_projection(recipe_id: str, recipe: dict) -> dict | None:
+        row = observation_rows.get(recipe_id)
+        if not row or row.get("recipe_sha256") != canonical_recipe_sha256(validate_recipe_metadata(recipe)):
+            return None
+        return row
+
     return package_service.PackageService(
         data_dir=DATA,
         workspace_root=ROOT,
@@ -1450,13 +1443,29 @@ def package_projection_service() -> package_service.PackageService:
         workflow_path=workflow_path,
         read_workflow=read_workflow_file,
         repo_settings=repo_settings,
-        release_lookup=lambda repository: github_release_cache().get(repository),
-        run_projector=lambda run, store: validation_service.project_run(
-            run,
-            store,
-            blocker=APPLICATION_VALIDATION_MANAGER.blocker if APPLICATION_VALIDATION_MANAGER is not None else None,
-        ),
+        observation_lookup=observation_projection,
+        run_projector=project_run_for_read,
     )
+
+
+def project_run_for_read(run: dict, store: BuildStore) -> dict:
+    """Combine bounded Validation eligibility with durable publication facts."""
+    projected = validation_service.project_run(
+        run,
+        store,
+        blocker=APPLICATION_VALIDATION_MANAGER.blocker if APPLICATION_VALIDATION_MANAGER is not None else None,
+    )
+    apt = repo_settings()
+    projected.update(artifact_publication.publication_evidence_projection(
+        run,
+        repo_root=REPOSITORY_ROOT,
+        distribution=apt["distribution"],
+        component=apt["component"],
+    ))
+    # Package identity may require the immutable Recipe snapshot.  Resolve it
+    # before the public projection removes the local workspace pointer.
+    projected["package"] = build_run_package(run)
+    return projected
 
 
 def recipe_package_name(recipe: dict) -> str:
@@ -1464,7 +1473,11 @@ def recipe_package_name(recipe: dict) -> str:
 
 
 def live_published_index() -> list[dict]:
-    return package_projection_service().fetch_live_index()
+    apt = repo_settings()
+    rows = apt_repo.local_packages_index(
+        REPOSITORY_ROOT, apt["distribution"], apt["component"], apt["architecture"],
+    )
+    return rows or []
 
 
 def build_run_package(run: dict) -> str:
@@ -1499,7 +1512,7 @@ def associate_workflow_package(wid: str, workflow: dict, previous_id: str = "") 
 
 
 def inspect_upstream_archive(workflow: dict) -> dict:
-    recipe = normalize_recipe(workflow)
+    recipe = recipe_document_for_storage(workflow)
     if recipe["artifact"]["mode"] != "upstream_archive":
         raise ValueError("archive inspection requires upstream_archive artifact mode")
     return upstream_archive.inspect(recipe, token=github_token(DATA))
@@ -1512,6 +1525,10 @@ def delete_package(name: str) -> None:
 def list_recipes() -> list[dict]:
     out = []
     package_by_recipe = {p.get("recipe"): p.get("name") for p in list_packages() if p.get("recipe")}
+    try:
+        observation_rows = upstream_observation_service().store.read()["recipes"]
+    except upstream_observation.UpstreamObservationError:
+        observation_rows = {}
     for wf in list_workflows():
         rid = wf["id"]
         path = workflow_path(rid)
@@ -1522,21 +1539,45 @@ def list_recipes() -> list[dict]:
             valid = True
             package = package or recipe_package_name(recipe)
             source = recipe.get("source") or {}
-            out_metadata = {"repository": source.get("repository", ""), "tracking": source.get("tracking", "latest_release"), "active": recipe.get("active", True)}
+            candidate = observation_rows.get(rid)
+            observation = candidate if candidate and candidate.get("recipe_sha256") == canonical_recipe_sha256(recipe) else None
+            out_metadata = {
+                "repository": source.get("repository", ""),
+                "tracking": source.get("tracking", "latest_release"),
+                "active": recipe.get("active", True),
+                "observation": observation,
+            }
         except Exception:
             out_metadata = {}
         out.append({**wf, **out_metadata, "package": package, "valid": valid})
     return out
 
 
+def refresh_upstream_observation(recipe_id: str) -> dict:
+    """Explicitly refresh display-only upstream state for any valid linked Recipe."""
+    require_safe_name(recipe_id, "Recipe ID")
+    path = workflow_path(recipe_id)
+    if path is None:
+        raise FileNotFoundError("recipe not found")
+    recipe = validate_recipe_metadata(read_workflow_file(path))
+    if recipe.get("name") != recipe_id:
+        raise ValueError("Recipe identity is invalid")
+    service = upstream_observation_service()
+    result = service.observe(
+        recipe_id, recipe, path, token=github_token(DATA),
+    )
+    if not result.get("observation_persisted"):
+        raise upstream_observation.UpstreamObservationError(
+            str(result.get("observation_persistence_error") or "observation_state_unavailable"),
+            "Upstream observation could not be persisted",
+        )
+    return service.projection(recipe_id, recipe) or {}
+
+
 def list_executions(limit: int = 50, *, structured_runs: list[dict] | None = None) -> list[dict]:
     store = BuildStore(DATA / "builds")
     runs = structured_runs if structured_runs is not None else store.list(limit=1_000_000)
-    projected = [validation_service.project_run(
-        run,
-        store,
-        blocker=APPLICATION_VALIDATION_MANAGER.blocker if APPLICATION_VALIDATION_MANAGER is not None else None,
-    ) for run in runs]
+    projected = [project_run_for_read(run, store) for run in runs]
     return execution_service.list_executions(
         store,
         build_run_package,
@@ -1548,25 +1589,15 @@ def list_executions(limit: int = 50, *, structured_runs: list[dict] | None = Non
 def get_execution(run_id: str) -> dict | None:
     store = BuildStore(DATA / "builds")
     run = store.load(run_id)
-    projected = validation_service.project_run(
-        run,
-        store,
-        blocker=APPLICATION_VALIDATION_MANAGER.blocker if APPLICATION_VALIDATION_MANAGER is not None else None,
-    ) if run else None
+    projected = project_run_for_read(run, store) if run else None
     execution = execution_service.get_execution(store, run_id, run=projected)
-    if execution:
-        execution["package"] = build_run_package(execution)
     return execution
 
 
 def get_execution_log(run_id: str, *, verbosity: str = "normal", after: int = 0) -> dict | None:
     store = BuildStore(DATA / "builds")
     run = store.load(run_id)
-    projected = validation_service.project_run(
-        run,
-        store,
-        blocker=APPLICATION_VALIDATION_MANAGER.blocker if APPLICATION_VALIDATION_MANAGER is not None else None,
-    ) if run else None
+    projected = project_run_for_read(run, store) if run else None
     return execution_service.get_log(store, run_id, verbosity=verbosity, after=after, run=projected)
 
 
@@ -1648,7 +1679,7 @@ def settings_defaults() -> dict:
 
 
 def app_settings() -> dict:
-    return settings_service.load_app_settings(DATA, settings_defaults())
+    return load_settings(DATA, settings_defaults())
 
 
 def repo_settings() -> dict:
@@ -1660,21 +1691,15 @@ def effective_security() -> dict:
 
 
 def settings_view() -> dict:
-    loaded = settings_service.load_app_settings_result(DATA, settings_defaults())
+    settings = app_settings()
     view = settings_service.public_settings_view(
         data_dir=DATA,
-        root=ROOT,
-        settings=loaded.settings,
-        port=RUNTIME.port,
+        settings=settings,
     )
-    notification_settings = dict(view.get("notifications") or {})
-    notification_settings["token"] = "masked"
-    notification_settings["token_configured"] = notifications.ntfy_token_configured(DATA)
-    view["notifications"] = notification_settings
     capability = command_containment.cached_containment_capability()
     view["resource_limits_status"] = {
-        "valid": loaded.resource_limits_error is None,
-        "diagnostic": loaded.resource_limits_error,
+        "valid": True,
+        "diagnostic": None,
         "capability": {
             "backend": capability.backend,
             "available": capability.available,
@@ -1685,26 +1710,7 @@ def settings_view() -> dict:
 
 
 def update_settings(payload: dict) -> dict:
-    loaded = settings_service.load_app_settings_result(DATA, settings_defaults())
-    if loaded.resource_limits_error and (
-        not isinstance(payload, dict) or "resource_limits" not in payload
-    ):
-        diagnostic = loaded.resource_limits_error
-        raise resource_limits.ResourceLimitError(
-            "resource_settings_repair_required",
-            "Stored resource-limit Settings must be repaired explicitly before other Settings can be saved",
-            path=str(diagnostic.get("path") or "$.resource_limits"),
-            details={"stored_diagnostic": diagnostic},
-        )
-    if loaded.resource_limits_error:
-        payload = settings_service.prepare_resource_limits_repair(payload, loaded)
-    security = payload.get("security") if isinstance(payload, dict) else None
-    if isinstance(security, dict) and str(security.get("auth_mode") or "").lower() == "oidc":
-        prepare_cookie_secret(DATA)
-    notification_settings = payload.get("notifications") if isinstance(payload, dict) else None
-    if isinstance(notification_settings, dict) and notification_settings.get("token"):
-        notifications.save_ntfy_token(DATA, str(notification_settings["token"]))
-    settings_service.update_settings(DATA, payload, loaded.settings, settings_view)
+    settings_service.update_settings(DATA, payload, settings_defaults())
     request_maintenance(refresh=True)
     return settings_view()
 
@@ -1737,10 +1743,6 @@ def oidc_authorize_url(return_to: str = "/") -> tuple[str, str]:
         discovery=oidc_discovery(),
         sessions=SESSIONS,
     )
-
-
-def _b64json(value: str) -> dict:
-    return auth_service.b64json(value)
 
 
 def _validate_rs256(jwt: str, jwks_uri: str, *, issuer: str, audience: str, nonce: str) -> dict:
@@ -1827,12 +1829,11 @@ def serve_application(
     manager_factory=create_execution_manager,
     maintenance_factory=create_maintenance_service,
     automation_scheduler_factory=None,
-    retention_target=None,
     install_signal_handlers=True,
     shutdown_timeout=DEFAULT_SHUTDOWN_TIMEOUT,
 ) -> int:
     """Own startup, serving, and shutdown under one diagnostic target."""
-    global APPLICATION_AUTOMATION_ORCHESTRATOR, APPLICATION_AUTOMATION_SCHEDULER, APPLICATION_MAINTENANCE_SERVICE, APPLICATION_MUTATION_GATE, APPLICATION_VALIDATION_MANAGER, GITHUB_RELEASE_CACHE_SERVICE
+    global APPLICATION_AUTOMATION_ORCHESTRATOR, APPLICATION_AUTOMATION_SCHEDULER, APPLICATION_MAINTENANCE_SERVICE, APPLICATION_MUTATION_GATE, APPLICATION_VALIDATION_MANAGER
     graceful_timeout = _graceful_shutdown_timeout(shutdown_timeout)
     http_server = None
     manager = None
@@ -1943,11 +1944,7 @@ def serve_application(
         APPLICATION_AUTOMATION_SCHEDULER = automation_detection_scheduler
         automation_detection_scheduler.start()
         check_shutdown_requested()
-        maintenance_service = (
-            maintenance.TargetMaintenanceService(retention_target)
-            if retention_target is not None
-            else maintenance_factory(http_server)
-        )
+        maintenance_service = maintenance_factory(http_server)
         http_server.maintenance_service = maintenance_service
         APPLICATION_MAINTENANCE_SERVICE = maintenance_service
         maintenance_service.start()
@@ -2037,14 +2034,6 @@ def serve_application(
         except BaseException as exc:
             cleanup_failures.append(("HTTP mutation shutdown", exc))
             mutation_result = mutation_gate.wait_for_quiescence(None)
-        release_service = GITHUB_RELEASE_CACHE_SERVICE
-        if release_service is not None and getattr(release_service, "mutation_gate", None) is mutation_gate:
-            try:
-                release_service.close()
-            except BaseException as exc:
-                cleanup_failures.append(("release cache shutdown", exc))
-            finally:
-                GITHUB_RELEASE_CACHE_SERVICE = None
         if manager_started:
             try:
                 shutdown_result = manager.shutdown(timeout=_remaining_shutdown_time(graceful_deadline))

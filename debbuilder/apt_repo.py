@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import gzip
+import io
 import os
 import re
 import shlex
-import urllib.request
+import stat
 from pathlib import Path
-from urllib.parse import urljoin
 
 from .command_runner import run_command
+from .repository_lock import RepositoryLockError, pinned_directory, safe_relative_path
 
 
 DEBIAN_VERSION_PATTERN = re.compile(
@@ -51,7 +52,7 @@ def parse_packages_index(text: str) -> list[dict]:
                 cur = {}
                 last_key = None
             continue
-        if raw.startswith(" ") and last_key:
+        if raw.startswith((" ", "\t")) and last_key:
             cur[last_key] += "\n" + raw[1:]
             continue
         if ": " in raw:
@@ -60,31 +61,119 @@ def parse_packages_index(text: str) -> list[dict]:
                 raise ValueError(f"duplicate Packages field: {key}")
             cur[key] = value
             last_key = key
+            continue
+        raise ValueError("malformed Packages index line")
     return rows
 
 
-def fetch_packages_index(repo_url: str, distribution: str, component: str, architecture: str, timeout: int = 20) -> list[dict]:
-    base = repo_url.rstrip("/") + "/"
-    rel = f"dists/{distribution}/{component}/binary-{architecture}/Packages.gz"
-    with urllib.request.urlopen(urljoin(base, rel), timeout=timeout) as response:
-        payload = response.read()
+MAX_PACKAGES_COMPRESSED_BYTES = 8 * 1024 * 1024
+MAX_PACKAGES_INDEX_BYTES = 32 * 1024 * 1024
+_INDEX_MISSING = object()
+
+
+def _read_pinned_index_file(root_fd: int, relative: str, *, compressed: bool):
+    """Read one stable regular index file through a root-pinned no-follow walk."""
+    path = safe_relative_path(relative, required_prefix="dists")
+    parent_fd = os.dup(root_fd)
+    descriptor = -1
     try:
-        text = gzip.decompress(payload).decode(errors="replace")
-    except OSError:
-        text = payload.decode(errors="replace")
-    return parse_packages_index(text)
+        for part in path.parts[:-1]:
+            child = os.open(
+                part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=parent_fd,
+            )
+            os.close(parent_fd)
+            parent_fd = child
+        descriptor = os.open(
+            path.parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+            dir_fd=parent_fd,
+        )
+        before = os.fstat(descriptor)
+        maximum = MAX_PACKAGES_COMPRESSED_BYTES if compressed else MAX_PACKAGES_INDEX_BYTES
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > maximum:
+            return None
+        chunks = []
+        remaining = maximum + 1
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        after = os.fstat(descriptor)
+        current = os.stat(path.parts[-1], dir_fd=parent_fd, follow_symlinks=False)
+        revision = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+        rooted_parent = os.dup(root_fd)
+        try:
+            for part in path.parts[:-1]:
+                child = os.open(
+                    part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=rooted_parent,
+                )
+                os.close(rooted_parent)
+                rooted_parent = child
+            rooted_current = os.stat(path.parts[-1], dir_fd=rooted_parent, follow_symlinks=False)
+        finally:
+            os.close(rooted_parent)
+        if (
+            len(payload) > maximum
+            or revision(before) != revision(after)
+            or revision(after) != revision(current)
+            or revision(after) != revision(rooted_current)
+        ):
+            return None
+        return payload
+    except FileNotFoundError:
+        # Absence before the target is opened is an ordinary missing index.
+        # Disappearance during the post-read rooted identity checks is a
+        # publication transition and must not fall back to another index.
+        return _INDEX_MISSING if descriptor < 0 else None
+    except (OSError, RepositoryLockError):
+        return None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
 
 
-def local_packages_index(repo_root: Path, distribution: str, component: str, architecture: str) -> list[dict]:
-    """Read the repository's exported index, never just reprepro's internal database."""
-    binary = Path(repo_root).resolve() / "dists" / distribution / component / f"binary-{architecture}"
-    compressed = binary / "Packages.gz"
-    plain = binary / "Packages"
-    if compressed.is_file():
-        return parse_packages_index(gzip.decompress(compressed.read_bytes()).decode(errors="replace"))
-    if plain.is_file():
-        return parse_packages_index(plain.read_text(encoding="utf-8", errors="replace"))
-    return []
+def _bounded_gzip_decompress(payload: bytes) -> bytes | None:
+    try:
+        with gzip.GzipFile(fileobj=io.BytesIO(payload)) as archive:
+            decoded = archive.read(MAX_PACKAGES_INDEX_BYTES + 1)
+    except (OSError, EOFError):
+        return None
+    return decoded if len(decoded) <= MAX_PACKAGES_INDEX_BYTES else None
+
+
+def local_packages_index(repo_root: Path, distribution: str, component: str, architecture: str) -> list[dict] | None:
+    """Project a stable bounded exported index without taking the publication lock."""
+    try:
+        relative_base = safe_relative_path(
+            f"dists/{distribution}/{component}/binary-{architecture}", required_prefix="dists",
+        ).as_posix()
+        with pinned_directory(repo_root) as (_root, root_fd):
+            compressed = _read_pinned_index_file(root_fd, f"{relative_base}/Packages.gz", compressed=True)
+            if compressed is _INDEX_MISSING:
+                payload = _read_pinned_index_file(root_fd, f"{relative_base}/Packages", compressed=False)
+            elif compressed is not None:
+                payload = _bounded_gzip_decompress(compressed)
+            else:
+                return None
+    except (OSError, RepositoryLockError):
+        return None
+    if payload is None or payload is _INDEX_MISSING:
+        return None
+    try:
+        text = payload.decode("utf-8")
+        rows = parse_packages_index(text)
+        if text.strip() and not rows:
+            return None
+        if any(not all(row.get(field) for field in ("Package", "Version", "Architecture")) for row in rows):
+            return None
+        return rows
+    except (UnicodeError, ValueError, TypeError):
+        return None
 
 
 def debian_version_relation(candidate: str, published: str, *, workspace: Path, runner=run_command) -> dict:
@@ -170,11 +259,6 @@ def parse_reprepro_distribution_stanzas(text: str) -> list[dict]:
     return stanzas
 
 
-def parse_reprepro_distributions(text: str) -> dict:
-    rows = parse_reprepro_distribution_stanzas(text)
-    return rows[0] if rows else _distribution_config({})
-
-
 def select_reprepro_distribution(text: str, requested: str) -> dict:
     matches = [
         row for row in parse_reprepro_distribution_stanzas(text)
@@ -185,24 +269,6 @@ def select_reprepro_distribution(text: str, requested: str) -> dict:
             f"reprepro distribution {requested!r} must match exactly one configured codename or suite"
         )
     return matches[0]
-
-
-def detect_repo_backend(repo_root: Path) -> str:
-    repo_root = Path(repo_root)
-    if (repo_root / "conf" / "distributions").exists():
-        return "reprepro"
-    if (repo_root / "dists").exists() or (repo_root / "pool").exists():
-        return "manual"
-    return "unknown"
-
-
-def reprepro_config(repo_root: Path, distribution: str = "") -> dict:
-    """Read the active reprepro distribution configuration."""
-    path = Path(repo_root) / "conf" / "distributions"
-    if not path.is_file():
-        raise FileNotFoundError(str(path))
-    text = path.read_text(encoding="utf-8")
-    return select_reprepro_distribution(text, distribution) if distribution else parse_reprepro_distributions(text)
 
 
 def _reprepro_layout_arguments(root: Path, *, lease=None) -> tuple[str, ...]:

@@ -9,6 +9,7 @@ from unittest import mock
 from debbuilder import dependency_preparation, validation_service
 from debbuilder.build_models import utc_now
 from debbuilder.build_store import BuildStore
+from tests.validation_helpers import record_canonical_validation
 
 
 IMAGE = {"name": "debbuilder-validation:bookworm", "id": "sha256:" + "a" * 64, "digest": None}
@@ -41,7 +42,7 @@ class ValidationServiceTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def make_run(self, run_id):
-        run = self.store.create({"name": "validation-demo", "package": {"name": "validation-demo"}}, mode="build", run_id=run_id)
+        run = self.store.create({"schema_version": 5, "name": "validation-demo", "package": {"name": "validation-demo"}}, mode="build", run_id=run_id)
         artifact = Path(run["workspace"]) / "artifacts" / f"{run_id}.deb"
         artifact.write_bytes(b"controlled")
         run["status"] = "success"
@@ -202,7 +203,7 @@ class ValidationServiceTests(unittest.TestCase):
         self.assertTrue(released.wait(1))
         self.assertEqual(cancelled["validation"]["status"], "cancelling")
 
-    def test_status_projection_is_read_only_and_historical_records_remain(self):
+    def test_status_projection_is_read_only_and_ignores_noncanonical_run_rows(self):
         release = threading.Event()
         manager = self.manager(lambda _run, _attempt, event, _automation: release.wait(2) or event.is_set())
         admitted = manager.admit(self.run["id"], {})
@@ -217,7 +218,7 @@ class ValidationServiceTests(unittest.TestCase):
         }]
         status = validation_service.public_attempt(
             validation_service.load_attempt(self.store, self.run["id"], admitted["attempt_id"]),
-            run=observed_run,
+            run=observed_run, store=self.store,
         )
         self.assertEqual(status["attempt_id"], admitted["attempt_id"])
         serialized = json.dumps(status)
@@ -226,22 +227,19 @@ class ValidationServiceTests(unittest.TestCase):
         self.assertNotIn("commands", status)
         self.assertNotIn("backend", status)
         self.assertEqual(path.read_bytes(), before)
-        historical = self.store.load(self.run["id"])
-        historical["validations"] = [{
-            "id": "historical", "status": "success", "artifact": historical["artifact"]["path"],
+        noncanonical = self.store.load(self.run["id"])
+        noncanonical["validations"] = [{
+            "id": "untrusted-validation", "status": "success", "artifact": noncanonical["artifact"]["path"],
             "commands": [{"stdout": "BEGIN PGP PRIVATE KEY"}],
             "backend": {"workspace": "/tmp/debbuilder-validation/private"},
         }]
-        projected = validation_service.project_run(historical, self.store)
-        self.assertEqual(projected["validations"][0]["id"], "historical")
-        projected_serialized = json.dumps(projected["validations"])
+        projected = validation_service.project_run(noncanonical, self.store)
+        self.assertNotIn("validations", projected)
+        self.assertNotIn("validations", projected["artifact"])
+        self.assertNotIn("untrusted-validation", {row["id"] for row in projected["_validation_attempts"]})
+        projected_serialized = json.dumps(projected["_validation_attempts"])
         self.assertNotIn("BEGIN PGP PRIVATE KEY", projected_serialized)
         self.assertNotIn("/tmp/debbuilder-validation", projected_serialized)
-        self.assertNotIn("artifact", projected["validations"][0])
-        self.assertNotIn("commands", projected["validations"][0])
-        self.assertNotIn("backend", projected["validations"][0])
-        self.assertEqual(projected["validations"][0]["status_url"], "")
-        self.assertEqual(projected["validations"][0]["cancel_url"], "")
         release.set()
 
     def test_running_manifest_never_inherits_raw_lifecycle_error(self):
@@ -259,7 +257,7 @@ class ValidationServiceTests(unittest.TestCase):
             "id": admitted["attempt_id"], "status": "failed",
             "error": {"code": "private", "message": "/tmp/private"},
         }]
-        public = validation_service.project_run(run, self.store)["validations"][-1]
+        public = validation_service.project_run(run, self.store)["_validation_attempts"][-1]
         self.assertEqual(public["status"], "running")
         self.assertIsNone(public["error"])
         self.assertNotIn("/tmp/private", json.dumps(public))
@@ -269,7 +267,7 @@ class ValidationServiceTests(unittest.TestCase):
         root.mkdir(parents=True)
         (root / "attempt.json").write_text("not-json")
         projected = validation_service.project_run(self.store.load(self.run["id"]), self.store)
-        validation = projected["validations"][-1]
+        validation = projected["_validation_attempts"][-1]
         self.assertEqual(validation["phase"], "recovery")
         self.assertEqual(validation["status"], "cancelling")
         self.assertEqual(validation["recovery_blocker"]["code"], "validation_attempt_recovery_unverifiable")
@@ -325,7 +323,10 @@ class ValidationServiceTests(unittest.TestCase):
         queued = manager.admit(second["id"], {})
         fail_cleanup.set()
         for _ in range(200):
-            if manager.blocker:
+            queued_status = validation_service.load_attempt(
+                self.store, second["id"], queued["attempt_id"],
+            )["status"]
+            if manager.blocker and queued_status == "cancelled":
                 break
             threading.Event().wait(0.01)
         self.assertEqual(manager.blocker["code"], "validation_container_recovery_required")
@@ -350,6 +351,65 @@ class ValidationServiceTests(unittest.TestCase):
             validation_service.load_attempt(self.store, self.run["id"], "future-attempt")
         self.assertEqual(raised.exception.code, "future_contract_version")
         self.assertEqual(raised.exception.status, 409)
+
+    def test_success_requires_matching_prepared_result_and_automation_manifests(self):
+        mutations = {
+            "missing-result": lambda root: (root / "result.json").unlink(),
+            "malformed-result": lambda root: (root / "result.json").write_text("{}"),
+            "mismatched-result": lambda root: validation_service.storage.save_json(
+                root / "result.json",
+                {
+                    **validation_service.storage.load_json(root / "result.json", {}),
+                    "attempt_id": "different-attempt",
+                },
+            ),
+            "missing-prepared": lambda root: (root / "prepared.json").unlink(),
+            "missing-automation": lambda root: (root / "automation.json").unlink(),
+            "missing-publication-state": lambda root: validation_service.storage.save_json(
+                root / "automation.json",
+                {
+                    key: value
+                    for key, value in validation_service.storage.load_json(root / "automation.json", {}).items()
+                    if key != "publication_state"
+                },
+            ),
+        }
+        expected = {
+            "missing-result": "validation_result_missing",
+            "malformed-result": "invalid_contract_version",
+            "mismatched-result": "validation_result_identity_mismatch",
+            "missing-prepared": "validation_prepared_missing",
+            "missing-automation": "validation_automation_missing",
+            "missing-publication-state": "validation_automation_unreadable",
+        }
+        for suffix, mutate in mutations.items():
+            attempt_id = f"canonical-{suffix}"
+            record_canonical_validation(
+                self.store, self.run, attempt_id=attempt_id,
+                artifact_identity=self.current.identity(),
+            )
+            root = validation_service.attempt_root(self.store, self.run["id"], attempt_id)
+            mutate(root)
+            with self.subTest(suffix=suffix), self.assertRaises(validation_service.ValidationAdmissionError) as raised:
+                validation_service.load_attempt(self.store, self.run["id"], attempt_id)
+            self.assertEqual(raised.exception.code, expected[suffix])
+
+    def test_public_attempt_retains_bounded_preparation_diagnostics(self):
+        attempt_id = "canonical-diagnostics"
+        record_canonical_validation(
+            self.store, self.run, attempt_id=attempt_id,
+            artifact_identity=self.current.identity(),
+        )
+        root = validation_service.attempt_root(self.store, self.run["id"], attempt_id)
+        prepared = validation_service.storage.load_json(root / "prepared.json", {})
+        prepared["diagnostics"] = [{"code": "base_satisfied", "message": "two exact packages selected"}]
+        validation_service.storage.save_json(root / "prepared.json", prepared)
+
+        current = validation_service.load_attempt(self.store, self.run["id"], attempt_id)
+        public = validation_service.public_attempt(
+            current, run=self.store.load(self.run["id"]), store=self.store,
+        )
+        self.assertEqual(public["diagnostics"], prepared["diagnostics"])
 
     def test_worker_failure_is_terminal_and_terminal_cancellation_is_a_noop(self):
         manager = self.manager(lambda *_args: (_ for _ in ()).throw(RuntimeError("private host path /tmp/secret")))
@@ -411,10 +471,32 @@ class ValidationServiceTests(unittest.TestCase):
                 "started_at": current["created_at"], "finished_at": utc_now(),
                 "diagnostics": [], "enforcement": [],
             }
+            root = path.parent
+            lifecycle_started = prepared["finished_at"]
+            lifecycle_finished = utc_now()
+            validation_service.storage.save_json(root / "prepared.json", prepared)
+            validation_service.storage.save_json(root / "result.json", {
+                "contract_version": 1,
+                "attempt_id": attempt["id"],
+                "build_run_id": self.run["id"],
+                "artifact": current["inputs"]["artifact"],
+                "profile": current["selected_profile"],
+                "status": "success",
+                "started_at": lifecycle_started,
+                "finished_at": lifecycle_finished,
+                "checks": [{"name": name, "status": "success", "error": ""} for name in (
+                    "lifecycle_network_disabled", "package_install", "package_status_installed",
+                    "package_remove", "package_purge", "package_absent_after_purge",
+                )],
+                "execution": {
+                    "network": "disabled", "network_verified": True,
+                    "cleanup": {"status": "success", "absence_proved": True},
+                },
+                "commands": [], "error": None,
+            })
             current.update({
-                "status": "success", "started_at": current["created_at"], "finished_at": utc_now(),
-                "prepared_dependencies": prepared,
-                "result": {"status": "success", "reference": f"validation/{attempt['id']}"}, "error": None,
+                "status": "success", "started_at": current["created_at"], "finished_at": lifecycle_finished,
+                "result": {"status": "success", "reference": "result.json"}, "error": None,
             })
             validation_service._save_attempt(path, current)
         resumed = []

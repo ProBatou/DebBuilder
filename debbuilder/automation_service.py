@@ -10,8 +10,7 @@ def publication_confirmation(run: dict) -> str:
     artifact = run.get("artifact") or {}
     inspection = artifact.get("inspection") or {}
     package = inspection.get("package") or run.get("package") or run.get("recipe_id") or ""
-    run_version = run.get("version") or {}
-    version = inspection.get("version") or (run_version.get("debian") if isinstance(run_version, dict) else run_version)
+    version = inspection.get("version") or (run.get("version") or {}).get("debian", "")
     return f"publish:{package}:{version}"
 
 
@@ -51,23 +50,6 @@ def run_post_build(
     current = store.load(run_id) or run
     summary["publication"] = publish(run_id, {"confirm": publication_confirmation(current)})
     return summary
-
-
-def run_with_automation(
-    workflow: dict,
-    *,
-    dry_run: bool,
-    pipeline: Callable[..., dict],
-    automate: Callable[..., dict],
-    notify_completion: Callable[[dict], object],
-) -> dict:
-    result = pipeline(workflow, dry_run=dry_run)
-    return complete_with_automation(
-        result,
-        dry_run=dry_run,
-        automate=automate,
-        notify_completion=notify_completion,
-    )
 
 
 def complete_with_automation(

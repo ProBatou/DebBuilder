@@ -153,7 +153,7 @@ def read_run(fd: int, root: Path, run_id: str) -> dict:
 
 
 def require_finished(run: dict) -> None:
-    from .build_pipeline import execution_summary
+    from .execution_projection import public_summary
     # Async validation admission is durable in a manifest before the worker
     # appends lifecycle history to run.json. Consult that canonical inventory
     # while the caller holds the Run lease; unreadable inventory fails closed.
@@ -170,11 +170,11 @@ def require_finished(run: dict) -> None:
         raise WorkspaceBusyError("Validation attempt inventory is unverifiable; cleanup refused") from exc
     auxiliary_active = any(
         isinstance(record, dict) and record.get("status") == "running"
-        for key in ("validations", "publications")
+        for key in ("publications",)
         for record in (run.get(key) or [])
     )
     if (
-        execution_summary(run)["lifecycle_active"]
+        public_summary(run)["lifecycle_active"]
         or any(step.get("status") == "running" for step in run["steps"])
         or auxiliary_active
         or manifest_active
@@ -355,20 +355,6 @@ def _clean_locked(
     return result
 
 
-@containment_safety_serialized
-def clean_workspace(
-    store,
-    run_id: str,
-    *,
-    reason: str = "manual",
-    authorization: CleanupAuthorization = OPEN_CLEANUP_AUTHORIZATION,
-) -> dict:
-    authorization.require_global()
-    with store.locked_run(run_id, blocking=False) as fd:
-        run = read_run(fd, store.root, run_id)
-        return _clean_locked(fd, run, reason=reason, authorization=authorization)
-
-
 def _clear_output(value) -> None:
     if isinstance(value, dict):
         for key, child in value.items():
@@ -471,10 +457,27 @@ def completed_history_ids(store) -> list[str]:
     return selected
 
 
-def _completion_time(run: dict) -> float:
+def _canonical_validation_attempts(store, run: dict) -> list[dict]:
+    from .validation_service import list_attempts
+
+    return list_attempts(store, str(run["id"]), strict=True)
+
+
+def _completion_time(store, run: dict) -> float:
     dates = [run.get("finished_at") or run.get("created_at")]
-    dates.extend(attempt.get("finished_at") for key in ("validations", "publications") for attempt in (run.get(key) or []))
+    dates.extend(attempt.get("finished_at") for attempt in _canonical_validation_attempts(store, run))
+    dates.extend(attempt.get("finished_at") for attempt in (run.get("publications") or []))
     return max(datetime.fromisoformat(date).timestamp() for date in dates if date)
+
+
+def _retention_failed(store, run: dict) -> bool:
+    latest = (_canonical_validation_attempts(store, run) or [{}])[-1]
+    publication = (run.get("publications") or [{}])[-1]
+    return (
+        run.get("status") in {"failed", "cancelled"}
+        or latest.get("status") in {"failed", "cancelled"}
+        or publication.get("status") in {"failed", "cancelled"}
+    )
 
 
 def apply_retention(
@@ -513,11 +516,10 @@ def apply_retention(
                 entries = set(os.listdir(fd))
                 if not entries.intersection(DISPOSABLE_DIRECTORIES + DISPOSABLE_FILES):
                     continue
-                from .build_pipeline import execution_summary
-                failed = execution_summary(run)["lifecycle_status"] in {"failed", "build_failed", "validation_failed", "publication_failed", "cancelled"}
+                failed = _retention_failed(store, run)
                 deleted = bool(read_json(fd, HISTORY_MARKER) or run.get("log_deleted"))
                 revision = os.stat("run.json", dir_fd=fd, follow_symlinks=False).st_mtime_ns
-                candidates.append((run_id, _completion_time(run), failed, deleted, revision))
+                candidates.append((run_id, _completion_time(store, run), failed, deleted, revision))
         except (WorkspaceBusyError, FileNotFoundError):
             result["skipped"].append(run_id)
         except (OSError, ValueError) as exc:
@@ -544,7 +546,7 @@ def apply_retention(
                     if os.stat("run.json", dir_fd=fd, follow_symlinks=False).st_mtime_ns != revision:
                         result["skipped"].append(run_id)
                         continue
-                    current_failed = execution_summary(run)["lifecycle_status"] in {"failed", "build_failed", "validation_failed", "publication_failed", "cancelled"}
+                    current_failed = _retention_failed(store, run)
                     if current_failed != failed:
                         result["skipped"].append(run_id)
                         continue

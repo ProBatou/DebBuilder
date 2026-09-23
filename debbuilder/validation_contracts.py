@@ -1,11 +1,6 @@
-"""Versioned durable contracts for future runtime dependency validation.
-
-These validators are intentionally execution-independent. CP1A does not make
-artifact validation asynchronous and does not prepare or install packages.
-"""
+"""Strict current-v1 contracts for Validation admission, preparation, and results."""
 from __future__ import annotations
 
-import copy
 from datetime import datetime
 import re
 
@@ -20,8 +15,16 @@ from .runtime_apt_repositories import (
 
 VALIDATION_ATTEMPT_CONTRACT_VERSION = 1
 PREPARED_DEPENDENCIES_CONTRACT_VERSION = 1
-HISTORICAL_VALIDATION_CONTRACT_VERSION = 0
+VALIDATION_RESULT_CONTRACT_VERSION = 1
 VALIDATION_STATUSES = frozenset({"queued", "running", "cancelling", "cancelled", "success", "failed"})
+REQUIRED_SUCCESS_CHECKS = frozenset({
+    "lifecycle_network_disabled",
+    "package_install",
+    "package_status_installed",
+    "package_remove",
+    "package_purge",
+    "package_absent_after_purge",
+})
 MAX_PACKAGES = 512
 MAX_DIAGNOSTICS = 50
 MAX_ENFORCEMENT_OBSERVATIONS = 32
@@ -292,7 +295,7 @@ def _normalize_enforcement(value, *, path: str) -> list[dict]:
 
 
 def normalize_prepared_runtime_dependencies(value) -> dict:
-    path = "$.prepared_dependencies"
+    path = "$"
     if not isinstance(value, dict):
         raise ValidationContractError("invalid_contract", f"{path} must be an object", path=path)
     version = value.get("contract_version")
@@ -302,10 +305,6 @@ def normalize_prepared_runtime_dependencies(value) -> dict:
         raise ValidationContractError("future_contract_version", "Prepared dependency contract is newer than supported", path=f"{path}.contract_version")
     if version != PREPARED_DEPENDENCIES_CONTRACT_VERSION:
         raise ValidationContractError("unsupported_contract_version", "Prepared dependency contract version is unsupported", path=f"{path}.contract_version")
-    # CP1B added exact APT-selected base satisfiers to the still-unreleased v1
-    # contract. Accept CP1A drafts as an empty base-satisfier set.
-    if "base_packages" not in value:
-        value = {**value, "base_packages": []}
     value = _object(value, {
         "contract_version", "profile_name", "image", "native_architecture", "artifacts",
         "repositories", "base_packages", "packages", "started_at", "finished_at", "diagnostics", "enforcement",
@@ -420,7 +419,7 @@ def _normalize_attempt_result(value, *, path: str) -> dict | None:
     if value is None:
         return None
     value = _object(value, {"status", "reference"}, path)
-    if value["status"] not in {"success", "failed"}:
+    if value["status"] not in {"success", "failed", "cancelled"}:
         raise ValidationContractError("invalid_contract", f"{path}.status is invalid", path=f"{path}.status")
     reference = value["reference"]
     if reference is not None:
@@ -435,23 +434,17 @@ def _normalize_attempt_result(value, *, path: str) -> dict | None:
 
 
 def normalize_validation_attempt(value) -> dict:
-    """Normalize a v1 attempt or tag an unversioned historical record in memory."""
+    """Normalize the sole supported current-v1 Validation attempt contract."""
     if not isinstance(value, dict):
         raise ValidationContractError("invalid_contract", "Validation attempt must be an object")
     if "contract_version" not in value:
-        if not isinstance(value.get("id"), str) or not value["id"] or not isinstance(value.get("status"), str):
-            raise ValidationContractError("invalid_historical_validation", "Historical validation record lacks identity or status")
-        normalized = copy.deepcopy(value)
-        normalized["contract_version"] = HISTORICAL_VALIDATION_CONTRACT_VERSION
-        return normalized
+        raise ValidationContractError(
+            "invalid_contract_version", "Validation attempt contract_version is required",
+            path="$.contract_version",
+        )
     version = value["contract_version"]
     if isinstance(version, bool) or not isinstance(version, int):
         raise ValidationContractError("invalid_contract_version", "Validation attempt contract version must be an integer", path="$.contract_version")
-    if version == HISTORICAL_VALIDATION_CONTRACT_VERSION:
-        normalized = copy.deepcopy(value)
-        if not isinstance(normalized.get("id"), str) or not normalized["id"] or not isinstance(normalized.get("status"), str):
-            raise ValidationContractError("invalid_historical_validation", "Historical validation record lacks identity or status")
-        return normalized
     if version > VALIDATION_ATTEMPT_CONTRACT_VERSION:
         raise ValidationContractError("future_contract_version", "Validation attempt contract is newer than supported", path="$.contract_version")
     if version != VALIDATION_ATTEMPT_CONTRACT_VERSION:
@@ -459,7 +452,7 @@ def normalize_validation_attempt(value) -> dict:
 
     value = _object(value, {
         "contract_version", "id", "build_run_id", "inputs", "selected_profile", "created_at",
-        "started_at", "finished_at", "status", "prepared_dependencies", "result", "error",
+        "started_at", "finished_at", "status", "result", "error",
     }, "$")
     identifier = _string(value["id"], "$.id", maximum=128, pattern=SAFE_ID)
     build_run_id = _string(value["build_run_id"], "$.build_run_id", maximum=128, pattern=SAFE_ID)
@@ -492,56 +485,35 @@ def normalize_validation_attempt(value) -> dict:
         raise ValidationContractError("invalid_contract", "Validation attempt status is invalid", path="$.status")
     result = _normalize_attempt_result(value["result"], path="$.result")
     error = _normalize_attempt_error(value["error"], path="$.error")
-    prepared = None if value["prepared_dependencies"] is None else normalize_prepared_runtime_dependencies(
-        value["prepared_dependencies"],
-    )
 
     if status == "queued" and (
-        started is not None or finished is not None or prepared is not None or result is not None or error is not None
+        started is not None or finished is not None or result is not None or error is not None
     ):
         raise ValidationContractError("invalid_contract", "Queued validation attempt has terminal or started fields", path="$.status")
     if status in {"running", "cancelling"} and (started is None or finished is not None or result is not None or error is not None):
         raise ValidationContractError("invalid_contract", "Active validation attempt has inconsistent fields", path="$.status")
-    if status == "cancelled" and (finished is None or result is not None or error is None):
+    if status == "cancelled" and (finished is None or error is None):
         raise ValidationContractError("invalid_contract", "Cancelled validation attempt has inconsistent terminal fields", path="$.status")
-    if status in {"success", "failed"} and (
+    if status == "success" and (
         started is None or finished is None or result is None or result["status"] != status
+    ):
+        raise ValidationContractError("invalid_contract", "Terminal validation attempt has inconsistent result fields", path="$.status")
+    if status in {"failed", "cancelled"} and (
+        finished is None or (result is not None and result["status"] != status)
     ):
         raise ValidationContractError("invalid_contract", "Terminal validation attempt has inconsistent result fields", path="$.status")
     if status == "success" and error is not None:
         raise ValidationContractError("invalid_contract", "Successful validation attempt must not contain an error", path="$.error")
-    if status == "success" and prepared is None:
-        raise ValidationContractError(
-            "invalid_contract", "Successful validation attempt requires prepared dependency provenance",
-            path="$.prepared_dependencies",
-        )
+    if status == "success" and (result is None or result["reference"] != "result.json"):
+        raise ValidationContractError("invalid_contract", "Successful validation attempt requires result.json", path="$.result")
+    if result is not None and result["reference"] != "result.json":
+        raise ValidationContractError("invalid_contract", "Validation result reference must be result.json", path="$.result.reference")
     if status == "failed" and error is None:
         raise ValidationContractError("invalid_contract", "Failed validation attempt requires an error", path="$.error")
     if started is not None and started < created:
         raise ValidationContractError("invalid_contract", "Validation attempt started before creation", path="$.started_at")
     if finished is not None and finished < (started or created):
         raise ValidationContractError("invalid_contract", "Validation attempt finished before it started", path="$.finished_at")
-    if prepared is not None and prepared["profile_name"] != profile:
-        raise ValidationContractError("invalid_contract", "Prepared dependencies use a different profile", path="$.prepared_dependencies.profile_name")
-    if prepared is not None:
-        if prepared["artifacts"] != {"current": artifact, "previous": previous_artifact}:
-            raise ValidationContractError(
-                "invalid_contract", "Prepared dependencies do not match immutable artifact inputs",
-                path="$.prepared_dependencies.artifacts",
-            )
-        if prepared["image"] != selected_image:
-            raise ValidationContractError(
-                "invalid_contract", "Prepared dependencies do not match the selected image identity",
-                path="$.prepared_dependencies.image",
-            )
-        _, prepared_started = _timestamp(prepared["started_at"], "$.prepared_dependencies.started_at")
-        _, prepared_finished = _timestamp(prepared["finished_at"], "$.prepared_dependencies.finished_at")
-        if started is None or prepared_started < started or (finished is not None and prepared_finished > finished):
-            raise ValidationContractError(
-                "invalid_contract", "Prepared dependency timestamps fall outside the validation attempt",
-                path="$.prepared_dependencies",
-            )
-
     return {
         "contract_version": version,
         "id": identifier,
@@ -555,7 +527,159 @@ def normalize_validation_attempt(value) -> dict:
         "started_at": started_at,
         "finished_at": finished_at,
         "status": status,
-        "prepared_dependencies": prepared,
         "result": result,
+        "error": error,
+    }
+
+
+def _optional_string(value, path: str, *, maximum: int) -> str:
+    if value is None or value == "":
+        return ""
+    return _safe_diagnostic_text(value, path, maximum=maximum)
+
+
+def _optional_printable(value, path: str, *, maximum: int) -> str:
+    if value is None or value == "":
+        return ""
+    value = str(value)
+    if len(value) > maximum:
+        raise ValidationContractError("invalid_contract", f"{path} is too long", path=path)
+    if any(ord(character) < 32 and character not in "\t\r\n" or ord(character) == 127 for character in value):
+        raise ValidationContractError("invalid_contract", f"{path} contains control characters", path=path)
+    return value
+
+
+def _normalize_result_error(value, *, path: str) -> dict | None:
+    if value is None:
+        return None
+    value = _object(value, {"code", "message", "failed_checks", "cleanup_code"}, path)
+    failed_checks = value["failed_checks"]
+    if not isinstance(failed_checks, list) or len(failed_checks) > MAX_DIAGNOSTICS:
+        raise ValidationContractError("invalid_contract", f"{path}.failed_checks must be a bounded list", path=f"{path}.failed_checks")
+    return {
+        "code": _string(value["code"], f"{path}.code", maximum=128, pattern=SAFE_CODE),
+        "message": _safe_diagnostic_text(value["message"], f"{path}.message", maximum=1000),
+        "failed_checks": [
+            _string(item, f"{path}.failed_checks[{index}]", maximum=128)
+            for index, item in enumerate(failed_checks)
+        ],
+        "cleanup_code": _optional_string(value["cleanup_code"], f"{path}.cleanup_code", maximum=128),
+    }
+
+
+def _normalize_result_checks(value, *, path: str) -> list[dict]:
+    if not isinstance(value, list) or not value or len(value) > 256:
+        raise ValidationContractError("invalid_contract", f"{path} must be a non-empty bounded list", path=path)
+    normalized = []
+    for index, row in enumerate(value):
+        row_path = f"{path}[{index}]"
+        row = _object(row, {"name", "status", "error"}, row_path)
+        if row["status"] not in {"success", "failed"}:
+            raise ValidationContractError("invalid_contract", f"{row_path}.status is invalid", path=f"{row_path}.status")
+        normalized.append({
+            "name": _string(row["name"], f"{row_path}.name", maximum=256),
+            "status": row["status"],
+            "error": _optional_string(row["error"], f"{row_path}.error", maximum=1000),
+        })
+    return normalized
+
+
+def _normalize_result_commands(value, *, path: str) -> list[dict]:
+    if not isinstance(value, list) or len(value) > 100:
+        raise ValidationContractError("invalid_contract", f"{path} must be a bounded list", path=path)
+    normalized = []
+    for index, row in enumerate(value):
+        row_path = f"{path}[{index}]"
+        row = _object(row, {"command", "arguments", "status", "exit_code", "accepted", "stdout", "stderr"}, row_path)
+        arguments = row["arguments"]
+        if not isinstance(arguments, list) or len(arguments) > 128:
+            raise ValidationContractError("invalid_contract", f"{row_path}.arguments must be a bounded list", path=f"{row_path}.arguments")
+        if row["status"] not in {"success", "failed", "cancelled"}:
+            raise ValidationContractError("invalid_contract", f"{row_path}.status is invalid", path=f"{row_path}.status")
+        exit_code = row["exit_code"]
+        if exit_code is not None and (isinstance(exit_code, bool) or not isinstance(exit_code, int) or abs(exit_code) > MAX_SAFE_INTEGER):
+            raise ValidationContractError("invalid_contract", f"{row_path}.exit_code is invalid", path=f"{row_path}.exit_code")
+        if row["accepted"] is not None and not isinstance(row["accepted"], bool):
+            raise ValidationContractError("invalid_contract", f"{row_path}.accepted is invalid", path=f"{row_path}.accepted")
+        normalized.append({
+            "command": _optional_printable(row["command"], f"{row_path}.command", maximum=1000),
+            "arguments": [_optional_printable(item, f"{row_path}.arguments[{offset}]", maximum=1000) for offset, item in enumerate(arguments)],
+            "status": row["status"],
+            "exit_code": exit_code,
+            "accepted": row["accepted"],
+            "stdout": _optional_printable(row["stdout"], f"{row_path}.stdout", maximum=4096),
+            "stderr": _optional_printable(row["stderr"], f"{row_path}.stderr", maximum=4096),
+        })
+    return normalized
+
+
+def normalize_validation_result(value) -> dict:
+    """Normalize the strict current-v1 detailed lifecycle result."""
+    path = "$"
+    if not isinstance(value, dict):
+        raise ValidationContractError("invalid_contract", "Validation result must be an object")
+    version = value.get("contract_version")
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise ValidationContractError("invalid_contract_version", "Validation result contract version must be an integer", path="$.contract_version")
+    if version > VALIDATION_RESULT_CONTRACT_VERSION:
+        raise ValidationContractError("future_contract_version", "Validation result contract is newer than supported", path="$.contract_version")
+    if version != VALIDATION_RESULT_CONTRACT_VERSION:
+        raise ValidationContractError("unsupported_contract_version", "Validation result contract version is unsupported", path="$.contract_version")
+    value = _object(value, {
+        "contract_version", "attempt_id", "build_run_id", "artifact", "profile", "status",
+        "started_at", "finished_at", "checks", "execution", "commands", "error",
+    }, path)
+    attempt_id = _string(value["attempt_id"], "$.attempt_id", maximum=128, pattern=SAFE_ID)
+    build_run_id = _string(value["build_run_id"], "$.build_run_id", maximum=128, pattern=SAFE_ID)
+    artifact = normalize_artifact_identity(value["artifact"], path="$.artifact")
+    profile = _object(value["profile"], {"name", "image"}, "$.profile")
+    profile_name = _string(profile["name"], "$.profile.name", maximum=128, pattern=SAFE_ID)
+    image = _normalize_prepared_image_identity(profile["image"], path="$.profile.image")
+    status = value["status"]
+    if status not in {"success", "failed", "cancelled"}:
+        raise ValidationContractError("invalid_contract", "Validation result status is invalid", path="$.status")
+    started_at, started = _timestamp(value["started_at"], "$.started_at")
+    finished_at, finished = _timestamp(value["finished_at"], "$.finished_at")
+    if finished < started:
+        raise ValidationContractError("invalid_contract", "Validation result timestamps are out of order", path="$.finished_at")
+    checks = _normalize_result_checks(value["checks"], path="$.checks")
+    execution = _object(value["execution"], {"network", "network_verified", "cleanup"}, "$.execution")
+    if execution["network"] not in {"disabled", "unverified"} or not isinstance(execution["network_verified"], bool):
+        raise ValidationContractError("invalid_contract", "Validation network evidence is invalid", path="$.execution")
+    cleanup = _object(execution["cleanup"], {"status", "absence_proved"}, "$.execution.cleanup")
+    if cleanup["status"] not in {"success", "unresolved"} or not isinstance(cleanup["absence_proved"], bool):
+        raise ValidationContractError("invalid_contract", "Validation cleanup evidence is invalid", path="$.execution.cleanup")
+    error = _normalize_result_error(value["error"], path="$.error")
+    successful_check_counts = {
+        name: sum(row["name"] == name and row["status"] == "success" for row in checks)
+        for name in REQUIRED_SUCCESS_CHECKS
+    }
+    if status == "success" and (
+        error is not None or execution["network"] != "disabled" or execution["network_verified"] is not True
+        or cleanup != {"status": "success", "absence_proved": True}
+        or any(row["status"] != "success" for row in checks)
+        or any(count != 1 for count in successful_check_counts.values())
+    ):
+        raise ValidationContractError("invalid_contract", "Successful Validation lacks complete lifecycle proof", path="$.status")
+    if status in {"failed", "cancelled"} and error is None:
+        raise ValidationContractError("invalid_contract", "Unsuccessful Validation requires a bounded error", path="$.error")
+    if cleanup["absence_proved"] is not True:
+        raise ValidationContractError("invalid_contract", "Terminal Validation result requires OCI absence proof", path="$.execution.cleanup")
+    return {
+        "contract_version": version,
+        "attempt_id": attempt_id,
+        "build_run_id": build_run_id,
+        "artifact": artifact,
+        "profile": {"name": profile_name, "image": image},
+        "status": status,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "checks": checks,
+        "execution": {
+            "network": execution["network"],
+            "network_verified": execution["network_verified"],
+            "cleanup": {"status": cleanup["status"], "absence_proved": cleanup["absence_proved"]},
+        },
+        "commands": _normalize_result_commands(value["commands"], path="$.commands"),
         "error": error,
     }

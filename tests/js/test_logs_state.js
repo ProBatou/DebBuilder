@@ -98,11 +98,14 @@ function canonical(lifecycle, allowedActions, validationStatus, publicationStatu
     publication_status: publicationStatus,
     lifecycle_status: lifecycle,
     lifecycle_active: ['validating', 'publishing'].includes(lifecycle),
+    publication_insertion_eligible: validationStatus === 'success',
+    publication_insertion_reasons: validationStatus === 'success' ? [] : ['current_validation_required'],
+    publication_reconciliation_available: lifecycle === 'published',
     allowed_actions: allowedActions,
     updated: 1,
     version: {upstream: '2.0', debian: '2.0-1'},
     artifact: {
-      path: '/builds/run-one/artifacts/demo_2.0-1_all.deb',
+      name: 'demo_2.0-1_all.deb',
       size: 3,
       sha256: 'abc',
       inspection: {package: 'demo', version: '2.0-1'},
@@ -119,6 +122,7 @@ assert.equal(context.adminState.selectedExecution.lifecycle_status, 'ready_to_pu
 assert.equal(context.adminState.executions[0].lifecycle_status, 'ready_to_publish');
 assert.match(nodes.executionList.innerHTML, /ready_to_publish/);
 assert.match(nodes.executionMeta.innerHTML, /Ready to publish/);
+assert.match(nodes.executionMeta.innerHTML, /Eligible for repository insertion/);
 assert.match(nodes.executionMetaMore.innerHTML, /demo_2\.0-1_all\.deb/);
 assert.match(nodes.executionSteps.innerHTML, /build · success/);
 assert.equal(nodes.btnRevalidateExecution.hidden, false);
@@ -136,6 +140,14 @@ assert.match(nodes.executionMeta.innerHTML, /Published/);
 assert.equal(nodes.btnRevalidateExecution.hidden, false);
 assert.equal(nodes.btnPublishExecution.hidden, true);
 
+context.canonical = canonical('published', {validate: true, publish: false}, 'failed', 'success');
+context.canonical.publication_insertion_eligible = false;
+context.canonical.publication_insertion_reasons = ['current_validation_required'];
+context.canonical.publication_reconciliation_available = true;
+vm.runInContext('applyCanonicalExecution(canonical, {preserveLog: true})', context);
+assert.match(nodes.executionMeta.innerHTML, /Published previously; retry verifies exact repository state/);
+assert.equal(nodes.btnPublishExecution.hidden, true);
+
 context.canonical = canonical('validation_failed', {validate: true, publish: false}, 'failed', 'not_run');
 context.canonical.diagnostic = {
   title: 'Package validation failed', code: 'validation_runtime_incompatible', reason: 'Node.js missing',
@@ -144,6 +156,7 @@ context.canonical.diagnostic = {
 };
 vm.runInContext('applyCanonicalExecution(canonical, {preserveLog: true})', context);
 assert.match(nodes.executionList.innerHTML, /validation_failed/);
+assert.match(nodes.executionMeta.innerHTML, /Revalidate before publishing/);
 assert.equal(nodes.btnRevalidateExecution.hidden, false);
 assert.equal(nodes.btnPublishExecution.hidden, true);
 assert.match(nodes.executionDiagnostic.innerHTML, /Show details/);

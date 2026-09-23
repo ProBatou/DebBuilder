@@ -19,8 +19,6 @@ from .resource_limits import empty_policy, normalize_policy
 
 ACTIVE_COMMAND_FILE = ".active-command.json"
 IDENTITY_SCHEMA_VERSION = 3
-PREVIOUS_IDENTITY_SCHEMA_VERSION = 2
-LEGACY_IDENTITY_SCHEMA_VERSION = 1
 MAX_IDENTITY_BYTES = 4096
 MAX_ENVIRON_BYTES = 1024 * 1024
 BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
@@ -240,44 +238,29 @@ def capture_identity(
 def _validated_identity(value, *, expected_run_id: str | None = None) -> dict:
     if not isinstance(value, dict):
         raise CommandIdentityError("active command identity has invalid fields")
-    legacy_fields = {
+    process_group_base_fields = {
         "schema_version", "pid", "pgid", "start_time_ticks", "boot_id", "run_id", "command_id",
     }
-    process_group_v2_fields = legacy_fields | {"backend", "containment_state"}
-    systemd_v2_starting_fields = {
+    process_group_fields = process_group_base_fields | {"backend", "containment_state", "resource_limits", "resource_io_targets"}
+    systemd_starting_fields = {
         "schema_version", "backend", "boot_id", "run_id", "command_id", "unit_name", "containment_state",
+        "resource_limits", "resource_io_targets",
     }
-    systemd_v2_active_fields = systemd_v2_starting_fields | {"invocation_id", "control_group"}
-    process_group_fields = process_group_v2_fields | {"resource_limits", "resource_io_targets"}
-    systemd_starting_fields = systemd_v2_starting_fields | {"resource_limits", "resource_io_targets"}
     systemd_active_required = systemd_starting_fields | {"invocation_id", "control_group"}
     fields = set(value)
     schema_version = value.get("schema_version")
-    if schema_version == LEGACY_IDENTITY_SCHEMA_VERSION and fields == legacy_fields:
-        backend = "process_group"
-    elif schema_version == PREVIOUS_IDENTITY_SCHEMA_VERSION and fields == process_group_v2_fields:
-        backend = value.get("backend")
-    elif schema_version == PREVIOUS_IDENTITY_SCHEMA_VERSION and fields == systemd_v2_starting_fields:
-        backend = value.get("backend")
-    elif schema_version == PREVIOUS_IDENTITY_SCHEMA_VERSION and fields == systemd_v2_active_fields:
-        backend = value.get("backend")
-    elif schema_version == IDENTITY_SCHEMA_VERSION and fields == process_group_fields:
-        backend = value.get("backend")
-    elif schema_version == IDENTITY_SCHEMA_VERSION and fields == systemd_starting_fields:
-        backend = value.get("backend")
-    elif (
-        schema_version == IDENTITY_SCHEMA_VERSION
-        and fields == systemd_active_required
-    ):
-        backend = value.get("backend")
-    else:
-        raise CommandIdentityError("active command identity has invalid fields")
-    if schema_version not in {LEGACY_IDENTITY_SCHEMA_VERSION, PREVIOUS_IDENTITY_SCHEMA_VERSION, IDENTITY_SCHEMA_VERSION}:
+    if schema_version != IDENTITY_SCHEMA_VERSION:
         raise CommandIdentityError("active command identity schema is unsupported")
+    backend = value.get("backend")
+    if (
+        (backend == "process_group" and fields != process_group_fields)
+        or (backend == "systemd_cgroup" and fields not in (systemd_starting_fields, systemd_active_required))
+    ):
+        raise CommandIdentityError("active command identity has invalid fields")
     if backend not in {"process_group", "systemd_cgroup"}:
         raise CommandIdentityError("active command backend is invalid")
     if backend == "process_group":
-        if schema_version != LEGACY_IDENTITY_SCHEMA_VERSION and value.get("containment_state") != "active":
+        if value.get("containment_state") != "active":
             raise CommandIdentityError("process-group containment state is invalid")
         for field in ("pid", "pgid"):
             if type(value.get(field)) is not int or value[field] <= 0:
@@ -292,8 +275,7 @@ def _validated_identity(value, *, expected_run_id: str | None = None) -> dict:
         ):
             raise CommandIdentityError("systemd unit name is invalid")
         if value["containment_state"] == "starting":
-            expected_fields = systemd_starting_fields if schema_version == IDENTITY_SCHEMA_VERSION else systemd_v2_starting_fields
-            if fields != expected_fields:
+            if fields != systemd_starting_fields:
                 raise CommandIdentityError("starting systemd containment has invalid fields")
         else:
             if not isinstance(value.get("invocation_id"), str) or not re.fullmatch(r"[0-9a-f]{32}", value["invocation_id"]):
@@ -302,18 +284,17 @@ def _validated_identity(value, *, expected_run_id: str | None = None) -> dict:
                 r"/system\.slice/debbuilder-command-[0-9a-f]{16}-[0-9a-f]{32}\.service", value["control_group"],
             ):
                 raise CommandIdentityError("systemd control group is invalid")
-    if schema_version == IDENTITY_SCHEMA_VERSION:
-        try:
-            if not isinstance(value.get("resource_limits"), dict):
-                raise CommandIdentityError("active command resource policy must be an object")
-            normalize_policy(value.get("resource_limits"), path="$.resource_limits")
-        except (CommandIdentityError, ValueError) as exc:
-            raise CommandIdentityError(f"active command resource policy is invalid: {exc}") from exc
-        targets = value.get("resource_io_targets")
-        if not isinstance(targets, list) or len(targets) > 2 or any(
-            not isinstance(path, str) or not path.startswith("/") for path in targets
-        ):
-            raise CommandIdentityError("active command I/O targets are invalid")
+    try:
+        if not isinstance(value.get("resource_limits"), dict):
+            raise CommandIdentityError("active command resource policy must be an object")
+        normalize_policy(value.get("resource_limits"), path="$.resource_limits")
+    except (CommandIdentityError, ValueError) as exc:
+        raise CommandIdentityError(f"active command resource policy is invalid: {exc}") from exc
+    targets = value.get("resource_io_targets")
+    if not isinstance(targets, list) or len(targets) > 2 or any(
+        not isinstance(path, str) or not path.startswith("/") for path in targets
+    ):
+        raise CommandIdentityError("active command I/O targets are invalid")
     if not isinstance(value.get("boot_id"), str) or not BOOT_ID.fullmatch(value["boot_id"]):
         raise CommandIdentityError("active command boot ID is invalid")
     require_safe_name(value.get("run_id"), "build run id")
@@ -331,7 +312,7 @@ def verify_identity(value, *, expected_run_id: str | None = None) -> Verificatio
         current_boot_id = _read_boot_id()
     except (CommandIdentityError, OSError, TypeError, ValueError) as exc:
         return VerificationResult(VerificationStatus.UNVERIFIABLE, str(exc))
-    if identity.get("backend", "process_group") != "process_group":
+    if identity["backend"] != "process_group":
         return VerificationResult(VerificationStatus.UNVERIFIABLE, "systemd containment requires canonical unit verification")
     if identity["pid"] != identity["pgid"]:
         return VerificationResult(VerificationStatus.MISMATCH, "recorded process is not the process-group leader")
@@ -425,22 +406,12 @@ def update_identity(workspace_fd: int, expected: dict, updated: dict) -> bool:
     if any(updated_value.get(field) != expected_value.get(field) for field in invariant_fields):
         return False
     transition = (expected_value.get("containment_state"), updated_value.get("containment_state"))
-    if expected_value.get("backend", "process_group") != "systemd_cgroup" or transition not in {
+    if expected_value["backend"] != "systemd_cgroup" or transition not in {
         ("starting", "active"), ("active", "stopping"),
     }:
         return False
     write_json(workspace_fd, ACTIVE_COMMAND_FILE, updated_value)
     return True
-
-
-def verify_persisted_identity(workspace_fd: int, *, expected_run_id: str) -> tuple[dict | None, VerificationResult]:
-    try:
-        identity = read_persisted_identity(workspace_fd)
-    except (CommandIdentityError, OSError) as exc:
-        return None, VerificationResult(VerificationStatus.UNVERIFIABLE, str(exc))
-    if identity is None:
-        return None, VerificationResult(VerificationStatus.UNVERIFIABLE, "active command identity is absent")
-    return identity, verify_identity(identity, expected_run_id=expected_run_id)
 
 
 def terminate_verified_process_group(

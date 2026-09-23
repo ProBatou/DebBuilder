@@ -29,8 +29,6 @@ def version_from_resolution(recipe: dict, resolved: dict) -> tuple[str, str]:
     """Derive canonical upstream and Debian versions from resolved source metadata."""
     version_config = recipe["source"]["version"]
     mode = version_config["source"]
-    if mode == "build":
-        raise SourceError("unable_to_determine_version", "Unable to determine version: build-provided versions are not available before build execution")
     if mode == "tag":
         raw = str(resolved.get("tag") or resolved.get("ref") or "")
     elif mode == "release_name":

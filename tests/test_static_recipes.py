@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from debbuilder import builtin_recipe, debian_packaging
-from debbuilder.recipe_schema import recipe_for_storage, validate_recipe_metadata
+from debbuilder.recipe_schema import runtime_recipe_for_storage, validate_recipe_metadata
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -72,7 +72,7 @@ class StaticRecipeTests(unittest.TestCase):
     def test_shipped_service_recipes_survive_canonical_storage_round_trip(self):
         for name in ("seerr", "debbuilder"):
             original = self.load(name)
-            reloaded = validate_recipe_metadata(recipe_for_storage(original))
+            reloaded = validate_recipe_metadata(runtime_recipe_for_storage(original))
             self.assertEqual(reloaded["service"], original["service"])
             self.assertTrue(reloaded["service"]["configured"])
         self.assertEqual(self.load("debbuilder")["install"]["config_files"][0]["policy"], "create_if_missing")

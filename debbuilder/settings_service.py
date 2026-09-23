@@ -1,20 +1,31 @@
 """Settings assembly and persistence helpers."""
 from __future__ import annotations
 
+import os
+import secrets
+from copy import deepcopy
 from pathlib import Path
 
+from . import storage
+from .resource_limits import ResourceLimitError
 from .settings_store import (
+    SECRET_PRESERVE_SENTINEL,
+    SessionSecretError,
+    SettingsDocumentError,
     default_settings,
     github_token_configured,
     load_settings,
-    load_settings_result,
+    load_secrets,
     ntfy_token_configured,
-    oidc_client_secret,
     oidc_client_secret_configured,
     repair_resource_limits,
-    save_github_token,
-    save_oidc_client_secret,
+    resource_repair_security,
+    save_secrets,
     save_settings,
+    settings_path,
+    validate_cookie_secret,
+    validate_github_token,
+    validate_secrets_document,
     validate_settings,
 )
 
@@ -45,60 +56,117 @@ def defaults_from_environment(
     )
 
 
-def load_app_settings(data_dir: Path, defaults: dict) -> dict:
-    return load_settings(data_dir, defaults)
+def validate_app_settings_storage(data_dir: Path, defaults: dict) -> dict:
+    """Read-only startup validation for the canonical Settings and secrets stores."""
+    settings = load_settings(data_dir, defaults)
+    secret_document = load_secrets(data_dir)
+    _require_oidc_client_secret(settings, secret_document)
+    return settings
 
 
-def load_app_settings_result(data_dir: Path, defaults: dict):
-    return load_settings_result(data_dir, defaults)
-
-
-def public_settings_view(*, data_dir: Path, root: Path, settings: dict, port: int) -> dict:
-    general = dict(settings["general"])
-    general.update({"port": port, "workdir": str(root)})
+def public_settings_view(*, data_dir: Path, settings: dict) -> dict:
     return {
-        "general": general,
+        "general": settings["general"],
         "apt": settings["apt"],
         "github": {
-            "token": "masked",
             "token_configured": github_token_configured(data_dir),
         },
         "security": {
             **settings["security"],
-            "pocket_id_active": settings["security"]["auth_mode"] == "oidc",
             "oidc_client_secret_configured": oidc_client_secret_configured(data_dir),
         },
         "notifications": {
             **settings["notifications"],
             "token_configured": ntfy_token_configured(data_dir),
         },
-        "automation": settings.get("automation", {}),
+        "automation": settings["automation"],
         "workspace_cleanup": settings["workspace_cleanup"],
         "resource_limits": settings["resource_limits"],
     }
 
 
-def update_settings(data_dir: Path, payload: dict, current: dict, view_factory) -> dict:
+def _secret_replacement(payload: dict, section: str, field: str) -> str | None:
+    section_payload = payload.get(section)
+    if not isinstance(section_payload, dict) or field not in section_payload:
+        return None
+    value = section_payload[field].strip()
+    if not value or value == SECRET_PRESERVE_SENTINEL:
+        return None
+    return value
+
+
+def _replace_secret(document: dict, section: str, field: str, value: str | None) -> None:
+    if value is not None:
+        document.setdefault(section, {})[field] = value
+
+
+def _require_oidc_client_secret(settings: dict, secret_document: dict) -> None:
+    if settings["security"]["auth_mode"] != "oidc":
+        return
+    effective = os.environ.get("DEBBUILDER_OIDC_CLIENT_SECRET", "").strip()
+    if not effective:
+        effective = str((secret_document.get("oidc") or {}).get("client_secret") or "").strip()
+    if not effective or effective == SECRET_PRESERVE_SENTINEL:
+        raise SettingsDocumentError(
+            "missing_required_secret",
+            "OIDC client secret is required before enabling authentication",
+            path="$.security.oidc_client_secret",
+        )
+
+
+def _mutation_plan(payload: dict, current: dict, existing_secrets: dict) -> tuple[dict, dict, bool]:
+    """Validate every requested Settings-owned semantic before any durable write."""
     new_settings = validate_settings(payload, current)
-    github_payload = payload.get("github") if isinstance(payload, dict) else None
-    if isinstance(github_payload, dict) and github_payload.get("token"):
-        save_github_token(data_dir, str(github_payload["token"]))
+    new_secrets = deepcopy(existing_secrets)
 
-    security_payload = payload.get("security") if isinstance(payload, dict) else None
-    new_secret = isinstance(security_payload, dict) and str(security_payload.get("oidc_client_secret") or "").strip()
-    if new_settings["security"]["auth_mode"] == "oidc" and not (new_secret or oidc_client_secret(data_dir)):
-        raise ValueError("OIDC client secret is required before enabling authentication")
-    if new_secret:
-        save_oidc_client_secret(data_dir, str(security_payload["oidc_client_secret"]))
+    github_secret = _secret_replacement(payload, "github", "token")
+    if github_secret is not None:
+        github_secret = validate_github_token(github_secret, path="$.github.token")
+    _replace_secret(new_secrets, "github", "token", github_secret)
 
-    save_settings(data_dir, new_settings)
-    return view_factory()
+    notification_secret = _secret_replacement(payload, "notifications", "token")
+    _replace_secret(new_secrets, "notifications", "token", notification_secret)
+
+    oidc_secret = _secret_replacement(payload, "security", "oidc_client_secret")
+    _replace_secret(new_secrets, "oidc", "client_secret", oidc_secret)
+
+    _require_oidc_client_secret(new_settings, new_secrets)
+    if new_settings["security"]["auth_mode"] == "oidc":
+        cookie_from_environment = os.environ.get("DEBBUILDER_COOKIE_SECRET", "").strip()
+        if cookie_from_environment:
+            try:
+                validate_cookie_secret(cookie_from_environment)
+            except SessionSecretError as exc:
+                raise SettingsDocumentError(
+                    "invalid_required_secret", "Session cookie secret is invalid",
+                    path="$.security.auth_mode",
+                ) from exc
+        elif "session" not in new_secrets:
+            new_secrets["session"] = {"cookie_secret": secrets.token_urlsafe(48)}
+
+    canonical_secrets = validate_secrets_document(new_secrets)
+    return new_settings, canonical_secrets, canonical_secrets != existing_secrets
 
 
-def prepare_resource_limits_repair(payload: dict, loaded) -> dict:
-    """Canonicalize an explicit repair against the original malformed section."""
-    repaired = dict(payload)
-    repaired["resource_limits"] = repair_resource_limits(
-        loaded.resource_limits_repair_source, payload.get("resource_limits"),
-    )
-    return repaired
+def update_settings(data_dir: Path, payload: dict, defaults: dict) -> None:
+    """Serialize the complete current-v1 mutation, including resource-only repair."""
+    with storage.locked_path(settings_path(data_dir)):
+        try:
+            current = load_settings(data_dir, defaults)
+        except (SettingsDocumentError, ResourceLimitError):
+            # Repair may change only resource limits. A malformed Secrets store
+            # must reject the request before Settings is replaced.
+            existing_secrets = load_secrets(data_dir)
+            _require_oidc_client_secret(
+                {"security": resource_repair_security(data_dir)}, existing_secrets,
+            )
+            repair_resource_limits(data_dir, payload)
+            return
+
+        existing_secrets = load_secrets(data_dir)
+        new_settings, new_secrets, secrets_changed = _mutation_plan(
+            payload, current, existing_secrets,
+        )
+        if secrets_changed:
+            save_secrets(data_dir, new_secrets)
+        save_settings(data_dir, new_settings)

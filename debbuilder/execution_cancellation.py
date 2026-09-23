@@ -27,7 +27,7 @@ class ExecutionCancelled(RuntimeError):
 
 
 def raise_for_cancelled_result(result: dict) -> None:
-    """Preserve cancellation when a compatible runner returns instead of raising."""
+    """Propagate cancellation when a runner reports it as a result."""
     if result.get("cancellation_requested") or result.get("status") == "cancelled":
         raise ExecutionCancelled(result.get("cancellation"), command_result=result)
 

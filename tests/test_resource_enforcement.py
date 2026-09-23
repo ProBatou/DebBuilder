@@ -1,3 +1,4 @@
+from tests.lifecycle_helpers import cleanup_blockers
 import tempfile
 import threading
 import time
@@ -224,8 +225,8 @@ class ResourceEnforcementFallbackTests(unittest.TestCase):
         }
         first = self.run_with_completed(unresolved)
         self.assertEqual(first["error_code"], "command_containment_termination_failed")
-        self.assertEqual(len(containment.cleanup_blockers()), 1)
-        self.assertEqual(containment.cleanup_blockers()[0].reason, "runtime cgroup remains")
+        self.assertEqual(len(cleanup_blockers()), 1)
+        self.assertEqual(cleanup_blockers()[0].reason, "runtime cgroup remains")
 
         second = self.run_with_completed({
             **unresolved, "exit_code": 0, "process_exit_code": 0, "timed_out": False,

@@ -1,3 +1,4 @@
+from tests.lifecycle_helpers import cleanup_blockers
 import json
 import os
 import selectors
@@ -44,6 +45,7 @@ from debbuilder.execution_cancellation import ExecutionCancelled
 
 def recipe(name):
     return {
+        "schema_version": 5,
         "name": name,
         "package": {
             "name": name,
@@ -371,7 +373,7 @@ class SystemdCommandContainmentTests(unittest.TestCase):
             self.assertEqual(result["error_code"], "command_containment_termination_failed")
             self.assertEqual(remaining, transitions[-1])
             self.assertEqual(transitions[-1]["containment_state"], "active")
-            blockers = containment_module.cleanup_blockers()
+            blockers = cleanup_blockers()
             self.assertEqual(len(blockers), 1)
             self.assertEqual(blockers[0].invocation_id, transitions[-1]["invocation_id"])
             self.assertEqual(blockers[0].control_group, transitions[-1]["control_group"])

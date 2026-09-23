@@ -1,9 +1,11 @@
 import json
+import hashlib
 import os
 import time
 import urllib.error
 import http.client
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 from pathlib import Path
 
@@ -17,6 +19,46 @@ from debbuilder.automation_scheduler import AutomationRetryStore
 from debbuilder.build_store import canonical_recipe_sha256
 from debbuilder.lifecycle import MutationGate
 from tests.admin_api_case import AdminApiCase
+from tests.validation_helpers import record_canonical_validation
+
+
+def publication_attempt(run, attempt_id):
+    artifact = run["artifact"]
+    inspection = artifact["inspection"]
+    apt = server.repo_settings()
+    repository_root = str(server.REPOSITORY_ROOT.absolute())
+    sha256 = artifact["sha256"]
+    size = artifact["size"]
+    package = inspection["package"]
+    version = inspection["version"]
+    architecture = inspection["architecture"]
+    pool_path = f"pool/main/{package[0]}/{package}/{Path(artifact['path']).name}"
+    return {
+        "id": attempt_id, "build_run_id": run["id"], "status": "success", "artifact": artifact["path"],
+        "package": package, "version": version, "architecture": architecture,
+        "repository": {
+            "root": repository_root, "distribution": apt["distribution"], "component": apt["component"],
+        },
+        "proof": {
+            "schema": "debbuilder.repository-publication-proof.v1", "proof_version": 1,
+            "verified_at": "2026-01-01T00:01:00+00:00",
+            "repository": {"root": repository_root, "device": 1, "inode": 2},
+            "distribution": {
+                "requested": apt["distribution"], "codename": apt["distribution"], "suite": "stable",
+            },
+            "component": apt["component"], "package": package, "version": version,
+            "architecture": architecture,
+            "source": {"path": artifact["path"], "size": size, "sha256": sha256, "device": 3, "inode": 4},
+            "targets": [{
+                "database_architecture": apt["architecture"],
+                "index": {
+                    "path": f"dists/{apt['distribution']}/{apt['component']}/binary-{apt['architecture']}/Packages.gz",
+                    "device": 5, "inode": 6, "filename": pool_path, "size": size, "sha256": sha256,
+                },
+                "pool": {"path": pool_path, "size": size, "sha256": sha256, "device": 7, "inode": 8},
+            }],
+        },
+    }
 
 
 class AdminApiTests(AdminApiCase):
@@ -45,6 +87,9 @@ class AdminApiTests(AdminApiCase):
                 self.requests.append(recipe_id)
             return {"accepted": True, "created": created, "recipe_id": recipe_id}
 
+        def request_observation(self, recipe_id):
+            return self.request_recipe(recipe_id)
+
         def request(self):
             self.wakes += 1
             return True
@@ -70,6 +115,89 @@ class AdminApiTests(AdminApiCase):
             "source": {"provider": "github", "repository": "example/automatic", "tracking": "latest_release", "version": {"source": "tag"}},
             "artifact": {"mode": "upstream_deb", "architecture": "all", "name_pattern": "automatic_*_all.deb"},
         }
+
+    @staticmethod
+    def observation_result(version="9.8.7"):
+        return {
+            "display_version": version,
+            "display_ref": f"v{version}",
+            "identity": {"private_exact_identity": "must-not-be-persisted"},
+        }
+
+    def test_explicit_observation_refresh_supports_manual_disabled_and_inactive_without_lifecycle(self):
+        recipes = (
+            self.automatic_recipe(enabled=False, policy="manual"),
+            self.automatic_recipe(enabled=False, policy="manual", active=False),
+        )
+        service = server.upstream_observation_service()
+        service.resolver = lambda _recipe, token="": self.observation_result()
+        before_runs = list((server.DATA / "builds").rglob("run.json"))
+        before_ledger = (server.DATA / "automation-ledger.json").read_bytes() if (server.DATA / "automation-ledger.json").exists() else None
+        for index, configured in enumerate(recipes):
+            configured["name"] = f"observe-{index}"
+            configured["package"]["name"] = f"observe-{index}"
+            configured["source"]["repository"] = f"owner/observe-{index}"
+            status, _ = self.request("POST", f"/api/workflows/observe-{index}", {"workflow": configured})
+            self.assertEqual(status, 200)
+            status, refreshed = self.request("POST", f"/api/recipes/observe-{index}/observation/refresh", {})
+            self.assertEqual(status, 200)
+            self.assertEqual(refreshed["observation"]["last_success"]["display_version"], "9.8.7")
+        self.assertEqual(list((server.DATA / "builds").rglob("run.json")), before_runs)
+        after_ledger = (server.DATA / "automation-ledger.json").read_bytes() if (server.DATA / "automation-ledger.json").exists() else None
+        self.assertEqual(after_ledger, before_ledger)
+        persisted = (server.DATA / "upstream-observations.json").read_text()
+        self.assertNotIn("private_exact_identity", persisted)
+
+    def test_explicit_observation_refresh_supports_application_managed_recipe(self):
+        service = server.upstream_observation_service()
+        service.resolver = lambda _recipe, token="": self.observation_result("1.0.0")
+        status, refreshed = self.request("POST", "/api/recipes/debbuilder/observation/refresh", {})
+        self.assertEqual(status, 200)
+        self.assertEqual(refreshed["observation"]["last_success"]["display_ref"], "v1.0.0")
+
+    def test_failed_explicit_refresh_records_bounded_attempt_without_lifecycle(self):
+        configured = self.automatic_recipe(enabled=False, policy="manual")
+        self.request("POST", "/api/workflows/automatic", {"workflow": configured})
+        service = server.upstream_observation_service()
+        service.resolver = lambda _recipe, token="": (_ for _ in ()).throw(
+            server.upstream_detection.UpstreamDetectionError("github_unavailable", "bounded"),
+        )
+        with self.assertRaises(urllib.error.HTTPError) as captured:
+            self.request("POST", "/api/recipes/automatic/observation/refresh", {})
+        self.assertEqual(captured.exception.code, 502)
+        payload = json.loads(captured.exception.read())
+        self.assertEqual(payload["error"]["code"], "github_unavailable")
+        recipe = server.read_workflow_file(server.USER_WORKFLOWS / "automatic.json")
+        observation = service.projection("automatic", recipe)
+        self.assertEqual(observation["last_attempt"]["diagnostic_code"], "github_unavailable")
+        self.assertFalse((server.DATA / "automation-ledger.json").exists())
+
+    def test_package_and_recipe_get_routes_never_own_upstream_or_background_work(self):
+        service = server.upstream_observation_service()
+        observation_before = service.store.path.read_bytes() if service.store.path.exists() else None
+        with mock.patch.object(service, "observe", side_effect=AssertionError("GET attempted observation")) as observe, \
+                mock.patch("debbuilder.github_client.latest_release", side_effect=AssertionError("GET called GitHub")) as github, \
+                mock.patch("debbuilder.app.apt_repo.local_packages_index", return_value=[]), \
+                mock.patch.object(ThreadPoolExecutor, "submit", side_effect=AssertionError("GET submitted background work")) as submit:
+            for path in ("/api/dashboard", "/api/packages", "/api/packages/webapp", "/api/recipes"):
+                status, _payload = self.request("GET", path)
+                self.assertEqual(status, 200, path)
+        observe.assert_not_called()
+        github.assert_not_called()
+        submit.assert_not_called()
+        observation_after = service.store.path.read_bytes() if service.store.path.exists() else None
+        self.assertEqual(observation_after, observation_before)
+
+    def complete_manual_run(self, run_id: str) -> dict:
+        store = BuildStore(server.DATA / "builds")
+        with mock.patch.object(
+            server.build_pipeline,
+            "execute_pipeline_run",
+            return_value={"run_id": run_id, "status": "success"},
+        ):
+            return server.execute_queued_recipe_run(
+                run_id, store=store, expected_initial_status="queued",
+            )
 
     def test_recipe_automation_save_roundtrip_wakes_without_detection(self):
         scheduler = self.AutomationSchedulerStub()
@@ -115,7 +243,7 @@ class AdminApiTests(AdminApiCase):
                 _, loaded = self.request("GET", "/api/workflows/automatic")
                 self.assertEqual(loaded["automation"], {"enabled": True, "policy": policy})
                 if policy == "manual":
-                    self.assertEqual(scheduler.requests, [])
+                    self.assertEqual(scheduler.requests, ["automatic"])
             self.assertEqual(scheduler.requests, ["automatic"])
         finally:
             server.APPLICATION_AUTOMATION_SCHEDULER = previous
@@ -215,7 +343,7 @@ class AdminApiTests(AdminApiCase):
         self.assertEqual(webapp["recipe"], "webapp-recipe")
         self.assertEqual(webapp["status"], "ready")
         self.assertEqual(webapp["version"]["published"], "3.4.1")
-        self.assertEqual(webapp["lifecycle_state"], "up_to_date")
+        self.assertEqual(webapp["lifecycle_state"], "unknown")
         self.assertIn("build", webapp)
         self.assertIn("repository", webapp)
         self.assertFalse(webapp["recipe_complete"] if "recipe_complete" in webapp else False)
@@ -227,8 +355,8 @@ class AdminApiTests(AdminApiCase):
         ])
         summary = server.dashboard_summary()
         self.assertEqual(summary["packages"], 5)
-        self.assertEqual(summary["updates"], 1)
-        self.assertEqual(summary["state_counts"]["update_available"], 1)
+        self.assertEqual(summary["updates"], 0)
+        self.assertEqual(summary["state_counts"].get("update_available", 0), 0)
         self.assertIn("github-demo", [row["name"] for row in summary["package_rows"]])
         self.assertIn("local-demo", [row["name"] for row in summary["package_rows"]])
         self.assertTrue(all("history" not in row for row in summary["package_rows"]))
@@ -247,8 +375,10 @@ class AdminApiTests(AdminApiCase):
         self.assertEqual(states["pending"], "validation_needed")
 
     def test_package_list_prefers_live_apt_repository_versions_when_available(self):
-        (server.DATA / "settings.json").write_text(json.dumps({"apt": {"repository": "https://repo.example.test", "distribution": "testing", "component": "main", "architecture": "amd64"}}))
-        with mock.patch("debbuilder.package_service.apt_repo.fetch_packages_index", return_value=[
+        settings = server.settings_defaults()
+        settings["apt"] = {"repository": "https://repo.example.test", "distribution": "testing", "component": "main", "architecture": "amd64"}
+        server.settings_service.save_settings(server.DATA, settings)
+        with mock.patch("debbuilder.app.apt_repo.local_packages_index", return_value=[
             {"Package": "webapp", "Version": "3.4.2", "Architecture": "all", "Filename": "pool/main/o/webapp/webapp_3.4.2_all.deb"},
             {"Package": "monitoring-app", "Version": "117", "Architecture": "all", "Filename": "pool/main/u/monitoring-app/monitoring-app_117_all.deb"},
         ]):
@@ -260,7 +390,7 @@ class AdminApiTests(AdminApiCase):
 
     def test_package_aggregate_rebuilds_from_recipe_run_and_apt_after_restart(self):
         recipe = {
-            "schema_version": 1, "name": "demo-recipe", "active": True,
+            "schema_version": 5, "name": "demo-recipe", "active": True,
             "package": {"name": "demo", "architecture": "all", "maintainer": "Demo <demo@example.test>", "description": "Real demo", "runtime_dependencies": ["curl"]},
             "source": {"provider": "github", "repository": "owner/demo", "tracking": "latest_release", "version": {"source": "tag"}},
         }
@@ -269,16 +399,25 @@ class AdminApiTests(AdminApiCase):
         run = store.create(recipe, recipe_id="demo-recipe", mode="build", run_id="structured-run")
         artifact = Path(run["workspace"]) / "artifacts/demo_2.0-1_all.deb"
         artifact.write_bytes(b"deb")
-        run.update({"status": "success", "version": {"upstream": "2.0", "debian": "2.0-1"}, "artifact": {"path": str(artifact), "size": 3, "sha256": "abc"}})
+        run.update({"status": "success", "version": {"upstream": "2.0", "debian": "2.0-1"}, "artifact": {
+            "path": str(artifact), "size": 3, "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+            "inspection": {"package": "demo", "version": "2.0-1", "architecture": "all"},
+        }})
         source = next(step for step in run["steps"] if step["name"] == "source")
         source["details"] = {"repository": "owner/demo", "ref": "v2.0", "tag": "v2.0", "release_url": "https://github.test/v2.0"}
-        run["validations"] = [{"id": "validation", "artifact": str(artifact), "status": "success", "finished_at": "2026-01-01T00:00:00+00:00"}]
-        run["publications"] = [{"id": "publication", "status": "success", "published_version": "2.0-1", "finished_at": "2026-01-01T00:01:00+00:00"}]
+        run["publications"] = [{
+            **publication_attempt(run, "publication"),
+            "finished_at": "2026-01-01T00:01:00+00:00",
+        }]
         store.save(run)
+        record_canonical_validation(store, run, attempt_id="validation")
         published = [{"Package": "demo", "Version": "2.0-1", "Architecture": "all", "Filename": "pool/main/d/demo.deb"}]
+        server.upstream_observation_service().store.record_success(
+            "demo-recipe", canonical_recipe_sha256(recipe),
+            {"display_version": "2.0", "display_ref": "v2.0"},
+        )
         with mock.patch("debbuilder.app.live_published_index", return_value=published):
             first = server.get_package("demo")
-            server.github_release_cache().entries.clear()
             second = server.get_package("demo")
         for package in (first, second):
             self.assertEqual(package["recipe"], "demo-recipe")
@@ -291,7 +430,7 @@ class AdminApiTests(AdminApiCase):
 
     def test_package_lifecycle_tracks_latest_real_run_without_hiding_repository_version(self):
         recipe = {
-            "schema_version": 1, "name": "debbuilder-recipe", "active": True,
+            "schema_version": 5, "name": "debbuilder-recipe", "active": True,
             "package": {"name": "debbuilder", "architecture": "all", "maintainer": "Demo <demo@example.test>", "description": "Demo"},
             "source": {"provider": "github", "repository": "owner/debbuilder", "tracking": "latest_release", "version": {"source": "tag"}},
         }
@@ -305,14 +444,13 @@ class AdminApiTests(AdminApiCase):
             run.update({
                 "status": "success", "created_at": created_at, "created_at_epoch": 1,
                 "version": {"upstream": version.split("-")[0], "debian": version},
-                "artifact": {"path": str(artifact), "size": 3, "sha256": run_id, "inspection": {"package": "debbuilder", "version": version, "architecture": "all"}},
+                "artifact": {"path": str(artifact), "size": 3, "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(), "inspection": {"package": "debbuilder", "version": version, "architecture": "all"}},
             })
             store.save(run)
             return run, artifact
 
         old, old_artifact = build_run("old-published", "0.1.3-2", "2026-01-01T00:00:00+00:00")
-        old["validations"] = [{"id": "old-validation", "artifact": str(old_artifact), "status": "success"}]
-        old["publications"] = [{"id": "old-publication", "status": "success", "published_version": "0.1.3-2"}]
+        old["publications"] = [publication_attempt(old, "old-publication")]
         store.save(old)
         current, current_artifact = build_run("current-build", "0.1.4-2", "2026-01-02T00:00:00+00:00")
 
@@ -326,23 +464,17 @@ class AdminApiTests(AdminApiCase):
         self.assertIsNone(package["validation"])
         self.assertIsNone(package["publication"])
 
-        current["validations"] = [{
-            "id": "current-validation", "artifact": str(current_artifact), "status": "success",
-            "commands": [{"stdout": "BEGIN PGP PRIVATE KEY"}],
-            "backend": {"workspace": "/tmp/private-validation"},
-        }]
-        store.save(current)
         with mock.patch("debbuilder.app.live_published_index", return_value=published_old):
             package = server.get_package("debbuilder")
-        self.assertEqual(package["lifecycle_display_status"], "ready_to_publish")
-        self.assertTrue(package["build"]["ready_to_publish"])
+        self.assertEqual(package["lifecycle_display_status"], "validation_needed")
+        self.assertFalse(package["build"]["ready_to_publish"])
         serialized_package = json.dumps(package)
         self.assertNotIn("BEGIN PGP PRIVATE KEY", serialized_package)
         self.assertNotIn("/tmp/private-validation", serialized_package)
-        self.assertNotIn("commands", package["validation"])
-        self.assertNotIn("backend", package["validation"])
+        self.assertIsNone(package["validation"])
 
-        current["publications"] = [{"id": "current-publication", "status": "success", "published_version": "0.1.4-2"}]
+        record_canonical_validation(store, current, attempt_id="current-validation")
+        current["publications"] = [publication_attempt(current, "current-publication")]
         store.save(current)
         published_current = [{**published_old[0], "Version": "0.1.4-2"}]
         with mock.patch("debbuilder.app.live_published_index", return_value=published_current):
@@ -364,7 +496,7 @@ class AdminApiTests(AdminApiCase):
 
     def test_failed_dry_run_keeps_package_without_pending_real_run_up_to_date(self):
         recipe = {
-            "schema_version": 1, "name": "stable-recipe", "active": True,
+            "schema_version": 5, "name": "stable-recipe", "active": True,
             "package": {"name": "stable", "architecture": "all", "maintainer": "Demo <demo@example.test>", "description": "Stable"},
             "source": {"provider": "github", "repository": "owner/stable", "tracking": "latest_release", "version": {"source": "tag"}},
         }
@@ -376,7 +508,7 @@ class AdminApiTests(AdminApiCase):
         published = [{"Package": "stable", "Version": "1.0.0-1", "Architecture": "all", "Filename": "pool/stable_1.0.0-1_all.deb"}]
         with mock.patch("debbuilder.app.live_published_index", return_value=published):
             package = server.get_package("stable")
-        self.assertEqual(package["lifecycle_display_status"], "up_to_date")
+        self.assertEqual(package["lifecycle_display_status"], "unknown")
         self.assertEqual(package["version"]["published"], "1.0.0-1")
         self.assertIsNone(package["build"]["latest_run"])
 
@@ -412,9 +544,9 @@ class AdminApiTests(AdminApiCase):
         self.assertIn("ok", log["log"]["text"])
         status, settings = self.request("GET", "/api/settings")
         self.assertNotIn("build", settings["settings"])
-        self.assertEqual(settings["settings"]["github"]["token"], "masked")
+        self.assertNotIn("token", settings["settings"]["github"])
 
-    def test_execution_detail_hides_historical_source_and_archive_identity(self):
+    def test_execution_detail_hides_source_and_archive_identity(self):
         store = BuildStore(server.DATA / "builds")
         for mode in ("source_build", "archive_payload", "upstream_deb"):
             with self.subTest(mode=mode):
@@ -431,14 +563,17 @@ class AdminApiTests(AdminApiCase):
                 before = (store.run_dir(run["id"]) / "run.json").read_bytes()
                 _, response = self.request("GET", f"/api/executions/{run['id']}")
                 projected = next(step for step in response["execution"]["steps"] if step["name"] == "source")
-                self.assertEqual(projected["details"], {"artifact_mode": mode})
+                self.assertEqual(projected["details"], {"mode": mode})
                 self.assertNotIn("upstream_identity", json.dumps(response))
                 if mode == "upstream_deb":
-                    self.assertEqual(response["execution"]["artifact"], {"name": "demo.deb"})
+                    self.assertEqual(response["execution"]["artifact"]["name"], "demo.deb")
+                    self.assertNotIn("path", response["execution"]["artifact"])
                 self.assertEqual((store.run_dir(run["id"]) / "run.json").read_bytes(), before)
 
     def test_execution_endpoints_project_every_canonical_lifecycle_transition(self):
         store, run, artifact = self.successful_build_run(run_id="lifecycle-run", package="lifecycle", version="2.0-1")
+        run["artifact"]["sha256"] = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        store.save(run)
 
         def assert_state(lifecycle, *, active, validate, publish):
             _, listed = self.request("GET", "/api/executions")
@@ -446,7 +581,10 @@ class AdminApiTests(AdminApiCase):
             _, response = self.request("GET", f"/api/executions/{run['id']}")
             detail = response["execution"]
             for row in (summary, detail):
-                self.assertEqual(row["lifecycle_status"], lifecycle)
+                self.assertEqual(
+                    row["lifecycle_status"], lifecycle,
+                    {"projected": row, "stored": store.load(run["id"])},
+                )
                 self.assertEqual(row["lifecycle_active"], active)
                 self.assertEqual(row["allowed_actions"], {"validate": validate, "publish": publish})
             self.assertEqual(detail["package"], "lifecycle")
@@ -462,27 +600,29 @@ class AdminApiTests(AdminApiCase):
         run["steps"][4]["status"] = "success"
         store.save(run)
         detail = assert_state("validation_needed", active=False, validate=True, publish=False)
-        self.assertEqual(detail["artifact"]["path"], str(artifact))
+        self.assertEqual(detail["artifact"]["name"], artifact.name)
+        self.assertNotIn("path", detail["artifact"])
 
-        run["validations"] = [{
-            "id": "validation-one", "artifact": str(artifact), "status": "running",
-            "commands": [{"stdout": "BEGIN PGP PRIVATE KEY"}],
-            "backend": {"workspace": "/tmp/private-validation"},
-        }]
-        store.save(run)
+        record_canonical_validation(store, run, attempt_id="validation-one", status="running")
         detail = assert_state("validating", active=True, validate=False, publish=False)
         self.assertNotIn("BEGIN PGP PRIVATE KEY", json.dumps(detail))
         self.assertNotIn("/tmp/private-validation", json.dumps(detail))
         self.assertNotIn("commands", detail["validations"][-1])
         self.assertNotIn("backend", detail["validations"][-1])
-        run["validations"][-1]["status"] = "failed"
-        store.save(run)
+        run = store.load(run["id"])
+        record_canonical_validation(store, run, attempt_id="validation-one", status="failed")
         assert_state("validation_failed", active=False, validate=True, publish=False)
-        run["validations"].append({"id": "validation-two", "artifact": str(artifact), "status": "running"})
-        store.save(run)
+        run = store.load(run["id"])
+        record_canonical_validation(
+            store, run, attempt_id="validation-two", status="running",
+            created_at="2026-09-14T09:00:00+00:00",
+        )
         assert_state("validating", active=True, validate=False, publish=False)
-        run["validations"][-1]["status"] = "success"
-        store.save(run)
+        run = store.load(run["id"])
+        record_canonical_validation(
+            store, run, attempt_id="validation-two", status="success",
+            created_at="2026-09-14T09:00:00+00:00",
+        )
         assert_state("ready_to_publish", active=False, validate=True, publish=True)
 
         run["publications"] = [{"id": "publication-one", "status": "running"}]
@@ -494,13 +634,14 @@ class AdminApiTests(AdminApiCase):
         run["publications"].append({"id": "publication-two", "status": "running"})
         store.save(run)
         assert_state("publishing", active=True, validate=False, publish=False)
-        run["publications"][-1]["status"] = "success"
+        run["publications"][-1] = publication_attempt(run, "publication-two")
         store.save(run)
         assert_state("published", active=False, validate=True, publish=False)
 
     def test_execution_list_does_not_include_staging_inventory_or_manifest_contents(self):
         store = BuildStore(server.DATA / "builds")
         run = store.create({
+            "schema_version": 5,
             "name": "large", "active": True, "source": {"repository": "example/large"},
             "package": {"name": "large", "maintainer": "Test <test@example.test>", "description": "Large"},
         }, mode="build", run_id="large-run")
@@ -517,6 +658,7 @@ class AdminApiTests(AdminApiCase):
     def test_execution_logs_are_separate_incremental_and_verbose_selectable(self):
         store = BuildStore(server.DATA / "builds")
         run = store.create({
+            "schema_version": 5,
             "name": "logs", "active": True, "source": {"repository": "example/logs"},
             "package": {"name": "logs", "maintainer": "Test <test@example.test>", "description": "Logs"},
         }, mode="build", run_id="live-run")
@@ -543,12 +685,13 @@ class AdminApiTests(AdminApiCase):
     def test_delete_execution_log_preserves_package_lifecycle_and_artifact(self):
         store = BuildStore(server.DATA / "builds")
         run = store.create({
+            "schema_version": 5,
             "name": "cleanup", "active": True, "source": {"repository": "example/cleanup"},
             "package": {"name": "cleanup", "maintainer": "Test <test@example.test>", "description": "Cleanup"},
         }, mode="build", run_id="cleanup-run")
         artifact = Path(run["workspace"]) / "artifacts/cleanup.deb"
         artifact.write_bytes(b"deb")
-        run.update({"status": "success", "artifact": {"path": str(artifact), "sha256": "abc", "inspection": {"package": "cleanup", "version": "1.0-1", "architecture": "all"}}, "validations": [{"status": "success", "artifact": str(artifact)}]})
+        run.update({"status": "success", "artifact": {"path": str(artifact), "sha256": "abc", "inspection": {"package": "cleanup", "version": "1.0-1", "architecture": "all"}}})
         run["steps"][4]["details"] = {"commands": [{"index": 1, "stdout": "long output", "stderr": ""}]}
         store.save(run)
         store.append_log_line("cleanup-run", "long output")
@@ -576,7 +719,7 @@ class AdminApiTests(AdminApiCase):
         self.assertTrue(restarted_store.execution_history_deleted("cleanup-run", restarted_store.load("cleanup-run")))
         package = server.get_package("cleanup")
         self.assertEqual(package["build"]["latest_run_id"], "cleanup-run")
-        self.assertEqual(package["lifecycle_display_status"], "ready_to_publish")
+        self.assertEqual(package["lifecycle_display_status"], "validation_needed")
         self.assertNotIn("cleanup-run", [row["id"] for row in package.get("history", [])])
         status, execution_list = self.request("GET", "/api/executions")
         self.assertEqual(status, 200)
@@ -595,17 +738,18 @@ class AdminApiTests(AdminApiCase):
     def test_clear_all_execution_logs_preserves_lifecycle_and_artifacts(self):
         store = BuildStore(server.DATA / "builds")
         for run_id in ("batch-one", "batch-two"):
-            run = store.create({"name": run_id, "package": {"name": run_id}, "source": {"repository": f"example/{run_id}"}, "active": True}, mode="dry_run", run_id=run_id)
+            run = store.create({"schema_version": 5, "name": run_id, "package": {"name": run_id}, "source": {"repository": f"example/{run_id}"}, "active": True}, mode="dry_run", run_id=run_id)
             run["status"] = "prepared"
             store.save(run)
             store.append_log_line(run_id, "temporary detail")
         run = store.create({
+            "schema_version": 5,
             "name": "global-cleanup", "active": True, "source": {"repository": "example/global-cleanup"},
             "package": {"name": "global-cleanup", "maintainer": "Test <test@example.test>", "description": "Cleanup"},
         }, mode="build", run_id="global-cleanup-run")
         artifact = Path(run["workspace"]) / "artifacts/global-cleanup.deb"
         artifact.write_bytes(b"deb")
-        run.update({"status": "success", "artifact": {"path": str(artifact), "sha256": "abc", "inspection": {"package": "global-cleanup", "version": "1.0-1", "architecture": "all"}}, "validations": [{"status": "success", "artifact": str(artifact)}]})
+        run.update({"status": "success", "artifact": {"path": str(artifact), "sha256": "abc", "inspection": {"package": "global-cleanup", "version": "1.0-1", "architecture": "all"}}})
         run["steps"][4]["details"] = {"commands": [{"index": 1, "stdout": "long output", "stderr": ""}]}
         store.save(run)
         store.append_log_line("global-cleanup-run", "temporary detail")
@@ -625,8 +769,8 @@ class AdminApiTests(AdminApiCase):
         self.assertTrue(cleaned["log_deleted"])
         self.assertTrue(artifact.exists())
         self.assertEqual(cleaned["artifact"]["path"], str(artifact))
-        self.assertEqual(cleaned["validations"][0]["status"], "success")
-        self.assertEqual(server.get_package("global-cleanup")["lifecycle_display_status"], "ready_to_publish")
+        self.assertNotIn("validations", cleaned)
+        self.assertEqual(server.get_package("global-cleanup")["lifecycle_display_status"], "validation_needed")
 
         store.save(stale_batch_one)
         restarted_store = BuildStore(server.DATA / "builds")
@@ -665,12 +809,41 @@ class AdminApiTests(AdminApiCase):
         settings_path = server.DATA / "settings.json"
         self.assertTrue(settings_path.exists())
         saved = json.loads(settings_path.read_text())
+        self.assertEqual(saved["schema_version"], 1)
         self.assertEqual(saved["apt"]["repository"], "https://repo.example.test")
+        self.assertNotIn("github", saved)
+        self.assertNotIn("configured", saved["notifications"])
+
+    def test_settings_api_rejects_unknown_and_coerced_fields_without_writing(self):
+        settings_path = server.DATA / "settings.json"
+        for payload, path in (
+            ([], "$"),
+            ({"legacy": True}, "$.legacy"),
+            ({"general": {"port": 8080}}, "$.general.port"),
+            ({"github": {"token_configured": True}}, "$.github.token_configured"),
+            ({"notifications": {"configured": True}}, "$.notifications.configured"),
+            ({"automation": {"auto_validate_after_successful_build": "false"}}, "$.automation.auto_validate_after_successful_build"),
+            ({"workspace_cleanup": {"enabled": 1}}, "$.workspace_cleanup.enabled"),
+            ({"security": {"pocket_id_active": False}}, "$.security.pocket_id_active"),
+        ):
+            with self.subTest(payload=payload), self.assertRaises(urllib.error.HTTPError) as raised:
+                self.request("POST", "/api/settings", payload)
+            self.assertEqual(raised.exception.code, 422)
+            self.assertEqual(json.loads(raised.exception.read())["error"]["path"], path)
+            self.assertFalse(settings_path.exists())
+
+        with self.assertRaises(urllib.error.HTTPError):
+            self.request("POST", "/api/settings", {
+                "legacy": True,
+                "github": {"token": "ghlocalvalue12345678901234567890"},
+                "notifications": {"token": "private-notification-token"},
+            })
+        self.assertFalse(settings_path.exists())
+        self.assertFalse((server.DATA / "secrets.json").exists())
 
     def test_execution_deletion_rejects_active_runs_without_cancelling_them(self):
         store, run, artifact = self.successful_build_run("busy-run")
-        run["validations"] = [{"status": "running"}]
-        store.save(run)
+        record_canonical_validation(store, run, attempt_id="active-validation", status="running")
         source = Path(run["workspace"]) / "source/keep"
         source.write_text("active workspace")
         with self.assertRaises(urllib.error.HTTPError) as error:
@@ -679,7 +852,10 @@ class AdminApiTests(AdminApiCase):
         self.assertEqual(json.loads(error.exception.read())["code"], "execution_active")
         self.assertTrue(source.exists())
         self.assertTrue(artifact.exists())
-        self.assertEqual(store.load(run["id"])["validations"][0]["status"], "running")
+        self.assertEqual(
+            server.validation_service.load_attempt(store, run["id"], "active-validation")["status"],
+            "running",
+        )
         _, preview = self.request("POST", "/api/executions/delete-logs", {"all": True, "dry_run": True})
         self.assertNotIn(run["id"], preview["ids"])
         _, cleared = self.request("POST", "/api/executions/delete-logs", {"all": True})
@@ -695,15 +871,13 @@ class AdminApiTests(AdminApiCase):
         self.assertEqual(settings["settings"]["workspace_cleanup"], {"enabled": True, "failed_workspaces_to_retain": 5})
         _, saved = self.request("POST", "/api/settings", {"workspace_cleanup": {"enabled": False, "failed_workspaces_to_retain": 2}})
         self.assertEqual(saved["settings"]["workspace_cleanup"], {"enabled": False, "failed_workspaces_to_retain": 2})
-        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": run["id"], "status": "success"}), \
-                mock.patch("debbuilder.app.request_maintenance") as request:
-            server.run_recipe_pipeline_with_automation({}, dry_run=False)
+        with mock.patch("debbuilder.app.request_maintenance") as request:
+            self.complete_manual_run(run["id"])
         request.assert_called_once_with(cleanup=True)
         self.assertTrue(source.exists())
         self.request("POST", "/api/settings", {"workspace_cleanup": {"enabled": True}})
-        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": run["id"], "status": "success"}), \
-                mock.patch("debbuilder.app.request_maintenance") as request:
-            result = server.run_recipe_pipeline_with_automation({}, dry_run=False)
+        with mock.patch("debbuilder.app.request_maintenance") as request:
+            result = self.complete_manual_run(run["id"])
         self.assertEqual(result["status"], "success")
         request.assert_called_once_with(cleanup=True)
         self.assertTrue(source.exists())
@@ -744,12 +918,31 @@ class AdminApiTests(AdminApiCase):
         status, updated = self.request("POST", "/api/settings", body)
         self.assertEqual(status, 200)
         settings = updated["settings"]
+        self.assertEqual(set(settings), {
+            "general", "apt", "github", "notifications", "automation",
+            "workspace_cleanup", "resource_limits", "resource_limits_status", "security",
+        })
+        self.assertEqual(set(settings["general"]), {"app_name", "url"})
+        self.assertEqual(set(settings["github"]), {"token_configured"})
+        self.assertEqual(set(settings["notifications"]), {"type", "server_url", "topic", "token_configured"})
+        self.assertEqual(set(settings["security"]), {
+            "auth_mode", "oidc_issuer", "oidc_client_id", "oidc_redirect_uri",
+            "oidc_client_secret_configured",
+        })
         self.assertEqual(settings["general"]["app_name"], "Package Console")
         self.assertEqual(settings["general"]["url"], "https://console.example.test")
-        self.assertEqual(settings["github"]["token"], "masked")
+        self.assertNotIn("port", settings["general"])
+        self.assertNotIn("workdir", settings["general"])
+        self.assertNotIn("token", settings["github"])
         self.assertFalse(settings["github"]["token_configured"])
-        self.assertTrue(settings["notifications"]["configured"])
+        self.assertNotIn("configured", settings["notifications"])
         self.assertEqual(settings["notifications"]["type"], "ntfy")
+        self.assertNotIn("pocket_id_active", settings["security"])
+        self.assertTrue(settings["resource_limits_status"]["valid"])
+        self.assertIsNone(settings["resource_limits_status"]["diagnostic"])
+        self.assertEqual(set(settings["resource_limits_status"]["capability"]), {
+            "backend", "available", "reason",
+        })
         self.assertTrue(settings["automation"]["auto_validate_after_successful_build"])
         self.assertTrue(settings["automation"]["auto_publish_after_successful_validation"])
 
@@ -778,17 +971,197 @@ class AdminApiTests(AdminApiCase):
         status, updated = self.request("POST", "/api/settings", body)
         self.assertEqual(status, 200)
         github = updated["settings"]["github"]
-        self.assertEqual(github["token"], "masked")
+        self.assertNotIn("token", github)
         self.assertTrue(github["token_configured"])
         self.assertNotIn("ghlocalvalue", json.dumps(updated))
         secrets_path = Path(self.tmp.name) / "data" / "secrets.json"
         self.assertTrue(secrets_path.exists())
-        self.assertIn("ghlocalvalue12345678901234567890", secrets_path.read_text())
+        secrets = json.loads(secrets_path.read_text())
+        self.assertEqual(secrets["schema_version"], 1)
+        self.assertEqual(secrets["github"]["token"], "ghlocalvalue12345678901234567890")
+
+    def test_masked_secret_sentinel_preserves_every_existing_secret_via_api(self):
+        server.update_settings({
+            "github": {"token": "ghlocalvalue12345678901234567890"},
+            "notifications": {"token": "old-notification-token"},
+            "security": {"oidc_client_secret": "old-oidc-client-secret"},
+        })
+        secret_path = server.DATA / "secrets.json"
+        before = secret_path.read_bytes()
+
+        status, response = self.request("POST", "/api/settings", {
+            "github": {"token": "masked"},
+            "notifications": {"token": "masked"},
+            "security": {"oidc_client_secret": "masked"},
+        })
+
+        self.assertEqual(status, 200)
+        self.assertEqual(secret_path.read_bytes(), before)
+        self.assertNotIn("masked", secret_path.read_text())
+        self.assertTrue(response["settings"]["github"]["token_configured"])
+        self.assertTrue(response["settings"]["notifications"]["token_configured"])
+        self.assertTrue(response["settings"]["security"]["oidc_client_secret_configured"])
+
+    def test_empty_secret_inputs_preserve_existing_values_via_api(self):
+        server.update_settings({
+            "github": {"token": "ghlocalvalue12345678901234567890"},
+            "notifications": {"token": "old-notification-token"},
+            "security": {"oidc_client_secret": "old-oidc-client-secret"},
+        })
+        secret_path = server.DATA / "secrets.json"
+        before = secret_path.read_bytes()
+
+        status, _response = self.request("POST", "/api/settings", {
+            "github": {"token": ""},
+            "notifications": {"token": ""},
+            "security": {"oidc_client_secret": ""},
+        })
+
+        self.assertEqual(status, 200)
+        self.assertEqual(secret_path.read_bytes(), before)
+
+    def test_masked_oidc_secret_without_existing_value_is_rejected_via_api(self):
+        with mock.patch.dict(os.environ, {"DEBBUILDER_OIDC_CLIENT_SECRET": ""}):
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                self.request("POST", "/api/settings", {"security": {
+                    "auth_mode": "oidc",
+                    "oidc_issuer": "https://id.example.test",
+                    "oidc_client_id": "debbuilder",
+                    "oidc_redirect_uri": "https://apt.example.test/auth/callback",
+                    "oidc_client_secret": "masked",
+                }})
+        self.assertEqual(raised.exception.code, 422)
+        error = json.loads(raised.exception.read())["error"]
+        self.assertEqual(error["code"], "missing_required_secret")
+        self.assertEqual(error["path"], "$.security.oidc_client_secret")
+        self.assertFalse((server.DATA / "settings.json").exists())
+        self.assertFalse((server.DATA / "secrets.json").exists())
+
+    def test_late_invalid_oidc_semantics_cannot_partially_replace_github_secret(self):
+        server.update_settings({"github": {"token": "gholdvalue123456789012345678901"}})
+        settings_path = server.DATA / "settings.json"
+        secret_path = server.DATA / "secrets.json"
+        settings_before = settings_path.read_bytes()
+        secrets_before = secret_path.read_bytes()
+
+        with mock.patch.dict(os.environ, {"DEBBUILDER_OIDC_CLIENT_SECRET": ""}):
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                self.request("POST", "/api/settings", {
+                    "github": {"token": "ghnewvalue123456789012345678901"},
+                    "notifications": {"token": "new-notification-token"},
+                    "security": {
+                        "auth_mode": "oidc",
+                        "oidc_issuer": "https://id.example.test",
+                        "oidc_client_id": "debbuilder",
+                        "oidc_redirect_uri": "https://apt.example.test/auth/callback",
+                    },
+                })
+
+        self.assertEqual(raised.exception.code, 422)
+        self.assertEqual(json.loads(raised.exception.read())["error"]["path"], "$.security.oidc_client_secret")
+        self.assertEqual(settings_path.read_bytes(), settings_before)
+        self.assertEqual(secret_path.read_bytes(), secrets_before)
+        self.assertEqual(json.loads(secret_path.read_text())["github"]["token"], "gholdvalue123456789012345678901")
+
+    def test_invalid_resource_update_cannot_partially_replace_secret(self):
+        server.update_settings({"github": {"token": "gholdvalue123456789012345678901"}})
+        settings_path = server.DATA / "settings.json"
+        secret_path = server.DATA / "secrets.json"
+        before = (settings_path.read_bytes(), secret_path.read_bytes())
+
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            self.request("POST", "/api/settings", {
+                "github": {"token": "ghnewvalue123456789012345678901"},
+                "resource_limits": {"tasks_max": -1},
+            })
+
+        self.assertEqual(raised.exception.code, 422)
+        self.assertEqual(
+            (settings_path.read_bytes(), secret_path.read_bytes()), before,
+        )
+
+    def test_explicit_secret_replacements_are_validated_then_persisted_together(self):
+        status, _response = self.request("POST", "/api/settings", {
+            "github": {"token": "ghreplacement12345678901234567890"},
+            "notifications": {"token": "replacement-notification-token"},
+            "security": {"oidc_client_secret": "replacement-oidc-secret"},
+        })
+        self.assertEqual(status, 200)
+        secrets = json.loads((server.DATA / "secrets.json").read_text())
+        self.assertEqual(secrets["github"]["token"], "ghreplacement12345678901234567890")
+        self.assertEqual(secrets["notifications"]["token"], "replacement-notification-token")
+        self.assertEqual(secrets["oidc"]["client_secret"], "replacement-oidc-secret")
+        self.assertNotIn("masked", json.dumps(secrets))
+
+    def test_resource_only_repair_is_reachable_via_api_but_get_remains_fail_closed(self):
+        settings = server.settings_defaults()
+        settings["resource_limits"]["memory_max_bytes"] = 1073741824
+        settings["resource_limits"]["tasks_max"] = "bad"
+        settings_path = server.DATA / "settings.json"
+        settings_path.write_text(json.dumps(settings))
+
+        with self.assertRaises(urllib.error.HTTPError) as get_error:
+            self.request("GET", "/api/settings")
+        self.assertEqual(get_error.exception.code, 503)
+
+        status, response = self.request("POST", "/api/settings", {
+            "resource_limits": {"tasks_max": 48},
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(response["settings"]["resource_limits"]["memory_max_bytes"], 1073741824)
+        self.assertEqual(response["settings"]["resource_limits"]["tasks_max"], 48)
+
+        saved = json.loads(settings_path.read_text())
+        self.assertEqual(saved["schema_version"], 1)
+        self.assertEqual(set(saved["resource_limits"]), {
+            "memory_max_bytes", "tasks_max", "cpu_quota_percent",
+            "io_read_bandwidth_max_bytes_per_sec", "io_write_bandwidth_max_bytes_per_sec",
+        })
+
+    def test_resource_repair_uses_the_stored_v1_authentication_mode(self):
+        settings = server.settings_defaults()
+        settings["security"]["auth_mode"] = "header"
+        settings["resource_limits"]["tasks_max"] = "bad"
+        (server.DATA / "settings.json").write_text(json.dumps(settings))
+        payload = {"resource_limits": {"tasks_max": 24}}
+
+        with self.assertRaises(urllib.error.HTTPError) as unauthenticated:
+            self.request("POST", "/api/settings", payload)
+        self.assertEqual(unauthenticated.exception.code, 503)
+
+        status, response = self.request(
+            "POST", "/api/settings", payload, headers={server.AUTH_HEADER: "operator"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(response["settings"]["resource_limits"]["tasks_max"], 24)
+
+    def test_resource_repair_prevalidates_secrets_before_writing_settings(self):
+        settings = server.settings_defaults()
+        settings["resource_limits"]["tasks_max"] = "bad"
+        settings_path = server.DATA / "settings.json"
+        settings_path.write_text(json.dumps(settings))
+        secret_path = server.DATA / "secrets.json"
+        secret_path.write_text('{"schema_version":1,"github":')
+        secret_path.chmod(0o600)
+        settings_before = settings_path.read_bytes()
+        secrets_before = secret_path.read_bytes()
+
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            self.request("POST", "/api/settings", {
+                "resource_limits": {"tasks_max": 32},
+            })
+
+        self.assertEqual(raised.exception.code, 422)
+        error = json.loads(raised.exception.read())["error"]
+        self.assertEqual(error["code"], "invalid_secrets_json")
+        self.assertEqual(error["path"], "$")
+        self.assertEqual(settings_path.read_bytes(), settings_before)
+        self.assertEqual(secret_path.read_bytes(), secrets_before)
 
     def test_notification_settings_reject_unknown_types(self):
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             self.request("POST", "/api/settings", {"notifications": {"type": "webhook"}})
-        self.assertEqual(ctx.exception.code, 400)
+        self.assertEqual(ctx.exception.code, 422)
 
     def test_disabled_ntfy_accepts_an_empty_configuration(self):
         status, updated = self.request("POST", "/api/settings", {
@@ -796,17 +1169,16 @@ class AdminApiTests(AdminApiCase):
         })
         self.assertEqual(status, 200)
         notifications = updated["settings"]["notifications"]
-        self.assertFalse(notifications["configured"])
         self.assertEqual(notifications["server_url"], "")
         self.assertEqual(notifications["topic"], "")
 
     def test_repo_settings_reject_secret_like_repository_values(self):
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             self.request("POST", "/api/settings", {"apt": {"repository": "https://example.invalid/?token=abc12345"}})
-        self.assertEqual(ctx.exception.code, 400)
+        self.assertEqual(ctx.exception.code, 422)
 
     def test_recipe_metadata_can_be_created_loaded_and_renamed(self):
-        workflow = {"name":"flood","package":{"name":"flood"},"source":{"repository":"jesec/flood","tracking":"latest_release"},"active":True}
+        workflow = {"schema_version":5,"name":"flood","package":{"name":"flood"},"source":{"repository":"jesec/flood","tracking":"latest_release"},"active":True}
         status, _ = self.request("POST", "/api/workflows/flood", {"workflow": workflow})
         self.assertEqual(status, 200)
         status, loaded = self.request("GET", "/api/workflows/flood")
@@ -820,8 +1192,9 @@ class AdminApiTests(AdminApiCase):
 
     def test_recipe_json_validation_is_canonical_and_does_not_write(self):
         recipe = {
+            "schema_version": 5,
             "name": "validated-only", "package": {"name": "validated-only", "version_revision": "1+b1"},
-            "build": {"timeout": 90, "output": {"mode": "source"}},
+            "build": {"inactivity_timeout": 90, "output": {"mode": "source"}},
             "install": {"directories": []},
         }
         before = list(server.USER_WORKFLOWS.iterdir())
@@ -834,7 +1207,7 @@ class AdminApiTests(AdminApiCase):
         self.assertEqual(before, list(server.USER_WORKFLOWS.iterdir()))
 
     def test_recipe_json_validation_reports_structured_errors(self):
-        for recipe, code in (([], "invalid_root"), ({"package": {}}, "missing_id"), ({"name": "demo", "unknown": 1}, "unknown_field"), ({"name": "demo", "build": []}, "invalid_recipe")):
+        for recipe, code in (([], "invalid_root"), ({"schema_version": 5, "package": {}}, "missing_id"), ({"schema_version": 5, "name": "demo", "unknown": 1}, "unknown_field"), ({"schema_version": 5, "name": "demo", "build": []}, "invalid_recipe")):
             with self.subTest(code=code), self.assertRaises(urllib.error.HTTPError) as raised:
                 self.request("POST", "/api/recipes/validate", {"recipe": recipe})
             self.assertEqual(raised.exception.code, 422)
@@ -853,8 +1226,81 @@ class AdminApiTests(AdminApiCase):
         self.assertEqual(syntax_error["code"], "invalid_json")
         self.assertIn("line 1", syntax_error["message"])
 
+    def test_all_recipe_authoring_and_run_apis_reject_build_version_source(self):
+        before_runs = {path.name for path in (server.DATA / "builds").iterdir()}
+        for index, (path, body) in enumerate((
+            ("/api/recipes/validate", {"recipe": None}),
+            ("/api/recipes/import", {"recipe": None}),
+            ("/api/workflows/unsupported-workflow", {"workflow": None}),
+            ("/api/upstream-archive/inspect", {"workflow": None}),
+            ("/api/run", {"workflow": None, "dry_run": True}),
+        )):
+            name = f"unsupported-version-{index}"
+            recipe = {
+                "schema_version": 5, "name": name, "active": True,
+                "package": {"name": name},
+                "source": {"repository": f"example/{name}", "version": {"source": "build"}},
+                "artifact": {
+                    "mode": "upstream_archive", "type": "archive", "archive_source": "github_source",
+                    "payload": {"mode": "entire_archive"},
+                },
+            }
+            if path == "/api/workflows/unsupported-workflow":
+                recipe["name"] = "unsupported-workflow"
+                recipe["package"]["name"] = "unsupported-workflow"
+                recipe["source"]["repository"] = "example/unsupported-workflow"
+            payload = {**body, "recipe" if path.startswith("/api/recipes/") else "workflow": recipe}
+            with self.subTest(path=path), self.assertRaises(urllib.error.HTTPError) as raised:
+                self.request("POST", path, payload)
+            self.assertEqual(raised.exception.code, 422)
+            error = json.loads(raised.exception.read().decode())["error"]
+            self.assertEqual(error["code"], "unsupported_version_source")
+            if path != "/api/run":
+                self.assertEqual(error["path"], "$.source.version.source")
+
+        self.assertFalse((server.USER_WORKFLOWS / "unsupported-version-1.json").exists())
+        self.assertFalse((server.USER_WORKFLOWS / "unsupported-workflow.json").exists())
+        self.assertEqual({path.name for path in (server.DATA / "builds").iterdir()}, before_runs)
+
+    def test_all_recipe_authoring_and_run_apis_reject_derived_service_configured(self):
+        before_runs = {path.name for path in (server.DATA / "builds").iterdir()}
+        for index, (path, body) in enumerate((
+            ("/api/recipes/validate", {"recipe": None}),
+            ("/api/recipes/import", {"recipe": None}),
+            ("/api/workflows/derived-service-workflow", {"workflow": None}),
+            ("/api/upstream-archive/inspect", {"workflow": None}),
+            ("/api/run", {"workflow": None, "dry_run": True}),
+        )):
+            name = f"derived-service-{index}"
+            recipe = {
+                "schema_version": 5, "name": name, "active": True,
+                "package": {"name": name},
+                "source": {"repository": f"example/{name}"},
+                "artifact": {
+                    "mode": "upstream_archive", "type": "archive", "archive_source": "github_source",
+                    "payload": {"mode": "entire_archive"},
+                },
+                "service": {"configured": False, "enabled": False},
+            }
+            if path == "/api/workflows/derived-service-workflow":
+                recipe["name"] = "derived-service-workflow"
+                recipe["package"]["name"] = "derived-service-workflow"
+                recipe["source"]["repository"] = "example/derived-service-workflow"
+            payload = {**body, "recipe" if path.startswith("/api/recipes/") else "workflow": recipe}
+            with self.subTest(path=path), self.assertRaises(urllib.error.HTTPError) as raised:
+                self.request("POST", path, payload)
+            self.assertEqual(raised.exception.code, 422)
+            error = json.loads(raised.exception.read().decode())["error"]
+            self.assertEqual(error["code"], "unknown_field")
+            if path != "/api/run":
+                self.assertEqual(error.get("path"), "$.service.configured")
+
+        self.assertFalse((server.USER_WORKFLOWS / "derived-service-1.json").exists())
+        self.assertFalse((server.USER_WORKFLOWS / "derived-service-workflow.json").exists())
+        self.assertEqual({path.name for path in (server.DATA / "builds").iterdir()}, before_runs)
+
     def test_recipe_json_import_requires_explicit_collision_replacement(self):
-        recipe = {"name": "imported", "package": {"name": "imported"}, "install": {"directories": []}}
+        recipe = {"schema_version": 5, "name": "imported", "package": {"name": "imported"}, "install": {"directories": []}}
         status, created = self.request("POST", "/api/recipes/import", {"recipe": recipe, "replace": False})
         self.assertEqual(status, 200)
         self.assertTrue(created["created"])
@@ -875,12 +1321,13 @@ class AdminApiTests(AdminApiCase):
         self.assertEqual(json.loads((server.USER_WORKFLOWS / "imported.json").read_text())["package"]["version_revision"], "1+b1")
 
     def test_recipe_json_import_rechecks_collision_after_validation(self):
-        recipe = {"name": "late-collision", "package": {"name": "late-collision"}, "install": {"directories": []}}
+        recipe = {"schema_version": 5, "name": "late-collision", "package": {"name": "late-collision"}, "install": {"directories": []}}
         status, validated = self.request("POST", "/api/recipes/validate", {"recipe": recipe})
         self.assertEqual(status, 200)
         self.assertIsNone(validated["collision"])
 
-        appeared = server.recipe_for_storage({
+        appeared = server.recipe_document_for_storage({
+            "schema_version": 5,
             "name": "late-collision", "package": {"name": "late-collision", "description": "Created concurrently"},
         })
         server.storage.save_json(server.USER_WORKFLOWS / "late-collision.json", appeared)
@@ -892,7 +1339,7 @@ class AdminApiTests(AdminApiCase):
         self.assertEqual(persisted["package"]["description"], "Created concurrently")
 
     def test_recipe_json_import_cannot_replace_shipped_recipe(self):
-        recipe = {"name": "webapp-recipe", "package": {"name": "webapp"}, "install": {"directories": []}}
+        recipe = {"schema_version": 5, "name": "webapp-recipe", "package": {"name": "webapp"}, "install": {"directories": []}}
         with self.assertRaises(urllib.error.HTTPError) as raised:
             self.request("POST", "/api/recipes/import", {"recipe": recipe, "replace": True})
         self.assertEqual(raised.exception.code, 403)
@@ -900,7 +1347,7 @@ class AdminApiTests(AdminApiCase):
         self.assertFalse((server.USER_WORKFLOWS / "webapp-recipe.json").exists())
 
     def test_reserved_builtin_id_cannot_be_created_imported_deleted_or_renamed(self):
-        recipe = {"name": "debbuilder", "package": {"name": "debbuilder"}}
+        recipe = {"schema_version": 5, "name": "debbuilder", "package": {"name": "debbuilder"}}
         builtin_path = server.USER_WORKFLOWS / "debbuilder.json"
         original = builtin_path.read_bytes()
         with self.assertRaises(urllib.error.HTTPError) as raised:
@@ -920,12 +1367,12 @@ class AdminApiTests(AdminApiCase):
         self.assertEqual(json.loads(raised.exception.read().decode())["error"]["code"], "builtin_recipe_reserved")
 
         status, _ = self.request("POST", "/api/workflows/rename-source", {
-            "workflow": {"name": "rename-source", "package": {"name": "rename-source"}},
+            "workflow": {"schema_version": 5, "name": "rename-source", "package": {"name": "rename-source"}},
         })
         self.assertEqual(status, 200)
         with self.assertRaises(urllib.error.HTTPError) as raised:
             self.request("POST", "/api/workflows/renamed", {
-                "workflow": {"name": "renamed", "package": {"name": "renamed"}},
+                "workflow": {"schema_version": 5, "name": "renamed", "package": {"name": "renamed"}},
                 "previous_id": "debbuilder",
             })
         self.assertEqual(raised.exception.code, 409)
@@ -946,11 +1393,11 @@ class AdminApiTests(AdminApiCase):
         self.assertFalse((server.USER_WORKFLOWS / "alias.json").exists())
         self.assertEqual(builtin_path.read_bytes(), original)
 
-        ordinary = {"name": "matching", "package": {"name": "matching"}}
+        ordinary = {"schema_version": 5, "name": "matching", "package": {"name": "matching"}}
         status, result = self.request("POST", "/api/workflows/matching", {"workflow": ordinary})
         self.assertEqual(status, 200)
         self.assertEqual(result["id"], "matching")
-        persisted = server.recipe_store.load_recipe(server.USER_WORKFLOWS / "matching.json", write_back=False)
+        persisted = server.recipe_store.load_recipe(server.USER_WORKFLOWS / "matching.json")
         self.assertEqual(persisted["name"], "matching")
         self.assertNotIn("management", persisted)
 
@@ -974,7 +1421,7 @@ class AdminApiTests(AdminApiCase):
             "workflow": viewed, "previous_id": "debbuilder",
         })
         self.assertEqual(status, 200)
-        persisted = server.recipe_store.load_recipe(server.USER_WORKFLOWS / "debbuilder.json", write_back=False)
+        persisted = server.recipe_store.load_recipe(server.USER_WORKFLOWS / "debbuilder.json")
         self.assertEqual(persisted["management"]["operator_overrides"], {
             "active": False,
             "build": {"environment": {"HTTP_PROXY": "http://proxy.example.test"}},
@@ -1043,7 +1490,7 @@ class AdminApiTests(AdminApiCase):
         self.assertIn("body too large", error["message"])
 
     def test_user_recipe_can_be_deleted_without_repository_or_system_deletion(self):
-        workflow = {"name":"temporary","package":{"name":"temporary"},"source":{"repository":"example/temporary","tracking":"latest_release"},"active":True}
+        workflow = {"schema_version":5,"name":"temporary","package":{"name":"temporary"},"source":{"repository":"example/temporary","tracking":"latest_release"},"active":True}
         status, _ = self.request("POST", "/api/workflows/temporary", {"workflow": workflow})
         self.assertEqual(status, 200)
         status, listed = self.request("GET", "/api/workflows")
@@ -1064,15 +1511,14 @@ class AdminApiTests(AdminApiCase):
         self.assertNotEqual(packages["temporary"].get("recipe"), "temporary")
 
     def test_recipe_package_can_select_inventory_item_or_create_new_item(self):
-        existing = {"name":"webapp-build","package":{"name":"webapp"},"source":{"repository":"example/webapp","tracking":"latest_release"},"active":True}
+        existing = {"schema_version":5,"name":"webapp-build","package":{"name":"webapp"},"source":{"repository":"example/webapp","tracking":"latest_release"},"active":True}
         status, _ = self.request("POST", "/api/workflows/webapp-build", {"workflow": existing})
         self.assertEqual(status, 200)
-        with mock.patch("debbuilder.release_cache.github_client.latest_release", return_value={"tag":"v3.5.0","name":"3.5.0","url":"https://github.example.test/release","archive_url":"https://github.example.test/archive","assets":[]}):
-            package = server.get_package("webapp")
-            self.assertEqual(package["recipe"], "")
-            self.assertEqual(package["recipe_error"]["code"], "ambiguous_recipe")
-            self.assertEqual(set(package["recipe_error"]["candidates"]), {"webapp-recipe", "webapp-build"})
-        new = {"name":"new-app","package":{"name":"new-app"},"source":{"repository":"example/new-app","tracking":"latest_release"},"active":True}
+        package = server.get_package("webapp")
+        self.assertEqual(package["recipe"], "")
+        self.assertEqual(package["recipe_error"]["code"], "ambiguous_recipe")
+        self.assertEqual(set(package["recipe_error"]["candidates"]), {"webapp-recipe", "webapp-build"})
+        new = {"schema_version":5,"name":"new-app","package":{"name":"new-app"},"source":{"repository":"example/new-app","tracking":"latest_release"},"active":True}
         status, _ = self.request("POST", "/api/workflows/new-app", {"workflow": new})
         self.assertEqual(status, 200)
         created = server.get_package("new-app")
@@ -1080,13 +1526,13 @@ class AdminApiTests(AdminApiCase):
         self.assertEqual(created["source"]["repository"], "example/new-app")
 
     def test_package_projection_uses_a_disabled_recipe_only_as_the_no_enabled_recipe_fallback(self):
-        disabled = {"name": "disabled-fallback", "active": False, "package": {"name": "fallback-app"}, "source": {"repository": "example/fallback"}}
+        disabled = {"schema_version": 5, "name": "disabled-fallback", "active": False, "package": {"name": "fallback-app"}, "source": {"repository": "example/fallback"}}
         status, _ = self.request("POST", "/api/workflows/disabled-fallback", {"workflow": disabled})
         self.assertEqual(status, 200)
         records = server.package_projection_service().recipe_records_by_package()
         self.assertEqual(records["fallback-app"]["id"], "disabled-fallback")
 
-        enabled = {"name": "enabled-preferred", "active": True, "package": {"name": "fallback-app"}, "source": {"repository": "example/preferred"}}
+        enabled = {"schema_version": 5, "name": "enabled-preferred", "active": True, "package": {"name": "fallback-app"}, "source": {"repository": "example/preferred"}}
         status, _ = self.request("POST", "/api/workflows/enabled-preferred", {"workflow": enabled})
         self.assertEqual(status, 200)
         records = server.package_projection_service().recipe_records_by_package()
@@ -1096,7 +1542,7 @@ class AdminApiTests(AdminApiCase):
         status, created = self.request("POST", "/api/packages", {"name": "nested-app", "architecture": "amd64", "source": {"type": "github", "repository": "example/nested-app"}})
         self.assertEqual(status, 200)
         workflow = {
-            "schema_version": 1, "name": "nested-app", "active": True,
+            "schema_version": 5, "name": "nested-app", "active": True,
             "package": {"name": "nested-app", "architecture": "amd64"},
             "source": {"provider": "github", "repository": "example/nested-app", "tracking": "latest_release", "version": {"source": "tag"}},
             "build": {"commands": [], "output": {"mode": "source"}},
@@ -1115,25 +1561,27 @@ class AdminApiTests(AdminApiCase):
         self.assertEqual(listed["recipe"], "nested-app")
         self.assertNotIn("recipe_error", listed)
 
-    def test_published_inventory_package_is_enriched_from_matching_recipe_metadata(self):
-        inventory_file = server.DATA / "repo-current-packages-inventory.json"
-        inventory = json.loads(inventory_file.read_text())
-        inventory.append({
+    def test_local_repository_package_is_enriched_from_matching_observation(self):
+        published = [{
             "Package": "flood", "Version": "4.8.2-0", "Architecture": "amd64",
             "Homepage": None, "Filename": "pool/main/f/flood/flood_4.8.2-0_amd64.deb",
             "Description": "Flood",
-        })
-        inventory_file.write_text(json.dumps(inventory))
+        }]
         storage.save_json(server.DATA / "packages.json", [{
             "name": "flood", "apt_version": "4.8.2-0", "upstream_version": "4.8.2-0",
             "source": {"type": "apt-repository", "repository": ""}, "recipe": "flood",
         }])
         (server.USER_WORKFLOWS / "flood.json").write_text(json.dumps({
+            "schema_version": 5,
             "name": "flood", "package": {"name": "flood"},
             "source": {"repository": "jesec/flood", "tracking": "latest_release", "version": {"source": "tag"}}, "active": True,
         }))
-        release = {"tag":"v4.9.0","name":"Flood 4.9.0","url":"https://github.example.test/flood/4.9.0","archive_url":"https://github.example.test/flood/archive","assets":[]}
-        with mock.patch.dict(server.github_release_cache().entries, {"jesec/flood": (time.time() + 300, release)}, clear=False):
+        recipe = server.read_workflow_file(server.USER_WORKFLOWS / "flood.json")
+        recipe_sha = canonical_recipe_sha256(recipe)
+        server.upstream_observation_service().store.record_success(
+            "flood", recipe_sha, {"display_version": "4.9.0", "display_ref": "v4.9.0"},
+        )
+        with mock.patch("debbuilder.app.live_published_index", return_value=published):
             status, data = self.request("GET", "/api/packages")
         self.assertEqual(status, 200)
         flood = next(package for package in data["packages"] if package["name"] == "flood")
@@ -1146,7 +1594,7 @@ class AdminApiTests(AdminApiCase):
         self.assertEqual(flood["lifecycle_state"], "update_available")
 
     def test_empty_recipe_create_load_duplicate_and_save_metadata(self):
-        workflow = {"name":"empty","package":{"name":"empty"},"source":{"repository":"example/empty","tracking":"latest_release","version":{"source":"tag"}},"active":True}
+        workflow = {"schema_version":5,"name":"empty","package":{"name":"empty"},"source":{"repository":"example/empty","tracking":"latest_release","version":{"source":"tag"}},"active":True}
         self.request("POST", "/api/workflows/empty", {"workflow": workflow})
         _, loaded = self.request("GET", "/api/workflows/empty")
         self.assertNotIn("steps", loaded)
@@ -1156,18 +1604,18 @@ class AdminApiTests(AdminApiCase):
         self.assertNotIn("steps", copied)
         self.assertEqual(copied["source"]["version"]["source"], "tag")
 
-    def test_recipe_v1_is_stored_canonically_and_loaded_with_full_sections(self):
+    def test_recipe_v5_is_stored_canonically_and_loaded_with_full_sections(self):
         recipe = {
-            "schema_version": 1, "name": "v1-demo", "active": True,
-            "package": {"name": "v1-demo", "architecture": "all", "runtime_dependencies": ["python3"]},
-            "source": {"provider": "github", "repository": "example/v1-demo", "tracking": "latest_release", "version": {"source": "tag"}},
+            "schema_version": 5, "name": "v5-demo", "active": True,
+            "package": {"name": "v5-demo", "architecture": "all", "runtime_dependencies": ["python3"]},
+            "source": {"provider": "github", "repository": "example/v5-demo", "tracking": "latest_release", "version": {"source": "tag"}},
             "build": {"extra_dependencies": ["python3-dev"], "commands": ["python3 -m build"], "working_directory": ".", "output": {"mode": "path", "path": "dist"}},
-            "install": {"destination": "/opt/v1-demo", "owner": {"user": "root", "group": "root"}, "config_policy": "replace", "config_files": [{"source": "demo.conf", "destination": "/etc/v1-demo.conf"}]},
-            "service": {"configured": True, "name": "v1-demo.service", "user": "v1-demo", "group": "v1-demo", "command": "/usr/bin/python3 /opt/v1-demo/server.py"},
+            "install": {"destination": "/opt/v5-demo", "owner": {"user": "root", "group": "root"}, "config_files": [{"source": "demo.conf", "destination": "/etc/v5-demo.conf", "policy": "replace"}]},
+            "service": {"name": "v5-demo.service", "user": "v5-demo", "group": "v5-demo", "command": "/usr/bin/python3 /opt/v5-demo/server.py"},
         }
-        status, _ = self.request("POST", "/api/workflows/v1-demo", {"workflow": recipe})
+        status, _ = self.request("POST", "/api/workflows/v5-demo", {"workflow": recipe})
         self.assertEqual(status, 200)
-        stored = json.loads((server.USER_WORKFLOWS / "v1-demo.json").read_text())
+        stored = json.loads((server.USER_WORKFLOWS / "v5-demo.json").read_text())
         self.assertEqual(stored["schema_version"], 5)
         self.assertEqual(stored["runtime_apt_repositories"], [])
         self.assertNotIn("package_name", stored)
@@ -1175,29 +1623,23 @@ class AdminApiTests(AdminApiCase):
         self.assertNotIn("config_policy", stored["install"])
         self.assertEqual(stored["install"]["config_files"][0]["policy"], "replace")
         self.assertNotIn("configured", stored["service"])
-        _, loaded = self.request("GET", "/api/workflows/v1-demo")
+        _, loaded = self.request("GET", "/api/workflows/v5-demo")
         self.assertEqual(loaded["build"]["extra_dependencies"], ["python3-dev"])
         self.assertEqual(loaded["install"]["owner"]["user"], "root")
-        self.assertEqual(loaded["service"]["user"], "v1-demo")
-        self.assertTrue(loaded["service"]["configured"])
+        self.assertEqual(loaded["service"]["user"], "v5-demo")
+        self.assertNotIn("configured", loaded["service"])
 
-    def test_existing_user_recipe_get_canonicalizes_without_durable_mutation(self):
-        path = server.USER_WORKFLOWS / "loaded-legacy.json"
-        path.write_text(json.dumps({
-            "schema_version": 1,
-            "name": "loaded-legacy",
-            "build": {"timeout": 45, "output": {"mode": "source"}},
-            "steps": [],
-        }))
-
-        status, loaded = self.request("GET", "/api/workflows/loaded-legacy")
-        stored = json.loads(path.read_text())
-
-        self.assertEqual(status, 200)
-        self.assertEqual(loaded["schema_version"], 5)
-        self.assertEqual(stored["schema_version"], 1)
-        self.assertEqual(stored["build"]["timeout"], 45)
-        self.assertIn("steps", stored)
+    def test_recipe_import_rejects_unversioned_and_v0_through_v4(self):
+        for version in (None, 0, 1, 2, 3, 4):
+            recipe = {"name": f"old-{version}"}
+            if version is not None:
+                recipe["schema_version"] = version
+            with self.subTest(version=version), self.assertRaises(urllib.error.HTTPError) as raised:
+                self.request("POST", "/api/recipes/import", {"recipe": recipe})
+            self.assertEqual(raised.exception.code, 422)
+            error = json.loads(raised.exception.read())["error"]
+            self.assertEqual(error["code"], "unsupported_recipe_schema")
+            self.assertEqual(error["path"], "$.schema_version")
 
     def test_readonly_recipe_cannot_be_deleted(self):
         with self.assertRaises(urllib.error.HTTPError) as ctx:
@@ -1208,21 +1650,22 @@ class AdminApiTests(AdminApiCase):
     def test_disabled_recipe_cannot_run_via_direct_test_or_build_api(self):
         for dry_run in (True, False):
             with self.subTest(dry_run=dry_run), self.assertRaises(urllib.error.HTTPError) as ctx:
-                self.request("POST", "/api/run", {"workflow":{"name":"disabled","active":False,"steps":[]}, "dry_run":dry_run})
+                self.request("POST", "/api/run", {"workflow":{"schema_version":5,"name":"disabled","active":False}, "dry_run":dry_run})
             self.assertEqual(ctx.exception.code, 409)
 
-    def test_legacy_run_payload_without_active_remains_enabled(self):
-        workflow = {"name": "legacy-enabled", "steps": []}
-        execute, finished = self.terminal_executor("prepared")
-        with mock.patch("debbuilder.app.execute_queued_recipe_run", side_effect=execute):
-            status, response = self.request("POST", "/api/run", {"workflow": workflow, "dry_run": True})
-            self.assertTrue(finished.wait(2))
-        self.assertEqual(status, 202)
-        self.assertEqual(response["status"], "queued")
-        self.assertEqual(BuildStore(server.DATA / "builds").load(response["run_id"])["mode"], "dry_run")
+    def test_inline_run_rejects_old_schema_before_creating_a_run(self):
+        before = set((server.DATA / "builds").iterdir())
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            self.request("POST", "/api/run", {"workflow": {"schema_version": 4, "name": "old-inline"}, "dry_run": True})
+        self.assertEqual(raised.exception.code, 422)
+        self.assertEqual(json.loads(raised.exception.read())["error"]["code"], "unsupported_recipe_schema")
+        self.assertEqual(set((server.DATA / "builds").iterdir()), before)
 
-    def test_real_build_uses_structured_pipeline_without_legacy_settings_gate(self):
-        workflow = {"name": "enabled", "active": True, "steps": []}
+    def test_real_build_uses_structured_v5_pipeline(self):
+        workflow = {
+            "schema_version": 5, "name": "enabled", "active": True,
+            "source": {"repository": "example/enabled", "tracking": "manual", "ref": "v1.0.0"},
+        }
         execute, finished = self.terminal_executor("success")
         with mock.patch("debbuilder.app.execute_queued_recipe_run", side_effect=execute):
             status, response = self.request("POST", "/api/run", {"workflow": workflow, "dry_run": False})
@@ -1233,11 +1676,11 @@ class AdminApiTests(AdminApiCase):
 
     def test_auto_validation_does_not_run_after_dry_run(self):
         server.update_settings({"automation": {"auto_validate_after_successful_build": True, "auto_publish_after_successful_validation": True}})
-        workflow = {"name": "dry-auto", "active": True, "steps": []}
-        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": "dry-run", "status": "success"}) as run, mock.patch.object(server.APPLICATION_VALIDATION_MANAGER, "admit") as validate:
-            response = server.run_recipe_pipeline_with_automation(workflow, dry_run=True)
-        self.assertEqual(response["run_id"], "dry-run")
-        run.assert_called_once_with(workflow, dry_run=True)
+        store = BuildStore(server.DATA / "builds")
+        run = store.create({"schema_version": 5, "name": "dry-auto", "package": {"name": "dry-auto"}}, mode="dry_run", run_id="dry-run")
+        with mock.patch.object(server.APPLICATION_VALIDATION_MANAGER, "admit") as validate:
+            response = self.complete_manual_run(run["id"])
+        self.assertEqual(response["run_id"], run["id"])
         validate.assert_not_called()
 
     def test_successful_real_build_auto_validates_latest_artifact_when_enabled(self):
@@ -1245,8 +1688,8 @@ class AdminApiTests(AdminApiCase):
         server.update_settings({"automation": {"auto_validate_after_successful_build": True, "auto_publish_after_successful_validation": False}})
 
         validation = {"id": "auto-validation", "attempt_id": "auto-validation", "build_run_id": run["id"], "status": "queued"}
-        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": run["id"], "status": "success"}), mock.patch.object(server.APPLICATION_VALIDATION_MANAGER, "admit", return_value=validation) as validate_mock, mock.patch("debbuilder.app.publish_build_artifact") as publish:
-            response = server.run_recipe_pipeline_with_automation({"name": "latest-auto-recipe", "active": True}, dry_run=False)
+        with mock.patch.object(server.APPLICATION_VALIDATION_MANAGER, "admit", return_value=validation) as validate_mock, mock.patch("debbuilder.app.publish_build_artifact") as publish:
+            response = self.complete_manual_run(run["id"])
         validate_mock.assert_called_once_with("latest-auto-run", {}, automatic=True, publish_after_success=False)
         publish.assert_not_called()
         self.assertEqual(response["validation"]["status"], "queued")
@@ -1255,18 +1698,18 @@ class AdminApiTests(AdminApiCase):
     def test_auto_validation_uses_returned_build_run_not_previous_artifact(self):
         store, old, old_artifact = self.successful_build_run(run_id="old-auto-run", package="same-auto", version="1.0-1")
         old["created_at"] = "2026-01-01T00:00:00+00:00"
-        old["validations"] = [{"id": "old-validation", "artifact": str(old_artifact), "status": "success"}]
         store.save(old)
+        record_canonical_validation(store, old, attempt_id="old-validation")
         _, current, current_artifact = self.successful_build_run(run_id="current-auto-run", package="same-auto", version="2.0-1")
         current["created_at"] = "2026-01-02T00:00:00+00:00"
         store.save(current)
         server.update_settings({"automation": {"auto_validate_after_successful_build": True}})
 
         validation = {"id": "current-validation", "attempt_id": "current-validation", "build_run_id": "current-auto-run", "status": "queued"}
-        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": "current-auto-run", "status": "success"}), mock.patch.object(server.APPLICATION_VALIDATION_MANAGER, "admit", return_value=validation) as validate_mock:
-            server.run_recipe_pipeline_with_automation({"name": "same-auto-recipe", "active": True}, dry_run=False)
+        with mock.patch.object(server.APPLICATION_VALIDATION_MANAGER, "admit", return_value=validation) as validate_mock:
+            self.complete_manual_run(current["id"])
         validate_mock.assert_called_once_with("current-auto-run", {}, automatic=True, publish_after_success=False)
-        self.assertEqual(len(store.load("old-auto-run")["validations"]), 1)
+        self.assertEqual(len(server.validation_service.list_attempts(store, "old-auto-run")), 1)
         self.assertIsNone(store.load("current-auto-run").get("validations"))
 
     def test_auto_validation_failure_records_validation_failed_lifecycle(self):
@@ -1274,8 +1717,8 @@ class AdminApiTests(AdminApiCase):
         server.update_settings({"automation": {"auto_validate_after_successful_build": True}})
 
         validation = {"id": "failed-validation", "build_run_id": run["id"], "status": "failed", "error": {"message": "admission failed"}}
-        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": run["id"], "status": "success"}), mock.patch.object(server.APPLICATION_VALIDATION_MANAGER, "admit", return_value=validation):
-            response = server.run_recipe_pipeline_with_automation({"name": "failed-auto-recipe", "active": True}, dry_run=False)
+        with mock.patch.object(server.APPLICATION_VALIDATION_MANAGER, "admit", return_value=validation):
+            response = self.complete_manual_run(run["id"])
         self.assertEqual(response["validation"]["status"], "failed")
 
     def test_auto_publish_runs_after_successful_auto_validation_when_enabled(self):
@@ -1283,8 +1726,8 @@ class AdminApiTests(AdminApiCase):
         server.update_settings({"automation": {"auto_validate_after_successful_build": True, "auto_publish_after_successful_validation": True}})
 
         validation = {"id": "publish-validation", "attempt_id": "publish-validation", "build_run_id": run["id"], "status": "queued"}
-        with mock.patch("debbuilder.app.run_recipe_pipeline", return_value={"run_id": run["id"], "status": "success"}), mock.patch.object(server.APPLICATION_VALIDATION_MANAGER, "admit", return_value=validation) as validate_mock, mock.patch("debbuilder.app.publish_build_artifact") as publish_mock:
-            response = server.run_recipe_pipeline_with_automation({"name": "publish-auto-recipe", "active": True}, dry_run=False)
+        with mock.patch.object(server.APPLICATION_VALIDATION_MANAGER, "admit", return_value=validation) as validate_mock, mock.patch("debbuilder.app.publish_build_artifact") as publish_mock:
+            response = self.complete_manual_run(run["id"])
         validate_mock.assert_called_once_with("publish-auto-run", {}, automatic=True, publish_after_success=True)
         publish_mock.assert_not_called()
         self.assertEqual(response["validation"]["status"], "queued")
@@ -1313,10 +1756,13 @@ class AdminApiTests(AdminApiCase):
 
     def test_dry_run_creates_structured_workspace_and_is_visible_in_logs(self):
         workflow = {
-            "name": "structured", "source": {"repository": "example/structured"}, "active": True,
+            "schema_version": 5,
+            "name": "structured", "source": {
+                "repository": "example/structured", "tracking": "manual", "ref": "v1.0.0",
+            }, "active": True,
             "package": {"name": "structured", "maintainer": "Test <test@example.test>", "description": "Structured test package"},
         }
-        def acquire(_recipe, workspace, token=""):
+        def acquire(_recipe, workspace, token="", expected_identity=None):
             source = Path(workspace) / "source"
             (source / "requirements.txt").write_text("requests\n")
             return {"repository":"example/structured","ref":"v1.0.0","tag":"v1.0.0","upstream_version":"1.0.0","debian_version":"1.0.0-1","source_directory":str(source)}
@@ -1337,7 +1783,9 @@ class AdminApiTests(AdminApiCase):
         row = next(item for item in executions["executions"] if item["id"] == result["run_id"])
         self.assertEqual(row["status"], "prepared")
         _, detail = self.request("GET", f"/api/executions/{result['run_id']}")
-        self.assertEqual(detail["execution"]["recipe_sha256"], json.loads((workspace / "run.json").read_text())["recipe_sha256"])
+        self.assertNotIn("recipe_sha256", detail["execution"])
+        self.assertNotIn("workspace", detail["execution"])
+        self.assertNotIn("schema_version", detail["execution"])
         self.assertNotIn("log", detail["execution"])
         _, log = self.request("GET", f"/api/executions/{result['run_id']}/logs?verbosity=raw")
         self.assertIn("snapshot", log["log"]["text"])
@@ -1379,7 +1827,9 @@ class AdminApiTests(AdminApiCase):
             with self.assertRaises(urllib.error.HTTPError) as invalid:
                 self.request("GET", "/api/executions/%2F/validations/invalid")
             self.assertEqual(invalid.exception.code, 400)
-            self.assertEqual(json.loads(invalid.exception.read())["error"]["code"], "invalid_validation_identity")
+            invalid_error = json.loads(invalid.exception.read())["error"]
+            self.assertEqual(invalid_error["code"], "invalid_validation_identity")
+            self.assertNotIn("details", invalid_error)
             self.assertEqual(attempt_path.read_bytes(), before)
             status, cancelled = self.request("POST", validation["cancel_url"], {})
             self.assertEqual(status, 200)
@@ -1394,12 +1844,14 @@ class AdminApiTests(AdminApiCase):
         with self.assertRaises(urllib.error.HTTPError) as raised:
             self.request("POST", f"/api/executions/{run['id']}/validate", {"unexpected": True})
         self.assertEqual(raised.exception.code, 400)
+        self.assertNotIn("details", json.loads(raised.exception.read())["error"])
         root = store.run_dir(run["id"]) / "manifests/validation-attempts"
         self.assertEqual(list(root.iterdir()) if root.exists() else [], [])
 
     def test_validation_worker_orchestrates_preparation_then_offline_lifecycle(self):
         store = BuildStore(server.DATA / "builds")
         configured = {
+            "schema_version": 5,
             "name": "cp1c-orchestration",
             "package": {"name": "cp1c-orchestration"},
             "source": {"repository": "owner/cp1c-orchestration"},
@@ -1417,6 +1869,7 @@ class AdminApiTests(AdminApiCase):
         notifier = mock.Mock()
         notifier.notify_validation_result.side_effect = RuntimeError("notification unavailable")
         with mock.patch("debbuilder.app.dependency_preparation.prepare_runtime_dependencies", return_value={"prepared_dependencies": prepared}) as prepare, \
+                mock.patch("debbuilder.app.validation_service.load_prepared", return_value=prepared), \
                 mock.patch("debbuilder.app.dependency_preparation.begin_lifecycle_attempt") as begin, \
                 mock.patch("debbuilder.app.dependency_preparation.complete_lifecycle_attempt") as complete, \
                 mock.patch("debbuilder.app.dependency_preparation.SUPERVISOR.register") as register, \
@@ -1438,7 +1891,7 @@ class AdminApiTests(AdminApiCase):
         self.assertEqual(prepare.call_args.kwargs["current_artifact"], artifact)
         self.assertEqual(lifecycle.call_args.kwargs["prepared_dependencies"], prepared)
         self.assertEqual(lifecycle.call_args.kwargs["attempt_id"], "attempt")
-        self.assertTrue(prepare.call_args.kwargs["admitted"])
+        self.assertEqual(prepare.call_args.args, (run["id"], "attempt"))
         begin.assert_called_once()
         complete.assert_called_once()
         register.assert_called_once()
@@ -1458,7 +1911,13 @@ class AdminApiTests(AdminApiCase):
         self.assertTrue(view["security"]["oidc_client_secret_configured"])
         self.assertNotIn("very-private", json.dumps(view))
         self.assertNotIn("build", view)
-        server.update_settings({"security": {**view["security"], "oidc_client_secret": ""}})
+        server.update_settings({"security": {
+            "auth_mode": view["security"]["auth_mode"],
+            "oidc_issuer": view["security"]["oidc_issuer"],
+            "oidc_client_id": view["security"]["oidc_client_id"],
+            "oidc_redirect_uri": view["security"]["oidc_redirect_uri"],
+            "oidc_client_secret": "",
+        }})
         self.assertEqual(server.oidc_client_secret(server.DATA), "very-private-client-secret")
         disabled = server.update_settings({"security": {"auth_mode": "none", "oidc_issuer": "", "oidc_client_id": "", "oidc_redirect_uri": ""}})
         self.assertEqual(disabled["security"]["auth_mode"], "none")
@@ -1502,6 +1961,7 @@ class AdminApiTests(AdminApiCase):
         secret_path = server.DATA / "secrets.json"
         corrupt = b'{"session":{"cookie_secret":"PRIVATE_TEST_VALUE"}'
         secret_path.write_bytes(corrupt)
+        secret_path.chmod(0o600)
         oidc = {
             "auth_mode": "oidc",
             "oidc_issuer": "https://id.example.test",

@@ -12,6 +12,7 @@ from debbuilder.execution_manager import ExecutionManager, ExecutionManagerError
 
 def recipe(name: str) -> dict:
     return {
+        "schema_version": 5,
         "name": name,
         "active": True,
         "package": {
@@ -475,6 +476,9 @@ class GracefulShutdownTests(unittest.TestCase):
         self.assertFalse(first["complete"])
         self.assertEqual(first["unresolved_active_run_ids"], [run["id"]])
         self.assertEqual(first["errors"][0]["ownership"], "active")
+        self.assertEqual(self.store.load(run["id"])["status"], "running")
+        self.assertIsNone(first["active_context_run_id"])
+        self.assertIn(run["id"], manager._unresolved_active_runs)
         self.assertEqual(executed, [run["id"]])
 
         second = manager.shutdown(timeout=2)

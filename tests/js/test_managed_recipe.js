@@ -32,7 +32,7 @@ assert.notEqual(start, -1);
 assert.notEqual(end, -1);
 
 const effective = {
-  schema_version: 4,
+  schema_version: 5,
   name: 'debbuilder',
   active: true,
   resource_limits: {memory_max_bytes: null, tasks_max: 128, cpu_quota_percent: null, io_read_bandwidth_max_bytes_per_sec: null, io_write_bandwidth_max_bytes_per_sec: null},

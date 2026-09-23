@@ -13,6 +13,7 @@ from typing import Callable
 
 from . import storage_pruning
 from .build_models import validate_run
+from .build_store import BuildStore
 from .maintenance import MAINTENANCE_INTERVAL_SECONDS
 from .workspace_cleanup import DEFAULT_POLICY, directory_fd, validate_policy
 
@@ -27,10 +28,6 @@ CATEGORIES = (
 )
 MAX_DIAGNOSTICS = 20
 MAX_LARGEST_RUNS = 5
-KNOWN_CACHE_FILES = frozenset({
-    "github-release-cache.json",
-    "repo-current-packages-inventory.json",
-})
 RUN_METADATA_FILES = frozenset({
     "run.json",
     "recipe.json",
@@ -78,9 +75,7 @@ def _classify_data(relative: Path) -> str:
     if not parts:
         return "unknown"
     if parts[0] != "builds":
-        if parts[0] in KNOWN_CACHE_FILES:
-            return "cache"
-        if parts[0] in {"workflows", "settings.json", "packages.json", "secrets.json", "cookie-secret"}:
+        if parts[0] in {"workflows", "settings.json", "packages.json", "secrets.json", "upstream-observations.json"}:
             return "metadata"
         return "unknown"
     if len(parts) < 3:
@@ -172,9 +167,13 @@ def _read_run_metadata(data_root: Path, run_id: str, scan: _Scan) -> None:
         scan.run_metadata[run_id] = run
         active = run.get("status") in {"pending", "queued", "running", "cancelling"}
         active = active or any(step.get("status") == "running" for step in run.get("steps") or [])
+        from .validation_service import ACTIVE_STATUSES, list_attempts
+
+        attempts = list_attempts(BuildStore(data_root / "builds"), run_id, strict=True)
+        active = active or any(row.get("status") in ACTIVE_STATUSES for row in attempts)
         active = active or any(
             row.get("status") == "running"
-            for key in ("validations", "publications")
+            for key in ("publications",)
             for row in (run.get(key) or [])
             if isinstance(row, dict)
         )

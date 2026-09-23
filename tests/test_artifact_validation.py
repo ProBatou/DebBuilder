@@ -1,3 +1,5 @@
+from tests.lifecycle_helpers import clean_workspace
+from debbuilder import execution_projection
 import json
 import os
 import shutil
@@ -15,15 +17,15 @@ from debbuilder.dependency_preparation import (
     SUPERVISOR,
     begin_lifecycle_attempt,
     complete_lifecycle_attempt,
-    prepare_runtime_dependencies,
     inspect_artifact,
 )
 from debbuilder.execution_cancellation import ExecutionCancelled
 from debbuilder.repository_lock import repository_lease
 from debbuilder.resource_limits import admission_contract, requested_controls
-from debbuilder.validation_backend import BackendError, OciSystemdBackend, OwnedOciSystemdBackend
+from debbuilder.validation_backend import BackendError, OwnedOciSystemdBackend
 from debbuilder.validation_oci import IdentityRegistry, new_identity
 from debbuilder.validation_profiles import python_satisfies
+from tests.validation_helpers import canonical_validation_inputs, prepare_admitted_for_test
 
 
 def recipe(*, service=False, configs=None):
@@ -31,6 +33,7 @@ def recipe(*, service=False, configs=None):
     if configs:
         install.update({"content": {"source": "configured_files"}, "owner": {"user": "root", "group": "root", "create_user": False, "create_group": False}})
     return {
+        "schema_version": 5,
         "name": "demo", "package": {"name": "demo", "architecture": "all", "maintainer": "Demo <demo@example.test>", "description": "Demo"},
         "source": {"repository": "owner/demo"}, "build": {"output": {"mode": "source"}},
         "install": install,
@@ -39,14 +42,28 @@ def recipe(*, service=False, configs=None):
 
 
 class FakeBackend:
-    def __init__(self, *, workspace, image, on_result):
+    def __init__(self, *, workspace, image, on_result, mounts, **_kwargs):
         self.workspace, self.image, self.on_result = workspace, image, on_result
         self.arguments = []
         self.index = 0
         self.removed = False
+        self.installed = {}
+        self.package_inputs = {}
+        for source, target, _options in mounts:
+            source = Path(source)
+            if source.is_dir():
+                for candidate in source.iterdir():
+                    self.package_inputs[f"{target}/{candidate.name}"] = inspect_artifact(
+                        candidate, workspace=Path(workspace),
+                    )
+            else:
+                self.package_inputs[target] = inspect_artifact(source, workspace=Path(workspace))
 
     def start(self, validation_id):
-        return {"runtime": "fake", "image": self.image, "container": validation_id}
+        return {
+            "runtime": "fake", "image": self.image, "container": validation_id,
+            "network": "disabled", "network_verified": True,
+        }
 
     def exec(self, arguments, *, timeout=120, accepted_exit_codes=None):
         self.arguments.append(arguments)
@@ -56,21 +73,49 @@ class FakeBackend:
             stdout = "755|demo|demo|d|/opt/demo\n644|demo|demo|f|/opt/demo/readme\n777|demo|demo|l|/opt/demo/current\n"
         if arguments and arguments[0] == "stat":
             stdout = "644|root|root|regular file|/etc/demo/demo.conf\n"
+        if arguments == ["dpkg", "--print-architecture"]:
+            stdout = "amd64\n"
         if arguments[:3] == ["dpkg-query", "--show", "--showformat=${Status}\\n"]:
             stdout = "install ok installed\n"
-        if arguments[:2] == ["dpkg-query", "--show"] and len(arguments) == 3:
-            exit_code = 1
+        if arguments[:2] == ["dpkg-query", "--show"] and "binary:Package" in arguments[2]:
+            if len(arguments) == 3:
+                stdout = "".join(
+                    f"{package}\t{version}\t{architecture}\tinstalled\n"
+                    for (package, architecture), version in sorted(self.installed.items())
+                )
+            else:
+                package = arguments[3]
+                found = next((
+                    (architecture, version)
+                    for (name, architecture), version in self.installed.items()
+                    if name == package
+                ), None)
+                if found:
+                    architecture, version = found
+                    stdout = f"{package}\t{version}\t{architecture}\tinstalled\n"
+                else:
+                    exit_code = 1
+        elif arguments[:2] == ["dpkg-query", "--show"] and len(arguments) == 3:
+            exit_code = 0 if any(name == arguments[2] for name, _architecture in self.installed) else 1
+        if arguments and arguments[0] == "apt-get" and "install" in arguments:
+            for package_path in arguments[arguments.index("install") + 1:]:
+                metadata = self.package_inputs[package_path]
+                self.installed[(metadata.package, metadata.architecture)] = metadata.version
         if arguments[:3] == ["systemctl", "is-active", "--quiet"] and self.removed:
             exit_code = 3
         accepted = exit_code in (accepted_exit_codes or {0})
         result = {"index": self.index, "command": "fake", "arguments": arguments, "working_directory": str(self.workspace), "status": "success" if exit_code == 0 else "failed", "exit_code": exit_code, "stdout": stdout, "stderr": "", "duration": 0.001, "timed_out": False, "accepted": accepted}
         self.on_result(result)
-        if arguments[:2] == ["dpkg", "--remove"]:
+        if arguments[:2] in (["dpkg", "--remove"], ["dpkg", "--purge"]):
             self.removed = True
+            self.installed = {
+                key: version for key, version in self.installed.items()
+                if key[0] != arguments[2]
+            }
         return result
 
     def stop(self):
-        return None
+        return {"status": "success", "absence_proved": True}
 
 
 class FailingBackend(FakeBackend):
@@ -126,6 +171,22 @@ class MixedPolicyBackend(FakeBackend):
 
 
 class ArtifactValidationTests(unittest.TestCase):
+    def test_lifecycle_refuses_missing_prepared_evidence_before_backend_creation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store, run = self.successful_run(temporary)
+            backend_factory = mock.Mock()
+            with self.assertRaises(artifact_validation.ValidationError) as raised:
+                artifact_validation.validate_artifact(
+                    run["id"], store=store,
+                    prepared_dependencies=None,
+                    attempt_id="missing-preparation",
+                    registry_root=Path(temporary) / "registry",
+                    backend_factory=backend_factory,
+                )
+            self.assertEqual(raised.exception.code, "prepared_dependencies_required")
+            backend_factory.assert_not_called()
+            self.assertEqual(store.load(run["id"]).get("validations", []), [])
+
     def test_local_apt_argv_uses_only_explicit_files_and_disables_sources(self):
         arguments = artifact_validation._local_apt_arguments(
             conffile_option="--force-confold",
@@ -157,6 +218,20 @@ class ArtifactValidationTests(unittest.TestCase):
             with self.assertRaises(BackendError) as raised:
                 backend.start("attempt")
             self.assertEqual(raised.exception.code, "validation_container_overlap")
+
+    def test_owned_lifecycle_refuses_attempt_identity_mismatch_before_oci_creation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            image = {"name": "debbuilder-validation:bookworm", "id": "sha256:" + "a" * 64, "digest": None}
+            backend = OwnedOciSystemdBackend(
+                root, image=image["name"], run_id="run", attempt_id="attempt",
+                registry_root=root / "registry", resource_policy={}, mounts=[],
+                expected_image=image,
+                runner=lambda *_args, **_kwargs: self.fail("OCI must not be called for mismatched ownership"),
+            )
+            with self.assertRaises(BackendError) as raised:
+                backend.start("foreign-attempt")
+            self.assertEqual(raised.exception.code, "validation_attempt_identity_mismatch")
 
     def test_prepared_bundle_is_reverified_and_mounted_read_only_with_explicit_package_paths(self):
         from tests.test_dependency_preparation import build_deb
@@ -296,7 +371,7 @@ class ArtifactValidationTests(unittest.TestCase):
 
                 class InterruptingBackend(FakeBackend):
                     def __init__(self, **kwargs):
-                        super().__init__(workspace=kwargs["workspace"], image=kwargs["image"], on_result=kwargs["on_result"])
+                        super().__init__(**kwargs)
                         self.phase_calls = 0
                         self.stopped = False
                         created.append(self)
@@ -356,11 +431,32 @@ class ArtifactValidationTests(unittest.TestCase):
                     stopped.append(True)
                     return None
 
-            result = artifact_validation.validate_artifact(
+            result = self.canonical_validate(
                 run["id"], store=store, backend_factory=RuntimeCancellingBackend,
             )
             self.assertEqual(result["status"], "cancelled")
             self.assertEqual(stopped, [True])
+
+    def test_backend_stop_error_is_normalized_as_unresolved_cleanup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store, run = self.successful_run(temporary)
+
+            class UnresolvedStopBackend(FakeBackend):
+                def stop(self):
+                    raise BackendError(
+                        "validation_container_identity_mismatch",
+                        "container identity changed during cleanup",
+                    )
+
+            result = self.canonical_validate(
+                run["id"], store=store, backend_factory=UnresolvedStopBackend,
+            )
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["error"]["code"], "validation_container_cleanup_unresolved")
+            self.assertEqual(
+                result["error"]["details"]["cleanup_code"],
+                "validation_container_identity_mismatch",
+            )
 
     def test_cancellation_during_prepared_input_verification_is_durable(self):
         from tests.test_dependency_preparation import build_deb
@@ -407,8 +503,8 @@ class ArtifactValidationTests(unittest.TestCase):
             self.assertEqual(result["error"]["code"], "validation_lifecycle_cancelled")
             backend_factory.assert_not_called()
             durable = store.load(run["id"])
-            self.assertEqual(durable["validations"][-1]["status"], "cancelled")
-            self.assertEqual(durable["artifact"]["validations"][-1]["status"], "cancelled")
+            self.assertNotIn("validations", durable)
+            self.assertNotIn("validations", durable["artifact"])
 
     def test_dependency_install_failure_names_prepared_dependency(self):
         for dependency in ("cp1b-external", "g++", "libfixture-"):
@@ -436,7 +532,7 @@ class ArtifactValidationTests(unittest.TestCase):
     def test_validation_after_workspace_cleanup_preserves_artifact_and_holds_lease(self):
         with tempfile.TemporaryDirectory() as temporary:
             store, run = self.successful_run(temporary)
-            workspace_cleanup.clean_workspace(store, run["id"])
+            clean_workspace(store, run["id"])
             self.assertFalse((Path(run["workspace"]) / "source").exists())
             def backend_factory(**kwargs):
                 # Even preparation, before the persisted status becomes running,
@@ -444,44 +540,80 @@ class ArtifactValidationTests(unittest.TestCase):
                 with self.assertRaises(workspace_cleanup.WorkspaceBusyError):
                     store.clear_log_history(run["id"])
                 return FakeBackend(**kwargs)
-            result = artifact_validation.validate_artifact(run["id"], store=store, backend_factory=backend_factory)
+            result = self.canonical_validate(run["id"], store=store, backend_factory=backend_factory)
             self.assertEqual(result["status"], "success")
             self.assertTrue(Path(run["artifact"]["path"]).exists())
             store.clear_log_history(run["id"])
-            repeated = artifact_validation.validate_artifact(run["id"], store=store, backend_factory=FakeBackend)
+            repeated = self.canonical_validate(run["id"], store=store, backend_factory=FakeBackend)
             self.assertEqual(repeated["status"], "success")
             self.assertTrue(store.execution_history_deleted(run["id"]))
 
     def successful_run(self, root, configured=None):
+        from tests.test_dependency_preparation import build_deb
+
         store = BuildStore(Path(root) / "builds")
         run = store.create(configured or recipe(), mode="build", run_id="successful-run")
         artifact = Path(run["workspace"]) / "artifacts/demo_1.0-1_all.deb"
-        artifact.write_bytes(b"deb")
+        build_deb(Path(root), artifact, package="demo", version="1.0-1")
         run["status"] = "success"
-        run["artifact"] = {"path": str(artifact), "name": artifact.name, "inspection": {"maintainer_scripts": []}}
+        run["artifact"] = {
+            "path": str(artifact), "name": artifact.name,
+            "inspection": {"maintainer_scripts": [], "depends": ""},
+        }
         store.save(run)
         return store, run
 
-    def test_validation_is_persisted_without_changing_build_status(self):
+    def canonical_validate(
+        self,
+        run_id,
+        *,
+        store,
+        previous_artifact="",
+        profile="bookworm",
+        **kwargs,
+    ):
+        inputs = canonical_validation_inputs(
+            store,
+            store.load(run_id),
+            profile=profile,
+            previous_artifact=previous_artifact,
+        )
+        try:
+            return artifact_validation.validate_artifact(
+                run_id,
+                store=store,
+                previous_artifact=previous_artifact,
+                profile=profile,
+                **inputs,
+                **kwargs,
+            )
+        finally:
+            shutil.rmtree(
+                Path(store.load(run_id)["workspace"])
+                / "manifests" / "validation-attempts" / inputs["attempt_id"],
+                ignore_errors=True,
+            )
+
+    def test_lifecycle_returns_evidence_without_persisting_run_copies(self):
         with tempfile.TemporaryDirectory() as temporary:
             store, run = self.successful_run(temporary)
-            result = artifact_validation.validate_artifact(run["id"], store=store, backend_factory=FakeBackend)
+            result = self.canonical_validate(run["id"], store=store, backend_factory=FakeBackend)
             self.assertEqual(result["status"], "success")
             self.assertTrue(any(check["name"] == "package_install" for check in result["checks"]))
             self.assertTrue(any(check["name"] == "package_purge" for check in result["checks"]))
             self.assertTrue(Path(run["workspace"], "validation", result["id"], "commands", "001.json").is_file())
             persisted = store.load(run["id"])
             self.assertEqual(persisted["status"], "success")
-            self.assertEqual(persisted["validations"][0]["status"], "success")
-            self.assertEqual(persisted["artifact"]["validations"][0]["id"], result["id"])
+            self.assertNotIn("validations", persisted)
+            self.assertNotIn("validations", persisted["artifact"])
             permissions = next(check for check in result["checks"] if check["name"] == "installed_payload_permissions")
             self.assertEqual(permissions["status"], "success")
             self.assertEqual(permissions["details"]["symbolic_links"], "excluded (target permissions apply)")
             self.assertEqual(permissions["details"]["count"], 3)
 
-    def test_runtime_repository_declaration_does_not_change_cp1a_execution(self):
+    def test_runtime_repository_declaration_does_not_enable_network_in_lifecycle(self):
         configured = recipe()
-        configured["schema_version"] = 4
+        configured["schema_version"] = 5
         configured["runtime_apt_repositories"] = [{
             "id": "vendor-runtime",
             "uri": "https://apt.example.invalid/runtime",
@@ -502,18 +634,18 @@ class ArtifactValidationTests(unittest.TestCase):
                 backends.append(backend)
                 return backend
 
-            result = artifact_validation.validate_artifact(
+            result = self.canonical_validate(
                 run["id"], store=store, backend_factory=factory,
             )
 
         self.assertEqual(result["status"], "success")
-        self.assertIn(
-            ["dpkg", "--force-confnew", "--install", "/validation/artifacts/demo_1.0-1_all.deb"],
-            backends[0].arguments,
-        )
-        self.assertFalse(any(arguments and arguments[0] in {"apt", "apt-get", "curl"} for arguments in backends[0].arguments))
+        install = next(arguments for arguments in backends[0].arguments if arguments and arguments[0] == "apt-get")
+        self.assertIn("/debbuilder-input/current.deb", install)
+        self.assertIn("Dir::Etc::sourcelist=/dev/null", install)
+        self.assertIn("Dir::Etc::sourceparts=/dev/null", install)
+        self.assertFalse(any(arguments and arguments[0] in {"apt", "curl"} for arguments in backends[0].arguments))
 
-    def test_validation_running_state_is_visible_until_backend_completion(self):
+    def test_lifecycle_does_not_persist_transient_run_state(self):
         with tempfile.TemporaryDirectory() as temporary:
             store, run = self.successful_run(temporary)
             entered = threading.Event()
@@ -528,26 +660,26 @@ class ArtifactValidationTests(unittest.TestCase):
                     return super().start(validation_id)
 
             thread = threading.Thread(
-                target=lambda: result.setdefault("validation", artifact_validation.validate_artifact(
+                target=lambda: result.setdefault("validation", self.canonical_validate(
                     run["id"], store=store, backend_factory=BlockingBackend,
                 )),
             )
             thread.start()
             self.assertTrue(entered.wait(1))
             persisted = store.load(run["id"])
-            self.assertEqual(persisted["validations"][-1]["status"], "running")
-            self.assertEqual(build_pipeline.execution_summary(persisted)["lifecycle_status"], "validating")
-            self.assertTrue(build_pipeline.execution_summary(persisted)["lifecycle_active"])
+            self.assertNotIn("validations", persisted)
+            self.assertEqual(execution_projection.public_summary(persisted)["lifecycle_status"], "validation_needed")
+            self.assertFalse(execution_projection.public_summary(persisted)["lifecycle_active"])
             release.set()
             thread.join(timeout=2)
             self.assertFalse(thread.is_alive())
             self.assertEqual(result["validation"]["status"], "success")
-            self.assertEqual(store.load(run["id"])["validations"][-1]["status"], "success")
+            self.assertNotIn("validations", store.load(run["id"]))
 
     def test_backend_failure_is_a_validation_failure_not_a_build_failure(self):
         with tempfile.TemporaryDirectory() as temporary:
             store, run = self.successful_run(temporary)
-            result = artifact_validation.validate_artifact(run["id"], store=store, backend_factory=FailingBackend)
+            result = self.canonical_validate(run["id"], store=store, backend_factory=FailingBackend)
             self.assertEqual(result["status"], "failed")
             self.assertEqual(result["error"]["code"], "validation_backend_unavailable")
             self.assertEqual(store.load(run["id"])["status"], "success")
@@ -555,12 +687,16 @@ class ArtifactValidationTests(unittest.TestCase):
     def test_profiles_default_explicit_and_unknown(self):
         with tempfile.TemporaryDirectory() as temporary:
             store, run = self.successful_run(temporary)
-            default = artifact_validation.validate_artifact(run["id"], store=store, backend_factory=FakeBackend)
-            explicit = artifact_validation.validate_artifact(run["id"], store=store, backend_factory=FakeBackend, profile="bookworm-node22")
+            default = self.canonical_validate(run["id"], store=store, backend_factory=FakeBackend)
+            explicit = self.canonical_validate(run["id"], store=store, backend_factory=FakeBackend, profile="bookworm-node22")
             self.assertEqual(default["profile"]["name"], "bookworm")
             self.assertEqual(explicit["profile"]["name"], "bookworm-node22")
+            inputs = canonical_validation_inputs(store, store.load(run["id"]))
             with self.assertRaises(artifact_validation.ValidationError) as raised:
-                artifact_validation.validate_artifact(run["id"], store=store, backend_factory=FakeBackend, profile="untrusted/image")
+                artifact_validation.validate_artifact(
+                    run["id"], store=store, backend_factory=FakeBackend,
+                    profile="untrusted/image", **inputs,
+                )
             self.assertEqual(raised.exception.code, "validation_profile_unknown")
 
     def test_node_detected_for_build_does_not_create_a_runtime_check(self):
@@ -574,10 +710,34 @@ class ArtifactValidationTests(unittest.TestCase):
                 backend = FakeBackend(**kwargs)
                 backends.append(backend)
                 return backend
-            good = artifact_validation.validate_artifact(run["id"], store=store, backend_factory=backend_factory)
+            good = self.canonical_validate(run["id"], store=store, backend_factory=backend_factory)
             self.assertEqual(good["status"], "success")
             self.assertNotIn(["node", "--version"], backends[0].arguments)
             self.assertFalse(any(check["name"] == "runtime_node" for check in good["checks"]))
+
+    def test_runtime_dependencies_require_final_artifact_inspection(self):
+        for inspection in ({}, {"depends": None}, {"depends": ["nodejs"]}, {"depends": "nodejs (>= )"}):
+            with self.subTest(inspection=inspection), self.assertRaises(artifact_validation.ValidationError) as raised:
+                artifact_validation._runtime_dependency_specs({"inspection": inspection})
+            self.assertEqual(raised.exception.code, "artifact_metadata_invalid")
+        self.assertEqual(
+            artifact_validation._runtime_dependency_specs({"inspection": {"depends": "nodejs (>= 22), python3 | python3-minimal"}}),
+            [
+                {"package": "nodejs", "operator": ">=", "version": "22"},
+                {"package": "python3", "operator": "", "version": ""},
+                {"package": "python3-minimal", "operator": "", "version": ""},
+            ],
+        )
+
+    def test_lifecycle_refuses_missing_final_dependency_metadata_before_oci(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store, run = self.successful_run(temporary)
+            persisted = store.load(run["id"])
+            del persisted["artifact"]["inspection"]["depends"]
+            store.save(persisted)
+            with self.assertRaises(artifact_validation.ValidationError) as raised:
+                self.canonical_validate(run["id"], store=store, backend_factory=FakeBackend)
+            self.assertEqual(raised.exception.code, "artifact_metadata_invalid")
 
     def test_declared_node_runtime_is_checked_after_install(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -585,16 +745,16 @@ class ArtifactValidationTests(unittest.TestCase):
             persisted = store.load(run["id"])
             persisted["artifact"]["inspection"]["depends"] = "nodejs (>= 22.19.0)"
             store.save(persisted)
-            good = artifact_validation.validate_artifact(run["id"], store=store, backend_factory=NodeBackend, profile="bookworm-node22")
+            good = self.canonical_validate(run["id"], store=store, backend_factory=NodeBackend, profile="bookworm-node22")
             self.assertEqual(good["status"], "success")
             self.assertEqual(next(check for check in good["checks"] if check["name"] == "runtime_node")["details"]["actual"], "v22.22.1")
             class OldNode(NodeBackend):
                 version = "v18.20.0\n"
-            old = artifact_validation.validate_artifact(run["id"], store=store, backend_factory=OldNode, profile="bookworm-node22")
+            old = self.canonical_validate(run["id"], store=store, backend_factory=OldNode, profile="bookworm-node22")
             self.assertEqual(old["error"]["code"], "validation_runtime_incompatible")
             class MissingNode(NodeBackend):
                 version = ""
-            missing = artifact_validation.validate_artifact(run["id"], store=store, backend_factory=MissingNode, profile="bookworm-node22")
+            missing = self.canonical_validate(run["id"], store=store, backend_factory=MissingNode, profile="bookworm-node22")
             self.assertEqual(missing["error"]["code"], "validation_runtime_incompatible")
 
     def test_service_missing_declared_node_runtime_fails_systemd_validation(self):
@@ -602,7 +762,7 @@ class ArtifactValidationTests(unittest.TestCase):
             configured = recipe(service=True)
             configured["service"]["command"] = "/usr/bin/node /opt/demo/dist/index.js"
             store, run = self.successful_run(temporary, configured)
-            result = artifact_validation.validate_artifact(run["id"], store=store, backend_factory=MissingNodeServiceBackend)
+            result = self.canonical_validate(run["id"], store=store, backend_factory=MissingNodeServiceBackend)
             self.assertEqual(result["status"], "failed")
             failed = {check["name"]: check for check in result["checks"] if check["status"] == "failed"}
             self.assertIn("systemd_active", failed)
@@ -618,7 +778,7 @@ class ArtifactValidationTests(unittest.TestCase):
             persisted = store.load(run["id"])
             persisted["artifact"]["inspection"]["depends"] = "nodejs"
             store.save(persisted)
-            result = artifact_validation.validate_artifact(run["id"], store=store, backend_factory=NodeBackend, profile="bookworm-node22")
+            result = self.canonical_validate(run["id"], store=store, backend_factory=NodeBackend, profile="bookworm-node22")
             self.assertEqual(result["status"], "success")
             self.assertTrue(any(check["name"] == "runtime_node" for check in result["checks"]))
             self.assertTrue(any(check["name"] == "systemd_active_after_grace" for check in result["checks"]))
@@ -636,12 +796,12 @@ class ArtifactValidationTests(unittest.TestCase):
             next(step for step in persisted["steps"] if step["name"] == "detection")["details"] = {"project_type": "python", "python_requirement": ">=3.10"}
             persisted["artifact"]["inspection"]["depends"] = "python3 (>= 3.10)"
             store.save(persisted)
-            good = artifact_validation.validate_artifact(run["id"], store=store, backend_factory=PythonBackend)
+            good = self.canonical_validate(run["id"], store=store, backend_factory=PythonBackend)
             self.assertEqual(good["status"], "success")
             self.assertEqual(next(check for check in good["checks"] if check["name"] == "runtime_python")["details"]["actual"], "Python 3.11.2")
             class OldPython(PythonBackend):
                 version = "Python 3.9.18\n"
-            old = artifact_validation.validate_artifact(run["id"], store=store, backend_factory=OldPython)
+            old = self.canonical_validate(run["id"], store=store, backend_factory=OldPython)
             self.assertEqual(old["error"]["code"], "validation_runtime_incompatible")
 
     def test_upstream_artifact_uses_opaque_payload_and_detected_systemd_checks(self):
@@ -661,13 +821,15 @@ class ArtifactValidationTests(unittest.TestCase):
                 backend = FakeBackend(**kwargs)
                 created.append(backend)
                 return backend
-            result = artifact_validation.validate_artifact(run["id"], store=store, backend_factory=factory)
+            result = self.canonical_validate(run["id"], store=store, backend_factory=factory)
             self.assertEqual(result["status"], "success")
             self.assertIn(["test", "-e", "/usr/bin/demo"], created[0].arguments)
             self.assertIn(["systemctl", "cat", "demo@.service"], created[0].arguments)
             self.assertFalse(any(call[:2] == ["find", "/opt/demo"] for call in created[0].arguments))
 
     def test_upgrade_modifies_and_checks_configuration_and_systemd(self):
+        from tests.test_dependency_preparation import build_deb
+
         with tempfile.TemporaryDirectory() as temporary:
             configured = recipe(service=True, configs=[{
                 "source": "demo.conf",
@@ -685,22 +847,27 @@ class ArtifactValidationTests(unittest.TestCase):
             old_dir = Path(temporary) / "builds/old-run/artifacts"
             old_dir.mkdir(parents=True)
             previous = old_dir / "demo_0.9-1_all.deb"
-            previous.write_bytes(b"old")
+            build_deb(Path(temporary), previous, package="demo", version="0.9-1")
             created = []
             def factory(**kwargs):
                 backend = FakeBackend(**kwargs)
                 created.append(backend)
                 return backend
-            result = artifact_validation.validate_artifact(run["id"], store=store, previous_artifact=str(previous), backend_factory=factory)
+            result = self.canonical_validate(run["id"], store=store, previous_artifact=str(previous), backend_factory=factory)
             self.assertEqual(result["status"], "success")
             calls = created[0].arguments
-            self.assertIn(["dpkg", "--force-confnew", "--install", "/validation/validation/" + result["id"] + "/previous.deb"], calls)
+            self.assertTrue(any(
+                call[0] == "apt-get" and "/debbuilder-input/previous.deb" in call
+                for call in calls
+            ))
             self.assertTrue(any(call[:3] == ["systemctl", "is-active", "--quiet"] for call in calls))
             self.assertEqual(sum(call[:3] == ["systemctl", "is-active", "--quiet"] for call in calls), 3)
             self.assertTrue(any(check["name"] == "systemd_active_after_grace" for check in result["checks"]))
             self.assertTrue(any(check["name"] == "configuration_preserved:/etc/demo/demo.conf" for check in result["checks"]))
 
     def test_upgrade_checks_each_mapping_policy_independently(self):
+        from tests.test_dependency_preparation import build_deb
+
         with tempfile.TemporaryDirectory() as temporary:
             configured = recipe(configs=[
                 {"source": "owned.sh", "destination": "/etc/demo/owned.sh", "policy": "replace"},
@@ -715,8 +882,8 @@ class ArtifactValidationTests(unittest.TestCase):
             old_dir = Path(temporary) / "builds/old-run/artifacts"
             old_dir.mkdir(parents=True)
             previous = old_dir / "demo_0.9-1_all.deb"
-            previous.write_bytes(b"old")
-            result = artifact_validation.validate_artifact(run["id"], store=store, previous_artifact=str(previous), backend_factory=MixedPolicyBackend)
+            build_deb(Path(temporary), previous, package="demo", version="0.9-1")
+            result = self.canonical_validate(run["id"], store=store, previous_artifact=str(previous), backend_factory=MixedPolicyBackend)
             names = {check["name"] for check in result["checks"]}
             self.assertEqual(result["status"], "success")
             self.assertIn("configuration_replaced:/etc/demo/owned.sh", names)
@@ -727,21 +894,31 @@ class ArtifactValidationTests(unittest.TestCase):
             store = BuildStore(Path(temporary) / "builds")
             run = store.create(recipe(), mode="build", run_id="failed-run")
             with self.assertRaisesRegex(artifact_validation.ValidationError, "successful Build Run"):
-                artifact_validation.validate_artifact(run["id"], store=store, backend_factory=FakeBackend)
+                artifact_validation.validate_artifact(
+                    run["id"], store=store, backend_factory=FakeBackend,
+                    prepared_dependencies={}, attempt_id="failed-attempt",
+                    registry_root=Path(temporary) / "registry",
+                )
             store, run = self.successful_run(Path(temporary) / "second")
             outside = Path(temporary) / "outside.deb"
             outside.write_bytes(b"old")
             with self.assertRaisesRegex(artifact_validation.ValidationError, "belong"):
-                artifact_validation.validate_artifact(run["id"], store=store, previous_artifact=str(outside), backend_factory=FakeBackend)
+                artifact_validation.validate_artifact(
+                    run["id"], store=store, previous_artifact=str(outside),
+                    backend_factory=FakeBackend, prepared_dependencies={},
+                    attempt_id="outside-attempt", registry_root=Path(temporary) / "registry",
+                )
             self.assertEqual(store.load(run["id"]).get("validations", []), [])
 
     def test_repository_previous_artifact_is_snapshotted_and_lease_released_before_backend(self):
+        from tests.test_dependency_preparation import build_deb
+
         with tempfile.TemporaryDirectory() as temporary:
             store, run = self.successful_run(temporary)
             repo = Path(temporary) / "repo"
             previous = repo / "pool/main/d/demo/demo_0.9-1_all.deb"
             previous.parent.mkdir(parents=True)
-            previous.write_bytes(b"old")
+            build_deb(Path(temporary), previous, package="demo", version="0.9-1")
 
             def factory(**kwargs):
                 class LeaseCheckingBackend(FakeBackend):
@@ -749,11 +926,11 @@ class ArtifactValidationTests(unittest.TestCase):
                         with repository_lease(repo, operation="backend-start-proof"):
                             pass
                         snapshot = Path(backend_self.workspace) / "validation"
-                        self.assertEqual(next(snapshot.rglob("previous.deb")).read_bytes(), b"old")
+                        self.assertEqual(next(snapshot.rglob("previous.deb")).read_bytes(), previous.read_bytes())
                         return super().start(validation_id)
                 return LeaseCheckingBackend(**kwargs)
 
-            result = artifact_validation.validate_artifact(
+            result = self.canonical_validate(
                 run["id"], store=store, previous_artifact=str(previous),
                 allowed_previous_roots=(repo / "pool",), backend_factory=factory,
             )
@@ -768,10 +945,10 @@ class ArtifactValidationTests(unittest.TestCase):
             target = Path(temporary) / "outside.deb"
             target.write_bytes(b"outside")
             previous.symlink_to(target)
-            with self.assertRaises(artifact_validation.ValidationError) as raised:
-                artifact_validation.validate_artifact(
-                    run["id"], store=store, previous_artifact=str(previous),
-                    allowed_previous_roots=(repo / "pool",), backend_factory=FakeBackend,
+            with store.locked_run(run["id"]), self.assertRaises(artifact_validation.ValidationError) as raised:
+                artifact_validation.snapshot_previous_for_preparation_locked(
+                    run["id"], str(previous), store=store,
+                    run=store.load(run["id"]), attempt_id="symlink-attempt", allowed_previous_roots=(repo / "pool",),
                 )
             self.assertIn(raised.exception.code, {"repository_file_invalid", "previous_artifact_not_available"})
 
@@ -785,19 +962,12 @@ class ArtifactValidationTests(unittest.TestCase):
             previous.parent.mkdir(parents=True)
             previous.write_bytes(b"outside")
             (repo / "pool").symlink_to(outside_pool, target_is_directory=True)
-            with self.assertRaises(artifact_validation.ValidationError) as raised:
-                artifact_validation.validate_artifact(
-                    run["id"], store=store, previous_artifact=str(previous.resolve()),
-                    allowed_previous_roots=(repo / "pool",), backend_factory=FakeBackend,
+            with store.locked_run(run["id"]), self.assertRaises(artifact_validation.ValidationError) as raised:
+                artifact_validation.snapshot_previous_for_preparation_locked(
+                    run["id"], str(previous.resolve()), store=store,
+                    run=store.load(run["id"]), attempt_id="symlinked-pool-attempt", allowed_previous_roots=(repo / "pool",),
                 )
             self.assertEqual(raised.exception.code, "previous_artifact_outside_build_store")
-
-    def test_oci_backend_reports_missing_runtime_without_host_execution(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            backend = OciSystemdBackend(temporary, runtime="")
-            backend.runtime = ""
-            with self.assertRaisesRegex(BackendError, "Docker or Podman"):
-                backend.start("validation")
 
     def test_lifecycle_installs_the_run_resource_identity_context(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -827,22 +997,11 @@ class ArtifactValidationTests(unittest.TestCase):
                 return {"status": "success"}
 
             with mock.patch("debbuilder.artifact_validation._validate_artifact_locked", side_effect=observe):
-                self.assertEqual(artifact_validation.validate_artifact(run["id"], store=store)["status"], "success")
-
-    def test_oci_backend_forces_network_none_and_read_only_workspace(self):
-        calls = []
-        def runner(command, **kwargs):
-            calls.append(command)
-            stdout = '[{"Id":"image-id","RepoDigests":["image@sha256:digest"]}]' if " image inspect " in f" {command} " else "running\n"
-            return {"command": command, "arguments": [], "working_directory": str(kwargs.get("workspace")), "status": "success", "exit_code": 0, "stdout": stdout, "stderr": "", "duration": 0, "timed_out": False}
-        with tempfile.TemporaryDirectory() as temporary:
-            backend = OciSystemdBackend(temporary, runtime="podman", runner=runner)
-            context = backend.start("isolated")
-            backend.stop()
-        launch = next(command for command in calls if " run " in f" {command} ")
-        self.assertIn("--network none", launch)
-        self.assertIn(":/validation:ro", launch)
-        self.assertEqual(context["network"], "disabled")
+                self.assertEqual(artifact_validation.validate_artifact(
+                    run["id"], store=store, prepared_dependencies={},
+                    attempt_id="resource-context-attempt",
+                    registry_root=root / "registry",
+                )["status"], "success")
 
 
 @unittest.skipUnless(os.getenv("DEBBUILDER_REAL_OCI_TESTS") == "1", "controlled real OCI tests disabled")
@@ -892,11 +1051,11 @@ class RealOfflineLifecycleTests(unittest.TestCase):
             }
             store.save(persisted)
             registry = root / "validation-containers"
-            attempt = prepare_runtime_dependencies(
-                run["id"], "offline-node22-attempt", store=store,
+            attempt = prepare_admitted_for_test(
+                run["id"], store=store,
                 current_artifact=artifact, profile_name="bookworm-node22", registry_root=registry,
             )
-            prepared = attempt["prepared_dependencies"]
+            prepared = attempt["prepared"]
             self.assertEqual(prepared["packages"], [])
             self.assertIn("nodejs", {row["package"] for row in prepared["base_packages"]})
             begin_lifecycle_attempt(store, run["id"], attempt["id"], prepared)
@@ -982,12 +1141,12 @@ class RealOfflineLifecycleTests(unittest.TestCase):
                     "signing_key": {"armored": armored},
                 }
                 registry = root / "validation-containers"
-                attempt = prepare_runtime_dependencies(
-                    run["id"], "offline-lifecycle-attempt", store=store,
+                attempt = prepare_admitted_for_test(
+                    run["id"], store=store,
                     current_artifact=artifact, repositories=[repository],
                     registry_root=registry, test_ca_certificate=cert,
                 )
-                prepared = attempt["prepared_dependencies"]
+                prepared = attempt["prepared"]
                 begin_lifecycle_attempt(store, run["id"], attempt["id"], prepared)
                 result = artifact_validation.validate_artifact(
                     run["id"], store=store,
@@ -1055,13 +1214,13 @@ class RealOfflineLifecycleTests(unittest.TestCase):
                     "signing_key": {"armored": armored},
                 }
                 registry = root / "validation-containers"
-                attempt = prepare_runtime_dependencies(
-                    run["id"], "offline-upgrade-attempt", store=store,
+                attempt = prepare_admitted_for_test(
+                    run["id"], store=store,
                     current_artifact=current, previous_artifact=previous,
                     repositories=[repository], registry_root=registry,
                     test_ca_certificate=cert,
                 )
-                prepared = attempt["prepared_dependencies"]
+                prepared = attempt["prepared"]
                 self.assertIn(("cp1b-external", "previous"), {(row["package"], row["role"]) for row in prepared["packages"]})
                 self.assertIn(("cp1b-provider", "current"), {(row["package"], row["role"]) for row in prepared["packages"]})
                 begin_lifecycle_attempt(store, run["id"], attempt["id"], prepared)

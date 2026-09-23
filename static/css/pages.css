@@ -659,7 +659,7 @@
 .archive-selector-list { display: grid; gap: var(--space-1); margin-top: var(--space-2); }
 .archive-selector-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: var(--space-2); }
 .archive-selector-row code { min-width: 0; overflow-wrap: anywhere; }
-.archive-legacy-note,.archive-selector-warning { grid-column: 1 / -1; margin: 0; border-radius: var(--radius-md); padding: var(--space-2); background: var(--surface-2); color: var(--text-muted); }
+.archive-selector-warning { grid-column: 1 / -1; margin: 0; border-radius: var(--radius-md); padding: var(--space-2); background: var(--surface-2); color: var(--text-muted); }
 .archive-selector-warning { color: var(--danger-strong); }
 .archive-inspection { display: grid; align-self: end; gap: var(--space-2); }
 .archive-inspection-results { display: grid; max-height: 340px; gap: var(--space-2); overflow: auto; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--surface-2); padding: var(--space-2); }

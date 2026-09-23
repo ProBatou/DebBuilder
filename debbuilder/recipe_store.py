@@ -12,8 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import storage
-from .recipe_migrations import CURRENT_SCHEMA_VERSION, RecipeMigrationError, migrate_recipe_document
-from .recipe_schema import RecipeDocumentError, recipe_document_for_storage
+from .recipe_schema import SCHEMA_VERSION, RecipeDocumentError, recipe_document_for_storage
 
 
 class RecipeStoreError(ValueError):
@@ -27,7 +26,7 @@ class RecipeStoreError(ValueError):
         file: Path,
         path: str = "$",
         source_version: int | None = None,
-        target_version: int | None = CURRENT_SCHEMA_VERSION,
+        target_version: int | None = SCHEMA_VERSION,
     ):
         super().__init__(message)
         self.code = code
@@ -51,21 +50,11 @@ class RecipeStoreError(ValueError):
 
 
 @dataclass(frozen=True)
-class RecipeLoadResult:
-    recipe: dict
-    source_version: int
-    target_version: int
-    applied_migrations: tuple[str, ...]
-    rewritten: bool
-
-
-@dataclass(frozen=True)
-class RecipeFileReport:
+class RecipeFileValidationReport:
     file: str
     status: str
     source_version: int | None = None
     target_version: int | None = None
-    applied_migrations: tuple[str, ...] = ()
     error: dict | None = None
 
     def as_dict(self) -> dict:
@@ -74,21 +63,18 @@ class RecipeFileReport:
             result["source_version"] = self.source_version
         if self.target_version is not None:
             result["target_version"] = self.target_version
-        if self.applied_migrations:
-            result["applied_migrations"] = list(self.applied_migrations)
         if self.error is not None:
             result["error"] = self.error
         return result
 
 
 @dataclass(frozen=True)
-class RecipeDirectoryMigrationReport:
+class RecipeDirectoryValidationReport:
     directory: str
     inspected: int
-    current: int
-    migrated: int
+    valid: int
     failed: int
-    files: tuple[RecipeFileReport, ...]
+    files: tuple[RecipeFileValidationReport, ...]
 
     @property
     def ok(self) -> bool:
@@ -99,8 +85,7 @@ class RecipeDirectoryMigrationReport:
             "directory": self.directory,
             "ok": self.ok,
             "inspected": self.inspected,
-            "current": self.current,
-            "migrated": self.migrated,
+            "valid": self.valid,
             "failed": self.failed,
             "files": [row.as_dict() for row in self.files],
         }
@@ -298,41 +283,15 @@ def _document_error(path: Path, exc: RecipeDocumentError) -> RecipeStoreError:
     )
 
 
-def _migration_error(path: Path, exc: RecipeMigrationError) -> RecipeStoreError:
-    return RecipeStoreError(
-        exc.code,
-        str(exc),
-        file=path,
-        path=exc.path,
-        source_version=exc.source_version,
-        target_version=exc.target_version,
-    )
-
-
-def load_recipe_result(path: Path, *, write_back: bool = True) -> RecipeLoadResult:
-    """Strictly load one Recipe and optionally persist its canonical current form."""
+def load_recipe(path: Path) -> dict:
+    """Load one canonical v5 Recipe without mutating durable state."""
     path = Path(path)
     with _recipe_lease(path):
-        original = _read_bytes(path)
-        document = _decode_recipe(path, original)
+        document = _decode_recipe(path, _read_bytes(path))
         try:
-            migration = migrate_recipe_document(document)
-            canonical = recipe_document_for_storage(migration.document)
-        except RecipeMigrationError as exc:
-            raise _migration_error(path, exc) from exc
+            return recipe_document_for_storage(document)
         except RecipeDocumentError as exc:
             raise _document_error(path, exc) from exc
-        canonical_bytes = _canonical_bytes(canonical)
-        rewritten = write_back and original != canonical_bytes
-        if rewritten:
-            _durable_atomic_write(path, canonical_bytes)
-        return RecipeLoadResult(
-            recipe=canonical,
-            source_version=migration.source_version,
-            target_version=migration.target_version,
-            applied_migrations=migration.applied_migrations,
-            rewritten=rewritten,
-        )
 
 
 @contextmanager
@@ -343,18 +302,10 @@ def locked_recipe(path: Path):
         original = _read_bytes(path)
         document = _decode_recipe(path, original)
         try:
-            migration = migrate_recipe_document(document)
-            canonical = recipe_document_for_storage(migration.document)
-        except RecipeMigrationError as exc:
-            raise _migration_error(path, exc) from exc
+            canonical = recipe_document_for_storage(document)
         except RecipeDocumentError as exc:
             raise _document_error(path, exc) from exc
         yield canonical
-
-
-def load_recipe(path: Path, *, write_back: bool = True) -> dict:
-    """Return one canonical current Recipe or raise a structured refusal."""
-    return load_recipe_result(path, write_back=write_back).recipe
 
 
 def save_recipe(path: Path, document: dict) -> dict:
@@ -385,8 +336,8 @@ def save_recipe(path: Path, document: dict) -> dict:
     return canonical
 
 
-def migrate_recipe_directory(directory: Path) -> RecipeDirectoryMigrationReport:
-    """Scan every Recipe JSON file deterministically and migrate safe entries."""
+def validate_recipe_directory(directory: Path) -> RecipeDirectoryValidationReport:
+    """Validate every persisted Recipe as canonical v5 without rewriting it."""
     directory = Path(directory)
     try:
         if directory.is_symlink() or not directory.is_dir():
@@ -399,32 +350,24 @@ def migrate_recipe_directory(directory: Path) -> RecipeDirectoryMigrationReport:
             file=directory,
         ) from exc
 
-    current = migrated = failed = 0
-    rows: list[RecipeFileReport] = []
+    valid = failed = 0
+    rows: list[RecipeFileValidationReport] = []
     for path in paths:
         try:
-            result = load_recipe_result(path, write_back=True)
+            load_recipe(path)
         except RecipeStoreError as exc:
             failed += 1
-            rows.append(RecipeFileReport(file=path.name, status="failed", error=exc.as_dict()))
+            rows.append(RecipeFileValidationReport(file=path.name, status="failed", error=exc.as_dict()))
             continue
-        status = "migrated" if result.rewritten else "current"
-        if result.rewritten:
-            migrated += 1
-        else:
-            current += 1
-        rows.append(RecipeFileReport(
-            file=path.name,
-            status=status,
-            source_version=result.source_version,
-            target_version=result.target_version,
-            applied_migrations=result.applied_migrations,
+        valid += 1
+        rows.append(RecipeFileValidationReport(
+            file=path.name, status="valid",
+            source_version=SCHEMA_VERSION, target_version=SCHEMA_VERSION,
         ))
-    return RecipeDirectoryMigrationReport(
+    return RecipeDirectoryValidationReport(
         directory=str(directory),
         inspected=len(paths),
-        current=current,
-        migrated=migrated,
+        valid=valid,
         failed=failed,
         files=tuple(rows),
     )

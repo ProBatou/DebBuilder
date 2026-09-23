@@ -6,7 +6,7 @@
   <title>DebBuilder</title>
   <link rel="stylesheet" href="/style.css?v=20260906-2" />
   <link rel="stylesheet" href="/css/components.css?v=20260916-1" />
-  <link rel="stylesheet" href="/css/pages.css?v=20260916-1" />
+  <link rel="stylesheet" href="/css/pages.css?v=20260923-1" />
 </head>
 <body>
   <header class="mobile-topbar" aria-label="Mobile navigation">
@@ -94,7 +94,7 @@
                 </section>
                 <label><span>Tracking</span><select id="recipeMetaTracking"><option value="latest_release">Latest release</option><option value="tag">Explicit tag</option><option value="manual">Manual ref</option></select></label>
                 <label id="recipeSourceRefField" hidden><span>GitHub ref</span><input id="recipeMetaSourceRef" placeholder="v1.2.3, main, or commit SHA"></label>
-                <label><span>Debian version</span><select id="recipeMetaVersionSource"><option value="tag">From GitHub tag</option><option value="release_name">From release name</option><option value="regex">Custom expression</option><option value="build">Provided by build</option></select></label>
+                <label><span>Debian version</span><select id="recipeMetaVersionSource"><option value="tag">From GitHub tag</option><option value="release_name">From release name</option><option value="regex">Custom expression</option></select></label>
                 <label class="recipe-version-revision"><span>Debian revision</span><input id="recipePackageVersionRevision" type="text" value="1" required></label>
                 <label id="recipeVersionExpressionField" hidden><span>Expression / regex</span><input id="recipeMetaVersionExpression"></label>
               </div>
@@ -117,7 +117,7 @@
                   <h2>Build</h2>
                   <p>Prepares the source project before creating the Debian package.</p>
                 </div>
-                <span class="step-note">Recipe v3</span>
+                <span class="step-note">Recipe v5</span>
               </div>
               <div class="build-layout">
                 <section class="build-section"><div class="build-section-head"><h3>Build environment</h3><span class="detection-badge not-detected" id="buildDetectionBadge"><span></span><strong>Not detected</strong></span></div><div class="build-environment-summary"><strong class="build-environment-project" id="buildDetectedProject">Not detected</strong><p class="build-environment-line" id="buildToolsSummary" hidden><span>Detected tools:</span><strong id="buildDetectedTools">None</strong></p><p class="build-environment-line" id="buildDependenciesSummary" hidden><span>Dependencies:</span><strong id="buildDetectedDependencies">None</strong></p><p class="build-environment-line"><span>Detected from:</span><strong id="buildDetectedFiles">No source inspected yet</strong></p></div><div class="dependency-row"><div><small>Manually added system dependencies</small><div class="dependency-chips" id="buildDependencyChips"></div></div><button type="button" class="ghost compact-button" id="btnAddBuildDependency">+ Add dependency</button></div><div class="build-dependency-state" id="buildDependencyState"><p class="dependency-check-pending" id="buildDependencyPending"><span>Status:</span><strong>Not checked</strong></p><div class="dependency-check-results" id="buildDependencyResults" hidden><span>Detected tools: <strong id="buildAvailableTools">None</strong></span><span>Unavailable tools: <strong id="buildMissingTools">None</strong></span><span>System dependencies available: <strong id="buildAvailableDependencies">None</strong></span><span>System dependencies missing: <strong id="buildMissingDependencies">None</strong></span><div id="buildToolDetails"></div></div></div></section>
@@ -136,7 +136,7 @@
                   <h2>Debian installation</h2>
                   <p>Where should the build result be installed in the Debian package?</p>
                 </div>
-                <span class="step-note">Recipe v3</span>
+                <span class="step-note">Recipe v5</span>
               </div>
               <div class="recipe-form-stack">
                 <div class="recipe-form-group install-package-group">
@@ -303,7 +303,7 @@
       <label><span>GitHub project</span><input id="newRecipeGithub" placeholder="owner/repository" required pattern="[A-Za-z0-9_.\-]+\/[A-Za-z0-9_.\-]+"></label>
       <label><span>Tracking</span><select id="newRecipeTracking"><option value="latest_release">Latest release</option><option value="tag">Explicit tag</option><option value="manual">Manual ref</option></select></label>
       <label id="newRecipeSourceRefField" hidden><span>GitHub ref</span><input id="newRecipeSourceRef" placeholder="v1.2.3, main, or commit SHA"></label>
-      <label><span>Debian version</span><select id="newRecipeVersionSource"><option value="tag">From GitHub tag</option><option value="release_name">From release name</option><option value="regex">Custom expression</option><option value="build">Provided by build</option></select></label>
+      <label><span>Debian version</span><select id="newRecipeVersionSource"><option value="tag">From GitHub tag</option><option value="release_name">From release name</option><option value="regex">Custom expression</option></select></label>
       <label id="newRecipeVersionExpressionField" hidden><span>Expression / regex</span><input id="newRecipeVersionExpression"></label>
       <div class="actions"><button type="button" id="cancelNewRecipe">Cancel</button><button type="submit" class="btn-primary">Create recipe</button></div>
     </form>
@@ -355,18 +355,18 @@
 
   <script src="/ui_core.js?v=20260916-1"></script>
   <script src="/settings.js?v=20260909-2"></script>
-  <script src="/js/recipe/archive_tree.js?v=20260906-1"></script>
-  <script src="/recipe_serialization.js?v=20260916-1"></script>
-  <script src="/js/build_insight.js?v=20260906-4"></script>
+  <script src="/js/recipe/archive_tree.js?v=20260923-1"></script>
+  <script src="/recipe_serialization.js?v=20260921-1"></script>
+  <script src="/js/build_insight.js?v=20260923-1"></script>
   <script src="/js/recipe/test_run_modal.js?v=20260906-4"></script>
-  <script src="/app.js?v=20260916-1"></script>
+  <script src="/app.js?v=20260923-1"></script>
   <script src="/js/recipe/automation.js?v=20260916-1"></script>
   <script src="/js/pages/dashboard.js?v=20260905-2"></script>
-  <script src="/js/pages/packages.js?v=20260916-1"></script>
-  <script src="/js/pages/logs.js?v=20260916-1"></script>
+  <script src="/js/pages/packages.js?v=20260921-1"></script>
+  <script src="/js/pages/logs.js?v=20260923-1"></script>
   <script src="/js/recipe/source_changes.js?v=20260904-1"></script>
   <script src="/js/recipe/stepper.js?v=20260905-2"></script>
   <script src="/js/recipe/json_editor.js?v=20260905-1"></script>
-  <script src="/js/admin.js?v=20260916-1"></script>
+  <script src="/js/admin.js?v=20260923-1"></script>
 </body>
 </html>

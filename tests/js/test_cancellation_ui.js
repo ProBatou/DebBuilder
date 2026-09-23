@@ -383,6 +383,13 @@ function packageActionHarness() {
   });
   assert.match(packages.nodes.packageDetail.innerHTML, /Validation recovery/);
   assert.match(packages.nodes.packageDetail.innerHTML, /Operator attention required/);
+  packages.renderOpenPackage({
+    name: 'historical', source: {}, version: {}, build: {}, repository: {}, history: [],
+    validation: {status: 'success'}, publication: {}, allowed_actions: {validate: true, publish: false},
+    publication_insertion_eligible: false,
+    publication_insertion_reasons: ['current_validation_required'],
+  });
+  assert.match(packages.nodes.packageDetail.innerHTML, /Revalidate before publishing/);
 
   console.log('cancellation UI JS tests passed');
 })().catch(error => {

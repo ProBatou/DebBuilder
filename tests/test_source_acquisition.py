@@ -9,11 +9,11 @@ from unittest import mock
 from debbuilder import github_client, source_acquisition
 
 
-def recipe(tracking="latest_release", ref="", version_source="tag"):
+def recipe(tracking="latest_release", ref="", version_source="tag", version_expression=""):
     return {
-        "schema_version": 1, "name": "demo", "active": True,
+        "schema_version": 5, "name": "demo", "active": True,
         "package": {"name": "demo", "version_revision": "2", "architecture": "amd64"},
-        "source": {"provider": "github", "repository": "owner/demo", "tracking": tracking, "ref": ref, "version": {"source": version_source, "expression": ""}},
+        "source": {"provider": "github", "repository": "owner/demo", "tracking": tracking, "ref": ref, "version": {"source": version_source, "expression": version_expression}},
     }
 
 
@@ -140,12 +140,18 @@ class SourceResolutionTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "repository_not_found")
         self.assertEqual(str(raised.exception), "Repository not found")
 
-    def test_build_provided_version_fails_before_download(self):
-        release = {"tag": "v1.0", "name": "v1.0", "archive_url": "https://api.github.com/repos/owner/demo/tarball/v1.0"}
-        with mock.patch("debbuilder.source_acquisition.github_client.repo_info", return_value={"repository": "owner/demo"}), mock.patch("debbuilder.source_acquisition.github_client.latest_release", return_value=release):
-            with self.assertRaises(source_acquisition.SourceError) as raised:
-                source_acquisition.resolve_source(recipe(version_source="build"))
-        self.assertEqual(raised.exception.code, "unable_to_determine_version")
+    def test_supported_version_sources_resolve_before_build(self):
+        resolved = {
+            "tag": "v2.3.4", "ref": "v2.3.4", "name": "2.3.4",
+            "archive_url": "https://api.github.com/repos/owner/demo/tarball/v2.3.4",
+        }
+        for source, expression in (("tag", ""), ("release_name", ""), ("regex", r"([0-9]+(?:\.[0-9]+)+)")):
+            with self.subTest(source=source), \
+                    mock.patch.object(github_client, "repo_info", return_value={"repository": "owner/demo"}), \
+                    mock.patch.object(github_client, "latest_release", return_value=resolved):
+                result = source_acquisition.resolve_source(recipe(version_source=source, version_expression=expression))
+            self.assertEqual(result["upstream_version"], "2.3.4")
+            self.assertEqual(result["debian_version"], "2.3.4-2")
 
     def test_download_accepts_only_github_https_hosts_and_checks_redirect(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -9,6 +9,7 @@ from debbuilder.build_store import BuildStore
 
 def recipe(name="storage"):
     return {
+        "schema_version": 5,
         "name": name,
         "package": {
             "name": name,
@@ -220,7 +221,10 @@ class StorageInventoryTests(unittest.TestCase):
         artifact = root / "artifacts/package.deb"
         artifact.unlink()
         run = self.store.load(run["id"])
-        run["artifact"].update({"size": 123, "sha256": "a" * 64})
+        run["artifact"].update({
+            "size": 123, "sha256": "a" * 64,
+            "inspection": {"package": "package", "version": "1.0", "architecture": "all"},
+        })
         run["artifact"]["pruning"] = {
             "schema": "debbuilder.artifact-pruning.v1",
             "pruning_version": 1,
@@ -236,18 +240,23 @@ class StorageInventoryTests(unittest.TestCase):
                 "proof": {
                     "schema": "debbuilder.repository-publication-proof.v1",
                     "proof_version": 1,
+                    "verified_at": "2026-09-09T09:59:00+00:00",
                     "repository": {"root": str(self.repo), "device": 1, "inode": 2},
-                    "distribution": {"requested": "bookworm", "codename": "bookworm"},
+                    "distribution": {"requested": "bookworm", "codename": "bookworm", "suite": "stable"},
                     "component": "main",
                     "package": "package",
                     "version": "1.0",
                     "architecture": "all",
-                    "database_architectures": ["amd64"],
-                    "source": {"path": str(artifact), "size": 123, "sha256": "a" * 64},
+                    "source": {
+                        "path": str(artifact), "size": 123, "sha256": "a" * 64,
+                        "device": 3, "inode": 4,
+                    },
                     "targets": [{
                         "database_architecture": "amd64",
                         "index": {
                             "path": "dists/bookworm/main/binary-amd64/Packages",
+                            "device": 5,
+                            "inode": 6,
                             "filename": "pool/main/p/package.deb",
                             "size": 123,
                             "sha256": "a" * 64,
@@ -256,6 +265,8 @@ class StorageInventoryTests(unittest.TestCase):
                             "path": "pool/main/p/package.deb",
                             "size": 123,
                             "sha256": "a" * 64,
+                            "device": 7,
+                            "inode": 8,
                         },
                     }],
                 },
@@ -263,8 +274,11 @@ class StorageInventoryTests(unittest.TestCase):
         }
         proof = run["artifact"]["pruning"]["publication"]["proof"]
         run["publications"] = [{
-            "id": "publication", "status": "success",
-            "artifact": str(artifact), "proof": proof,
+            "id": "publication", "build_run_id": run["id"], "status": "success",
+            "artifact": str(artifact), "package": "package", "version": "1.0",
+            "architecture": "all",
+            "repository": {"root": str(self.repo), "distribution": "bookworm", "component": "main"},
+            "proof": proof,
         }]
         self.store.save(run)
 

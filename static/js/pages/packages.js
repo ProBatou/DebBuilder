@@ -37,6 +37,7 @@ function packageVersionLabel(packageRow) {
 const packageRunSubmissions = new Set();
 const packageValidationSubmissions = new Set();
 const packageAutomationSubmissions = new Set();
+const packageObservationSubmissions = new Set();
 
 function packageAutomationLabel(automation) {
   return STATUS_LABELS[automation?.state] || String(automation?.state || 'Manual').replaceAll('_', ' ');
@@ -138,6 +139,7 @@ function actionButtons(packageRow) {
   const buttons = [];
   if (packageRow.recipe) buttons.push(`<button class="btn-primary" data-admin-action="open-recipe" data-recipe-id="${esc(packageRow.recipe)}">Open recipe</button>`);
   else buttons.push(`<button class="btn-primary" data-admin-action="create-recipe" data-package-name="${name}">Create recipe</button>`);
+  if (packageRow.recipe) buttons.push(`<button class="ghost" data-admin-action="refresh-package-observation" data-package-name="${name}">Refresh upstream</button>`);
   if (actions.test) buttons.push(`<button class="btn-warning" data-admin-action="build-package" data-package-name="${name}" data-dry-run="true">Test</button>`);
   if (actions.build) buttons.push(`<button class="btn-success" data-admin-action="build-package" data-package-name="${name}" data-dry-run="false">Build</button>`);
   const validation = packageRow.validation || {};
@@ -199,10 +201,21 @@ function renderOpenPackage(packageRow) {
   const validation = packageRow.validation || {};
   const publication = packageRow.publication || {};
   const automation = packageRow.automation || {};
+  const observation = packageRow.observation || {};
   const artifactName = (build.last_artifact || '').split('/').pop();
   const artifact = [artifactName, build.artifact_source, build.artifact_sha256].filter(Boolean).join(' · ');
+  const insertionReasons = packageRow.publication_insertion_reasons || [];
+  const publicationEligibility = packageRow.publication_insertion_eligible
+    ? 'Eligible for repository insertion'
+    : packageRow.publication_reconciliation_available
+      ? 'Published previously; retry verifies exact repository state'
+      : insertionReasons.includes('validation_state_unverifiable')
+        ? 'Validation state requires operator attention'
+        : insertionReasons.includes('current_validation_required')
+          ? 'Revalidate before publishing'
+          : 'Not eligible';
   const automationDetails = automation.recipe_id ? packageDetailSection('Automation', [['State', badge(automation.state), true], ['Policy', packageAutomationPolicyLabel(automation.automation?.policy)], ['Last check', packageAutomationTimestamp(automation.last_check_at)], ['Detected', [automation.detected?.version, automation.detected?.ref].filter(Boolean).join(' · ') || 'None'], ['Next retry', packageAutomationTimestamp(automation.retry?.not_before)], ['Blocker', automation.blocked?.message]]) : '';
-  $('packageDetail').innerHTML = `<div class="package-lifecycle-panel stack stack--sm">${packageDetailSection('General', [['Linked recipe', packageRow.recipe || 'None'], ['Description', packageRow.description || 'Not set'], ['Architecture', packageRow.architecture || 'all'], ['Dependencies', packageRow.depends || 'None declared']])}${automationDetails}${packageDetailSection('Source', [['Type', source.type || 'Unknown'], ['Repository', source.repository || 'Not set'], ['Strategy', packageRow.tracking || packageRow.version_strategy || version.strategy || 'Not set'], ['Resolved ref', sourceRefLabel(packageRow)], ['Latest release', source.latest_release || 'Not fetched'], ['Payload', sourcePayloadLabel(source)], ['Release asset', source.asset_name], ['Source SHA-256', source.sha256], ['GitHub digest', source.checksum_verified ? 'Verified' : source.expected_sha256 ? 'Mismatch' : 'Not provided']])}${packageDetailSection('Versions', [['Available upstream', version.source || packageRow.upstream_version || 'Unknown'], ['Latest built', version.candidate || 'None'], ['Published', version.published || packageRow.apt_version || 'Not published'], ['Lifecycle', badge(lifecycleState(packageRow)), true]])}${packageDetailSection('Build', [['Method', build.method || 'Not set'], ['Latest run status', build.latest_status || 'No real run'], ['Latest run', build.latest_run_id || 'None'], ['Artifact run', build.last_build_id || 'None'], ['Latest artifact', artifact || 'None']])}${packageDetailSection('Validation & publication', [['Validation', validation.status ? `${validation.status} · ${validation.phase || ''} · ${validation.finished_at || validation.started_at || validation.created_at || ''}` : 'Not run'], ['Publication', publication.status ? `${publication.status} · ${publication.finished_at || publication.requested_at || ''}` : 'Not run'], ['Repository version', `${version.published || packageRow.apt_version || 'None'} remains published`]])}${packageDetailSection('APT repository', [['Repository', repository.url || 'Not configured'], ['Distribution', repository.distribution || 'Not configured'], ['Component', repository.component || 'Not configured'], ['Architectures', (repository.architectures || [packageRow.architecture || 'all']).join(', ')], ['Publication', repository.published ? 'Published' : 'Not published']])}</div><div class="package-action-bar toolbar"><div class="toolbar-actions">${actionButtons(packageRow)}</div></div><section class="drawer-history"><div class="section-header"><h3>History</h3></div><div class="data-list">${(packageRow.history || []).map(execution => `<div class="item list-row" role="button" tabindex="0" data-admin-action="open-history-execution" data-execution-id="${esc(execution.id)}"><div class="item-title"><span>${esc(execution.id)} · ${esc(execution.action)}</span>${badge(execution.lifecycle_status || execution.status)}</div><div class="item-meta">${fmtTime(execution.updated)}</div></div>`).join('') || '<div class="empty-state">No linked history.</div>'}</div></section><div class="danger-zone"><div><strong>Remove package</strong><p class="muted">Does not delete the package from the APT repository.</p></div><button class="btn btn--danger" data-admin-action="delete-package" data-package-name="${esc(packageRow.name)}">Delete from DebBuilder</button></div>`;
+  $('packageDetail').innerHTML = `<div class="package-lifecycle-panel stack stack--sm">${packageDetailSection('General', [['Linked recipe', packageRow.recipe || 'None'], ['Description', packageRow.description || 'Not set'], ['Architecture', packageRow.architecture || 'all'], ['Dependencies', packageRow.depends || 'None declared']])}${automationDetails}${packageDetailSection('Source', [['Type', source.type || 'Unknown'], ['Repository', source.repository || 'Not set'], ['Strategy', packageRow.tracking || packageRow.version_strategy || version.strategy || 'Not set'], ['Resolved ref', sourceRefLabel(packageRow)], ['Latest release', source.latest_release || 'Not fetched'], ['Observation', observation.state === 'failed' ? `Failed · ${observation.diagnostic_code || observation.classification || 'unavailable'}` : observation.state === 'observed' ? 'Observed' : 'Never fetched / unavailable'], ['Observed at', observation.observed_at ? fmtTime(observation.observed_at) : 'Never'], ['Payload', sourcePayloadLabel(source)], ['Release asset', source.asset_name], ['Source SHA-256', source.sha256], ['GitHub digest', source.checksum_verified ? 'Verified' : source.expected_sha256 ? 'Mismatch' : 'Not provided']])}${packageDetailSection('Versions', [['Available upstream', version.source || packageRow.upstream_version || 'Unknown'], ['Latest built', version.candidate || 'None'], ['Published', version.published || packageRow.apt_version || 'Not published'], ['Lifecycle', badge(lifecycleState(packageRow)), true]])}${packageDetailSection('Build', [['Method', build.method || 'Not set'], ['Latest run status', build.latest_status || 'No real run'], ['Latest run', build.latest_run_id || 'None'], ['Artifact run', build.last_build_id || 'None'], ['Latest artifact', artifact || 'None']])}${packageDetailSection('Validation & publication', [['Validation', validation.status ? `${validation.status} · ${validation.phase || ''} · ${validation.finished_at || validation.started_at || validation.created_at || ''}` : 'Not run'], ['Insertion eligibility', publicationEligibility], ['Publication', publication.status ? `${publication.status} · ${publication.finished_at || publication.requested_at || ''}` : 'Not run'], ['Repository version', `${version.published || packageRow.apt_version || 'None'} remains published`]])}${packageDetailSection('APT repository', [['Repository', repository.url || 'Not configured'], ['Distribution', repository.distribution || 'Not configured'], ['Component', repository.component || 'Not configured'], ['Architectures', (repository.architectures || [packageRow.architecture || 'all']).join(', ')], ['Publication', repository.published ? 'Published' : 'Not published']])}</div><div class="package-action-bar toolbar"><div class="toolbar-actions">${actionButtons(packageRow)}</div></div><section class="drawer-history"><div class="section-header"><h3>History</h3></div><div class="data-list">${(packageRow.history || []).map(execution => `<div class="item list-row" role="button" tabindex="0" data-admin-action="open-history-execution" data-execution-id="${esc(execution.id)}"><div class="item-title"><span>${esc(execution.id)} · ${esc(execution.action)}</span>${badge(execution.lifecycle_status || execution.status)}</div><div class="item-meta">${fmtTime(execution.updated)}</div></div>`).join('') || '<div class="empty-state">No linked history.</div>'}</div></section><div class="danger-zone"><div><strong>Remove package</strong><p class="muted">Does not delete the package from the APT repository.</p></div><button class="btn btn--danger" data-admin-action="delete-package" data-package-name="${esc(packageRow.name)}">Delete from DebBuilder</button></div>`;
   if (validation.recovery_blocker) {
     $('packageDetail').insertAdjacentHTML('afterbegin', packageDetailSection(
       'Validation recovery', [['State', validation.recovery_blocker.message || 'Operator attention required']],
@@ -231,6 +244,24 @@ async function checkPackageAutomation(name) {
     showToast(result.automation.created ? 'Upstream check accepted.' : 'An upstream check is already active.', {type: 'info'});
   } finally {
     packageAutomationSubmissions.delete(name);
+  }
+}
+
+async function refreshPackageObservation(name) {
+  if (packageObservationSubmissions.has(name)) return;
+  const current = packageByName(name);
+  if (!current?.recipe) return;
+  packageObservationSubmissions.add(name);
+  try {
+    await postJson(`/api/recipes/${encodeURIComponent(current.recipe)}/observation/refresh`, {});
+    const packageRow = (await getJson(`/api/packages/${encodeURIComponent(name)}`)).package;
+    const index = adminState.packages.findIndex(row => row.name === name);
+    if (index >= 0) adminState.packages[index] = packageRow;
+    renderPackages();
+    if (adminState.selectedPackage === name) renderOpenPackage(packageRow);
+    showToast('Upstream observation refreshed.', {type: 'success'});
+  } finally {
+    packageObservationSubmissions.delete(name);
   }
 }
 
@@ -439,7 +470,7 @@ async function createRecipeFromDialog() {
     return;
   }
   const tracking = $('newRecipeTracking').value;
-  const versionSource = $('newRecipeVersionSource').value;
+  const versionSource = canonicalRecipeVersionSource($('newRecipeVersionSource').value);
   const workflow = {schema_version: 5, name: packageName, active: true, automation: {enabled:false, policy:'manual'}, resource_limits: {memory_max_bytes:null,tasks_max:null,cpu_quota_percent:null,io_read_bandwidth_max_bytes_per_sec:null,io_write_bandwidth_max_bytes_per_sec:null}, runtime_apt_repositories: [], package: {name: packageName}, source: {provider: 'github', repository: $('newRecipeGithub').value.trim(), tracking, ref: tracking === 'latest_release' ? '' : $('newRecipeSourceRef').value.trim(), version: {source: versionSource, expression: versionSource === 'regex' ? $('newRecipeVersionExpression').value.trim() : ''}}};
   currentRecipeManaged = false;
   currentRecipeEditablePaths = [];

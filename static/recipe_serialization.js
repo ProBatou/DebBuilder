@@ -78,6 +78,14 @@ function value(id) { return $(id)?.value.trim() || ''; }
 function rawValue(id) { return $(id)?.value || ''; }
 function setValue(id, next) { if ($(id)) $(id).value = next ?? ''; }
 
+function canonicalRecipeVersionSource(value) {
+  const source = value || 'tag';
+  if (!['tag', 'release_name', 'regex'].includes(source)) {
+    throw new Error(`Unsupported Recipe version source: ${source}`);
+  }
+  return source;
+}
+
 function installDirectories(value) {
   return String(value || '').split(/\r?\n/).map(row => row.split('|').map(item => item.trim())).filter(parts => parts[0]).map(parts => ({path:parts[0], owner:parts[1] || 'root', group:parts[2] || parts[1] || 'root', mode:parts[3] || '0755'}));
 }
@@ -183,7 +191,6 @@ function collectWorkflow() {
       mode:window.recipeArchiveState.payload.mode,
       include:[...window.recipeArchiveState.payload.include],
       exclude:[...window.recipeArchiveState.payload.exclude],
-      ...(window.recipeArchiveState.payload.legacy_file_layout ? {legacy_file_layout:window.recipeArchiveState.payload.legacy_file_layout} : {}),
     };
     artifact.asset_name = archiveSource === 'release_asset' && assetSelection === 'exact' ? value('recipeArtifactName') : '';
     artifact.name_pattern = archiveSource === 'release_asset' && assetSelection === 'pattern' ? value('recipeArtifactPattern') : '';
@@ -216,7 +223,7 @@ function collectWorkflow() {
       repository: value('recipeMetaGithub'),
       tracking: $('recipeMetaTracking')?.value || 'latest_release',
       ref: value('recipeMetaSourceRef'),
-      version: {source: $('recipeMetaVersionSource')?.value || 'tag', expression: value('recipeMetaVersionExpression')}
+      version: {source: canonicalRecipeVersionSource($('recipeMetaVersionSource')?.value), expression: value('recipeMetaVersionExpression')}
     },
     artifact,
     build: {
@@ -314,7 +321,7 @@ function renderWorkflow(wf) {
     window.recipeBuildOutput = {mode:outputMode, path:configuredOutput.path || '', paths:[...(configuredOutput.paths || [])]};
     window.recipeSuggestedOutputPaths = [];
     setValue('recipeMetaName', wf.name || ''); setValue('recipeMetaPackage', packageData.name || ''); setValue('recipeMetaGithub', source.repository || '');
-    setValue('recipeMetaTracking', source.tracking || 'latest_release'); setValue('recipeMetaSourceRef', source.ref || ''); setValue('recipeMetaVersionSource', source.version?.source || 'tag'); setValue('recipePackageVersionRevision', packageData.version_revision ?? '1'); setValue('recipeMetaVersionExpression', source.version?.expression || '');
+    setValue('recipeMetaTracking', source.tracking || 'latest_release'); setValue('recipeMetaSourceRef', source.ref || ''); setValue('recipeMetaVersionSource', canonicalRecipeVersionSource(source.version?.source)); setValue('recipePackageVersionRevision', packageData.version_revision ?? '1'); setValue('recipeMetaVersionExpression', source.version?.expression || '');
     window.recipeArchiveState = ArchiveTree.createState(artifact.payload || {});
     window.recipeArchiveInspectionMeta = null;
     setValue('recipeArtifactMode', artifact.mode || 'source_build'); setValue('recipeArchiveSource', artifact.archive_source || 'auto'); setValue('recipeArchiveFormat', artifact.archive_format || 'tar.gz'); setValue('recipeAssetSelection', artifact.asset_selection || 'pattern'); setValue('recipeArtifactPattern', artifact.name_pattern || ''); setValue('recipeArtifactName', artifact.asset_name || '');

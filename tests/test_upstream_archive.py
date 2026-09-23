@@ -10,20 +10,24 @@ from pathlib import Path
 from unittest import mock
 
 from debbuilder import build_pipeline, debian_packaging, upstream_archive, upstream_artifact
+from debbuilder.automation_identity import release_asset_identity
 from debbuilder.build_store import BuildStore
 from debbuilder.execution_manager import ExecutionManager
-from debbuilder.recipe_schema import normalize_recipe, validate_recipe_metadata
+from debbuilder.recipe_schema import normalize_recipe, runtime_recipe_for_storage, validate_recipe_metadata
 
 
 def recipe(**artifact):
     artifact_config = {
         "mode": "upstream_archive", "type": "archive", "architecture": "amd64",
-        "asset_name": "demo-linux.tar.gz", "selected_files": ["demo"],
+        "asset_name": "demo-linux.tar.gz",
+        "archive_source": "release_asset", "asset_selection": "exact",
+        "payload": {"mode": "paths", "include": ["demo"], "exclude": []},
     }
-    if "payload" in artifact:
-        artifact_config.pop("selected_files")
     artifact_config.update(artifact)
+    if artifact_config.get("name_pattern") and not artifact_config.get("asset_name"):
+        artifact_config["asset_selection"] = "pattern"
     return validate_recipe_metadata({
+        "schema_version": 5,
         "name": "demo", "package": {"name": "demo", "architecture": "amd64", "maintainer": "Demo <demo@example.org>"},
         "source": {"repository": "example/demo", "tracking": "latest_release"},
         "artifact": artifact_config,
@@ -34,6 +38,14 @@ def recipe(**artifact):
 
 def release(assets):
     return {"repository": "example/demo", "release_id": 123, "tag": "v1.2.3", "ref": "v1.2.3", "name": "v1.2.3", "url": "https://github.com/example/demo/releases/tag/v1.2.3", "upstream_version": "1.2.3", "archive_url": "https://api.github.com/repos/example/demo/tarball/v1.2.3", "tarball_url": "https://api.github.com/repos/example/demo/tarball/v1.2.3", "zipball_url": "https://api.github.com/repos/example/demo/zipball/v1.2.3", "assets": assets}
+
+
+def admitted_asset_identity(configured, *, name="demo-linux.tar.gz", payload_kind="archive", size=0):
+    asset = {
+        "asset_id": 456, "name": name, "size": size, "digest": "",
+        "url": f"https://github.com/example/demo/releases/download/v1.2.3/{name}",
+    }
+    return release_asset_identity(configured, release([asset]), asset, payload_kind)
 
 
 def tar_bytes(entries, mode="w:gz"):
@@ -101,7 +113,6 @@ class UpstreamArchiveTests(unittest.TestCase):
                 "mode": "paths", "include": ["app/", "server.py", "static/"], "exclude": ["static/dev/"],
                 "explicit_files": 1, "selected_directories": 2, "selected_files": 4,
                 "excluded_files": 0, "excluded_directories": 1, "excluded_resolved_files": 1,
-                "legacy_layout": False,
             })
 
     def test_payload_selectors_are_validated_against_inventory(self):
@@ -188,9 +199,16 @@ class UpstreamArchiveTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as temporary:
             store = BuildStore(Path(temporary) / "builds")
+            configured = runtime_recipe_for_storage(recipe())
             with mock.patch.object(upstream_archive.upstream_artifact, "resolve_release", side_effect=error):
-                result = build_pipeline.run_pipeline(
-                    recipe(), store=store, dry_run=True, acquire=upstream_archive.acquire,
+                result = build_pipeline.execute_pipeline_run(
+                    build_pipeline.create_pipeline_run(
+                        configured,
+                        store=store,
+                        dry_run=True,
+                        manual_source_provenance=admitted_asset_identity(configured),
+                    )["id"],
+                    store=store, acquire=upstream_archive.acquire,
                 )
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["error"], {
@@ -206,7 +224,11 @@ class UpstreamArchiveTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as temporary:
             store = BuildStore(Path(temporary) / "builds")
-            run = build_pipeline.create_pipeline_run(recipe(), store=store, dry_run=True)
+            configured = runtime_recipe_for_storage(recipe())
+            run = build_pipeline.create_pipeline_run(
+                configured, store=store, dry_run=True,
+                manual_source_provenance=admitted_asset_identity(configured),
+            )
             manager = ExecutionManager(store)
             with mock.patch.object(upstream_archive.upstream_artifact, "resolve_release", side_effect=error):
                 manager.start()
@@ -410,6 +432,7 @@ class UpstreamArchiveTests(unittest.TestCase):
             ("demo-1.2.3/README.md", b"readme", "file"),
         ])
         configured = normalize_recipe({
+            "schema_version": 5,
             "name": "demo", "package": {"name": "demo"},
             "source": {"repository": "example/demo"},
             "artifact": {"mode": "upstream_archive", "archive_source": "github_source", "archive_format": "tar.gz"},
@@ -465,10 +488,6 @@ class UpstreamArchiveTests(unittest.TestCase):
             self.assertEqual(inventory["entry_count"], 2006)
             self.assertEqual(inventory["entries"][0], {"path": "data/", "kind": "directory", "descendant_files": 2005})
             self.assertEqual(inventory["entries"][-1]["path"], "data/2004.txt")
-            with self.assertRaises(upstream_archive.UpstreamArchiveError) as caught:
-                upstream_archive.list_extracted_files(source, limit=2000)
-            self.assertEqual(caught.exception.code, "archive_inspection_incomplete")
-            self.assertFalse(caught.exception.details["complete"])
 
     def test_inventory_rejects_noncanonical_logical_paths(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -846,13 +865,18 @@ class UpstreamArchiveTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as temporary:
             store = BuildStore(Path(temporary) / "builds")
-            def acquire(_recipe, workspace, token=""):
+            configured = runtime_recipe_for_storage(recipe())
+            expected = admitted_asset_identity(configured)
+            def acquire(_recipe, workspace, token="", expected_identity=None):
                 source = Path(workspace) / "source"
                 source.mkdir(exist_ok=True)
                 binary = source / "demo"
                 binary.write_bytes(b"binary")
-                return {**acquired, "source_directory": str(source), "archive_payload": upstream_archive.resolve_payload(_recipe, source)}
-            result = build_pipeline.run_pipeline(recipe(), store=store, dry_run=True, acquire=acquire)
+                return {**acquired, "upstream_identity": expected_identity, "source_directory": str(source), "archive_payload": upstream_archive.resolve_payload(_recipe, source)}
+            result = build_pipeline.execute_pipeline_run(
+                build_pipeline.create_pipeline_run(configured, store=store, dry_run=True, manual_source_provenance=expected)["id"],
+                store=store, acquire=acquire,
+            )
             persisted = store.load(result["run_id"])
         self.assertEqual(result["status"], "prepared")
         self.assertEqual(result["build"]["commands"], [])
@@ -881,9 +905,14 @@ class UpstreamArchiveTests(unittest.TestCase):
             Path(destination).write_bytes(payload)
             return {"path": str(destination), "size": len(payload), "sha256": digest}
 
-        def acquire(_recipe, workspace, token=""):
+        expected = release_asset_identity(
+            runtime_recipe_for_storage(configured), release([asset]), asset, "raw_file",
+        )
+
+        def acquire(_recipe, workspace, token="", expected_identity=None):
             return upstream_archive.acquire(
                 _recipe, workspace, token=token,
+                expected_identity=expected_identity,
                 release_resolver=lambda *_a, **_k: release([asset]), downloader=downloader,
             )
 
@@ -898,8 +927,25 @@ class UpstreamArchiveTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary, mock.patch.object(build_pipeline.debian_packaging, "build_deb", side_effect=build_deb):
             root = Path(temporary)
-            tested = build_pipeline.run_pipeline(configured, store=BuildStore(root / "test-builds"), dry_run=True, acquire=acquire)
-            built = build_pipeline.run_pipeline(configured, store=BuildStore(root / "real-builds"), dry_run=False, acquire=acquire)
+            admitted = runtime_recipe_for_storage(configured)
+            tested = build_pipeline.execute_pipeline_run(
+                build_pipeline.create_pipeline_run(
+                    admitted,
+                    store=BuildStore(root / "test-builds"),
+                    dry_run=True,
+                    manual_source_provenance=expected,
+                )["id"],
+                store=BuildStore(root / "test-builds"), acquire=acquire,
+            )
+            built = build_pipeline.execute_pipeline_run(
+                build_pipeline.create_pipeline_run(
+                    admitted,
+                    store=BuildStore(root / "real-builds"),
+                    dry_run=False,
+                    manual_source_provenance=expected,
+                )["id"],
+                store=BuildStore(root / "real-builds"), acquire=acquire,
+            )
             for result in (tested, built):
                 self.assertEqual(result["source"]["payload_kind"], "raw_file")
                 self.assertEqual(result["source"]["file_count"], 1)
@@ -911,7 +957,8 @@ class UpstreamArchiveTests(unittest.TestCase):
                 self.assertEqual(result["detection"]["detected_files"], ["demo"])
             self.assertEqual(tested["status"], "prepared")
             self.assertEqual(built["status"], "success")
-        self.assertEqual(downloads, [asset["url"], asset["url"]])
+        immutable_url = "https://api.github.com/repos/example/demo/releases/assets/456"
+        self.assertEqual(downloads, [immutable_url, immutable_url])
 
     def test_pipeline_stages_recursive_payload_with_exclusion_and_records_only_compact_facts(self):
         configured = recipe(payload={"mode": "paths", "include": ["app/"], "exclude": ["app/cache/"]})
@@ -928,18 +975,23 @@ class UpstreamArchiveTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as temporary:
             store = BuildStore(Path(temporary) / "builds")
+            admitted = runtime_recipe_for_storage(configured)
+            expected = admitted_asset_identity(admitted)
 
-            def acquire(_recipe, workspace, token=""):
+            def acquire(_recipe, workspace, token="", expected_identity=None):
                 source = Path(workspace) / "source"
                 (source / "app/cache").mkdir(parents=True)
                 (source / "app/main.py").write_text("print('ready')\n")
                 (source / "app/cache/state.db").write_bytes(b"cache")
                 return {
-                    **acquired, "source_directory": str(source),
+                    **acquired, "upstream_identity": expected_identity, "source_directory": str(source),
                     "archive_payload": upstream_archive.resolve_payload(_recipe, source),
                 }
 
-            result = build_pipeline.run_pipeline(configured, store=store, dry_run=True, acquire=acquire)
+            result = build_pipeline.execute_pipeline_run(
+                build_pipeline.create_pipeline_run(admitted, store=store, dry_run=True, manual_source_provenance=expected)["id"],
+                store=store, acquire=acquire,
+            )
             persisted = store.load(result["run_id"])
             staged = Path(result["workspace"]) / "staging/opt/demo"
             self.assertTrue((staged / "app/main.py").is_file())
@@ -954,38 +1006,6 @@ class UpstreamArchiveTests(unittest.TestCase):
         stored_staging = next(step for step in persisted["steps"] if step["name"] == "staging")["details"]
         self.assertEqual(stored_staging["content_file_count"], 1)
         self.assertNotIn("content_files", stored_staging)
-
-    def test_legacy_nested_file_selection_keeps_effective_basename_destination(self):
-        configured = recipe(selected_files=["bin/demo"])
-        configured["install"].update({
-            "destination": "/opt/demo", "content": {"source": "build_output", "path": ""},
-            "config_files": [],
-        })
-        self.assertEqual(configured["artifact"]["payload"]["legacy_file_layout"], "basename")
-        acquired = {
-            "repository": "example/demo", "strategy": "latest_release", "ref": "v1.2.3", "tag": "v1.2.3",
-            "release_name": "v1.2.3", "release_url": "https://github.com/example/demo/releases/tag/v1.2.3",
-            "upstream_version": "1.2.3", "debian_version": "1.2.3-1", "artifact_mode": "upstream_archive",
-            "asset": {"name": "demo-linux.tar.gz", "url": "https://github.com/example/demo/releases/download/v1.2.3/demo-linux.tar.gz", "download_size": 6, "sha256": "a" * 64, "archive_format": "tar.gz"},
-            "extraction": {"files": 1},
-        }
-        with tempfile.TemporaryDirectory() as temporary:
-            store = BuildStore(Path(temporary) / "builds")
-            def acquire(_recipe, workspace, token=""):
-                binary = Path(workspace) / "source/bin/demo"
-                binary.parent.mkdir(parents=True, exist_ok=True)
-                binary.write_bytes(b"binary")
-                binary.chmod(0o755)
-                return {
-                    **acquired, "source_directory": str(binary.parents[1]),
-                    "archive_payload": upstream_archive.resolve_payload(_recipe, binary.parents[1]),
-                }
-            result = build_pipeline.run_pipeline(configured, store=store, dry_run=True, acquire=acquire)
-            staging = Path(result["workspace"]) / "staging/opt/demo"
-            self.assertEqual(result["status"], "prepared")
-            self.assertTrue((staging / "demo").is_file())
-            self.assertFalse((staging / "bin/demo").exists())
-
 
 if __name__ == "__main__":
     unittest.main()

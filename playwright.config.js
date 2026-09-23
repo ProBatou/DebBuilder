@@ -26,7 +26,7 @@ module.exports = defineConfig({
     trace: 'retain-on-failure',
   },
   webServer: {
-    command: 'python3 server.py',
+    command: 'python3 -m tests.ui.showcase_server',
     url: `${baseURL}/api/status`,
     reuseExistingServer: false,
     timeout: 20_000,

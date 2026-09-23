@@ -13,11 +13,12 @@ from pathlib import Path
 
 from debbuilder.command_containment import CGROUP_ROOT, containment_capability, loaded_command_units
 from debbuilder.command_identity import ACTIVE_COMMAND_FILE
+from debbuilder import app, settings_store
 
 
 def recipe(name="signal-fixture"):
     return {
-        "schema_version": 1,
+        "schema_version": 5,
         "name": name,
         "active": True,
         "package": {
@@ -29,7 +30,8 @@ def recipe(name="signal-fixture"):
         "source": {
             "provider": "github",
             "repository": f"owner/{name}",
-            "tracking": "latest_release",
+            "tracking": "manual",
+            "ref": "v1.0.0",
             "version": {"source": "tag"},
         },
     }
@@ -73,7 +75,21 @@ class ServerSignalSubprocessTests(unittest.TestCase):
             "DEBBUILDER_AUTH_MODE": "none",
         }
         if pause_phase == "authentication":
+            settings = app.settings_defaults()
+            settings["security"] = {
+                "auth_mode": "oidc",
+                "oidc_issuer": "https://id.example.test",
+                "oidc_client_id": "debbuilder",
+                "oidc_redirect_uri": "https://apt.example.test/auth/callback",
+            }
+            settings_store.save_settings(self.data, settings)
+            settings_store.save_secrets(self.data, {
+                "schema_version": 1, "oidc": {"client_secret": "signal-fixture-client-secret"},
+            })
             environment["DEBBUILDER_AUTH_MODE"] = "oidc"
+            environment["DEBBUILDER_OIDC_ISSUER"] = "https://id.example.test"
+            environment["DEBBUILDER_OIDC_CLIENT_ID"] = "debbuilder"
+            environment["DEBBUILDER_OIDC_REDIRECT_URI"] = "https://apt.example.test/auth/callback"
         command = [
             sys.executable, "-m", "tests.shutdown_server", "--port", "0",
             "--shutdown-timeout", str(shutdown_timeout),
@@ -228,7 +244,7 @@ class ServerSignalSubprocessTests(unittest.TestCase):
 
     def test_sigterm_during_each_stateful_startup_phase_unwinds_safely(self):
         for phase in (
-            "directories", "recovery", "authentication", "migration",
+            "directories", "recovery", "authentication", "recipe_validation",
             "reconciliation", "manager_start", "retention",
         ):
             with self.subTest(phase=phase):
@@ -245,11 +261,14 @@ class ServerSignalSubprocessTests(unittest.TestCase):
     def test_shutdown_waits_while_startup_owned_secret_persistence_is_in_progress(self):
         process, record = self.launch(pause_phase="authentication")
         self.assertEqual(record["name"], "authentication")
+        before = settings_store.load_secrets(self.data)
+        self.assertEqual(before["oidc"]["client_secret"], "signal-fixture-client-secret")
+        self.assertNotIn("session", before)
 
         process.send_signal(signal.SIGTERM)
         with self.assertRaises(subprocess.TimeoutExpired):
             process.wait(timeout=0.2)
-        self.assertFalse((self.data / "secrets.json").exists())
+        self.assertNotIn("session", settings_store.load_secrets(self.data))
 
         process.stdin.write("x")
         process.stdin.flush()
@@ -259,7 +278,9 @@ class ServerSignalSubprocessTests(unittest.TestCase):
         self.assertEqual(summary["outcome"], 0)
         self.assertTrue(summary["listener_closed"])
         self.assertEqual(summary["lifecycle_threads"], [])
-        self.assertTrue((self.data / "secrets.json").exists())
+        after = settings_store.load_secrets(self.data)
+        self.assertEqual(after["oidc"], before["oidc"])
+        self.assertGreaterEqual(len(after["session"]["cookie_secret"]), 40)
 
     def test_sigint_during_recovery_uses_the_same_startup_cleanup(self):
         process, record = self.launch(pause_phase="recovery")

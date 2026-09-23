@@ -45,19 +45,9 @@
 
   function normalizePayload(payload = {}) {
     const mode = payload.mode === 'entire_archive' ? 'entire_archive' : 'paths';
-    const legacy = payload.legacy_file_layout === 'basename';
-    const legacyInclude = [];
-    if (legacy) {
-      const seen = new Set();
-      (payload.include || []).forEach(value => {
-        const parsed = parsePath(String(value));
-        if (parsed.kind !== 'file') throw new Error('Legacy archive payload only supports files');
-        if (!seen.has(parsed.path)) { legacyInclude.push(parsed.path); seen.add(parsed.path); }
-      });
-    }
-    const include = mode === 'entire_archive' ? [] : legacy ? legacyInclude : canonicalSelectors(payload.include || []);
+    const include = mode === 'entire_archive' ? [] : canonicalSelectors(payload.include || []);
     const exclude = canonicalSelectors(payload.exclude || []);
-    return {mode, include, exclude, ...(legacy ? {legacy_file_layout:'basename'} : {})};
+    return {mode, include, exclude};
   }
 
   function buildTree(inventory = {}) {
@@ -112,8 +102,6 @@
   }
 
   function mutate(state) {
-    if (state.payload.legacy_file_layout) state.payload.include = canonicalSelectors(state.payload.include);
-    delete state.payload.legacy_file_layout;
     state.selectionError = null;
   }
 

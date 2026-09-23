@@ -48,10 +48,6 @@ def _command(arguments: list[str], *, workspace: Path, runner, timeout: float = 
     return result
 
 
-def _unescape_colon(value: str) -> str:
-    return re.sub(r"\\x([0-9A-Fa-f]{2})", lambda match: chr(int(match.group(1), 16)), value)
-
-
 def _usable_signing_key(row: list[str], *, now: int) -> bool:
     validity = row[1].lower() if len(row) > 1 else ""
     # GnuPG uses lowercase for this key packet's capability and uppercase for

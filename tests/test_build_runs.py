@@ -9,13 +9,15 @@ from pathlib import Path
 from debbuilder import build_pipeline, execution_service
 from debbuilder.build_models import RUN_STATUSES, STEP_NAMES
 from debbuilder.build_store import BuildStore
+from debbuilder.recipe_schema import RecipeDocumentError
 
 
 def recipe():
     return {
+        "schema_version": 5,
         "name": "demo", "active": True,
         "package": {"name": "demo", "architecture": "all", "maintainer": "Demo <demo@example.test>", "description": "Demo package"},
-        "source": {"repository": "owner/demo"},
+        "source": {"repository": "owner/demo", "tracking": "manual", "ref": "v1.2.0"},
     }
 
 
@@ -45,6 +47,34 @@ class BuildStoreTests(unittest.TestCase):
 
             self.assertFalse(store.root.exists())
 
+    def test_removed_recipe_alias_is_rejected_before_run_creation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = BuildStore(Path(temporary) / "builds")
+            invalid = recipe()
+            invalid["build"] = {"timeout": 120}
+
+            with self.assertRaisesRegex(ValueError, r"\$\.build\.timeout"):
+                build_pipeline.create_pipeline_run(invalid, store=store, dry_run=False)
+
+            self.assertFalse(store.root.exists())
+
+    def test_build_version_source_cannot_bypass_direct_run_admission(self):
+        for admission in ("store", "pipeline"):
+            with self.subTest(admission=admission), tempfile.TemporaryDirectory() as temporary:
+                store = BuildStore(Path(temporary) / "builds")
+                invalid = recipe()
+                invalid["source"]["version"] = {"source": "build"}
+
+                with self.assertRaises(RecipeDocumentError) as raised:
+                    if admission == "store":
+                        store.create(invalid, mode="build")
+                    else:
+                        build_pipeline.create_pipeline_run(invalid, store=store, dry_run=False)
+
+                self.assertEqual(raised.exception.code, "unsupported_version_source")
+                self.assertEqual(raised.exception.path, "$.source.version.source")
+                self.assertFalse(store.root.exists())
+
     def test_large_staging_inventory_is_externalized(self):
         with tempfile.TemporaryDirectory() as temporary:
             store = BuildStore(Path(temporary) / "builds")
@@ -67,9 +97,9 @@ class BuildStoreTests(unittest.TestCase):
             self.assertEqual(persisted_details["content_manifest"], "manifests/staging-files.json")
             self.assertEqual(persisted_details["content_source"], "source/node_modules")
             self.assertLess((Path(run["workspace"]) / "run.json").stat().st_size, 20_000)
-            self.assertEqual(len(store.staging_content_files(run["id"], persisted_details)), 60_000)
+            self.assertEqual(len(store.load_manifest(run["id"], persisted_details["content_manifest"])), 60_000)
             with self.assertRaises(ValueError):
-                store.staging_content_files(run["id"], {"content_manifest": "manifests/../../recipe.json"})
+                store.load_manifest(run["id"], "manifests/../../recipe.json")
 
     def test_large_artifact_inventory_is_externalized(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -116,20 +146,33 @@ class BuildStoreTests(unittest.TestCase):
             store = BuildStore(Path(temporary) / "builds")
             store.create(recipe(), mode="build", run_id="concurrent-run")
 
-            def append_validation(index):
+            def append_event(index):
                 with store.locked_run("concurrent-run"):
                     current = store.load("concurrent-run")
-                    current.setdefault("validations", []).append({"id": f"validation-{index}", "status": "success"})
+                    current.setdefault("events", []).append({"at": str(index), "level": "info", "message": f"event-{index}"})
                     store.save(current)
 
-            threads = [threading.Thread(target=append_validation, args=(index,)) for index in range(20)]
+            threads = [threading.Thread(target=append_event, args=(index,)) for index in range(20)]
             for thread in threads:
                 thread.start()
             for thread in threads:
                 thread.join()
 
             stored = store.load("concurrent-run")
-            self.assertEqual(len(stored["validations"]), 20)
+            self.assertEqual(len(stored["events"]), 20)
+
+    def test_current_run_schema_rejects_persisted_validation_copies(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = BuildStore(Path(temporary) / "builds")
+            run = store.create(recipe(), mode="build", run_id="validation-copy")
+            for location in ("run", "artifact"):
+                candidate = dict(run)
+                if location == "run":
+                    candidate["validations"] = []
+                else:
+                    candidate["artifact"] = {"validations": []}
+                with self.subTest(location=location), self.assertRaisesRegex(ValueError, "must not persist Validation"):
+                    store.save(candidate)
 
     def test_build_run_has_the_complete_pending_pipeline(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -143,7 +186,7 @@ class BuildStoreTests(unittest.TestCase):
             run = store.create(recipe(), mode="build", run_id="log-run")
             artifact = Path(run["workspace"]) / "artifacts/demo.deb"
             artifact.write_bytes(b"deb")
-            run.update({"status": "success", "artifact": {"path": str(artifact), "sha256": "abc"}, "validations": [{"status": "success"}], "publications": [{"status": "success"}]})
+            run.update({"status": "success", "artifact": {"path": str(artifact), "sha256": "abc"}, "publications": [{"status": "success"}]})
             run["steps"][4]["details"] = {"commands": [{"index": 1, "stdout": "hello", "stderr": "warn"}]}
             store.save(run)
             store.append_log_line("log-run", "first")
@@ -160,7 +203,7 @@ class BuildStoreTests(unittest.TestCase):
             self.assertTrue(store.execution_history_deletion_path("log-run").is_file())
             self.assertEqual(cleaned["status"], "success")
             self.assertEqual(cleaned["artifact"]["path"], str(artifact))
-            self.assertEqual(cleaned["validations"][0]["status"], "success")
+            self.assertNotIn("validations", cleaned)
             self.assertEqual(cleaned["publications"][0]["status"], "success")
             self.assertEqual(cleaned["steps"][4]["details"]["commands"][0]["stdout"], "")
             self.assertTrue(cleaned["log_deleted"])
@@ -176,26 +219,31 @@ class BuildStoreTests(unittest.TestCase):
             run = store.create(recipe(), mode="build", run_id="lifecycle-log")
             run["status"] = "success"
             run["artifact"] = {"path": str(Path(run["workspace"]) / "artifacts/demo.deb")}
-            run["validations"] = [{"status": "running"}]
             store.save(run)
-            self.assertFalse(execution_service.get_log(store, run["id"], verbosity="raw")["complete"])
-            run["validations"][-1]["status"] = "success"
+            projected = {**run, "_validation_attempts": [{"status": "running"}]}
+            self.assertFalse(execution_service.get_log(store, run["id"], verbosity="raw", run=projected)["complete"])
+            projected["_validation_attempts"][-1]["status"] = "success"
             run["publications"] = [{"status": "running"}]
             store.save(run)
-            self.assertFalse(execution_service.get_log(store, run["id"], verbosity="raw")["complete"])
+            projected["publications"] = run["publications"]
+            self.assertFalse(execution_service.get_log(store, run["id"], verbosity="raw", run=projected)["complete"])
             run["publications"][-1]["status"] = "success"
             store.save(run)
-            self.assertTrue(execution_service.get_log(store, run["id"], verbosity="raw")["complete"])
+            projected["publications"] = run["publications"]
+            self.assertTrue(execution_service.get_log(store, run["id"], verbosity="raw", run=projected)["complete"])
 
     def test_phase_three_records_real_source_and_detection_details(self):
         with tempfile.TemporaryDirectory() as temporary:
             store = BuildStore(Path(temporary) / "builds")
-            def acquire(_recipe, workspace, token=""):
+            def acquire(_recipe, workspace, token="", expected_identity=None):
                 source = Path(workspace) / "source"
                 (source / "package.json").write_text('{"scripts":{"build":"vite build"}}')
                 return {"repository":"owner/demo","ref":"v1.2.0","tag":"v1.2.0","upstream_version":"1.2.0","debian_version":"1.2.0-1","source_directory":str(source)}
             available = lambda detected, manual, **_kwargs: {"detected":detected,"manually_added":manual,"required":detected+manual,"available":detected+manual,"missing":[],"checks":[],"installation_attempted":False}
-            result = build_pipeline.run_pipeline(recipe(), store=store, dry_run=True, acquire=acquire, dependency_check=available)
+            result = build_pipeline.execute_pipeline_run(
+                build_pipeline.create_pipeline_run(recipe(), store=store, dry_run=True)["id"],
+                store=store, acquire=acquire, dependency_check=available,
+            )
             persisted = store.load(result["run_id"])
             self.assertEqual(result["status"], "prepared")
             self.assertEqual(persisted["version"], {"upstream":"1.2.0","debian":"1.2.0-1"})
@@ -209,9 +257,12 @@ class BuildStoreTests(unittest.TestCase):
     def test_detection_failure_stops_before_dependencies(self):
         with tempfile.TemporaryDirectory() as temporary:
             store = BuildStore(Path(temporary) / "builds")
-            def acquire(_recipe, workspace, token=""):
+            def acquire(_recipe, workspace, token="", expected_identity=None):
                 return {"repository":"owner/demo","ref":"v1","tag":"v1","upstream_version":"1.0","debian_version":"1.0-1","source_directory":str(Path(workspace) / "source")}
-            result = build_pipeline.run_pipeline(recipe(), store=store, dry_run=True, acquire=acquire)
+            result = build_pipeline.execute_pipeline_run(
+                build_pipeline.create_pipeline_run(recipe(), store=store, dry_run=True)["id"],
+                store=store, acquire=acquire,
+            )
             self.assertEqual(result["status"], "failed")
             self.assertEqual(result["error"]["stage"], "detection")
             self.assertEqual(result["error"]["code"], "project_not_detected")
@@ -220,7 +271,7 @@ class BuildStoreTests(unittest.TestCase):
     def test_missing_dependency_fails_before_source_changes(self):
         with tempfile.TemporaryDirectory() as temporary:
             store = BuildStore(Path(temporary) / "builds")
-            def acquire(_recipe, workspace, token=""):
+            def acquire(_recipe, workspace, token="", expected_identity=None):
                 source = Path(workspace) / "source"
                 (source / "package.json").write_text("{}")
                 return {"repository":"owner/demo","ref":"v1","tag":"v1","upstream_version":"1.0","debian_version":"1.0-1","source_directory":str(source)}
@@ -228,7 +279,10 @@ class BuildStoreTests(unittest.TestCase):
                 state = {"detected":detected,"manually_added":manual,"required":detected,"available":["nodejs"],"missing":["npm"],"checks":[],"installation_attempted":False}
                 from debbuilder.dependency_checker import DependencyError
                 raise DependencyError("missing_build_dependencies", "Missing required build dependencies: npm. Automatic installation is disabled.", details=state)
-            result = build_pipeline.run_pipeline(recipe(), store=store, dry_run=True, acquire=acquire, dependency_check=missing)
+            result = build_pipeline.execute_pipeline_run(
+                build_pipeline.create_pipeline_run(recipe(), store=store, dry_run=True)["id"],
+                store=store, acquire=acquire, dependency_check=missing,
+            )
             self.assertEqual(result["status"], "failed")
             self.assertEqual(result["error"]["stage"], "dependencies")
             self.assertEqual(result["dependencies"]["missing"], ["npm"])
@@ -239,7 +293,7 @@ class BuildStoreTests(unittest.TestCase):
             store = BuildStore(Path(temporary) / "builds")
             external = Path(temporary) / "original.txt"
             external.write_text("old")
-            def acquire(_recipe, workspace, token=""):
+            def acquire(_recipe, workspace, token="", expected_identity=None):
                 source = Path(workspace) / "source"
                 (source / "package.json").write_text("{}")
                 (source / "app.txt").write_text(external.read_text())
@@ -247,7 +301,10 @@ class BuildStoreTests(unittest.TestCase):
             available = lambda detected, manual, **_kwargs: {"detected":detected,"manually_added":manual,"required":detected,"available":detected,"missing":[],"checks":[],"installation_attempted":False}
             configured = recipe()
             configured["build"] = {"source_changes":[{"operation":"replace","path":"app.txt","search":"old","content":"new"}]}
-            result = build_pipeline.run_pipeline(configured, store=store, dry_run=True, acquire=acquire, dependency_check=available)
+            result = build_pipeline.execute_pipeline_run(
+                build_pipeline.create_pipeline_run(configured, store=store, dry_run=True)["id"],
+                store=store, acquire=acquire, dependency_check=available,
+            )
             self.assertEqual(result["source_changes"]["applied_count"], 1)
             self.assertEqual((Path(result["workspace"]) / "source/app.txt").read_text(), "new")
             self.assertEqual(external.read_text(), "old")
@@ -256,12 +313,15 @@ class BuildStoreTests(unittest.TestCase):
     def test_dry_run_validates_detected_commands_without_executing_them(self):
         with tempfile.TemporaryDirectory() as temporary:
             store = BuildStore(Path(temporary) / "builds")
-            def acquire(_recipe, workspace, token=""):
+            def acquire(_recipe, workspace, token="", expected_identity=None):
                 source = Path(workspace) / "source"
                 (source / "package.json").write_text("{}")
                 return {"repository":"owner/demo","ref":"v1","tag":"v1","upstream_version":"1.0","debian_version":"1.0-1","source_directory":str(source)}
             available = lambda detected, manual, **_kwargs: {"detected":detected,"manually_added":manual,"required":detected,"available":detected,"missing":[],"checks":[],"installation_attempted":False}
-            result = build_pipeline.run_pipeline(recipe(), store=store, dry_run=True, acquire=acquire, dependency_check=available)
+            result = build_pipeline.execute_pipeline_run(
+                build_pipeline.create_pipeline_run(recipe(), store=store, dry_run=True)["id"],
+                store=store, acquire=acquire, dependency_check=available,
+            )
             self.assertEqual(result["steps"][4]["status"], "skipped")
             self.assertFalse(result["build"]["executed"])
             self.assertEqual(result["build"]["plan"]["selection"]["source"], "detection_proposal")
@@ -271,7 +331,7 @@ class BuildStoreTests(unittest.TestCase):
     def test_existing_dry_run_executes_from_its_persisted_mode(self):
         with tempfile.TemporaryDirectory() as temporary:
             store = BuildStore(Path(temporary) / "builds")
-            def acquire(_recipe, workspace, token=""):
+            def acquire(_recipe, workspace, token="", expected_identity=None):
                 source = Path(workspace) / "source"
                 (source / "package.json").write_text("{}")
                 return {"repository":"owner/demo","ref":"v1","tag":"v1","upstream_version":"1.0","debian_version":"1.0-1","source_directory":str(source)}
@@ -289,7 +349,7 @@ class BuildStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             store = BuildStore(Path(temporary) / "builds")
             repositories = []
-            def acquire(snapshot, workspace, token=""):
+            def acquire(snapshot, workspace, token="", expected_identity=None):
                 repositories.append(snapshot["source"]["repository"])
                 source = Path(workspace) / "source"
                 (source / "package.json").write_text("{}")
@@ -308,7 +368,7 @@ class BuildStoreTests(unittest.TestCase):
     def test_existing_run_can_only_execute_once(self):
         with tempfile.TemporaryDirectory() as temporary:
             store = BuildStore(Path(temporary) / "builds")
-            def acquire(_recipe, workspace, token=""):
+            def acquire(_recipe, workspace, token="", expected_identity=None):
                 return {"repository":"owner/demo","ref":"v1","tag":"v1","upstream_version":"1.0","debian_version":"1.0-1","source_directory":str(Path(workspace) / "source")}
             run = build_pipeline.create_pipeline_run(recipe(), store=store, dry_run=True)
             first = build_pipeline.execute_pipeline_run(run["id"], store=store, acquire=acquire)
@@ -347,14 +407,14 @@ class BuildStoreTests(unittest.TestCase):
                 "details": {"run_id": "missing-run"},
             })
 
-    def test_historical_run_without_future_state_fields_remains_readable(self):
+    def test_current_cancelled_run_remains_readable_without_optional_timestamps(self):
         with tempfile.TemporaryDirectory() as temporary:
             store = BuildStore(Path(temporary) / "builds")
-            historical = store.create(recipe(), mode="build", run_id="historical-run")
-            historical["status"] = "cancelled"
-            store.save(historical)
+            run = store.create(recipe(), mode="build", run_id="cancelled-run")
+            run["status"] = "cancelled"
+            store.save(run)
 
-            loaded = BuildStore(store.root).load("historical-run")
+            loaded = BuildStore(store.root).load("cancelled-run")
             self.assertEqual(loaded["status"], "cancelled")
             self.assertNotIn("queued_at", loaded)
             self.assertNotIn("cancelling_at", loaded)
@@ -363,7 +423,7 @@ class BuildStoreTests(unittest.TestCase):
     def test_real_build_records_commands_and_creates_an_inspected_artifact(self):
         with tempfile.TemporaryDirectory() as temporary:
             store = BuildStore(Path(temporary) / "builds")
-            def acquire(_recipe, workspace, token=""):
+            def acquire(_recipe, workspace, token="", expected_identity=None):
                 source = Path(workspace) / "source"
                 (source / "package.json").write_text("{}")
                 return {"repository":"owner/demo","ref":"v1","tag":"v1","upstream_version":"1.0","debian_version":"1.0-1","source_directory":str(source)}

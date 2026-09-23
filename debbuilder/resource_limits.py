@@ -194,15 +194,6 @@ def admission_contract(global_policy, recipe_policy, capability: dict) -> dict:
     }
 
 
-def historical_contract() -> dict:
-    return admission_contract(empty_policy(), empty_policy(), {
-        "backend": "historical",
-        "available": True,
-        "requested_controls": [],
-        "reason": "resource policy was not evaluated for this historical Run",
-    })
-
-
 def default_contract() -> dict:
     return admission_contract(empty_policy(), empty_policy(), {
         "backend": "not_evaluated",
@@ -240,7 +231,7 @@ def validate_contract(value, *, path: str = "$.resource_limits") -> dict:
     if (
         not isinstance(capability, dict)
         or set(capability) != {"backend", "available", "requested_controls", "reason"}
-        or capability.get("backend") not in {"systemd_cgroup", "process_group", "historical", "not_evaluated"}
+        or capability.get("backend") not in {"systemd_cgroup", "process_group", "not_evaluated"}
         or not isinstance(capability.get("available"), bool)
         or not isinstance(capability.get("reason"), str)
         or len(capability["reason"]) > 500

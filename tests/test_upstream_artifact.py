@@ -5,12 +5,14 @@ from pathlib import Path
 from unittest import mock
 
 from debbuilder import build_pipeline, upstream_artifact
+from debbuilder.automation_identity import release_asset_identity
 from debbuilder.build_store import BuildStore
-from debbuilder.recipe_schema import validate_recipe_metadata
+from debbuilder.recipe_schema import runtime_recipe_for_storage, validate_recipe_metadata
 
 
 def recipe(architecture="amd64", pattern="flood-linux-x64.deb"):
     return validate_recipe_metadata({
+        "schema_version": 5,
         "name": "flood", "package": {"name": "flood", "architecture": architecture},
         "source": {"repository": "jesec/flood", "tracking": "latest_release"},
         "artifact": {"mode": "upstream_deb", "architecture": architecture, "name_pattern": pattern},
@@ -18,7 +20,7 @@ def recipe(architecture="amd64", pattern="flood-linux-x64.deb"):
 
 
 def release(assets=None):
-    return {"repository": "jesec/flood", "tag": "v4.16.1", "ref": "v4.16.1", "name": "Release", "url": "https://github.com/jesec/flood/releases/tag/v4.16.1", "upstream_version": "4.16.1", "assets": assets or [{"name": "flood-linux-x64.deb", "url": "https://github.com/jesec/flood/releases/download/v4.16.1/flood-linux-x64.deb", "digest": ""}]}
+    return {"repository": "jesec/flood", "release_id": 10, "tag": "v4.16.1", "ref": "v4.16.1", "name": "Release", "url": "https://github.com/jesec/flood/releases/tag/v4.16.1", "upstream_version": "4.16.1", "assets": assets or [{"asset_id": 20, "name": "flood-linux-x64.deb", "url": "https://github.com/jesec/flood/releases/download/v4.16.1/flood-linux-x64.deb", "digest": ""}]}
 
 
 class UpstreamArtifactTests(unittest.TestCase):
@@ -69,12 +71,23 @@ class UpstreamArtifactTests(unittest.TestCase):
     def test_pipeline_skips_source_build_stages_and_registers_artifact(self):
         with tempfile.TemporaryDirectory() as temporary:
             store = BuildStore(Path(temporary) / "builds")
-            def acquire(configured, workspace, token=""):
+            configured = runtime_recipe_for_storage(recipe())
+            selected_release = release()
+            expected = release_asset_identity(
+                configured, selected_release, selected_release["assets"][0], "deb",
+            )
+            def acquire(configured, workspace, token="", expected_identity=None, cancellation_event=None, on_cancel=None):
                 target = Path(workspace) / "artifacts/flood-linux-x64.deb"
                 target.write_bytes(b"deb")
-                return {"path": str(target), "name": target.name, "size": 3, "sha256": "a" * 64, "source": "upstream_release", "release_asset": release()["assets"][0], "inspection": {"ok": True, "package": "flood", "version": "4.16.1-0", "architecture": "amd64", "depends": ""}}
-            with mock.patch("debbuilder.upstream_artifact.resolve_release", return_value=release()):
-                result = build_pipeline.run_pipeline(recipe(), store=store, dry_run=False, upstream_acquirer=acquire)
+                return {"path": str(target), "name": target.name, "size": 3, "sha256": "a" * 64, "source": "upstream_release", "release_asset": selected_release["assets"][0], "upstream_identity": expected_identity, "inspection": {"ok": True, "package": "flood", "version": "4.16.1-0", "architecture": "amd64", "depends": ""}}
+            run = build_pipeline.create_pipeline_run(
+                configured, store=store, dry_run=False,
+                manual_source_provenance=expected,
+            )
+            with mock.patch("debbuilder.upstream_artifact.resolve_release", return_value=selected_release):
+                result = build_pipeline.execute_pipeline_run(
+                    run["id"], store=store, upstream_acquirer=acquire,
+                )
             self.assertEqual(result["status"], "success")
             self.assertEqual(result["versions"], {"upstream": "4.16.1", "debian": "4.16.1-0"})
             statuses = {step["name"]: step["status"] for step in result["steps"]}

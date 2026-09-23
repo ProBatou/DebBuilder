@@ -12,11 +12,11 @@ from debbuilder.automation_ledger import AutomationLedger, AutomationLedgerError
 from debbuilder.automation_scheduler import AutomationRetryStore
 from debbuilder.automation_status import AutomationActionError, AutomationStatusService
 from debbuilder.build_store import BuildStore, canonical_recipe_sha256
-from debbuilder.recipe_schema import validate_recipe_metadata
+from debbuilder.recipe_schema import recipe_for_storage
 
 
 def recipe(*, active=True, enabled=True, policy="build", description="demo"):
-    return validate_recipe_metadata({
+    return recipe_for_storage({
         "schema_version": 5,
         "name": "demo",
         "active": active,
@@ -137,7 +137,7 @@ class AutomationStatusTests(unittest.TestCase):
 
     def test_latest_in_memory_check_observation_updates_display_without_a_write(self):
         claim = self.claim("detect")
-        configured = recipe_store.load_recipe(self.recipes / "demo.json", write_back=False)
+        configured = recipe_store.load_recipe(self.recipes / "demo.json")
         checked_at = (
             datetime.fromisoformat(claim.record["generations"][-1]["updated_at"])
             + timedelta(seconds=1)
@@ -179,7 +179,7 @@ class AutomationStatusTests(unittest.TestCase):
     def test_linked_run_state_is_read_from_canonical_run(self):
         claim = self.claim("build")
         row = self.ledger.preallocate_run(claim.attempt_key, 0)
-        configured = recipe_store.load_recipe(self.recipes / "demo.json", write_back=False)
+        configured = recipe_store.load_recipe(self.recipes / "demo.json")
         run = self.builds.create(
             configured,
             recipe_id="demo",
@@ -274,7 +274,7 @@ class AutomationStatusTests(unittest.TestCase):
     def test_status_read_does_not_write_recipe_ledger_run_validation_or_publication(self):
         claim = self.claim("full")
         allocation = self.ledger.preallocate_run(claim.attempt_key, 0)
-        configured = recipe_store.load_recipe(self.recipes / "demo.json", write_back=False)
+        configured = recipe_store.load_recipe(self.recipes / "demo.json")
         run = self.builds.create(
             configured,
             recipe_id="demo",
@@ -301,6 +301,14 @@ class AutomationStatusTests(unittest.TestCase):
             self.builds, run["id"], "validation-one",
         ) / "attempt.json"
         attempt_path.parent.mkdir(parents=True)
+        validation_service.storage.save_json(attempt_path.parent / "automation.json", {
+            "automatic": True,
+            "publish_after_success": True,
+            "publication_state": "pending",
+            "attempt_key": claim.attempt_key,
+            "generation": 0,
+            "policy": "full",
+        })
         validation_service._save_attempt(attempt_path, {
             "contract_version": 1,
             "id": "validation-one",
@@ -321,7 +329,6 @@ class AutomationStatusTests(unittest.TestCase):
             "started_at": None,
             "finished_at": None,
             "status": "queued",
-            "prepared_dependencies": None,
             "result": None,
             "error": None,
         })
@@ -367,6 +374,23 @@ class AutomationStatusTests(unittest.TestCase):
                 _run, _validation, publication, blocker = self.service._canonical_links({}, row)
                 self.assertIsNone(publication)
                 self.assertEqual(blocker["code"], "publication_state_unavailable")
+
+    def test_proofless_linked_success_cannot_project_automation_success(self):
+        row = {
+            "run_id": "run-one", "validation_attempt_id": None,
+            "publication_attempt_id": "publication-one",
+            "desired_policy": "full", "state": "terminal", "terminal_classification": "success",
+        }
+        with mock.patch.object(self.builds, "load", return_value={
+            "id": "run-one", "status": "success", "mode": "build",
+            "publications": [{"id": "publication-one", "status": "success", "proof": None}],
+        }):
+            run, validation, publication, blocker = self.service._canonical_links({}, row)
+
+        self.assertIsNone(blocker)
+        self.assertEqual(publication["status"], "failed")
+        self.assertEqual(publication["error_code"], "publication_proof_invalid")
+        self.assertEqual(self.service._state(row, run, validation, publication), ("failed", "failed"))
 
     def test_malformed_ledger_is_a_bounded_blocker_without_repair(self):
         self.save(recipe())

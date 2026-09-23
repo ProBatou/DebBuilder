@@ -147,6 +147,7 @@ with repository_lease(sys.argv[1], operation='owner') as lease:
     def test_run_lock_cannot_be_acquired_after_repository_lock(self):
         store = BuildStore(self.base / "builds")
         recipe = {
+            "schema_version": 5,
             "name": "demo",
             "package": {"name": "demo", "architecture": "all"},
             "source": {"repository": "owner/demo"},

@@ -9,7 +9,7 @@ import hashlib
 from pathlib import Path
 from typing import Callable
 
-from . import recipe_store, validation_service
+from . import artifact_publication, recipe_store, validation_service
 from .automation_ledger import AutomationLedger, AutomationLedgerError, MAX_GENERATIONS
 from .automation_scheduler import AutomationRetryStore, AutomationSchedulerError
 from .build_store import BuildStore, canonical_recipe_sha256
@@ -26,7 +26,7 @@ NON_RETRYABLE_DIAGNOSTICS = frozenset({
     "automation_publication_disabled", "publication_admission_disabled",
     "recipe_changed_during_detection", "automation_recipe_stale",
     "ambiguous_asset", "ambiguous_release_asset", "downgrade_refused",
-    "publication_identity_conflict", "unsupported_automation_source_mode",
+    "publication_identity_conflict",
     "unsupported_source", "invalid_automation_configuration", "invalid_configuration",
     "incomplete_upstream_identity",
 })
@@ -56,7 +56,6 @@ PUBLIC_MESSAGES = {
     "publication_identity_conflict": "Published repository state conflicts with this artifact.",
     "publication_state_unavailable": "The linked publication state is unavailable.",
     "source_not_found": "The configured upstream source was not found.",
-    "unsupported_automation_source_mode": "This source version mode cannot be automated.",
     "unsupported_source": "This Recipe source mode cannot be automated.",
     "upstream_unavailable": "Upstream metadata is temporarily unavailable.",
     "validation_state_unavailable": "The linked validation state is unavailable.",
@@ -149,7 +148,7 @@ class AutomationStatusService:
             ) from exc
         try:
             recipe = validate_recipe_metadata(
-                recipe_store.load_recipe(path, write_back=False)
+                recipe_store.load_recipe(path)
             )
         except (OSError, TypeError, ValueError, recipe_store.RecipeStoreError) as exc:
             raise AutomationActionError(
@@ -185,7 +184,7 @@ class AutomationStatusService:
 
     @staticmethod
     def _activity(scheduler, recipe_id: str) -> dict:
-        if scheduler is None or not hasattr(scheduler, "recipe_activity"):
+        if scheduler is None:
             return {"queued": False, "checking": False}
         try:
             return scheduler.recipe_activity(recipe_id)
@@ -215,7 +214,7 @@ class AutomationStatusService:
         if run is not None and attempt_id:
             try:
                 attempt = validation_service.load_attempt(self.build_store, row["run_id"], attempt_id)
-                public = validation_service.public_attempt(attempt, run=run)
+                public = validation_service.public_attempt(attempt, run=run, store=self.build_store)
                 validation = {
                     "attempt_id": str(public["attempt_id"])[:128],
                     "status": str(public.get("status") or "unknown")[:32],
@@ -235,9 +234,12 @@ class AutomationStatusService:
                 link_blocker = _blocker("publication_state_unavailable")
             else:
                 error = found.get("error") if isinstance(found.get("error"), dict) else None
+                status = artifact_publication.publication_attempt_status(found, run=run)
+                if found.get("status") == "success" and status != "success":
+                    error = {"code": "publication_proof_invalid"}
                 publication = {
                     "attempt_id": str(found.get("id") or "")[:128],
-                    "status": str(found.get("status") or "unknown")[:32],
+                    "status": status[:32],
                     "requested_at": _public_timestamp(found.get("requested_at")),
                     "finished_at": _public_timestamp(found.get("finished_at")),
                     "error_code": _safe_code(error.get("code"), "publication_failed") if error else None,
@@ -256,6 +258,10 @@ class AutomationStatusService:
         if row and row["state"] == "terminal":
             classification = row.get("terminal_classification")
             if classification == "success":
+                if row.get("desired_policy") == "full" and (
+                    not publication or publication.get("status") != "success"
+                ):
+                    return "failed", "failed"
                 return "up_to_date", "success"
             if classification == "cancelled":
                 return "cancelled", "cancelled"
@@ -502,8 +508,7 @@ class AutomationStatusService:
             ) from exc
         scheduler = self.scheduler()
         if scheduler is not None:
-            wake = getattr(scheduler, "request_orchestration", scheduler.request)
-            wake()
+            scheduler.request_orchestration()
         return {
             "accepted": True,
             "created": claim.created,

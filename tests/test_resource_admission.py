@@ -9,18 +9,18 @@ from debbuilder import app
 import debbuilder.command_containment as containment
 from debbuilder.build_store import BuildStore
 from debbuilder.execution_manager import ExecutionManager
-from debbuilder.resource_limits import ResourceLimitError, empty_policy
-from debbuilder.settings_store import save_settings
+from debbuilder.resource_limits import empty_policy
+from debbuilder.settings_store import SettingsDocumentError, save_settings
 
 
 def recipe(policy=None):
     return {
-        "schema_version": 3,
+        "schema_version": 5,
         "name": "resource-admission",
         "active": True,
         "resource_limits": {**empty_policy(), **(policy or {})},
         "package": {"name": "resource-admission"},
-        "source": {"repository": "owner/resource-admission"},
+        "source": {"repository": "owner/resource-admission", "tracking": "manual", "ref": "v1.0.0"},
     }
 
 
@@ -164,41 +164,44 @@ class ResourceAdmissionTests(unittest.TestCase):
         self.assertFalse(self.store.root.exists())
         self.assertEqual(manager.queued_run_ids, ())
 
-    def test_malformed_resource_settings_block_admission_but_settings_remain_repairable(self):
-        (self.data / "settings.json").write_text(json.dumps({"resource_limits": {"tasks_max": "64"}}))
+    def test_malformed_resource_settings_block_admission_until_explicit_bounded_repair(self):
+        settings = app.settings_defaults()
+        settings["resource_limits"]["memory_max_bytes"] = 1073741824
+        settings["resource_limits"]["tasks_max"] = "64"
+        raw = json.dumps(settings)
+        (self.data / "settings.json").write_text(raw)
         manager = self.manager()
         with self.assertRaises(app.RunAdmissionError) as raised:
             app.enqueue_recipe_run(manager, recipe(), dry_run=True)
-        self.assertEqual(raised.exception.code, "resource_settings_invalid")
+        self.assertEqual(raised.exception.code, "settings_invalid")
+        self.assertEqual(raised.exception.details["path"], "$.resource_limits.tasks_max")
         self.assertFalse(self.store.root.exists())
-        view = app.settings_view()
-        self.assertFalse(view["resource_limits_status"]["valid"])
-        with self.assertRaises(ResourceLimitError) as unrelated:
+        with self.assertRaises(ValueError):
+            app.settings_view()
+        with self.assertRaises(ValueError):
             app.update_settings({"general": {"app_name": "must-not-rewrite"}})
-        self.assertEqual(unrelated.exception.code, "resource_settings_repair_required")
-        self.assertEqual(
-            json.loads((self.data / "settings.json").read_text())["resource_limits"]["tasks_max"],
-            "64",
-        )
-        repaired = app.update_settings({"resource_limits": empty_policy()})
-        self.assertTrue(repaired["resource_limits_status"]["valid"])
-
-    def test_partial_repair_preserves_other_valid_stored_ceilings(self):
-        (self.data / "settings.json").write_text(json.dumps({
-            "resource_limits": {"memory_max_bytes": 1073741824, "tasks_max": "bad"},
-        }))
-        loaded = app.settings_view()
-        self.assertFalse(loaded["resource_limits_status"]["valid"])
-        self.assertEqual(loaded["resource_limits"]["memory_max_bytes"], 1073741824)
-
+        self.assertEqual((self.data / "settings.json").read_text(), raw)
         repaired = app.update_settings({"resource_limits": {"tasks_max": 32}})
-
-        self.assertTrue(repaired["resource_limits_status"]["valid"])
         self.assertEqual(repaired["resource_limits"]["memory_max_bytes"], 1073741824)
         self.assertEqual(repaired["resource_limits"]["tasks_max"], 32)
-        stored = json.loads((self.data / "settings.json").read_text())["resource_limits"]
-        self.assertEqual(stored["memory_max_bytes"], 1073741824)
-        self.assertEqual(stored["tasks_max"], 32)
+        self.assertEqual(
+            json.loads((self.data / "settings.json").read_text())["resource_limits"],
+            repaired["resource_limits"],
+        )
+
+    def test_unversioned_settings_block_admission_without_rewrite(self):
+        settings = app.settings_defaults()
+        del settings["schema_version"]
+        raw = json.dumps(settings)
+        (self.data / "settings.json").write_text(raw)
+        manager = self.manager()
+        with self.assertRaises(app.RunAdmissionError) as raised:
+            app.enqueue_recipe_run(manager, recipe(), dry_run=True)
+        self.assertEqual(raised.exception.code, "settings_invalid")
+        self.assertEqual(raised.exception.details["path"], "$.schema_version")
+        with self.assertRaises(SettingsDocumentError):
+            app.update_settings({"resource_limits": {"tasks_max": 32}})
+        self.assertEqual((self.data / "settings.json").read_text(), raw)
 
 
 if __name__ == "__main__":

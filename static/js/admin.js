@@ -122,6 +122,7 @@ async function handleAdminAction(element) {
   else if (action === 'open-recipe') await openLinkedRecipe(element.dataset.recipeId);
   else if (action === 'create-recipe') await createRecipeForPackage(packageName);
   else if (action === 'build-package') await buildPackage(packageName, element.dataset.dryRun === 'true');
+  else if (action === 'refresh-package-observation') await refreshPackageObservation(packageName);
   else if (action === 'check-package-automation') await checkPackageAutomation(packageName);
   else if (action === 'retry-package-automation') await retryPackageAutomation(packageName);
   else if (action === 'validate-package') await validatePackage(packageName);

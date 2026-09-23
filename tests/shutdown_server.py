@@ -16,6 +16,32 @@ from debbuilder.build_store import BuildStore
 from debbuilder.command_containment import ContainmentCapability
 
 
+class DeterministicMaintenanceService:
+    def __init__(self, target):
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=target,
+            args=(self._stop,),
+            name="storage-maintenance",
+            daemon=False,
+        )
+
+    def start(self):
+        self._thread.start()
+
+    def request(self, *, refresh=True, cleanup=False):
+        return None
+
+    def stop(self):
+        self._stop.set()
+
+    def join(self, timeout=None):
+        self._thread.join(timeout)
+
+    def is_alive(self):
+        return self._thread.is_alive()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=0)
@@ -25,7 +51,7 @@ def main() -> int:
     parser.add_argument("--force-process-group", action="store_true")
     parser.add_argument(
         "--pause-phase",
-        choices=("directories", "recovery", "authentication", "migration", "reconciliation", "manager_start", "retention"),
+        choices=("directories", "recovery", "authentication", "recipe_validation", "reconciliation", "manager_start", "retention"),
     )
     args = parser.parse_args()
     if args.force_process_group:
@@ -44,7 +70,7 @@ def main() -> int:
             threading.Event().wait(60)
             return None
 
-        def acquire(_recipe, workspace, token=""):
+        def acquire(_recipe, workspace, token="", expected_identity=None):
             source = Path(workspace) / "source"
             source.mkdir(exist_ok=True)
             command_script = "import time; print('command-ready', flush=True); time.sleep(60)"
@@ -115,7 +141,7 @@ def main() -> int:
                 raise RuntimeError("startup phase barrier was not released")
 
     original_recovery = app.execution_recovery.recover_startup
-    original_migration = app.recipe_store.migrate_recipe_directory
+    original_recipe_validation = app.recipe_store.validate_recipe_directory
     original_reconciliation = app.builtin_recipe.reconcile_builtin_recipe
     original_directories = app.prepare_application_directories
     original_atomic_write = settings_store.storage.atomic_write_text
@@ -128,9 +154,9 @@ def main() -> int:
         phase_barrier("recovery")
         return original_recovery(*call_args, **call_kwargs)
 
-    def migrate_recipes(*call_args, **call_kwargs):
-        phase_barrier("migration")
-        return original_migration(*call_args, **call_kwargs)
+    def validate_recipes(*call_args, **call_kwargs):
+        phase_barrier("recipe_validation")
+        return original_recipe_validation(*call_args, **call_kwargs)
 
     def reconcile_builtin(*call_args, **call_kwargs):
         phase_barrier("reconciliation")
@@ -142,7 +168,7 @@ def main() -> int:
         return original_atomic_write(path, value)
 
     app.execution_recovery.recover_startup = recover_startup
-    app.recipe_store.migrate_recipe_directory = migrate_recipes
+    app.recipe_store.validate_recipe_directory = validate_recipes
     app.builtin_recipe.reconcile_builtin_recipe = reconcile_builtin
     app.prepare_application_directories = prepare_directories
     settings_store.storage.atomic_write_text = atomic_write_text
@@ -158,7 +184,7 @@ def main() -> int:
         manager.start = start
         return manager
 
-    def retention_target(stop):
+    def maintenance_target(stop):
         phase_barrier("retention")
         stop.wait()
 
@@ -173,7 +199,7 @@ def main() -> int:
         app.Handler,
         server_factory=server_factory,
         manager_factory=manager_factory,
-        retention_target=retention_target,
+        maintenance_factory=lambda _server: DeterministicMaintenanceService(maintenance_target),
         shutdown_timeout=args.shutdown_timeout,
     )
     print("SUMMARY " + json.dumps({

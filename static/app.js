@@ -212,9 +212,8 @@ function renderArchivePayloadSummary() {
     ? `Entire archive${summary.resolvedFiles === null ? '' : ` · ${archiveCount('file', summary.resolvedFiles)}`}`
     : `${archiveCount('directory', summary.selectedDirectories)} · ${archiveCount('explicit file', summary.explicitFiles)}${summary.resolvedFiles === null ? '' : ` · ${archiveCount('resolved file', summary.resolvedFiles)}`}`;
   const exclusions = archiveCount('directory', summary.excludedDirectories) + ` · ${archiveCount('file', summary.excludedFiles)}`;
-  const legacy = state.payload.legacy_file_layout ? '<p class="archive-legacy-note">Existing file placement is preserved until you change this selection.</p>' : '';
   const missing = summary.missing.length ? `<p class="archive-selector-warning">Missing from inspected archive: ${summary.missing.map(esc).join(', ')}</p>` : '';
-  node.innerHTML = `<section class="archive-summary-card archive-summary-card--selected"><div class="archive-summary-title"><strong>Selected</strong><span>${esc(selectedLabel)}</span></div>${summary.mode === 'paths' ? archiveSelectorRows(state.payload.include, 'include') : ''}</section><section class="archive-summary-card archive-summary-card--excluded"><div class="archive-summary-title"><strong>Excluded</strong><span>${esc(exclusions)}</span></div>${archiveSelectorRows(state.payload.exclude, 'exclude')}</section>${legacy}${missing}`;
+  node.innerHTML = `<section class="archive-summary-card archive-summary-card--selected"><div class="archive-summary-title"><strong>Selected</strong><span>${esc(selectedLabel)}</span></div>${summary.mode === 'paths' ? archiveSelectorRows(state.payload.include, 'include') : ''}</section><section class="archive-summary-card archive-summary-card--excluded"><div class="archive-summary-title"><strong>Excluded</strong><span>${esc(exclusions)}</span></div>${archiveSelectorRows(state.payload.exclude, 'exclude')}</section>${missing}`;
 }
 
 function archiveTreeRow(node) {

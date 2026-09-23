@@ -4,18 +4,20 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 
 from debbuilder import storage
-from debbuilder.build_store import BuildStore
+from debbuilder.build_store import BuildStore, canonical_recipe_sha256
+from debbuilder.builtin_recipe import load_builtin_definition
 from debbuilder.recipe_schema import recipe_for_storage
+from debbuilder.upstream_observation import UpstreamObservationStore
 
 
 ROOT = Path(__file__).resolve().parents[2]
 RECIPE_FIXTURES = ROOT / "tests" / "fixtures" / "recipes"
-FIXED_RELEASE_EXPIRY = 4_102_444_800
 
 
 def load_recipe(name: str) -> dict:
@@ -235,7 +237,7 @@ def seed_run(
         artifact_path.write_bytes(b"deterministic UI showcase artifact\n")
         run["artifact"] = {
             "path": str(artifact_path), "name": artifact_name, "size": artifact_path.stat().st_size,
-            "sha256": "8d42585d4a877e05b642aa89e623a4b45884c65ddf5c24402c1b78d173b17a8c",
+            "sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
             "source": "upstream_release" if recipe["artifact"]["mode"] == "upstream_deb" else "local_build",
             "inspection": {
                 "package": recipe["package"]["name"], "version": run["version"]["debian"],
@@ -243,20 +245,6 @@ def seed_run(
                 "depends": ", ".join(recipe["package"]["runtime_dependencies"]),
             },
         }
-        if validation != "not_run":
-            validation_record = {
-                "id": f"validation-{run_id}", "status": validation, "artifact": str(artifact_path),
-                "started_at": timestamp, "finished_at": timestamp, "profile": {"name": "bookworm"},
-                "backend": {"runtime": "podman", "network": "disabled"},
-                "checks": [{"name": "package_metadata", "status": "success"}],
-            }
-            if validation == "failed":
-                validation_record.update({
-                    "error": {"code": "validation_failed", "message": "The isolated service check reported an inactive unit.", "details": {}},
-                    "checks": [{"name": "systemd_active_after_grace", "status": "failed", "error": "archive-agent.service exited during startup grace"}],
-                    "commands": [{"command": "systemctl is-active --quiet archive-agent.service", "arguments": ["systemctl", "is-active", "--quiet", "archive-agent.service"], "accepted": False, "status": "failed", "exit_code": 3, "stdout": "", "stderr": "inactive", "duration": 0.04}],
-                })
-            run["validations"] = [validation_record]
         if publication != "not_run":
             publication_record = {
                 "id": f"publication-{run_id}", "status": publication, "artifact": str(artifact_path),
@@ -273,6 +261,10 @@ def seed_run(
                 })
             run["publications"] = [publication_record]
     store.save(run)
+    if validation != "not_run":
+        from tests.validation_helpers import record_canonical_validation
+
+        record_canonical_validation(store, run, attempt_id=f"validation-{run_id}", status=validation, created_at=timestamp)
     store.append_log_line(run_id, f"Run {run_id} entered canonical state {status}")
     if validation != "not_run":
         store.append_log_line(run_id, f"validation {validation}")
@@ -287,38 +279,44 @@ def seed(data_dir: Path, repo_root: Path) -> None:
     workflows.mkdir()
     recipes = showcase_recipes()
     for name, recipe in recipes.items():
+        if name == "debbuilder":
+            # Startup installs the application-managed definition at this reserved id.
+            continue
         storage.save_json(workflows / f"{name}.json", recipe)
 
-    releases = {
-        recipe["source"]["repository"]: {
-            "expires_at": FIXED_RELEASE_EXPIRY,
-            "release": {
-                "tag": f"v{version}", "name": f"Release {version}",
-                "url": f"https://github.com/{recipe['source']['repository']}/releases/tag/v{version}",
-                "assets": [],
-            },
-        }
-        for name, recipe, version in (
+    observations = UpstreamObservationStore(data_dir, wall_clock=lambda: fixed_time(0)[1])
+    observations.record_success(
+        "debbuilder", canonical_recipe_sha256(load_builtin_definition()),
+        {"display_version": "0.1.9", "display_ref": "v0.1.9"},
+    )
+    for name, recipe, version in (
             ("bashrc", recipes["bashrc"], "1.4.0"),
-            ("debbuilder", recipes["debbuilder"], "0.1.9"),
             ("seerr", recipes["seerr"], "2.0.0"),
             ("ssh-notify", recipes["ssh-notify"], "2.1.0"),
             ("archive-agent", recipes["archive-agent"], "5.0.0"),
             ("vendor-cli", recipes["vendor-cli"], "3.3.0"),
             ("worker-agent", recipes["worker-agent"], "2.4.0"),
             ("release-tool", recipes["release-tool"], "7.1.0"),
+        ):
+        observations.record_success(
+            name, canonical_recipe_sha256(recipe),
+            {"display_version": version, "display_ref": f"v{version}"},
         )
-    }
-    storage.save_json(data_dir / "github-release-cache.json", releases)
-    storage.save_json(data_dir / "repo-current-packages-inventory.json", [
+    packages = [
         {"Package": "bashrc", "Version": "1.4.0-1", "Architecture": "all", "Description": "Managed shell defaults"},
         {"Package": "debbuilder", "Version": "0.1.8-2", "Architecture": "all", "Description": "Debian package build console"},
         {"Package": "release-tool", "Version": "7.1.0-4", "Architecture": "all", "Description": "Published release helper"},
-    ])
+    ]
+    packages_dir = repo_root / "dists" / "stable" / "main" / "binary-amd64"
+    packages_dir.mkdir(parents=True)
+    (packages_dir / "Packages").write_text(
+        "\n\n".join("\n".join(f"{key}: {value}" for key, value in row.items()) for row in packages) + "\n\n",
+    )
 
     store = BuildStore(data_dir / "builds")
     seed_run(store, recipes["debbuilder"], "ui-01-prepared", 1, mode="dry_run", status="prepared", upstream="0.1.9")
-    seed_run(store, recipes["worker-agent"], "ui-02-running", 2, status="running", upstream="2.4.0")
+    # Persist only terminal Runs: an unowned running Run correctly blocks startup recovery.
+    seed_run(store, recipes["worker-agent"], "ui-02-worker", 2, status="success", upstream="2.4.0")
     seed_run(store, recipes["ssh-notify"], "ui-03-validation-needed", 3, status="success", upstream="2.1.0")
     seed_run(store, recipes["seerr"], "ui-04-build-failed", 4, status="failed", upstream="2.0.0")
     seed_run(store, recipes["archive-agent"], "ui-05-validation-failed", 5, status="success", upstream="5.0.0", validation="failed")

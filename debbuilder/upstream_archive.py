@@ -397,20 +397,6 @@ def inspect_inventory(source: str | Path) -> dict:
     }
 
 
-def list_extracted_files(source: str | Path, *, limit: int | None = None) -> list[dict]:
-    """Compatibility view of the complete inventory; explicit truncation is rejected."""
-    inventory = inspect_inventory(source)
-    if limit is not None and limit < inventory["file_count"]:
-        raise UpstreamArchiveError(
-            "archive_inspection_incomplete", "Archive inspection limit would produce an incomplete inventory",
-            details={"limit": limit, "file_count": inventory["file_count"], "complete": False},
-        )
-    return [
-        {"relative_path": entry["path"], "size": entry["size"], "mode": entry["mode"]}
-        for entry in inventory["entries"] if entry["kind"] == "file"
-    ]
-
-
 def _expected_digest(asset: dict) -> str:
     digest = str(asset.get("digest") or "")
     return digest.split(":", 1)[1].lower() if digest.lower().startswith("sha256:") and len(digest) == 71 else ""
@@ -707,7 +693,7 @@ def resolve_raw_payload(source_directory: str | Path, filename: str, expected_id
         "mode": "raw_file", "include": [name], "exclude": [],
         "explicit_files": 1, "selected_directories": 0, "selected_files": 1,
         "excluded_files": 0, "excluded_directories": 0,
-        "excluded_resolved_files": 0, "legacy_layout": False,
+        "excluded_resolved_files": 0,
         "files": [{**_file_record(name, target), "verified_identity": identity}],
     }
 
@@ -717,7 +703,7 @@ def payload_plan_summary(plan: dict) -> dict:
     return {key: plan[key] for key in (
         "mode", "include", "exclude", "explicit_files", "selected_directories",
         "selected_files", "excluded_files", "excluded_directories",
-        "excluded_resolved_files", "legacy_layout",
+        "excluded_resolved_files",
     )}
 
 
@@ -741,10 +727,6 @@ def resolve_payload(recipe: dict, source_directory: str | Path) -> dict:
             details={"role": "payload", "path": "", "expected_kind": "file", "mode": payload["mode"]},
         )
 
-    legacy_layout = payload.get("legacy_file_layout") == "basename"
-    if legacy_layout:
-        targets = {relative: target for relative, target in selected}
-        selected = [(relative, targets[relative]) for relative in include if relative in targets]
     files = [_file_record(relative, target) for relative, target in selected]
     include_paths = [parse_archive_path(selector) for selector in include]
     exclude_paths = [parse_archive_path(selector) for selector in exclude]
@@ -756,13 +738,8 @@ def resolve_payload(recipe: dict, source_directory: str | Path) -> dict:
         "excluded_files": sum(not selector.is_directory for selector in exclude_paths),
         "excluded_directories": sum(selector.is_directory for selector in exclude_paths),
         "excluded_resolved_files": len(included) - len(selected),
-        "legacy_layout": legacy_layout, "files": files,
+        "files": files,
     }
-
-
-def selected_file_records(recipe: dict, source_directory: str | Path) -> list[dict]:
-    """Compatibility accessor for callers that only need the resolved file records."""
-    return resolve_payload(recipe, source_directory)["files"]
 
 
 def acquire(recipe: dict, workspace: str | Path, *, token: str = "", expected_identity: dict | None = None, release_resolver=resolve_release, downloader=None) -> dict:

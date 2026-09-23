@@ -1,13 +1,69 @@
 """Data contracts for isolated DebBuilder build runs."""
 from __future__ import annotations
 
+import copy
 from datetime import datetime, timezone
+import hashlib
+import json
 import re
 import time
 
 from .resource_limits import default_contract, validate_contract
-from .run_migrations import CURRENT_RUN_SCHEMA_VERSION, admission_metadata_sha256, migrate_run_document
 from .automation_identity import automation_attempt_key, normalize_upstream_identity
+
+CURRENT_RUN_SCHEMA_VERSION = 4
+
+
+class RunDocumentError(ValueError):
+    def __init__(self, code: str, message: str, *, source_version=None, target_version=CURRENT_RUN_SCHEMA_VERSION):
+        super().__init__(message)
+        self.code = code
+        self.source_version = source_version
+        self.target_version = target_version
+
+
+def _current_run_document(document: dict) -> dict:
+    if not isinstance(document, dict):
+        raise RunDocumentError("invalid_run", "Run document must be an object")
+    version = document.get("schema_version")
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise RunDocumentError("invalid_run_schema_version", "Run schema_version must be a positive integer", source_version=version)
+    if version > CURRENT_RUN_SCHEMA_VERSION:
+        raise RunDocumentError(
+            "future_run_schema_version",
+            f"Run schema v{version} is newer than supported v{CURRENT_RUN_SCHEMA_VERSION}",
+            source_version=version,
+        )
+    if version != CURRENT_RUN_SCHEMA_VERSION:
+        raise RunDocumentError(
+            "unsupported_run_schema_version",
+            f"Run schema v{version} is unsupported; expected v{CURRENT_RUN_SCHEMA_VERSION}",
+            source_version=version,
+        )
+    return copy.deepcopy(document)
+
+
+def admission_metadata_sha256(
+    recipe_id: str,
+    recipe_sha256: str,
+    mode: str,
+    origin: dict,
+    automation: dict | None,
+    manual_source_provenance: dict | None,
+) -> str:
+    """Seal immutable Run admission metadata with deterministic JSON."""
+    payload = {
+        "schema_version": 1,
+        "recipe_id": recipe_id,
+        "recipe_sha256": recipe_sha256,
+        "mode": mode,
+        "origin": origin,
+        "automation": automation,
+        "manual_source_provenance": manual_source_provenance,
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
 
 STEP_NAMES = (
     "source", "detection", "dependencies", "source_changes", "build",
@@ -111,11 +167,27 @@ def require_automation_mode(policy: str, mode: str) -> None:
         raise ValueError(f"Automation policy {policy} requires Run mode {required}")
 
 
-def new_run(run_id: str, recipe_id: str, mode: str, workspace: str, recipe_sha256: str, *, resource_contract: dict | None = None, origin: dict | None = None, automation: dict | None = None) -> dict:
+def _normalize_manual_source_provenance(value: dict | None, automation: dict | None) -> dict | None:
+    if automation is not None:
+        if value is not None:
+            raise ValueError("Automated Runs cannot duplicate manual source provenance")
+        return None
+    if value is None:
+        return None
+    identity = normalize_upstream_identity(value)
+    if identity["completeness"] != "complete":
+        raise ValueError("Manual Run source provenance must be complete")
+    return identity
+
+
+def new_run(run_id: str, recipe_id: str, mode: str, workspace: str, recipe_sha256: str, *, resource_contract: dict | None = None, origin: dict | None = None, automation: dict | None = None, manual_source_provenance: dict | None = None) -> dict:
     if mode not in {"dry_run", "build"}:
         raise ValueError("build mode must be dry_run or build")
     now = utc_now()
     normalized_origin, normalized_automation = normalize_run_origin(origin, automation)
+    normalized_manual_provenance = _normalize_manual_source_provenance(
+        manual_source_provenance, normalized_automation,
+    )
     if normalized_automation is not None and automation_attempt_key(
         recipe_id, normalized_automation["expected_upstream_identity"], recipe_sha256,
     ) != normalized_automation["attempt_key"]:
@@ -124,6 +196,7 @@ def new_run(run_id: str, recipe_id: str, mode: str, workspace: str, recipe_sha25
         require_automation_mode(normalized_automation["policy"], mode)
     admission_sha256 = admission_metadata_sha256(
         recipe_id, recipe_sha256, mode, normalized_origin, normalized_automation,
+        normalized_manual_provenance,
     )
     return {
         "schema_version": CURRENT_RUN_SCHEMA_VERSION,
@@ -146,37 +219,60 @@ def new_run(run_id: str, recipe_id: str, mode: str, workspace: str, recipe_sha25
         "resource_limits": validate_contract(resource_contract or default_contract()),
         "origin": normalized_origin,
         "automation": normalized_automation,
+        "manual_source_provenance": normalized_manual_provenance,
         "admission_sha256": admission_sha256,
     }
 
 
 def validate_run(run: dict) -> dict:
-    migrated = migrate_run_document(run).document
-    if "origin" not in migrated or "automation" not in migrated or "admission_sha256" not in migrated:
+    current = _current_run_document(run)
+    if "validations" in current:
+        raise ValueError("Current Run schema must not persist Validation lifecycle state")
+    artifact = current.get("artifact")
+    if isinstance(artifact, dict) and "validations" in artifact:
+        raise ValueError("Current artifact schema must not persist Validation lifecycle state")
+    if isinstance(artifact, dict) and "publications" in artifact:
+        raise ValueError("Current artifact schema must not persist Publication lifecycle state")
+    if any(field not in current for field in (
+        "origin", "automation", "manual_source_provenance", "admission_sha256",
+    )):
         raise ValueError("Current Run is missing immutable admission metadata")
-    validate_contract(migrated.get("resource_limits"))
-    origin, automation = normalize_run_origin(migrated.get("origin"), migrated.get("automation"))
-    migrated["origin"] = origin
-    migrated["automation"] = automation
+    validate_contract(current.get("resource_limits"))
+    persisted_origin = current["origin"]
+    persisted_automation = current["automation"]
+    persisted_manual_provenance = current["manual_source_provenance"]
+    origin, automation = normalize_run_origin(persisted_origin, persisted_automation)
+    current["origin"] = origin
+    current["automation"] = automation
+    manual_source_provenance = _normalize_manual_source_provenance(
+        persisted_manual_provenance, automation,
+    )
+    current["manual_source_provenance"] = manual_source_provenance
+    if (
+        persisted_origin != origin
+        or persisted_automation != automation
+        or persisted_manual_provenance != manual_source_provenance
+    ):
+        raise ValueError("Current Run admission metadata must be canonical")
     if automation is not None and automation_attempt_key(
-        str(migrated.get("recipe_id") or ""), automation["expected_upstream_identity"],
-        str(migrated.get("recipe_sha256") or ""),
+        str(current.get("recipe_id") or ""), automation["expected_upstream_identity"],
+        str(current.get("recipe_sha256") or ""),
     ) != automation["attempt_key"]:
         raise ValueError("Run automation attempt key does not match its immutable inputs")
     if automation is not None:
-        require_automation_mode(automation["policy"], str(migrated.get("mode") or ""))
+        require_automation_mode(automation["policy"], str(current.get("mode") or ""))
     expected_admission_sha256 = admission_metadata_sha256(
-        str(migrated.get("recipe_id") or ""), str(migrated.get("recipe_sha256") or ""),
-        str(migrated.get("mode") or ""), origin, automation,
+        str(current.get("recipe_id") or ""), str(current.get("recipe_sha256") or ""),
+        str(current.get("mode") or ""), origin, automation, manual_source_provenance,
     )
-    if migrated.get("admission_sha256") != expected_admission_sha256:
+    if current.get("admission_sha256") != expected_admission_sha256:
         raise ValueError("Run immutable admission metadata seal is invalid")
-    if migrated.get("status") not in RUN_STATUSES:
-        raise ValueError(f"invalid run status: {migrated.get('status')}")
-    steps = migrated.get("steps")
+    if current.get("status") not in RUN_STATUSES:
+        raise ValueError(f"invalid run status: {current.get('status')}")
+    steps = current.get("steps")
     if not isinstance(steps, list) or [step.get("name") for step in steps] != list(STEP_NAMES):
         raise ValueError("build run has an invalid step sequence")
     for step in steps:
         if step.get("status") not in STEP_STATUSES:
             raise ValueError(f"invalid status for step {step.get('name')}")
-    return migrated
+    return current

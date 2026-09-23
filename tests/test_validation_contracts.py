@@ -5,9 +5,11 @@ import unittest
 from debbuilder.validation_contracts import (
     PREPARED_DEPENDENCIES_CONTRACT_VERSION,
     VALIDATION_ATTEMPT_CONTRACT_VERSION,
+    VALIDATION_RESULT_CONTRACT_VERSION,
     ValidationContractError,
     normalize_prepared_runtime_dependencies,
     normalize_validation_attempt,
+    normalize_validation_result,
 )
 
 
@@ -56,7 +58,6 @@ def attempt(status="queued"):
         "started_at": None,
         "finished_at": None,
         "status": status,
-        "prepared_dependencies": None,
         "result": None,
         "error": None,
     }
@@ -65,12 +66,9 @@ def attempt(status="queued"):
     if status in {"cancelled", "success", "failed"}:
         value["finished_at"] = "2026-09-12T10:00:02+00:00"
     if status in {"success", "failed"}:
-        value["result"] = {"status": status, "reference": "validation/validation-1/result.json"}
+        value["result"] = {"status": status, "reference": "result.json"}
     if status in {"cancelled", "failed"}:
         value["error"] = {"code": "validation_cancelled" if status == "cancelled" else "validation_failed", "message": "Validation did not complete"}
-    if status == "success":
-        value["prepared_dependencies"] = prepared()
-        value["selected_profile"]["image"] = copy.deepcopy(value["prepared_dependencies"]["image"])
     return value
 
 
@@ -81,18 +79,16 @@ class ValidationAttemptContractTests(unittest.TestCase):
                 value = attempt(status)
                 self.assertEqual(normalize_validation_attempt(value), value)
 
-    def test_historical_unversioned_record_is_tagged_on_a_copy(self):
+    def test_historical_unversioned_record_is_rejected(self):
         historical = {
             "id": "legacy-validation",
             "status": "success",
             "artifact": "/historical/workspace/artifacts/demo.deb",
             "checks": [{"name": "package_install", "status": "success"}],
         }
-        before = copy.deepcopy(historical)
-        normalized = normalize_validation_attempt(historical)
-        self.assertEqual(normalized["contract_version"], 0)
-        self.assertEqual(normalized["artifact"], historical["artifact"])
-        self.assertEqual(historical, before)
+        with self.assertRaises(ValidationContractError) as raised:
+            normalize_validation_attempt(historical)
+        self.assertEqual(raised.exception.code, "invalid_contract_version")
 
     def test_future_and_invalid_attempt_versions_fail_closed(self):
         for version, code in ((2, "future_contract_version"), (-1, "unsupported_contract_version"), (True, "invalid_contract_version")):
@@ -126,37 +122,102 @@ class ValidationAttemptContractTests(unittest.TestCase):
         failed_without_error = attempt("failed")
         failed_without_error["error"] = None
         cases.append(failed_without_error)
-        queued_prepared = attempt()
-        queued_prepared["prepared_dependencies"] = prepared()
-        cases.append(queued_prepared)
-        success_without_prepared = attempt("success")
-        success_without_prepared["prepared_dependencies"] = None
-        cases.append(success_without_prepared)
+        success_without_result = attempt("success")
+        success_without_result["result"] = None
+        cases.append(success_without_result)
         for value in cases:
             with self.subTest(status=value["status"]), self.assertRaises(ValidationContractError):
                 normalize_validation_attempt(value)
 
-    def test_profile_and_prepared_summary_must_match_immutable_input(self):
+    def test_profile_must_match_immutable_input(self):
         value = attempt("success")
         self.assertEqual(normalize_validation_attempt(value), value)
         value["selected_profile"]["name"] = "bookworm-node22"
         with self.assertRaises(ValidationContractError):
             normalize_validation_attempt(value)
 
-    def test_prepared_summary_is_bound_to_artifacts_image_and_attempt_timestamps(self):
-        mutations = []
-        wrong_artifact = attempt("success")
-        wrong_artifact["prepared_dependencies"]["artifacts"]["current"]["sha256"] = "b" * 64
-        mutations.append(wrong_artifact)
-        wrong_image = attempt("success")
-        wrong_image["prepared_dependencies"]["image"]["id"] = "sha256:" + "3" * 64
-        mutations.append(wrong_image)
-        early_preparation = attempt("success")
-        early_preparation["prepared_dependencies"]["started_at"] = "2026-09-12T09:59:59+00:00"
-        mutations.append(early_preparation)
-        for value in mutations:
-            with self.assertRaises(ValidationContractError):
-                normalize_validation_attempt(value)
+    def test_attempt_rejects_duplicated_prepared_payload(self):
+        value = attempt("running")
+        value["prepared_dependencies"] = prepared()
+        with self.assertRaises(ValidationContractError):
+            normalize_validation_attempt(value)
+
+
+def lifecycle_result(*, status="success"):
+    failure = status != "success"
+    checks = [{
+        "name": name,
+        "status": "failed" if failure and name == "lifecycle_network_disabled" else "success",
+        "error": "Validation check failed" if failure and name == "lifecycle_network_disabled" else "",
+    } for name in (
+        "lifecycle_network_disabled", "package_install", "package_status_installed",
+        "package_remove", "package_purge", "package_absent_after_purge",
+    )]
+    return {
+        "contract_version": VALIDATION_RESULT_CONTRACT_VERSION,
+        "attempt_id": "validation-1",
+        "build_run_id": "run-1",
+        "artifact": artifact(),
+        "profile": {"name": "bookworm", "image": prepared()["image"]},
+        "status": status,
+        "started_at": "2026-09-12T10:00:02+00:00",
+        "finished_at": "2026-09-12T10:00:03+00:00",
+        "checks": checks,
+        "execution": {
+            "network": "disabled",
+            "network_verified": True,
+            "cleanup": {"status": "success", "absence_proved": True},
+        },
+        "commands": [],
+        "error": ({
+            "code": "validation_checks_failed",
+            "message": "Offline lifecycle validation failed",
+            "failed_checks": ["lifecycle_network_disabled"],
+            "cleanup_code": "",
+        } if failure else None),
+    }
+
+
+class ValidationResultContractTests(unittest.TestCase):
+    def test_strict_result_round_trips_and_requires_success_proofs(self):
+        value = lifecycle_result()
+        self.assertEqual(normalize_validation_result(value), value)
+        for mutation in ("network", "cleanup", "check"):
+            broken = copy.deepcopy(value)
+            if mutation == "network":
+                broken["execution"]["network_verified"] = False
+            elif mutation == "cleanup":
+                broken["execution"]["cleanup"]["absence_proved"] = False
+            else:
+                broken["checks"][0]["status"] = "failed"
+            with self.subTest(mutation=mutation), self.assertRaises(ValidationContractError):
+                normalize_validation_result(broken)
+
+        network_only = copy.deepcopy(value)
+        network_only["checks"] = network_only["checks"][:1]
+        with self.assertRaises(ValidationContractError):
+            normalize_validation_result(network_only)
+
+    def test_unversioned_malformed_and_unknown_fields_fail_closed(self):
+        for mutation in ("unversioned", "unknown", "identity"):
+            value = lifecycle_result(status="failed")
+            if mutation == "unversioned":
+                value.pop("contract_version")
+            elif mutation == "unknown":
+                value["legacy"] = True
+            else:
+                value["attempt_id"] = "../unsafe"
+            with self.subTest(mutation=mutation), self.assertRaises(ValidationContractError):
+                normalize_validation_result(value)
+
+    def test_bounded_command_output_retains_line_structure(self):
+        value = lifecycle_result()
+        value["commands"] = [{
+            "command": "dpkg --audit", "arguments": [], "status": "success",
+            "exit_code": 0, "accepted": True,
+            "stdout": "first line\nsecond line\n", "stderr": "warning\tcontext\n",
+        }]
+        self.assertEqual(normalize_validation_result(value), value)
 
 
 class PreparedRuntimeDependenciesContractTests(unittest.TestCase):
@@ -175,10 +236,11 @@ class PreparedRuntimeDependenciesContractTests(unittest.TestCase):
         with self.assertRaises(ValidationContractError):
             normalize_prepared_runtime_dependencies(value)
 
-    def test_cp1a_v1_draft_without_base_satisfiers_remains_readable(self):
+    def test_cp1a_v1_draft_without_base_satisfiers_is_rejected(self):
         value = prepared()
         value.pop("base_packages")
-        self.assertEqual(normalize_prepared_runtime_dependencies(value)["base_packages"], [])
+        with self.assertRaises(ValidationContractError):
+            normalize_prepared_runtime_dependencies(value)
 
     def test_package_and_repository_provenance_round_trip_without_raw_key(self):
         repository = {

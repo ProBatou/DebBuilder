@@ -1,7 +1,9 @@
 """Shared isolated HTTP fixture for DebBuilder API integration tests."""
 from __future__ import annotations
+from tests.lifecycle_helpers import stop_partial_manager
 
 import json
+import hashlib
 import tempfile
 import threading
 import time
@@ -18,28 +20,32 @@ class AdminApiCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         base = Path(self.tmp.name)
-        names = ("DATA", "USER_WORKFLOWS", "EXAMPLES", "STATIC", "AUTH_MODE", "GITHUB_RELEASE_CACHE_SERVICE")
+        names = ("DATA", "USER_WORKFLOWS", "EXAMPLES", "STATIC", "REPOSITORY_ROOT", "AUTH_MODE", "UPSTREAM_OBSERVATION_SERVICE")
         self.old = {name: getattr(server, name) for name in names}
         server.DATA = base / "data"
         server.USER_WORKFLOWS = server.DATA / "workflows"
         server.EXAMPLES = base / "examples" / "recipes"
         server.STATIC = base / "static"
-        for directory in (server.DATA, server.USER_WORKFLOWS, server.EXAMPLES, server.STATIC):
+        server.REPOSITORY_ROOT = base / "repository"
+        for directory in (server.DATA, server.USER_WORKFLOWS, server.EXAMPLES, server.STATIC, server.REPOSITORY_ROOT):
             directory.mkdir(parents=True, exist_ok=True)
         (server.STATIC / "index.html").write_text("DebBuilder")
-        (server.DATA / "repo-current-packages-inventory.json").write_text(json.dumps([
+        packages_dir = server.REPOSITORY_ROOT / "dists" / "stable" / "main" / "binary-amd64"
+        packages_dir.mkdir(parents=True)
+        rows = [
             {"Package": "webapp", "Version": "3.4.1", "Architecture": "all", "Homepage": None, "Filename": "pool/main/o/webapp/webapp_3.4.1_all.deb", "Depends": "npm, sqlite3, jq", "Description": "Description"},
             {"Package": "monitoring-app", "Version": "117", "Architecture": "all", "Homepage": None, "Filename": "pool/main/u/monitoring-app/monitoring-app_117_all.deb", "Depends": "npm, nodejs", "Description": "Description"},
-        ]))
+        ]
+        (packages_dir / "Packages").write_text("\n\n".join("\n".join(f"{key}: {value}" for key, value in row.items() if value is not None) for row in rows) + "\n\n")
         (server.EXAMPLES / "webapp-recipe.json").write_text(json.dumps({
-            "schema_version": 1,
+            "schema_version": 5,
             "name": "webapp-recipe",
             "active": True,
             "package": {"name": "webapp", "architecture": "all"},
             "source": {"provider": "github", "repository": "example/webapp", "tracking": "latest_release", "version": {"source": "tag"}},
         }))
         seed_recipe = {
-            "schema_version": 1,
+            "schema_version": 5,
             "name": "webapp-recipe",
             "active": True,
             "package": {"name": "webapp", "architecture": "all", "maintainer": "Demo <demo@example.test>", "description": "Description"},
@@ -51,7 +57,7 @@ class AdminApiCase(unittest.TestCase):
         store.save(run)
         store.append_event(run, "ok")
         server.AUTH_MODE = "none"
-        server.GITHUB_RELEASE_CACHE_SERVICE = None
+        server.UPSTREAM_OBSERVATION_SERVICE = None
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         self.execution_manager = server.start_execution_manager(self.httpd)
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
@@ -61,7 +67,7 @@ class AdminApiCase(unittest.TestCase):
     def tearDown(self):
         self.httpd.shutdown()
         self.thread.join(timeout=2)
-        server.stop_execution_manager(self.httpd, timeout=5)
+        stop_partial_manager(self.httpd, timeout=5)
         self.httpd.server_close()
         for name, value in self.old.items():
             setattr(server, name, value)
@@ -104,7 +110,7 @@ class AdminApiCase(unittest.TestCase):
 
     def successful_build_run(self, run_id="auto-run", package="auto-package", version="1.0-1"):
         recipe = {
-            "schema_version": 1,
+            "schema_version": 5,
             "name": f"{package}-recipe",
             "active": True,
             "package": {"name": package, "architecture": "all", "maintainer": "Demo <demo@example.test>", "description": "Demo"},
@@ -118,7 +124,11 @@ class AdminApiCase(unittest.TestCase):
         run.update({
             "status": "success",
             "version": {"upstream": version.split("-")[0], "debian": version},
-            "artifact": {"path": str(artifact), "size": 3, "sha256": run_id, "inspection": {"package": package, "version": version, "architecture": "all"}},
+            "artifact": {
+                "path": str(artifact), "size": 3,
+                "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                "inspection": {"package": package, "version": version, "architecture": "all"},
+            },
         })
         store.save(run)
         return store, run, artifact

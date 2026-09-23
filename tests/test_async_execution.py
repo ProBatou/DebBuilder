@@ -1,3 +1,4 @@
+from tests.lifecycle_helpers import stop_partial_manager
 import json
 import threading
 import urllib.error
@@ -11,7 +12,7 @@ from tests.admin_api_case import AdminApiCase
 
 def recipe(name: str) -> dict:
     return {
-        "schema_version": 1,
+        "schema_version": 5,
         "name": name,
         "active": True,
         "package": {
@@ -23,7 +24,8 @@ def recipe(name: str) -> dict:
         "source": {
             "provider": "github",
             "repository": f"owner/{name}",
-            "tracking": "latest_release",
+            "tracking": "manual",
+            "ref": "v1.0.0",
             "version": {"source": "tag"},
         },
     }
@@ -31,7 +33,7 @@ def recipe(name: str) -> dict:
 
 class AsyncExecutionTests(AdminApiCase):
     def replace_manager(self, *, queue_capacity=8, execute):
-        server.stop_execution_manager(self.httpd, timeout=5)
+        stop_partial_manager(self.httpd, timeout=5)
         manager = server.create_execution_manager(
             store=BuildStore(server.DATA / "builds"),
             queue_capacity=queue_capacity,
@@ -150,7 +152,7 @@ class AsyncExecutionTests(AdminApiCase):
             release.set()
 
     def test_unavailable_manager_returns_503_without_creating_a_run(self):
-        server.stop_execution_manager(self.httpd, timeout=5)
+        stop_partial_manager(self.httpd, timeout=5)
         before = {path.name for path in (server.DATA / "builds").iterdir()}
         status, response = self.error_response(
             "POST", "/api/run", {"workflow": recipe("unavailable"), "dry_run": False},
@@ -318,6 +320,9 @@ class AsyncExecutionTests(AdminApiCase):
         self.assertEqual(first["unresolved_admission_run_ids"], [run_id])
         self.assertEqual(first["outstanding_reservations"], 0)
         self.assertEqual(first["errors"][0]["ownership"], "admission")
+        self.assertEqual(manager.store.load(run_id)["status"], "queued")
+        self.assertNotIn(run_id, manager.queued_run_ids)
+        self.assertEqual(manager._unresolved_admission_runs[run_id]["code"], "execution_enqueue_persistence_unresolved")
 
         second = manager.shutdown(timeout=2)
         self.assertTrue(second["complete"])
@@ -447,7 +452,7 @@ class AsyncExecutionTests(AdminApiCase):
         self.assertIs(http_server.execution_manager, manager)
         self.assertTrue(worker.is_alive())
         self.assertFalse(worker.daemon)
-        server.stop_execution_manager(http_server, timeout=2)
+        stop_partial_manager(http_server, timeout=2)
         self.assertIsNone(http_server.execution_manager)
         self.assertFalse(worker.is_alive())
 

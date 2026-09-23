@@ -185,7 +185,6 @@ def _stage_archive_payload(output: dict, source_root: Path, destination: Path) -
     plan = output.get("payload")
     if not isinstance(plan, dict) or not isinstance(plan.get("files"), list):
         raise PackagingError("invalid_install_content", "Resolved archive payload plan is missing")
-    legacy_layout = bool(plan.get("legacy_layout"))
     raw_record = _raw_payload_record(output)
     if raw_record is not None:
         relative_value = str(raw_record.get("relative_path") or "")
@@ -234,16 +233,16 @@ def _stage_archive_payload(output: dict, source_root: Path, destination: Path) -
                 "invalid_install_content", f"Resolved archive payload file is invalid: {relative_value}",
                 details={"path": relative_value},
             )
-        target = destination if legacy_layout else destination.joinpath(*parsed.parts[:-1])
-        staged_relative = Path(resolved.name) if legacy_layout else relative
-        if not legacy_layout and staged_relative in staged_paths:
+        target = destination.joinpath(*parsed.parts[:-1])
+        staged_relative = relative
+        if staged_relative in staged_paths:
             raise PackagingError(
                 "invalid_install_content", f"Resolved archive payload contains a duplicate file: {relative_value}",
                 details={"path": relative_value},
             )
         staged_paths.add(staged_relative)
         copied_rows = _copy_regular_tree(resolved, target, allowed_root=source_root)
-        copied.extend(copied_rows if legacy_layout else [(relative.parent / row).as_posix() for row in copied_rows])
+        copied.extend((relative.parent / row).as_posix() for row in copied_rows)
     return copied
 
 

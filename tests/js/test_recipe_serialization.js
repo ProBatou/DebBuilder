@@ -55,6 +55,18 @@ assert.equal(nodes.installDirectories.value, '');
 assert.equal(JSON.stringify(context.collectWorkflow().install.directories), '[]');
 assert.equal(context.installDirectoriesText([]), '');
 
+for (const source of ['tag', 'release_name', 'regex']) {
+  nodes.recipeMetaVersionSource.value = source;
+  assert.equal(context.collectWorkflow().source.version.source, source);
+}
+nodes.recipeMetaVersionSource.value = 'build';
+assert.throws(() => context.collectWorkflow(), /Unsupported Recipe version source: build/);
+assert.throws(
+  () => context.renderWorkflow({name: 'unsupported-version', source: {version: {source: 'build'}}, install: {directories: []}}),
+  /Unsupported Recipe version source: build/,
+);
+nodes.recipeMetaVersionSource.value = 'tag';
+
 nodes.installDirectories.value = '/var/lib/demo | demo | demo | 0750';
 assert.equal(JSON.stringify(context.collectWorkflow().install.directories), JSON.stringify([
   {path: '/var/lib/demo', owner: 'demo', group: 'demo', mode: '0750'},
@@ -108,18 +120,6 @@ for (const description of ['Short description', 'First line\nSecond line\nThird 
   assert.equal(context.collectWorkflow().package.description, description);
 }
 
-context.renderWorkflow({
-  name: 'legacy-service', package: {name: 'legacy-service'}, install: {directories: []},
-  service: {name: 'legacy-service.service', command: '/opt/legacy-service/bin/serve'},
-});
-const legacyCollected = context.collectWorkflow();
-assert.equal(legacyCollected.service.description, 'legacy-service');
-assert.equal(legacyCollected.service.working_directory, '');
-nodes.serviceWorkingDirectory.value = '/opt/legacy-service';
-assert.equal(context.collectWorkflow().service.working_directory, '/opt/legacy-service');
-nodes.serviceWorkingDirectory.value = '';
-assert.equal(context.collectWorkflow().service.working_directory, '');
-
 const archiveRecipe = {
   name:'archive-demo', package:{name:'archive-demo'}, source:{repository:'owner/archive-demo'},
   artifact:{mode:'upstream_archive', archive_source:'github_source', payload:{mode:'paths', include:['app/', 'server.py'], exclude:['app/dev/']}},
@@ -138,12 +138,7 @@ context.renderWorkflow(entireRecipe);
 archiveCollected = context.collectWorkflow();
 assert.deepEqual(JSON.parse(JSON.stringify(archiveCollected.artifact.payload)), {mode:'entire_archive', include:[], exclude:['tests/']});
 
-const legacyArchive = {
-  ...archiveRecipe,
-  artifact:{...archiveRecipe.artifact, payload:{mode:'paths', include:['server.py', 'bin/tool'], exclude:[], legacy_file_layout:'basename'}},
-};
-context.renderWorkflow(legacyArchive);
-assert.deepEqual(JSON.parse(JSON.stringify(context.collectWorkflow().artifact.payload)), legacyArchive.artifact.payload);
+context.renderWorkflow(archiveRecipe);
 context.ArchiveTree.setInventory(context.window.recipeArchiveState, {
   complete:true, entries:[
     {path:'bin/',kind:'directory',descendant_files:1}, {path:'bin/tool',kind:'file',size:1,mode:'0755'},
@@ -152,8 +147,7 @@ context.ArchiveTree.setInventory(context.window.recipeArchiveState, {
 });
 context.ArchiveTree.includePath(context.window.recipeArchiveState, 'new.py');
 archiveCollected = context.collectWorkflow();
-assert.equal('legacy_file_layout' in archiveCollected.artifact.payload, false);
-assert.deepEqual(JSON.parse(JSON.stringify(archiveCollected.artifact.payload.include)), ['bin/tool', 'new.py', 'server.py']);
+assert.deepEqual(JSON.parse(JSON.stringify(archiveCollected.artifact.payload.include)), ['app/', 'new.py', 'server.py']);
 context.ArchiveTree.setMode(context.window.recipeArchiveState, 'entire_archive');
 context.ArchiveTree.setMode(context.window.recipeArchiveState, 'paths');
 assert.deepEqual(JSON.parse(JSON.stringify(context.collectWorkflow().artifact.payload)), {mode:'paths', include:[], exclude:[]});

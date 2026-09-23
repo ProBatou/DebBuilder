@@ -1,3 +1,4 @@
+from tests.lifecycle_helpers import clean_workspace
 import subprocess
 import sys
 import tempfile
@@ -12,10 +13,11 @@ from debbuilder.command_containment import expected_control_group, starting_meta
 from debbuilder.command_containment import ContainmentError
 from debbuilder.command_identity import persist_identity
 from debbuilder.settings_store import default_settings, validate_settings
+from debbuilder import storage
 
 
 def recipe():
-    return {"name": "demo", "package": {"name": "demo", "maintainer": "Demo <demo@example.test>", "description": "Demo"}, "source": {"repository": "owner/demo"}}
+    return {"schema_version": 5, "name": "demo", "package": {"name": "demo", "maintainer": "Demo <demo@example.test>", "description": "Demo"}, "source": {"repository": "owner/demo"}}
 
 
 class WorkspaceCleanupTests(unittest.TestCase):
@@ -39,6 +41,38 @@ class WorkspaceCleanupTests(unittest.TestCase):
         self.store.append_log_line(run_id, "persistent log")
         self.store.save_manifest(run_id, "manifests/staging-files.json", ["demo"])
         return run, root
+
+    def save_validation_attempt(self, run: dict, attempt_id: str, status: str) -> None:
+        root = validation_service.attempt_root(self.store, run["id"], attempt_id)
+        root.mkdir(parents=True, exist_ok=True)
+        storage.save_json(root / "automation.json", {
+            "automatic": False,
+            "publish_after_success": False,
+            "publication_state": "not_requested",
+        })
+        active = status in {"running", "cancelling"}
+        terminal = status in {"failed", "cancelled"}
+        validation_service._save_attempt(root / "attempt.json", {
+            "contract_version": 1,
+            "id": attempt_id,
+            "build_run_id": run["id"],
+            "inputs": {"profile": "bookworm", "artifact": {
+                "package": "demo", "version": "1.0-1", "architecture": "all",
+                "size": 9, "sha256": "a" * 64,
+            }, "previous_artifact": None},
+            "selected_profile": {"name": "bookworm", "image": {
+                "name": "debbuilder-validation:bookworm", "id": "sha256:" + "b" * 64, "digest": None,
+            }},
+            "created_at": "2026-09-14T10:00:00+00:00",
+            "started_at": "2026-09-14T10:00:01+00:00" if active or terminal else None,
+            "finished_at": "2026-09-14T10:00:02+00:00" if terminal else None,
+            "status": status,
+            "result": None,
+            "error": ({
+                "code": "validation_failed" if status == "failed" else "validation_cancelled",
+                "message": "Validation did not complete",
+            } if terminal else None),
+        })
 
     def test_automatic_cleanup_preserves_history_metadata_logs_manifests_and_artifact(self):
         run, root = self.make_run()
@@ -86,6 +120,8 @@ class WorkspaceCleanupTests(unittest.TestCase):
                     run["status"] = phase
                 elif phase == "step":
                     run["steps"][4]["status"] = "running"
+                elif phase == "validation":
+                    self.save_validation_attempt(run, "active-validation", "running")
                 else:
                     run[f"{phase}s"] = [{"status": "running"}]
                 self.store.save(run)
@@ -101,29 +137,10 @@ class WorkspaceCleanupTests(unittest.TestCase):
         run, root = self.make_run("manifest-queued")
         attempt_id = "queued-attempt"
         attempt_root = validation_service.attempt_root(self.store, run["id"], attempt_id)
-        attempt_root.mkdir(parents=True)
-        validation_service._save_attempt(attempt_root / "attempt.json", {
-            "contract_version": 1,
-            "id": attempt_id,
-            "build_run_id": run["id"],
-            "inputs": {"profile": "bookworm", "artifact": {
-                "package": "demo", "version": "1.0-1", "architecture": "all",
-                "size": 9, "sha256": "a" * 64,
-            }, "previous_artifact": None},
-            "selected_profile": {"name": "bookworm", "image": {
-                "name": "debbuilder-validation:bookworm", "id": "sha256:" + "b" * 64, "digest": None,
-            }},
-            "created_at": "2026-09-14T10:00:00+00:00",
-            "started_at": None,
-            "finished_at": None,
-            "status": "queued",
-            "prepared_dependencies": None,
-            "result": None,
-            "error": None,
-        })
+        self.save_validation_attempt(run, attempt_id, "queued")
 
         with self.assertRaisesRegex(workspace_cleanup.WorkspaceBusyError, "active"):
-            workspace_cleanup.clean_workspace(self.store, run["id"])
+            clean_workspace(self.store, run["id"])
         with self.assertRaisesRegex(workspace_cleanup.WorkspaceBusyError, "active"):
             execution_service.delete_log(self.store, run["id"])
         result = workspace_cleanup.apply_retention(
@@ -134,16 +151,19 @@ class WorkspaceCleanupTests(unittest.TestCase):
         self.assertTrue((root / "logs/pipeline.log").is_file())
 
     def test_non_latest_running_validation_or_publication_denies_cleanup(self):
-        for records_key in ("validations", "publications"):
-            with self.subTest(records_key=records_key):
-                run, root = self.make_run(f"historical-{records_key}")
-                run[records_key] = [{"status": "running"}, {"status": "failed"}]
-                self.store.save(run)
+        run, root = self.make_run("earlier-validation")
+        self.save_validation_attempt(run, "running", "running")
+        self.save_validation_attempt(run, "later-failed", "failed")
+        with self.assertRaises(workspace_cleanup.WorkspaceBusyError):
+            clean_workspace(self.store, run["id"])
+        self.assertTrue((root / "source/large-data").is_file())
 
-                with self.assertRaises(workspace_cleanup.WorkspaceBusyError):
-                    workspace_cleanup.clean_workspace(self.store, run["id"])
-
-                self.assertTrue((root / "source/large-data").is_file())
+        run, root = self.make_run("earlier-publication")
+        run["publications"] = [{"status": "running"}, {"status": "failed"}]
+        self.store.save(run)
+        with self.assertRaises(workspace_cleanup.WorkspaceBusyError):
+            clean_workspace(self.store, run["id"])
+        self.assertTrue((root / "source/large-data").is_file())
 
     def test_terminal_recovery_blocker_preserves_disposable_workspace(self):
         run, root = self.make_run("recovery-blocked", status="failed")
@@ -156,7 +176,7 @@ class WorkspaceCleanupTests(unittest.TestCase):
         self.assertFalse((root / ".active-command.json").exists())
 
         with self.assertRaisesRegex(workspace_cleanup.WorkspaceBusyError, "recovery is unresolved"):
-            workspace_cleanup.clean_workspace(self.store, run["id"])
+            clean_workspace(self.store, run["id"])
         result = workspace_cleanup.apply_retention(
             self.store, {"failed_workspaces_to_retain": 0},
         )
@@ -175,7 +195,7 @@ class WorkspaceCleanupTests(unittest.TestCase):
         with self.store.locked_run(run["id"]) as fd:
             persist_identity(fd, identity)
         with self.assertRaisesRegex(workspace_cleanup.WorkspaceBusyError, "Active command"):
-            workspace_cleanup.clean_workspace(self.store, run["id"])
+            clean_workspace(self.store, run["id"])
         self.assertTrue((root / "source/large-data").is_file())
 
     def test_matching_unit_or_cgroup_without_identity_refuses_cleanup_and_history_deletion(self):
@@ -185,7 +205,7 @@ class WorkspaceCleanupTests(unittest.TestCase):
             "debbuilder.command_containment.matching_run_command_units", return_value={unit},
         ):
             with self.assertRaisesRegex(workspace_cleanup.WorkspaceBusyError, "unit/cgroup"):
-                workspace_cleanup.clean_workspace(self.store, run["id"])
+                clean_workspace(self.store, run["id"])
             with self.assertRaisesRegex(workspace_cleanup.WorkspaceBusyError, "unit/cgroup"):
                 execution_service.delete_log(self.store, run["id"])
         self.assertTrue((root / "source/large-data").is_file())
@@ -198,7 +218,7 @@ class WorkspaceCleanupTests(unittest.TestCase):
             side_effect=ContainmentError("inventory denied"),
         ):
             with self.assertRaisesRegex(workspace_cleanup.WorkspaceBusyError, "inventory is unverifiable"):
-                workspace_cleanup.clean_workspace(self.store, run["id"])
+                clean_workspace(self.store, run["id"])
         self.assertTrue((root / "source/large-data").is_file())
 
     def test_process_latched_probe_cleanup_failure_refuses_cleanup(self):
@@ -208,7 +228,7 @@ class WorkspaceCleanupTests(unittest.TestCase):
             return_value="probe cgroup remains",
         ):
             with self.assertRaisesRegex(workspace_cleanup.WorkspaceBusyError, "probe containment"):
-                workspace_cleanup.clean_workspace(self.store, run["id"])
+                clean_workspace(self.store, run["id"])
         self.assertTrue((root / "source/large-data").is_file())
 
     def test_process_latched_runtime_cleanup_failure_refuses_cleanup(self):
@@ -218,7 +238,7 @@ class WorkspaceCleanupTests(unittest.TestCase):
             return_value="runtime cgroup remains",
         ):
             with self.assertRaisesRegex(workspace_cleanup.WorkspaceBusyError, "Runtime command"):
-                workspace_cleanup.clean_workspace(self.store, run["id"])
+                clean_workspace(self.store, run["id"])
         self.assertTrue((root / "source/large-data").is_file())
 
     def test_global_recovery_blocker_denies_every_destructive_entrypoint(self):
@@ -229,7 +249,7 @@ class WorkspaceCleanupTests(unittest.TestCase):
         })
 
         with self.assertRaisesRegex(workspace_cleanup.WorkspaceBusyError, "global recovery"):
-            workspace_cleanup.clean_workspace(
+            clean_workspace(
                 self.store, run["id"], authorization=authorization,
             )
         with self.assertRaisesRegex(workspace_cleanup.WorkspaceBusyError, "global recovery"):
@@ -288,10 +308,10 @@ class WorkspaceCleanupTests(unittest.TestCase):
             run, root = self.make_run(phase)
             if phase == "cancelled":
                 run["status"] = "cancelled"
+            elif phase == "validation":
+                self.save_validation_attempt(run, "failed-validation", "failed")
             else:
                 run[f"{phase}s"] = [{"status": "failed", "finished_at": "2026-09-05T12:01:00+00:00"}]
-                if phase == "publication":
-                    run["validations"] = [{"status": "success"}]
             self.store.save(run)
         self.assertEqual(len(workspace_cleanup.apply_retention(self.store)["retained"]), 3)
         result = workspace_cleanup.apply_retention(self.store, {"failed_workspaces_to_retain": 0})
@@ -301,7 +321,10 @@ class WorkspaceCleanupTests(unittest.TestCase):
     def test_missing_runs_keep_existing_validation_and_publication_errors(self):
         from debbuilder import artifact_publication, artifact_validation
         with self.assertRaises(artifact_validation.ValidationError) as validation:
-            artifact_validation.validate_artifact("missing", store=self.store)
+            artifact_validation.validate_artifact(
+                "missing", store=self.store, prepared_dependencies={},
+                attempt_id="missing-run", registry_root=self.base / "registry",
+            )
         self.assertEqual(validation.exception.code, "build_run_not_found")
         with self.assertRaises(artifact_publication.PublicationError) as publication:
             artifact_publication.publish_artifact("missing", store=self.store, repo_root=self.base / "repo", distribution="stable", component="main", confirm="")
@@ -309,8 +332,7 @@ class WorkspaceCleanupTests(unittest.TestCase):
 
     def test_manual_delete_overrides_disabled_retention_and_clears_validation_output(self):
         run, root = self.make_run(status="failed")
-        run["validations"] = [{"status": "failed", "commands": [{"stdout": "secret output", "stderr": "error"}]}]
-        self.store.save(run)
+        self.save_validation_attempt(run, "attempt-one", "failed")
         commands = root / "validation/attempt-one/commands"
         commands.mkdir(parents=True)
         (commands / "001.json").write_text("detailed validation log")
@@ -322,7 +344,7 @@ class WorkspaceCleanupTests(unittest.TestCase):
         self.assertIn("source", deletion["workspace_cleanup"]["removed"])
         self.assertFalse(commands.exists())
         self.assertTrue((commands.parent / "previous.deb").exists())
-        self.assertEqual(self.store.load(run["id"])["validations"][0]["commands"][0]["stdout"], "")
+        self.assertNotIn("validations", self.store.load(run["id"]))
         self.assertEqual(execution_service.list_executions(self.store, lambda run: "demo"), [])
         self.assertTrue(execution_service.delete_log(BuildStore(self.store.root), run["id"])["already_deleted"])
 
@@ -330,7 +352,7 @@ class WorkspaceCleanupTests(unittest.TestCase):
         run, root = self.make_run()
         for run_id in (".", "..", "../run-one", "/tmp/outside"):
             with self.subTest(run_id=run_id), self.assertRaises(ValueError):
-                workspace_cleanup.clean_workspace(self.store, run_id)
+                clean_workspace(self.store, run_id)
         run["workspace"] = str(self.base)
         self.store.save(run)
         with self.assertRaisesRegex(ValueError, "canonical builds root"):
@@ -377,7 +399,7 @@ class WorkspaceCleanupTests(unittest.TestCase):
         outside.mkdir()
         (outside / "keep").write_text("protected")
         (root / "source/link").symlink_to(outside, target_is_directory=True)
-        workspace_cleanup.clean_workspace(self.store, run["id"])
+        clean_workspace(self.store, run["id"])
         self.assertEqual((outside / "keep").read_text(), "protected")
 
     def test_bind_mount_below_disposable_directory_is_refused(self):
@@ -385,7 +407,7 @@ class WorkspaceCleanupTests(unittest.TestCase):
         mountinfo = f"1 2 0:1 / {root}/source/mounted rw - ext4 /dev/example rw\n"
         with mock.patch("debbuilder.workspace_cleanup.Path.read_text", return_value=mountinfo):
             with self.assertRaisesRegex(ValueError, "Mounted workspace"):
-                workspace_cleanup.clean_workspace(self.store, run["id"])
+                clean_workspace(self.store, run["id"])
         self.assertTrue((root / "source/large-data").exists())
 
     def test_symlink_swap_during_removal_cannot_delete_outside_data(self):
@@ -402,7 +424,7 @@ class WorkspaceCleanupTests(unittest.TestCase):
         swapped.avoids_symlink_attacks = True
         with mock.patch("debbuilder.workspace_cleanup.shutil.rmtree", swapped):
             with self.assertRaises(OSError):
-                workspace_cleanup.clean_workspace(self.store, run["id"])
+                clean_workspace(self.store, run["id"])
         self.assertEqual((outside / "keep").read_text(), "protected")
 
     def test_retention_rechecks_run_after_candidate_scan(self):
@@ -414,8 +436,7 @@ class WorkspaceCleanupTests(unittest.TestCase):
             calls += 1
             if calls == 2:
                 current = self.store.load(run_id)
-                current["validations"] = [{"status": "running"}]
-                self.store.save(current)
+                self.save_validation_attempt(current, "late-running", "running")
             return original_read(fd, build_root, run_id)
         with mock.patch("debbuilder.workspace_cleanup.read_run", side_effect=changed):
             result = workspace_cleanup.apply_retention(self.store)
@@ -443,7 +464,7 @@ class WorkspaceCleanupTests(unittest.TestCase):
         remaining = [root for root in (first_root, second_root) if (root / "source").exists()]
         self.assertEqual(len(remaining), 1)
 
-    def test_malformed_historical_run_does_not_block_independent_candidate(self):
+    def test_malformed_run_does_not_block_independent_candidate(self):
         run, root = self.make_run("valid")
         malformed = self.store.root / "malformed"
         malformed.mkdir()
@@ -480,7 +501,7 @@ class WorkspaceCleanupTests(unittest.TestCase):
         results = []
         def cleanup():
             try:
-                workspace_cleanup.clean_workspace(BuildStore(self.store.root), run["id"])
+                clean_workspace(BuildStore(self.store.root), run["id"])
             except workspace_cleanup.WorkspaceBusyError:
                 results.append("busy")
         with self.store.locked_run(run["id"]):
@@ -488,12 +509,12 @@ class WorkspaceCleanupTests(unittest.TestCase):
             thread.start()
             thread.join(timeout=2)
             self.assertFalse(thread.is_alive())
-            code = "from pathlib import Path; import sys; from debbuilder.build_store import BuildStore; from debbuilder.workspace_cleanup import clean_workspace, WorkspaceBusyError\ntry: clean_workspace(BuildStore(Path(sys.argv[1])), sys.argv[2])\nexcept WorkspaceBusyError: sys.exit(0)\nsys.exit(1)"
+            code = "from pathlib import Path; import sys; from debbuilder.build_store import BuildStore; from tests.lifecycle_helpers import clean_workspace; from debbuilder.workspace_cleanup import WorkspaceBusyError\ntry: clean_workspace(BuildStore(Path(sys.argv[1])), sys.argv[2])\nexcept WorkspaceBusyError: sys.exit(0)\nsys.exit(1)"
             child = subprocess.run([sys.executable, "-c", code, str(self.store.root), run["id"]], timeout=5, capture_output=True)
             self.assertEqual(child.returncode, 0, child.stderr)
         self.assertEqual(results, ["busy"])
         self.assertTrue((root / "source").exists())
-        workspace_cleanup.clean_workspace(self.store, run["id"])
+        clean_workspace(self.store, run["id"])
         self.assertFalse((root / "source").exists())
 
     def test_failed_run_with_live_process_is_protected_until_process_exits(self):
@@ -514,26 +535,36 @@ class WorkspaceCleanupTests(unittest.TestCase):
             process.terminate()
             process.wait(timeout=5)
             process.stdout.close()
-        self.assertIn("source", workspace_cleanup.clean_workspace(self.store, run["id"])["removed"])
+        self.assertIn("source", clean_workspace(self.store, run["id"])["removed"])
 
     def test_build_pipeline_holds_workspace_lease_even_before_running_status(self):
-        def acquire(_recipe, workspace, token=""):
+        configured = recipe()
+        configured["source"].update({"tracking": "manual", "ref": "v1"})
+        acquired = []
+
+        def acquire(_recipe, workspace, token="", expected_identity=None):
+            acquired.append(workspace)
             with self.assertRaises(workspace_cleanup.WorkspaceBusyError):
-                workspace_cleanup.clean_workspace(self.store, Path(workspace).name)
+                clean_workspace(self.store, Path(workspace).name)
             raise source_acquisition.SourceError("test_failure", "test failure")
-        result = build_pipeline.run_pipeline(recipe(), store=self.store, dry_run=True, acquire=acquire)
+        result = build_pipeline.execute_pipeline_run(
+            build_pipeline.create_pipeline_run(configured, store=self.store, dry_run=True)["id"],
+            store=self.store, acquire=acquire,
+        )
         self.assertEqual(result["status"], "failed")
-        workspace_cleanup.clean_workspace(self.store, result["run_id"])
+        self.assertEqual(result["error"]["code"], "test_failure")
+        self.assertEqual(len(acquired), 1)
+        clean_workspace(self.store, result["run_id"])
 
     def test_already_absent_workspace_and_disabled_policy_are_safe(self):
         self.assertEqual(workspace_cleanup.apply_retention(self.store)["cleaned"], [])
         run, root = self.make_run()
         self.assertEqual(workspace_cleanup.apply_retention(self.store, {"enabled": False})["cleaned"], [])
         self.assertTrue((root / "source").exists())
-        workspace_cleanup.clean_workspace(self.store, run["id"])
-        self.assertEqual(workspace_cleanup.clean_workspace(self.store, run["id"])["removed"], [])
+        clean_workspace(self.store, run["id"])
+        self.assertEqual(clean_workspace(self.store, run["id"])["removed"], [])
         with self.assertRaises(FileNotFoundError):
-            workspace_cleanup.clean_workspace(self.store, "unknown")
+            clean_workspace(self.store, "unknown")
 
     def test_policy_validates_types_and_does_not_change_recipe_schema(self):
         defaults = default_settings("https://repo.example.test", "stable", "main")

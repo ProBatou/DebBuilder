@@ -11,9 +11,6 @@ from debbuilder.recipe_schema import recipe_document_for_storage, validate_recip
 from debbuilder.runtime import RuntimeConfig
 from debbuilder.systemd_unit import generate_unit
 
-HISTORICAL_DEBBUILDER_FIXTURE = Path(__file__).parent / "fixtures" / "recipes" / "debbuilder.json"
-
-
 class BuiltinRecipeTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -81,39 +78,16 @@ class BuiltinRecipeTests(unittest.TestCase):
         self.assertEqual(replace.call_count, 0)
         self.assertEqual(self.path.stat().st_mtime_ns, before)
 
-    def test_historical_recipe_adoption_preserves_only_allowlisted_values(self):
-        historical = json.loads(HISTORICAL_DEBBUILDER_FIXTURE.read_text())
-        historical["active"] = False
-        historical["package"].update({"name": "local-debbuilder", "maintainer": "Ops <ops@example.test>"})
-        historical["source"]["repository"] = "local/fork"
-        historical["build"].update({
-            "timeout": 45, "maximum_runtime": 900, "environment": {"LOCAL_POLICY": "1"},
-        })
-        historical["install"]["destination"] = "/opt/local-debbuilder"
-        historical["steps"] = []
-        self.write(historical)
+    def test_unmanaged_reserved_v5_recipe_is_not_adopted(self):
+        unmanaged = self.definition()
+        unmanaged.pop("management")
+        original = self.write(unmanaged)
 
-        result = builtin_recipe.reconcile_builtin_recipe(self.workflows)
-        stored = recipe_store.load_recipe(self.path, write_back=False)
+        with self.assertRaises(builtin_recipe.BuiltinRecipeError) as raised:
+            builtin_recipe.reconcile_builtin_recipe(self.workflows)
 
-        self.assertEqual(result.action, "adopted")
-        self.assertFalse(stored["active"])
-        self.assertEqual(stored["package"]["maintainer"], "Ops <ops@example.test>")
-        self.assertEqual(stored["build"]["environment"], {"LOCAL_POLICY": "1"})
-        self.assertEqual(stored["build"]["inactivity_timeout"], 45)
-        self.assertEqual(stored["build"]["maximum_runtime"], 900)
-        self.assertEqual(stored["package"]["name"], "debbuilder")
-        self.assertEqual(stored["source"]["repository"], "ProBatou/DebBuilder")
-        self.assertEqual(stored["install"]["destination"], "/opt/debbuilder")
-        self.assertEqual(stored["management"]["operator_overrides"], {
-            "active": False,
-            "package": {"maintainer": "Ops <ops@example.test>"},
-            "build": {
-                "environment": {"LOCAL_POLICY": "1"},
-                "inactivity_timeout": 45,
-                "maximum_runtime": 900,
-            },
-        })
+        self.assertEqual(raised.exception.code, "builtin_recipe_adoption_failed")
+        self.assertEqual(self.path.read_bytes(), original)
 
     def test_unsafe_adoption_failures_leave_original_bytes_untouched(self):
         cases = {
@@ -271,23 +245,15 @@ class BuiltinRecipeTests(unittest.TestCase):
         self.assertEqual(raised.exception.path, "$.service.command")
         self.assertEqual(self.path.read_bytes(), original)
 
-    def test_write_failure_before_replace_keeps_historical_recipe(self):
-        original = self.write({"schema_version": 1, "name": "debbuilder", "active": False, "steps": []})
-
-        with mock.patch("debbuilder.recipe_store.os.replace", side_effect=OSError("injected")):
-            with self.assertRaises(recipe_store.RecipeStoreError) as raised:
-                builtin_recipe.reconcile_builtin_recipe(self.workflows)
-
-        self.assertEqual(raised.exception.code, "recipe_write_failed")
-        self.assertEqual(self.path.read_bytes(), original)
-
     def test_reserved_identity_and_normal_user_recipes_are_independent(self):
         with self.assertRaises(builtin_recipe.BuiltinRecipeError) as raised:
             builtin_recipe.require_user_recipe_id("debbuilder")
         self.assertEqual(raised.exception.code, "builtin_recipe_reserved")
         builtin_recipe.require_user_recipe_id("operator-recipe")
 
-        normal = recipe_store.save_recipe(self.workflows / "operator-recipe.json", {"name": "operator-recipe"})
+        normal = recipe_store.save_recipe(self.workflows / "operator-recipe.json", {
+            "schema_version": 5, "name": "operator-recipe",
+        })
         self.assertNotIn("management", normal)
         self.assertEqual(validate_recipe_metadata(normal)["name"], "operator-recipe")
         unit = generate_unit(validate_recipe_metadata(normal)["service"])

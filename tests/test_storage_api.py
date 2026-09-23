@@ -16,7 +16,7 @@ def snapshot(state="ready"):
         "bytes": {"managed_total": 123, "data_root": 100, "repository": 23},
         "categories": {
             "metadata": 10, "logs_manifests": 20, "artifacts": 30,
-            "validation_previous": 5, "disposable": 15, "cache": 10, "unknown": 10,
+            "validation_previous": 5, "disposable": 15, "cache": 0, "unknown": 20,
         },
         "runs": {
             "count": 2, "by_mode": {"build": 1, "dry_run": 1},
@@ -53,6 +53,7 @@ class StorageApiTests(AdminApiCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(response["storage"]["bytes"]["managed_total"], 123)
+        self.assertEqual(response["storage"]["categories"]["cache"], 0)
         self.assertTrue(response["storage"]["retention_policy"]["periodic_destructive_cleanup"])
         self.assertEqual(response["storage"]["retention_policy"]["cleanup_interval_seconds"], 300)
         self.assertEqual(inventory.snapshot_calls, 1)

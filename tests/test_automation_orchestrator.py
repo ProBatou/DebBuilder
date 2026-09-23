@@ -4,18 +4,57 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from debbuilder import app, build_pipeline, recipe_store, storage, validation_service
+from debbuilder import app, build_pipeline, execution_projection, recipe_store, storage, validation_service
 from debbuilder.automation_identity import normalize_upstream_identity
 from debbuilder.automation_ledger import AutomationLedger
 from debbuilder.automation_orchestrator import AutomationOrchestrator
 from debbuilder.build_models import utc_now
 from debbuilder.build_store import BuildStore, canonical_recipe_sha256
 from debbuilder.execution_manager import ExecutionManager
-from debbuilder.recipe_schema import validate_recipe_metadata
+from debbuilder.recipe_schema import recipe_for_storage
+from tests.validation_helpers import record_canonical_validation
+
+
+VALIDATION_ARTIFACT = {
+    "package": "demo", "version": "1.2.3", "architecture": "amd64",
+    "size": 7, "sha256": "ab" * 32,
+}
+
+
+def publication_attempt(run_id, attempt_id, *, status="success", error=None):
+    artifact = f"/builds/{run_id}/artifacts/demo_1.2.3_amd64.deb"
+    result = {
+        "id": attempt_id, "build_run_id": run_id, "status": status, "error": error,
+        "artifact": artifact, "package": "demo", "version": "1.2.3", "architecture": "amd64",
+        "repository": {"root": "/repository", "distribution": "bookworm", "component": "main"},
+        "proof": None,
+    }
+    if status == "success":
+        result["proof"] = {
+            "schema": "debbuilder.repository-publication-proof.v1", "proof_version": 1,
+            "verified_at": "2026-09-21T10:00:00+00:00",
+            "repository": {"root": "/repository", "device": 1, "inode": 2},
+            "distribution": {"requested": "bookworm", "codename": "bookworm", "suite": "stable"},
+            "component": "main", "package": "demo", "version": "1.2.3", "architecture": "amd64",
+            "source": {"path": artifact, "size": 7, "sha256": "ab" * 32, "device": 3, "inode": 4},
+            "targets": [{
+                "database_architecture": "amd64",
+                "index": {
+                    "path": "dists/bookworm/main/binary-amd64/Packages.gz",
+                    "device": 5, "inode": 6, "filename": "pool/main/d/demo/demo_1.2.3_amd64.deb",
+                    "size": 7, "sha256": "ab" * 32,
+                },
+                "pool": {
+                    "path": "pool/main/d/demo/demo_1.2.3_amd64.deb", "size": 7,
+                    "sha256": "ab" * 32, "device": 7, "inode": 8,
+                },
+            }],
+        }
+    return result
 
 
 def recipe(policy="build", *, enabled=True, active=True):
-    return validate_recipe_metadata({
+    return recipe_for_storage({
         "schema_version": 5, "name": "demo", "active": active,
         "automation": {"enabled": enabled, "policy": policy},
         "package": {"name": "demo", "architecture": "amd64"},
@@ -64,7 +103,13 @@ class FakeValidationManager:
         root = validation_service.attempt_root(self.store, run_id, attempt_id)
         root.mkdir(parents=True, exist_ok=False)
         attempt = {
-            "id": attempt_id, "build_run_id": run_id, "status": "queued", "created_at": utc_now(),
+            "contract_version": 1, "id": attempt_id, "build_run_id": run_id,
+            "inputs": {"profile": "bookworm", "artifact": VALIDATION_ARTIFACT, "previous_artifact": None},
+            "selected_profile": {"name": "bookworm", "image": {
+                "name": "debbuilder-validation:bookworm", "id": "sha256:" + "a" * 64, "digest": None,
+            }},
+            "status": "queued", "created_at": utc_now(), "started_at": None,
+            "finished_at": None, "result": None, "error": None,
         }
         storage.save_json(root / "attempt.json", attempt)
         metadata = {
@@ -101,10 +146,7 @@ class OrchestratorCase(unittest.TestCase):
         recipe_store.save_recipe(self.recipes / "demo.json", configured)
 
     def publish(self, run_id, _payload):
-        result = {
-            "id": f"publication-{len(self.publications) + 1}", "build_run_id": run_id,
-            "status": "success", "error": None,
-        }
+        result = publication_attempt(run_id, f"publication-{len(self.publications) + 1}")
         self.publications.append(result)
         with self.store.locked_run(run_id):
             run = self.store.load(run_id)
@@ -125,7 +167,7 @@ class OrchestratorCase(unittest.TestCase):
     def claim(self, policy):
         configured = recipe(policy)
         self.save_recipe(configured)
-        return self.ledger.claim("demo", identity(), canonical_recipe_sha256(configured), policy)
+        return self.ledger.claim_current_recipe(self.recipes / "demo.json", "demo", identity(), canonical_recipe_sha256(configured), policy, detect_only=policy == "detect")
 
     def terminal_run(self, claim, status=None):
         row = self.ledger.read()["attempts"][claim.attempt_key]["generations"][claim.generation]
@@ -135,27 +177,42 @@ class OrchestratorCase(unittest.TestCase):
             run["status"] = status or ("prepared" if row["desired_policy"] == "test" else "success")
             if run["status"] in {"prepared", "success", "failed", "cancelled"}:
                 run["finished_at"] = utc_now()
+            if run["status"] == "success" and run["mode"] == "build":
+                artifact = f"/builds/{run_id}/artifacts/demo_1.2.3_amd64.deb"
+                run["artifact"] = {
+                    "path": artifact, "size": 7, "sha256": "ab" * 32,
+                    "inspection": {
+                        "package": "demo", "version": "1.2.3", "architecture": "amd64",
+                    },
+                }
             self.store.save(run)
         return run_id
 
     def terminal_validation(self, run_id, attempt_id, status="success", code="validation_failed"):
-        path = validation_service.attempt_root(self.store, run_id, attempt_id) / "attempt.json"
+        root = validation_service.attempt_root(self.store, run_id, attempt_id)
+        path = root / "attempt.json"
         current = storage.load_json(path, {})
-        current["status"] = status
-        if status == "failed":
+        if status == "failed" and code == "validation_preparation_failed":
             current.update({
-                "contract_version": 1,
-                "inputs": {"profile": "bookworm", "artifact": {
-                    "package": "demo", "version": "1.2.3", "architecture": "amd64",
-                    "size": 7, "sha256": "ab" * 32,
-                }, "previous_artifact": None},
-                "selected_profile": {"name": "bookworm", "image": {"name": "image", "id": None, "digest": None}},
-                "started_at": current["created_at"], "finished_at": utc_now(),
-                "prepared_dependencies": None,
-                "result": {"status": "failed", "reference": None},
+                "status": "failed", "started_at": current["created_at"],
+                "finished_at": utc_now(), "result": None,
                 "error": {"code": code, "message": "Validation failed"},
             })
-        storage.save_json(path, current)
+            storage.save_json(path, current)
+            return
+        metadata = storage.load_json(root / validation_service.AUTOMATION_FILE, {})
+        current = record_canonical_validation(
+            self.store, self.store.load(run_id), attempt_id=attempt_id,
+            status=status, artifact_identity=VALIDATION_ARTIFACT,
+            created_at=current["created_at"],
+        )
+        storage.save_json(root / validation_service.AUTOMATION_FILE, metadata)
+        if status == "failed":
+            current["error"]["code"] = code
+            result = storage.load_json(root / "result.json", {})
+            result["error"]["code"] = code
+            storage.save_json(root / "result.json", result)
+            storage.save_json(path, current)
 
     def test_policy_matrix_uses_one_canonical_stage_chain(self):
         for policy in ("test", "build", "build_validate", "full"):
@@ -180,10 +237,65 @@ class OrchestratorCase(unittest.TestCase):
                 self.assertEqual(len(self.publications), 1 if policy == "full" else 0)
                 self.assertEqual(len(self.notifications), 1)
 
+    def test_proofless_publication_success_does_not_complete_automation(self):
+        def proofless_publish(run_id, _payload):
+            result = publication_attempt(run_id, "publication-proofless")
+            result["proof"] = None
+            with self.store.locked_run(run_id):
+                run = self.store.load(run_id)
+                run.setdefault("publications", []).append(copy.deepcopy(result))
+                self.store.save(run)
+            return result
+
+        claim = self.claim("full")
+        owner = self.orchestrator(proofless_publish)
+        owner.advance(claim.attempt_key, 0)
+        run_id = self.terminal_run(claim)
+        owner.on_run_terminal(run_id)
+        validation_id = self.validation.calls[0][1]
+        self.terminal_validation(run_id, validation_id)
+
+        owner.on_validation_terminal(run_id, validation_id)
+
+        row = self.ledger.read()["attempts"][claim.attempt_key]["generations"][0]
+        self.assertEqual(row["terminal_classification"], "blocked_manual")
+        self.assertEqual(row["last_error_code"], "publication_proof_invalid")
+        self.assertEqual(
+            validation_service.load_automation(self.store, run_id, validation_id)["publication_state"],
+            "cancelled",
+        )
+
+    def test_public_projected_success_is_verified_from_the_durable_attempt(self):
+        def projected_publish(run_id, _payload):
+            result = publication_attempt(run_id, "publication-public-dto")
+            with self.store.locked_run(run_id):
+                run = self.store.load(run_id)
+                run.setdefault("publications", []).append(copy.deepcopy(result))
+                self.store.save(run)
+            return execution_projection.public_publication(result)
+
+        claim = self.claim("full")
+        owner = self.orchestrator(projected_publish)
+        owner.advance(claim.attempt_key, 0)
+        run_id = self.terminal_run(claim)
+        owner.on_run_terminal(run_id)
+        validation_id = self.validation.calls[0][1]
+        self.terminal_validation(run_id, validation_id)
+
+        owner.on_validation_terminal(run_id, validation_id)
+
+        row = self.ledger.read()["attempts"][claim.attempt_key]["generations"][0]
+        self.assertEqual(row["terminal_classification"], "success")
+        self.assertEqual(row["publication_attempt_id"], "publication-public-dto")
+        self.assertEqual(
+            validation_service.load_automation(self.store, run_id, validation_id)["publication_state"],
+            "complete",
+        )
+
     def test_detect_policy_creates_no_run(self):
         configured = recipe("detect")
         self.save_recipe(configured)
-        claim = self.ledger.record_handled_detection("demo", identity(), canonical_recipe_sha256(configured))
+        claim = self.ledger.claim_current_recipe(self.recipes / "demo.json", "demo", identity(), canonical_recipe_sha256(configured), "detect", detect_only=True)
         self.orchestrator().advance(claim.attempt_key, 0)
         self.assertEqual(self.enqueue.calls, [])
         self.assertFalse(self.store.root.exists())
@@ -410,10 +522,12 @@ class OrchestratorCase(unittest.TestCase):
 
         def publish(run_id, _payload):
             status = results.pop(0)
-            result = {
-                "id": f"publication-{2 - len(results)}", "build_run_id": run_id, "status": status,
-                "error": None if status == "success" else {"code": "repository_mutation_busy"},
-            }
+            result = publication_attempt(
+                run_id,
+                f"publication-{2 - len(results)}",
+                status=status,
+                error=None if status == "success" else {"code": "repository_mutation_busy"},
+            )
             self.publications.append(result)
             with self.store.locked_run(run_id):
                 run = self.store.load(run_id)
@@ -541,7 +655,7 @@ class OrchestratorCase(unittest.TestCase):
     def test_newer_identity_waits_for_the_recipe_active_lifecycle(self):
         first = self.claim("build")
         configured = recipe("build")
-        second = self.ledger.claim("demo", identity("21"), canonical_recipe_sha256(configured), "build")
+        second = self.ledger.claim_current_recipe(self.recipes / "demo.json", "demo", identity("21"), canonical_recipe_sha256(configured), "build")
         owner = self.orchestrator()
         owner.advance_all()
         self.assertEqual(len(self.enqueue.calls), 1)
@@ -665,20 +779,20 @@ class OrchestratorCase(unittest.TestCase):
     def test_origin_reason_distinguishes_recipe_and_release_asset_changes(self):
         configured = recipe("build")
         self.save_recipe(configured)
-        first = self.ledger.claim("demo", identity("20"), canonical_recipe_sha256(configured), "build")
+        first = self.ledger.claim_current_recipe(self.recipes / "demo.json", "demo", identity("20"), canonical_recipe_sha256(configured), "build")
         self.ledger.finish(first.attempt_key, 0, "success")
 
         revised = copy.deepcopy(configured)
         revised["package"]["description"] = "revised"
         self.save_recipe(revised)
-        revision = self.ledger.claim("demo", identity("20"), canonical_recipe_sha256(revised), "build")
+        revision = self.ledger.claim_current_recipe(self.recipes / "demo.json", "demo", identity("20"), canonical_recipe_sha256(revised), "build")
         owner = self.orchestrator()
         owner.advance(revision.attempt_key, 0)
         revision_row = self.ledger.read()["attempts"][revision.attempt_key]["generations"][0]
         self.assertEqual(self.store.load(revision_row["run_id"])["origin"]["reason"], "recipe_revision_changed")
         self.ledger.finish(revision.attempt_key, 0, "success")
 
-        changed_asset = self.ledger.claim("demo", identity("21"), canonical_recipe_sha256(revised), "build")
+        changed_asset = self.ledger.claim_current_recipe(self.recipes / "demo.json", "demo", identity("21"), canonical_recipe_sha256(revised), "build")
         owner.advance(changed_asset.attempt_key, 0)
         asset_row = self.ledger.read()["attempts"][changed_asset.attempt_key]["generations"][0]
         self.assertEqual(self.store.load(asset_row["run_id"])["origin"]["reason"], "release_asset_changed")
@@ -723,7 +837,7 @@ class OrchestratorCase(unittest.TestCase):
     def test_preallocated_admission_uses_exact_id_and_canonical_manager(self):
         configured = recipe("test")
         self.save_recipe(configured)
-        claim = self.ledger.claim("demo", identity(), canonical_recipe_sha256(configured), "test")
+        claim = self.ledger.claim_current_recipe(self.recipes / "demo.json", "demo", identity(), canonical_recipe_sha256(configured), "test")
         row = self.ledger.preallocate_run(claim.attempt_key, 0)
 
         def execute(run_id, *, store, expected_initial_status, cancellation_control=None):

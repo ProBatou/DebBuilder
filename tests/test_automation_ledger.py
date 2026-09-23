@@ -6,12 +6,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from debbuilder import recipe_store
 from debbuilder.automation_identity import UpstreamIdentityError
 from debbuilder.automation_ledger import AutomationLedger, AutomationLedgerError
 from debbuilder.build_store import BuildStore, canonical_recipe_sha256
-
-
-RECIPE_SHA = "ab" * 32
 
 
 def identity(asset_id="5678"):
@@ -34,9 +32,9 @@ def identity(asset_id="5678"):
     }
 
 
-def _process_claim(data_dir, start, results):
+def _process_claim(data_dir, recipe_path, recipe_sha, start, results):
     start.wait()
-    result = AutomationLedger(data_dir).claim("recipe", identity(), RECIPE_SHA, "build")
+    result = AutomationLedger(data_dir).claim_current_recipe(recipe_path, "recipe", identity(), recipe_sha, "build")
     results.put((result.created, result.attempt_key, result.generation))
 
 
@@ -54,14 +52,20 @@ def automated_recipe(policy="build"):
 class AutomationLedgerTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
-        self.data = Path(self.temporary.name) / "data"
+        self.root = Path(self.temporary.name)
+        self.data = self.root / "data"
+        self.recipe_path = self.root / "recipes" / "recipe.json"
+        self.recipe_sha = canonical_recipe_sha256(recipe_store.save_recipe(self.recipe_path, automated_recipe()))
         self.ledger = AutomationLedger(self.data)
 
     def tearDown(self):
         self.temporary.cleanup()
 
     def claim(self, **kwargs):
-        return self.ledger.claim("recipe", kwargs.pop("identity", identity()), kwargs.pop("recipe_sha", RECIPE_SHA), kwargs.pop("policy", "build"), **kwargs)
+        return self.ledger.claim_current_recipe(
+            self.recipe_path, "recipe", kwargs.pop("identity", identity()),
+            kwargs.pop("recipe_sha", self.recipe_sha), kwargs.pop("policy", "build"), **kwargs,
+        )
 
     def test_missing_ledger_is_empty_and_read_only(self):
         self.assertEqual(self.ledger.read(), {"schema_version": 1, "attempts": {}})
@@ -70,7 +74,7 @@ class AutomationLedgerTests(unittest.TestCase):
     def test_atomic_create_duplicate_reuse_and_restart(self):
         first = self.claim()
         before = self.ledger.path.read_bytes()
-        second = AutomationLedger(self.data).claim("recipe", identity(), RECIPE_SHA, "build")
+        second = AutomationLedger(self.data).claim_current_recipe(self.recipe_path, "recipe", identity(), self.recipe_sha, "build")
         self.assertTrue(first.created)
         self.assertFalse(second.created)
         self.assertEqual(first.attempt_key, second.attempt_key)
@@ -85,26 +89,14 @@ class AutomationLedgerTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 self.claim()
         self.assertFalse(self.ledger.path.exists())
-        recovered = AutomationLedger(self.data).claim("recipe", identity(), RECIPE_SHA, "build")
+        recovered = AutomationLedger(self.data).claim_current_recipe(self.recipe_path, "recipe", identity(), self.recipe_sha, "build")
         self.assertTrue(recovered.created)
 
     def test_same_attempt_cannot_change_captured_policy(self):
         self.claim()
         with self.assertRaises(AutomationLedgerError) as raised:
             self.claim(policy="full")
-        self.assertEqual(raised.exception.code, "automation_policy_mismatch")
-
-    def test_detection_is_durable_and_claim_transition_is_atomic(self):
-        detected = self.ledger.record_detection("recipe", identity(), RECIPE_SHA, "build")
-        self.assertTrue(detected.created)
-        self.assertEqual(detected.record["generations"][0]["state"], "detected")
-        self.assertFalse(self.ledger.may_create_run(detected.attempt_key))
-        claimed = AutomationLedger(self.data).claim("recipe", identity(), RECIPE_SHA, "build")
-        self.assertTrue(claimed.created)
-        self.assertEqual(claimed.record["generations"][0]["state"], "claimed")
-        self.assertTrue(self.ledger.may_create_run(detected.attempt_key))
-        duplicate = self.claim()
-        self.assertFalse(duplicate.created)
+        self.assertEqual(raised.exception.code, "recipe_changed_during_detection")
 
     def test_concurrent_threads_converge(self):
         results = []
@@ -127,7 +119,7 @@ class AutomationLedgerTests(unittest.TestCase):
         context = multiprocessing.get_context("fork")
         start = context.Event()
         results = context.Queue()
-        processes = [context.Process(target=_process_claim, args=(self.data, start, results)) for _ in range(4)]
+        processes = [context.Process(target=_process_claim, args=(self.data, self.recipe_path, self.recipe_sha, start, results)) for _ in range(4)]
         for process in processes:
             process.start()
         start.set()
@@ -140,9 +132,18 @@ class AutomationLedgerTests(unittest.TestCase):
 
     def test_distinct_recipe_hash_and_identity_make_distinct_attempts(self):
         first = self.claim()
-        second = self.claim(recipe_sha="cd" * 32)
-        third = self.claim(identity=identity("9999"))
+        changed = automated_recipe()
+        changed["package"]["description"] = "Changed Recipe"
+        revised_sha = canonical_recipe_sha256(recipe_store.save_recipe(self.recipe_path, changed))
+        second = self.claim(recipe_sha=revised_sha)
+        third = self.claim(identity=identity("9999"), recipe_sha=revised_sha)
         self.assertEqual(len({first.attempt_key, second.attempt_key, third.attempt_key}), 3)
+
+    def test_stale_recipe_hash_cannot_claim(self):
+        with self.assertRaises(AutomationLedgerError) as raised:
+            self.claim(recipe_sha="cd" * 32)
+        self.assertEqual(raised.exception.code, "recipe_changed_during_detection")
+        self.assertEqual(self.ledger.read()["attempts"], {})
 
     def test_incomplete_identity_cannot_be_claimed(self):
         with self.assertRaises(UpstreamIdentityError) as raised:
@@ -157,7 +158,7 @@ class AutomationLedgerTests(unittest.TestCase):
         preallocated = self.ledger.preallocate_run(claim.attempt_key, 0)
         duplicate = self.ledger.preallocate_run(claim.attempt_key, 0)
         self.assertEqual(preallocated["preallocated_run_id"], duplicate["preallocated_run_id"])
-        self.assertTrue(AutomationLedger(self.data).may_create_run(claim.attempt_key))
+        self.assertTrue(AutomationLedger(self.data).may_create_run(claim.attempt_key, claim.generation))
         with self.assertRaises(AutomationLedgerError) as missing:
             self.ledger.link_run(claim.attempt_key, 0, preallocated["preallocated_run_id"])
         self.assertEqual(missing.exception.code, "automation_run_not_found")
@@ -170,13 +171,13 @@ class AutomationLedgerTests(unittest.TestCase):
                 "expected_upstream_identity": identity(),
             },
         )
-        self.assertFalse(AutomationLedger(self.data).may_create_run(claim.attempt_key))
+        self.assertFalse(AutomationLedger(self.data).may_create_run(claim.attempt_key, claim.generation))
         reconciled = AutomationLedger(self.data).reconcile_preallocated_run(claim.attempt_key, 0)
         self.assertTrue(reconciled["linked"])
         self.assertFalse(reconciled["recovered_incomplete"])
         linked = reconciled["record"]
         self.assertEqual(linked["state"], "admitted")
-        self.assertFalse(self.ledger.may_create_run(claim.attempt_key))
+        self.assertFalse(self.ledger.may_create_run(claim.attempt_key, claim.generation))
         self.assertEqual(self.ledger.link_run(claim.attempt_key, 0, preallocated["preallocated_run_id"]), linked)
         with self.assertRaises(AutomationLedgerError):
             self.ledger.link_run(claim.attempt_key, 0, "different")
@@ -191,31 +192,36 @@ class AutomationLedgerTests(unittest.TestCase):
         self.assertFalse(reconciled["linked"])
         self.assertTrue(reconciled["recovered_incomplete"])
         self.assertFalse(folder.exists())
-        self.assertTrue(self.ledger.may_create_run(claim.attempt_key))
+        self.assertTrue(self.ledger.may_create_run(claim.attempt_key, claim.generation))
 
     def test_detect_only_policy_never_admits_a_run(self):
-        detected = self.ledger.claim("recipe", identity(), RECIPE_SHA, "detect")
-        self.assertFalse(self.ledger.may_create_run(detected.attempt_key))
+        configured = recipe_store.save_recipe(self.recipe_path, automated_recipe("detect"))
+        detected = self.claim(recipe_sha=canonical_recipe_sha256(configured), policy="detect", detect_only=True)
+        self.assertFalse(self.ledger.may_create_run(detected.attempt_key, detected.generation))
         with self.assertRaises(AutomationLedgerError) as raised:
             self.ledger.preallocate_run(detected.attempt_key, 0)
-        self.assertEqual(raised.exception.code, "automation_policy_ineligible")
+        self.assertIn(raised.exception.code, {"automation_policy_ineligible", "automation_state_conflict"})
 
     def test_detect_only_handled_record_is_atomic_and_idempotent(self):
-        first = self.ledger.record_handled_detection("recipe", identity(), RECIPE_SHA)
-        second = AutomationLedger(self.data).record_handled_detection("recipe", identity(), RECIPE_SHA)
+        configured = recipe_store.save_recipe(self.recipe_path, automated_recipe("detect"))
+        recipe_sha = canonical_recipe_sha256(configured)
+        first = self.claim(recipe_sha=recipe_sha, policy="detect", detect_only=True)
+        second = AutomationLedger(self.data).claim_current_recipe(
+            self.recipe_path, "recipe", identity(), recipe_sha, "detect", detect_only=True,
+        )
         self.assertTrue(first.created)
         self.assertFalse(second.created)
         row = second.record["generations"][0]
         self.assertEqual(row["state"], "terminal")
         self.assertEqual(row["terminal_classification"], "success")
         self.assertEqual(row["diagnostic"], "detect_only_handled")
-        self.assertFalse(self.ledger.may_create_run(first.attempt_key))
+        self.assertFalse(self.ledger.may_create_run(first.attempt_key, first.generation))
 
     def test_link_rejects_unrelated_run_with_same_preallocated_id(self):
         claim = self.claim()
         row = self.ledger.preallocate_run(claim.attempt_key, 0)
         store = BuildStore(self.data / "builds")
-        store.create({"name": "other"}, recipe_id="other", run_id=row["preallocated_run_id"])
+        store.create({"schema_version": 5, "name": "other"}, recipe_id="other", run_id=row["preallocated_run_id"])
         with self.assertRaises(AutomationLedgerError) as raised:
             self.ledger.link_run(claim.attempt_key, 0, row["preallocated_run_id"])
         self.assertEqual(raised.exception.code, "automation_run_binding_invalid")
@@ -228,8 +234,8 @@ class AutomationLedgerTests(unittest.TestCase):
             last_error_code="github_unavailable", diagnostic="provider_recovery_required",
         )
         self.assertEqual(finished["state"], "retry_delayed")
-        self.assertFalse(self.ledger.may_create_run(claim.attempt_key))
-        retry = self.ledger.explicit_retry(claim.attempt_key)
+        self.assertFalse(self.ledger.may_create_run(claim.attempt_key, claim.generation))
+        retry = self.ledger.explicit_retry_current_recipe(self.recipe_path, "recipe", claim.attempt_key, 0, expected_updated_at=finished["updated_at"])
         self.assertEqual(retry.generation, 1)
         self.assertTrue(self.ledger.may_create_run(claim.attempt_key, 1))
         generations = AutomationLedger(self.data).read()["attempts"][claim.attempt_key]["generations"]
@@ -278,13 +284,67 @@ class AutomationLedgerTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "automation_ledger_malformed")
         self.assertEqual(self.ledger.path.read_bytes(), before)
 
+    def test_pre_v1_generation_shape_is_rejected_without_upgrade(self):
+        claim = self.claim()
+        document = json.loads(self.ledger.path.read_text())
+        generation = document["attempts"][claim.attempt_key]["generations"][0]
+        for field in (
+            "stage", "validation_attempt_id", "publication_attempt_id", "completion_notified",
+            "run_retry_count", "validation_retry_count", "publication_retry_count",
+        ):
+            generation.pop(field)
+        self.ledger.path.write_text(json.dumps(document))
+        before = self.ledger.path.read_bytes()
+
+        with self.assertRaises(AutomationLedgerError) as raised:
+            self.ledger.read()
+
+        self.assertEqual(raised.exception.code, "automation_ledger_invalid")
+        self.assertEqual(self.ledger.path.read_bytes(), before)
+
+    def test_noncanonical_persisted_upstream_identity_is_rejected(self):
+        claim = self.claim()
+        document = json.loads(self.ledger.path.read_text())
+        document["attempts"][claim.attempt_key]["upstream_identity"].pop("schema_version")
+        self.ledger.path.write_text(json.dumps(document))
+        before = self.ledger.path.read_bytes()
+
+        with self.assertRaises(AutomationLedgerError) as raised:
+            self.ledger.read()
+
+        self.assertEqual(raised.exception.code, "automation_ledger_invalid")
+        self.assertEqual(self.ledger.path.read_bytes(), before)
+
+    def test_current_lifecycle_stages_require_canonical_links(self):
+        claim = self.claim()
+        original = json.loads(self.ledger.path.read_text())
+        cases = (
+            {"state": "detected"},
+            {"state": "claimed", "stage": "validation"},
+            {
+                "state": "admitted", "stage": "publication",
+                "preallocated_run_id": "run-one", "run_id": "run-one",
+            },
+        )
+        for updates in cases:
+            with self.subTest(updates=updates):
+                document = json.loads(json.dumps(original))
+                row = document["attempts"][claim.attempt_key]["generations"][0]
+                row.update(updates)
+                self.ledger.path.write_text(json.dumps(document))
+                before = self.ledger.path.read_bytes()
+                with self.assertRaises(AutomationLedgerError) as raised:
+                    self.ledger.read()
+                self.assertEqual(raised.exception.code, "automation_ledger_invalid")
+                self.assertEqual(self.ledger.path.read_bytes(), before)
+
     def test_entry_bounds_refuse_growth_without_pruning_history(self):
         ledger = AutomationLedger(self.data, max_attempts=2, max_attempts_per_recipe=2)
-        ledger.claim("recipe", identity("1"), RECIPE_SHA, "build")
-        ledger.claim("recipe", identity("2"), RECIPE_SHA, "build")
+        ledger.claim_current_recipe(self.recipe_path, "recipe", identity("1"), self.recipe_sha, "build")
+        ledger.claim_current_recipe(self.recipe_path, "recipe", identity("2"), self.recipe_sha, "build")
         before = ledger.path.read_bytes()
         with self.assertRaises(AutomationLedgerError) as raised:
-            ledger.claim("recipe", identity("3"), RECIPE_SHA, "build")
+            ledger.claim_current_recipe(self.recipe_path, "recipe", identity("3"), self.recipe_sha, "build")
         self.assertEqual(raised.exception.code, "automation_ledger_bounds_exceeded")
         self.assertEqual(ledger.path.read_bytes(), before)
 

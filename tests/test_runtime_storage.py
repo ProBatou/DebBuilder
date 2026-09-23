@@ -11,7 +11,8 @@ from debbuilder import app
 from debbuilder import storage
 from debbuilder.package_service import PackageService
 from debbuilder.runtime import RuntimeConfig
-from debbuilder.settings_store import load_secrets, save_github_token, save_ntfy_token
+from debbuilder.settings_service import update_settings
+from debbuilder.settings_store import default_settings, load_secrets, load_settings
 
 
 class RuntimeConfigTests(unittest.TestCase):
@@ -95,11 +96,13 @@ class AtomicStorageTests(unittest.TestCase):
 
             def github():
                 barrier.wait()
-                save_github_token(data, "ghp_abcdefghijklmnopqrstuvwxyz123456")
+                update_settings(data, {"github": {"token": "ghp_abcdefghijklmnopqrstuvwxyz123456"}}, defaults)
 
             def ntfy():
                 barrier.wait()
-                save_ntfy_token(data, "ntfy-secret-value")
+                update_settings(data, {"notifications": {"token": "ntfy-secret-value"}}, defaults)
+
+            defaults = default_settings("http://localhost/debian", "stable", "main")
 
             first = threading.Thread(target=github)
             second = threading.Thread(target=ntfy)
@@ -111,6 +114,33 @@ class AtomicStorageTests(unittest.TestCase):
             self.assertEqual(secrets["github"]["token"], "ghp_abcdefghijklmnopqrstuvwxyz123456")
             self.assertEqual(secrets["notifications"]["token"], "ntfy-secret-value")
 
+    def test_concurrent_settings_and_secret_updates_preserve_both(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            defaults = default_settings("http://localhost/debian", "stable", "main")
+            barrier = threading.Barrier(2)
+            errors = []
+
+            def update(payload):
+                try:
+                    barrier.wait()
+                    update_settings(data, payload, defaults)
+                except Exception as exc:
+                    errors.append(exc)
+
+            threads = [
+                threading.Thread(target=update, args=({"general": {"app_name": "Concurrent"}},)),
+                threading.Thread(target=update, args=({"github": {"token": "ghp_abcdefghijklmnopqrstuvwxyz123456"}},)),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            self.assertEqual(errors, [])
+            self.assertEqual(load_settings(data, defaults)["general"]["app_name"], "Concurrent")
+            self.assertEqual(load_secrets(data)["github"]["token"], "ghp_abcdefghijklmnopqrstuvwxyz123456")
+
     def test_package_read_modify_write_is_serialized(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -121,7 +151,7 @@ class AtomicStorageTests(unittest.TestCase):
                 workflow_path=lambda _recipe_id: None,
                 read_workflow=lambda _path: {},
                 repo_settings=lambda: {"architecture": "all"},
-                release_lookup=lambda _repository: None,
+                observation_lookup=lambda _recipe_id, _recipe: None,
             )
             barrier = threading.Barrier(12)
 

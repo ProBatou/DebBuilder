@@ -22,7 +22,6 @@ from debbuilder.validation_oci import (
     OwnedContainer,
     PodmanRuntime,
     new_identity,
-    inventory_owned_containers,
     ownership_labels,
     recover_owned_containers,
     resource_arguments,
@@ -468,7 +467,7 @@ class OciRecoveryTests(unittest.TestCase):
             result = recover_owned_containers(registry.root, workspace=root, runner=self.runner({}, inventory_error=True))
             self.assertEqual(result.blockers[0]["code"], "validation_container_inventory_unavailable")
 
-    def test_read_only_inventory_distinguishes_running_stopped_absent_and_unverifiable(self):
+    def test_recovery_removes_owned_containers_and_blocks_unverifiable_namespace(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             registry = IdentityRegistry(root / "registry")
@@ -488,13 +487,11 @@ class OciRecoveryTests(unittest.TestCase):
                 ids[1]: inspection(stopped, running=False),
                 CONTAINER_ID: inspection(foreign, running=True),
             }
-            result = inventory_owned_containers(registry.root, workspace=root, runner=self.runner(state))
-            observed = {(row.get("attempt_id"), row["classification"], row["state"]) for row in result["rows"]}
-            self.assertIn(("running", "known_authenticated", "running"), observed)
-            self.assertIn(("stopped", "known_authenticated", "stopped"), observed)
-            self.assertIn(("absent", "known_authenticated", "absent"), observed)
-            self.assertIn((None, "namespace_unverifiable", "running"), observed)
-            self.assertFalse(result["trustworthy"])
+            result = recover_owned_containers(registry.root, workspace=root, runner=self.runner(state))
+            self.assertEqual(set(result.recovered), {"running", "stopped"})
+            self.assertEqual(result.cleared_absent, ["absent"])
+            self.assertEqual(result.blockers[0]["code"], "validation_container_ownership_unverifiable")
+            self.assertTrue(result.inventory_trustworthy)
 
 
 class OciResourceTests(unittest.TestCase):

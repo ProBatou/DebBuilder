@@ -1,3 +1,4 @@
+from tests.lifecycle_helpers import cleanup_blockers
 """CP1 containment diagnostics, blocker identities, and read-only absence proof."""
 import unittest
 import tempfile
@@ -70,8 +71,8 @@ class CP1ContainmentTests(unittest.TestCase):
                 self.assertFalse(connection.stopped)
                 self.assertIn(f"{name} expected={expected} observed={observed}", result.error)
                 containment.latch_runtime_cleanup_blocker(result.error, self.identity)
-                self.assertEqual(len(containment.cleanup_blockers()), 1)
-                self.assertEqual(containment.cleanup_blockers()[0].invocation_id, "b" * 32)
+                self.assertEqual(len(cleanup_blockers()), 1)
+                self.assertEqual(cleanup_blockers()[0].invocation_id, "b" * 32)
 
     def test_property_diagnostic_does_not_expose_arbitrary_value(self):
         result = containment._snapshot_matches_ownership(
@@ -107,8 +108,8 @@ class CP1ContainmentTests(unittest.TestCase):
                     mock.patch("debbuilder.command_runner._stream_systemd_cgroup", side_effect=stream):
                     result = run_command("true", workspace=temporary)
                 self.assertEqual(result["error_code"], "command_containment_termination_failed")
-                self.assertEqual(len(containment.cleanup_blockers()), 1)
-                self.assertEqual(containment.cleanup_blockers()[0].invocation_id, "b" * 32)
+                self.assertEqual(len(cleanup_blockers()), 1)
+                self.assertEqual(cleanup_blockers()[0].invocation_id, "b" * 32)
                 self.assertFalse(connection.stopped)
 
     def test_absence_outcomes_and_aba(self):
@@ -156,22 +157,22 @@ class CP1ContainmentTests(unittest.TestCase):
         other = containment.starting_metadata("cp1-other", "c" * 32)
         containment.latch_runtime_cleanup_blocker("first", self.identity)
         containment._publish_cleanup_blocker("probe", "second", other)
-        self.assertEqual([b.kind for b in containment.cleanup_blockers()], ["probe", "runtime"])
+        self.assertEqual([b.kind for b in cleanup_blockers()], ["probe", "runtime"])
         self.assertIn("2 containment cleanup object", containment.containment_cleanup_blocker())
         del containment._CLEANUP_BLOCKERS[(
             "runtime", self.identity["boot_id"], self.identity["unit_name"], "b" * 32)]
         self.assertIn("1 containment cleanup object", containment.containment_cleanup_blocker())
-        self.assertEqual(containment.cleanup_blockers()[0].reason, "second")
+        self.assertEqual(cleanup_blockers()[0].reason, "second")
         with mock.patch.object(containment, "MAX_CLEANUP_BLOCKERS", 1):
             containment.latch_runtime_cleanup_blocker("overflow", self.identity)
-        self.assertEqual(len(containment.cleanup_blockers()), 1)
+        self.assertEqual(len(cleanup_blockers()), 1)
         self.assertIn("capacity exceeded", containment.containment_cleanup_blocker())
 
     def test_reused_unit_name_retains_both_uncertain_incarnations(self):
         containment.latch_runtime_cleanup_blocker("old", self.identity)
         newer = {**self.identity, "invocation_id": "c" * 32}
         containment.latch_runtime_cleanup_blocker("new", newer)
-        self.assertEqual({b.invocation_id for b in containment.cleanup_blockers()},
+        self.assertEqual({b.invocation_id for b in cleanup_blockers()},
                          {"b" * 32, "c" * 32})
         self.assertIn("2 containment cleanup object", containment.containment_cleanup_blocker())
 

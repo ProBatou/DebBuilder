@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import storage
-from .settings_store import ntfy_token, ntfy_token_configured, save_ntfy_token
+from .settings_store import ntfy_token
 
 SECRET_REDACTIONS = [
     re.compile(r"(?i)(authorization:\s*bearer\s+)[^\s,;]+"),

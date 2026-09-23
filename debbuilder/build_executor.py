@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import inspect
 
 from .command_runner import (
     CommandValidationError,
@@ -108,7 +107,7 @@ def execute_build(recipe: dict, detection: dict, source_directory: str | Path, *
         return {"executed": False, "reason": "dry_run", "plan": plan, "commands": [], "output": plan["output"]}
     source_noop = detection.get("build_mode") == "source" and not recipe["build"]["commands"] and not detection.get("proposed_commands")
     actual_commands = [] if detection.get("project_type") == "static" or source_noop else select_commands(recipe["build"]["commands"], detection.get("proposed_commands") or [], dry_run=False)["commands"]
-    inactivity_timeout = inactivity_timeout if inactivity_timeout is not None else recipe["build"].get("inactivity_timeout", recipe["build"].get("timeout", 300))
+    inactivity_timeout = inactivity_timeout if inactivity_timeout is not None else recipe["build"].get("inactivity_timeout", 300)
     maximum_runtime = maximum_runtime if maximum_runtime is not None else recipe["build"].get("maximum_runtime")
     results = []
     for index, command in enumerate(actual_commands, 1):
@@ -122,13 +121,11 @@ def execute_build(recipe: dict, detection: dict, source_directory: str | Path, *
             "inactivity_timeout": inactivity_timeout,
             "maximum_runtime": maximum_runtime,
         }
-        parameters = inspect.signature(runner).parameters
-        accepts_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
-        if callable(on_output) and ("on_output" in parameters or accepts_kwargs):
+        if callable(on_output):
             kwargs["on_output"] = lambda item, command_index=index: on_output(command_index, item)
-        if cancellation_event is not None and ("cancellation_event" in parameters or accepts_kwargs):
+        if cancellation_event is not None:
             kwargs["cancellation_event"] = cancellation_event
-        if callable(on_cancel) and ("on_cancel" in parameters or accepts_kwargs):
+        if callable(on_cancel):
             kwargs["on_cancel"] = on_cancel
         try:
             result = runner(command, **kwargs)

@@ -1,3 +1,4 @@
+from tests.lifecycle_helpers import cleanup_blockers
 """CP2 runtime blocker reconciliation and atomic admission recovery."""
 import tempfile
 import threading
@@ -15,12 +16,12 @@ from debbuilder.resource_limits import empty_policy
 
 def recipe(name="cp2-recipe"):
     return {
-        "schema_version": 3,
+        "schema_version": 5,
         "name": name,
         "active": True,
         "resource_limits": empty_policy(),
         "package": {"name": name},
-        "source": {"repository": f"owner/{name}"},
+        "source": {"repository": f"owner/{name}", "tracking": "manual", "ref": "v1.0.0"},
     }
 
 
@@ -78,8 +79,8 @@ class CleanupReconciliationTests(unittest.TestCase):
         self.assertEqual((result.examined, result.removed, result.remaining), (4, 1, 3))
         self.assertEqual((result.proven_gone, result.still_present, result.ambiguous, result.unavailable),
                          (1, 1, 1, 1))
-        self.assertNotIn(gone["unit_name"], {item.unit_name for item in containment.cleanup_blockers()})
-        self.assertEqual({item.kind for item in containment.cleanup_blockers()}, {"runtime", "probe"})
+        self.assertNotIn(gone["unit_name"], {item.unit_name for item in cleanup_blockers()})
+        self.assertEqual({item.kind for item in cleanup_blockers()}, {"runtime", "probe"})
         self.assertTrue(result.admission_blocked)
 
     def test_two_runtime_blockers_reconcile_across_bounded_passes(self):
@@ -126,7 +127,7 @@ class CleanupReconciliationTests(unittest.TestCase):
 
         self.assertFalse(thread.is_alive())
         self.assertEqual((completed[0].removed, completed[0].stale), (0, 1))
-        self.assertEqual(containment.cleanup_blockers(), (original,))
+        self.assertEqual(cleanup_blockers(), (original,))
         self.assertGreater(containment._CLEANUP_BLOCKER_GENERATIONS[key], original_generation)
 
     def test_new_publication_during_proof_remains(self):
@@ -152,7 +153,7 @@ class CleanupReconciliationTests(unittest.TestCase):
 
         self.assertFalse(thread.is_alive())
         self.assertEqual(completed[0].removed, 1)
-        self.assertEqual([item.unit_name for item in containment.cleanup_blockers()], [second["unit_name"]])
+        self.assertEqual([item.unit_name for item in cleanup_blockers()], [second["unit_name"]])
         self.assertNotEqual(first["unit_name"], second["unit_name"])
 
     def test_saturation_remains_fail_closed_after_all_stored_records_resolve(self):
@@ -181,7 +182,7 @@ class CleanupReconciliationTests(unittest.TestCase):
              self.assertLogs("debbuilder.command_containment", level="ERROR"):
             result = containment.reconcile_cleanup_blockers()
         self.assertEqual((result.removed, result.unavailable, result.remaining), (1, 1, 1))
-        self.assertEqual(containment.cleanup_blockers()[0].unit_name, failed["unit_name"])
+        self.assertEqual(cleanup_blockers()[0].unit_name, failed["unit_name"])
 
     def test_property_mismatch_remains_then_natural_disappearance_reopens(self):
         value = self.publish("runtime", "mismatch", "a", "1")
@@ -287,7 +288,7 @@ class AdmissionReconciliationTests(unittest.TestCase):
                     run["status"] = "failed"
                     run["error"] = {
                         "code": "command_containment_termination_failed",
-                        "message": "historical containment failure",
+                        "message": "previous containment failure",
                     }
                     store.save(run)
                 return {"run_id": run_id, "status": "failed"}
@@ -313,7 +314,7 @@ class AdmissionReconciliationTests(unittest.TestCase):
         return value
 
     def test_unrelated_build_and_test_resume_without_restart_and_keep_history(self):
-        historical_done = threading.Event()
+        previous_done = threading.Event()
 
         def fail_with_history(run_id, *, store, expected_initial_status, cancellation_control=None):
             store.transition_status(run_id, expected=expected_initial_status, status="running")
@@ -325,16 +326,16 @@ class AdmissionReconciliationTests(unittest.TestCase):
                     "message": "KillMode expected=control-group observed=process",
                 }
                 store.save(run)
-            historical_done.set()
+            previous_done.set()
             return {"run_id": run_id, "status": "failed"}
 
         manager = self.manager(execute=fail_with_history)
         with mock.patch.object(app.command_containment, "resource_limit_capability", side_effect=self.capability):
-            historical_response = app.enqueue_recipe_run(
+            previous_response = app.enqueue_recipe_run(
                 manager, recipe("seerr-like"), dry_run=False,
             )
-        self.assertTrue(historical_done.wait(2))
-        historical_before = manager.store.load(historical_response["run_id"])
+        self.assertTrue(previous_done.wait(2))
+        previous_before = manager.store.load(previous_response["run_id"])
         self.publish(run_id="seerr-like")
         statuses = [
             containment.AbsenceStatus.PRESENT_BUT_IDENTITY_AMBIGUOUS,
@@ -351,11 +352,11 @@ class AdmissionReconciliationTests(unittest.TestCase):
             build = app.enqueue_recipe_run(manager, recipe("zoraxy-like"), dry_run=False)
 
         self.assertEqual(build["status"], "queued")
-        historical_after = manager.store.load(historical_response["run_id"])
-        self.assertEqual(historical_after, historical_before)
-        self.assertEqual(historical_after["status"], "failed")
+        previous_after = manager.store.load(previous_response["run_id"])
+        self.assertEqual(previous_after, previous_before)
+        self.assertEqual(previous_after["status"], "failed")
         self.assertIn("KillMode expected=control-group observed=process",
-                      historical_after["error"]["message"])
+                      previous_after["error"]["message"])
         self.assertFalse(containment.containment_cleanup_blocker())
 
         self.publish(run_id="test-blocked", command="b", invocation="2")
@@ -398,7 +399,7 @@ class AdmissionReconciliationTests(unittest.TestCase):
              ):
             with self.assertRaises(app.RunAdmissionError):
                 app.enqueue_recipe_run(manager, recipe(), dry_run=True)
-            self.assertEqual([(item.kind, item.unit_name) for item in containment.cleanup_blockers()],
+            self.assertEqual([(item.kind, item.unit_name) for item in cleanup_blockers()],
                              [("probe", probe_blocker["unit_name"])])
             states[probe_blocker["unit_name"]] = containment.AbsenceStatus.PROVEN_GONE
             resumed = app.enqueue_recipe_run(manager, recipe(), dry_run=True)
@@ -422,7 +423,7 @@ class AdmissionReconciliationTests(unittest.TestCase):
             app.enqueue_recipe_run(manager, recipe(), dry_run=False)
         self.assertEqual(blocked.exception.code, "execution_recovery_unresolved")
         self.assertEqual(prove_absent.call_count, 1)
-        self.assertEqual(containment.cleanup_blockers()[0].unit_name, new_identity["unit_name"])
+        self.assertEqual(cleanup_blockers()[0].unit_name, new_identity["unit_name"])
         self.assertFalse(manager.store.root.exists())
 
     def test_final_admission_and_publication_are_serialized(self):

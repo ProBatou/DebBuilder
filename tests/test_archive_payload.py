@@ -3,7 +3,7 @@ import unittest
 from debbuilder.archive_payload import (
     normalize_archive_payload,
     parse_archive_path,
-    payload_selects,
+    selectors_match,
     selector_matches,
 )
 
@@ -41,8 +41,8 @@ class ArchivePayloadTests(unittest.TestCase):
         })
         self.assertEqual(payload["include"], ["debbuilder/"])
         self.assertEqual(payload["exclude"], ["debbuilder/dev/"])
-        self.assertTrue(payload_selects(payload, "debbuilder/app.py"))
-        self.assertFalse(payload_selects(payload, "debbuilder/dev/server.py"))
+        self.assertTrue(selectors_match(payload["include"], "debbuilder/app.py"))
+        self.assertTrue(selectors_match(payload["exclude"], "debbuilder/dev/server.py"))
 
     def test_entire_archive_discards_include_and_applies_exclusions(self):
         payload = normalize_archive_payload({
@@ -51,8 +51,8 @@ class ArchivePayloadTests(unittest.TestCase):
             "exclude": ["tests/"],
         })
         self.assertEqual(payload["include"], [])
-        self.assertTrue(payload_selects(payload, "server.py"))
-        self.assertFalse(payload_selects(payload, "tests/test_app.py"))
+        self.assertEqual(payload["mode"], "entire_archive")
+        self.assertTrue(selectors_match(payload["exclude"], "tests/test_app.py"))
 
     def test_paths_mode_requires_an_include(self):
         with self.assertRaisesRegex(ValueError, "at least one"):

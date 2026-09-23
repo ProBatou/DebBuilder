@@ -1,10 +1,11 @@
-"""Internal, non-scheduled exact upstream detection for Recipe automation."""
+"""Internal exact upstream detection for Run admission and Recipe Automation."""
 from __future__ import annotations
 
 from pathlib import Path
 from contextlib import nullcontext
 
 from . import github_client, recipe_store, source_acquisition, upstream_archive, upstream_artifact
+from .upstream_observation import UpstreamObservationError
 from .automation_identity import (
     UpstreamIdentityError,
     identity_is_complete,
@@ -13,7 +14,7 @@ from .automation_identity import (
 )
 from .automation_ledger import AutomationLedger, AutomationLedgerError
 from .build_store import canonical_recipe_sha256
-from .recipe_schema import BUILTIN_RECIPE_ID, require_safe_name, validate_recipe_metadata
+from .recipe_schema import BUILTIN_RECIPE_ID, require_safe_name, runtime_recipe_for_storage, validate_recipe_metadata
 
 
 ERROR_CLASSIFICATIONS = {
@@ -25,7 +26,6 @@ ERROR_CLASSIFICATIONS = {
     "release_asset_not_found": "explicit_asset_not_found",
     "ambiguous_release_asset": "ambiguous_asset",
     "ambiguous_archive_source": "ambiguous_asset",
-    "unsupported_automation_source_mode": "unsupported_source",
     "unsupported_artifact_tracking": "unsupported_source",
     "incomplete_upstream_identity": "incomplete_identity",
     "invalid_upstream_identity": "incomplete_identity",
@@ -65,7 +65,6 @@ def _convert_error(exc: Exception) -> UpstreamDetectionError:
         "release_asset_not_found": "Configured Release asset was not found",
         "ambiguous_release_asset": "Configured Release asset selector is ambiguous",
         "ambiguous_archive_source": "Configured Release source selection is ambiguous",
-        "unsupported_automation_source_mode": "Recipe source mode cannot be detected before Build",
         "unsupported_artifact_tracking": "Recipe source tracking is unsupported for this artifact mode",
         "incomplete_upstream_identity": "GitHub metadata did not establish a complete immutable identity",
         "invalid_upstream_identity": "GitHub metadata did not establish a complete immutable identity",
@@ -100,10 +99,6 @@ def detect_upstream(recipe_snapshot: dict, *, token: str = "") -> dict:
     """Resolve one canonical Recipe snapshot without lifecycle side effects."""
     try:
         recipe = validate_recipe_metadata(recipe_snapshot)
-        if recipe["source"]["version"]["source"] == "build":
-            raise UpstreamDetectionError(
-                "unsupported_automation_source_mode", "Recipe source mode cannot be detected before Build",
-            )
         mode = recipe["artifact"]["mode"]
         if mode == "source_build":
             resolved = source_acquisition.resolve_source(recipe, token=token, exact=True)
@@ -149,9 +144,10 @@ def detect_upstream(recipe_snapshot: dict, *, token: str = "") -> dict:
 class AutomationDetectionService:
     """Explicit internal check path; no scheduler, Run creation, or enqueueing."""
 
-    def __init__(self, recipe_directory: str | Path, ledger: AutomationLedger):
+    def __init__(self, recipe_directory: str | Path, ledger: AutomationLedger, *, observation_service):
         self.recipe_directory = Path(recipe_directory)
         self.ledger = ledger
+        self.observation_service = observation_service
 
     def _path(self, recipe_id: str) -> Path:
         require_safe_name(recipe_id, "Recipe ID")
@@ -175,13 +171,75 @@ class AutomationDetectionService:
             "diagnostic": error.code,
             "retry_after_seconds": error.retry_after_seconds,
             "rate_limit_reset": error.rate_limit_reset,
+            "automation_eligible": False,
+        }
+
+    def check_scheduled(
+        self, recipe_id: str, *, automation_enabled: bool = True, token: str = "",
+        detector=detect_upstream, mutation_lease=None,
+    ) -> dict:
+        """Observe every valid Recipe; claim only when Automation is eligible."""
+        path = self._path(recipe_id)
+        try:
+            canonical = validate_recipe_metadata(recipe_store.load_recipe(path))
+        except (OSError, TypeError, ValueError, recipe_store.RecipeStoreError):
+            return self._failure(
+                recipe_id, "", "",
+                UpstreamDetectionError("invalid_automation_configuration", "Recipe is missing or invalid"),
+            )
+        recipe_sha = canonical_recipe_sha256(canonical)
+        policy = canonical["automation"]["policy"]
+        if canonical.get("name") != recipe_id:
+            return self._failure(
+                recipe_id, recipe_sha, policy,
+                UpstreamDetectionError("invalid_automation_configuration", "Recipe identity is invalid"),
+            )
+        eligible = bool(
+            automation_enabled
+            and recipe_id != BUILTIN_RECIPE_ID
+            and canonical["active"]
+            and canonical["automation"]["enabled"]
+            and policy != "manual"
+        )
+        if eligible:
+            result = self.check(
+                recipe_id, token=token, detector=detector, mutation_lease=mutation_lease,
+            )
+            result["automation_eligible"] = True
+            return result
+        try:
+            detection = self.observation_service.observe(
+                recipe_id, canonical, path, token=token, resolver=detector,
+                mutation_lease=mutation_lease,
+            )
+        except (UpstreamDetectionError, UpstreamObservationError) as exc:
+            if not isinstance(exc, UpstreamDetectionError):
+                exc = _convert_error(exc)
+            return self._failure(recipe_id, recipe_sha, policy, exc)
+        return {
+            "recipe_id": recipe_id,
+            "recipe_sha256": recipe_sha,
+            "policy": policy,
+            "identity": None,
+            "display_version": str(detection.get("display_version") or "")[:200],
+            "display_ref": str(detection.get("display_ref") or "")[:200],
+            "classification": "observed",
+            "change": "none",
+            "attempt_key": None,
+            "generation": None,
+            "attempt_state": None,
+            "claim_eligible": False,
+            "diagnostic": None,
+            "retry_after_seconds": None,
+            "rate_limit_reset": None,
+            "automation_eligible": False,
         }
 
     def check(self, recipe_id: str, *, token: str = "", detector=detect_upstream, mutation_lease=None) -> dict:
         """Detect and atomically deduplicate one explicitly requested Recipe."""
         path = self._path(recipe_id)
         try:
-            snapshot = recipe_store.load_recipe(path, write_back=False)
+            snapshot = recipe_store.load_recipe(path)
             canonical = validate_recipe_metadata(snapshot)
         except (OSError, TypeError, ValueError, recipe_store.RecipeStoreError):
             error = UpstreamDetectionError("invalid_automation_configuration", "Recipe is missing or invalid")
@@ -193,11 +251,18 @@ class AutomationDetectionService:
             return self._failure(recipe_id, recipe_sha, policy, error)
         if (recipe_id == BUILTIN_RECIPE_ID or not canonical["active"] or
                 not canonical["automation"]["enabled"] or policy == "manual"):
-            code = "manual_action_required" if canonical["source"]["version"]["source"] == "build" else "invalid_automation_configuration"
-            return self._failure(recipe_id, recipe_sha, policy, UpstreamDetectionError(code, "Recipe is not automation eligible"))
+            return self._failure(
+                recipe_id, recipe_sha, policy,
+                UpstreamDetectionError("invalid_automation_configuration", "Recipe is not automation eligible"),
+            )
         try:
-            detection = detector(canonical, token=token)
-        except UpstreamDetectionError as exc:
+            detection = self.observation_service.observe(
+                recipe_id, canonical, path, token=token, resolver=detector,
+                mutation_lease=mutation_lease,
+            )
+        except (UpstreamDetectionError, UpstreamObservationError) as exc:
+            if not isinstance(exc, UpstreamDetectionError):
+                exc = _convert_error(exc)
             return self._failure(recipe_id, recipe_sha, policy, exc)
         try:
             lease = mutation_lease() if mutation_lease is not None else nullcontext()
@@ -237,4 +302,5 @@ class AutomationDetectionService:
             "diagnostic": None,
             "retry_after_seconds": None,
             "rate_limit_reset": None,
+            "automation_eligible": True,
         }

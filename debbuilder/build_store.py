@@ -12,7 +12,7 @@ from pathlib import Path
 
 from . import storage
 from .build_models import new_run, utc_now, validate_run
-from .recipe_schema import recipe_for_storage, require_safe_name
+from .recipe_schema import recipe_for_storage, require_safe_name, runtime_recipe_for_storage
 
 WORKSPACE_DIRECTORIES = ("source", "staging", "artifacts", "logs", "manifests")
 EXECUTION_HISTORY_DELETION_FILE = ".execution-history-deleted.json"
@@ -32,14 +32,17 @@ def make_run_id() -> str:
     return time.strftime("%Y%m%d-%H%M%S", time.gmtime()) + f"-{time.time_ns() % 1_000_000:06d}-{secrets.token_hex(2)}"
 
 
-def canonical_recipe_snapshot(recipe: dict) -> bytes:
-    """Return the exact immutable Recipe bytes used by every Run."""
-    canonical = recipe_for_storage(recipe)
+def _canonical_recipe_bytes(canonical: dict) -> bytes:
     return (json.dumps(canonical, indent=2, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
 
 
+def canonical_recipe_snapshot(recipe: dict) -> bytes:
+    """Return the exact immutable Recipe bytes used by every Run."""
+    return _canonical_recipe_bytes(recipe_for_storage(recipe))
+
+
 def canonical_recipe_sha256(recipe: dict) -> str:
-    return hashlib.sha256(canonical_recipe_snapshot(recipe)).hexdigest()
+    return hashlib.sha256(_canonical_recipe_bytes(runtime_recipe_for_storage(recipe))).hexdigest()
 
 
 class BuildStore:
@@ -76,16 +79,6 @@ class BuildStore:
             return True
         return False
 
-    def _record_execution_history_deletion(self, run_id: str) -> dict:
-        path = self.execution_history_deletion_path(run_id)
-        marker = storage.load_json(path, None)
-        if isinstance(marker, dict) and marker.get("deleted_at"):
-            return marker
-        marker = {"run_id": run_id, "deleted_at": utc_now()}
-        storage.save_json(path, marker)
-        path.chmod(0o600)
-        return marker
-
     @contextmanager
     def locked_run(self, run_id: str, *, blocking: bool = True):
         """Lease the workspace across processes and serialize Run mutations."""
@@ -97,7 +90,7 @@ class BuildStore:
             with storage.locked_path(path):
                 yield fd
 
-    def create(self, recipe: dict, *, recipe_id: str = "", mode: str = "dry_run", run_id: str | None = None, resource_contract: dict | None = None, origin: dict | None = None, automation: dict | None = None) -> dict:
+    def create(self, recipe: dict, *, recipe_id: str = "", mode: str = "dry_run", run_id: str | None = None, resource_contract: dict | None = None, origin: dict | None = None, automation: dict | None = None, manual_source_provenance: dict | None = None) -> dict:
         canonical = recipe_for_storage(recipe)
         if automation is not None:
             if not isinstance(automation, dict):
@@ -121,6 +114,7 @@ class BuildStore:
             resource_contract=resource_contract,
             origin=origin,
             automation=automation,
+            manual_source_provenance=manual_source_provenance,
         )
         folder.mkdir(parents=True, exist_ok=False, mode=0o700)
         for name in WORKSPACE_DIRECTORIES:
@@ -269,16 +263,6 @@ class BuildStore:
             return path.resolve(strict=False).relative_to(workspace).as_posix()
         except ValueError:
             return str(path)
-
-    def staging_content_files(self, run_id: str, details: dict) -> list[str]:
-        """Read an externalized staging inventory."""
-        reference = details.get("content_manifest")
-        if not reference:
-            return []
-        value = self.load_manifest(run_id, str(reference))
-        if not isinstance(value, list) or not all(isinstance(row, str) for row in value):
-            raise ValueError("staging content manifest must contain a list of paths")
-        return value
 
     def artifact_details_for_storage(self, run: dict, artifact: dict) -> dict:
         stored = deepcopy(artifact)

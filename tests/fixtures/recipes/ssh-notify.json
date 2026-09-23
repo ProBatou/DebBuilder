@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 5,
   "name": "ssh-notify",
   "active": true,
   "package": {

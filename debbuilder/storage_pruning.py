@@ -72,8 +72,10 @@ def _latest_proof(run: dict, *, repo_root: Path, distribution: str, component: s
             or attempt.get("artifact") != artifact.get("path")
         ):
             continue
-        reference = artifact_publication.publication_proof_reference(attempt["proof"])
-        source = reference["source"]
+        proof = artifact_publication.canonical_publication_proof(attempt["proof"])
+        if artifact_publication.successful_publication_proof(attempt, run=run) is None:
+            raise ValueError("Successful publication proof does not match its canonical attempt")
+        source = proof["source"]
         if (
             source["path"] != artifact.get("path")
             or source["size"] != artifact.get("size")
@@ -83,7 +85,7 @@ def _latest_proof(run: dict, *, repo_root: Path, distribution: str, component: s
         attempt_id = attempt.get("id")
         if not isinstance(attempt_id, str) or not attempt_id or len(attempt_id) > 256:
             raise ValueError("Successful publication attempt identity is invalid")
-        return attempt_id, reference
+        return attempt_id, proof
     raise PruningIneligible("Run has no applicable successful PublicationProofV1")
 
 
@@ -152,7 +154,7 @@ def intentional_pruned_artifact_size(run: dict) -> int | None:
         publication = pruning.get("publication") if isinstance(pruning, dict) else None
         attempt_id = publication.get("attempt_id") if isinstance(publication, dict) else None
         proof = publication.get("proof") if isinstance(publication, dict) else None
-        canonical_proof = artifact_publication.publication_proof_reference(proof)
+        canonical_proof = artifact_publication.canonical_publication_proof(proof)
         if (
             run.get("mode") != "build"
             or run.get("status") != "success"
@@ -178,7 +180,7 @@ def intentional_pruned_artifact_size(run: dict) -> int | None:
                 and attempt.get("id") == attempt_id
                 and attempt.get("status") == "success"
                 and attempt.get("artifact") == artifact.get("path")
-                and artifact_publication.publication_proof_reference(attempt.get("proof")) == proof
+                and artifact_publication.canonical_publication_proof(attempt.get("proof")) == proof
             ):
                 return source["size"]
     except (KeyError, TypeError, ValueError, artifact_publication.PublicationError):
@@ -518,6 +520,23 @@ def _prune_locked(
 ) -> dict:
     require_destructive_run_safe(workspace_fd, run, authorization=authorization)
     require_safe_workspace_targets(workspace_fd, ("artifacts",))
+    artifact_missing = "artifact" not in run
+    if artifact_missing or run["artifact"] is None:
+        if artifact_missing:
+            raise ValueError("Current Run is missing artifact metadata")
+        try:
+            os.stat(PRUNING_INTENT, dir_fd=workspace_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            read_json(workspace_fd, PRUNING_INTENT)
+            raise ValueError("Run without an artifact retains artifact pruning intent")
+        if any(
+            isinstance(attempt, dict) and attempt.get("status") == "success"
+            for attempt in run.get("publications") or []
+        ):
+            raise ValueError("Run without an artifact retains successful publication metadata")
+        raise PruningIneligible("Run has no artifact to prune")
     artifact_name = _artifact_name(run)
     attempt_id, persisted_proof = _latest_proof(
         run, repo_root=repo_root, distribution=distribution, component=component,
@@ -561,7 +580,8 @@ def _prune_locked(
         component=component, operation=f"prune:{run['id']}", runner=runner,
     ) as (_lease, source, source_fd, artifacts_fd, verified_name, fresh_proof):
         fresh_reference = artifact_publication.publication_proof_reference(fresh_proof)
-        if fresh_reference != persisted_proof:
+        persisted_reference = artifact_publication.publication_proof_reference(persisted_proof)
+        if fresh_reference != persisted_reference:
             raise ValueError("Fresh repository proof does not match the successful publication proof")
         if should_stop():
             raise PruningStopped()

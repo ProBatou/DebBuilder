@@ -1,5 +1,6 @@
 import gzip
 import hashlib
+import json
 import shlex
 import shutil
 import tempfile
@@ -10,9 +11,10 @@ from copy import deepcopy
 from pathlib import Path
 from unittest import mock
 
-from debbuilder import artifact_publication, artifact_validation, package_store, storage_pruning, validation_service, workspace_cleanup
+from debbuilder import artifact_publication, artifact_validation, package_store, storage, storage_pruning, validation_service, workspace_cleanup
 from debbuilder.build_store import BuildStore
 from debbuilder.repository_lock import repository_lease, repository_lease_held
+from tests.validation_helpers import record_canonical_validation
 
 
 class RepositoryRunner:
@@ -50,6 +52,7 @@ class RepositoryRunner:
 
 def recipe():
     return {
+        "schema_version": 5,
         "name": "demo",
         "package": {"name": "demo", "architecture": "all", "maintainer": "Demo <demo@example.test>"},
         "source": {"repository": "owner/demo"},
@@ -83,7 +86,6 @@ class StoragePruningTests(unittest.TestCase):
                 "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
                 "inspection": dict(self.inspection),
             },
-            "validations": [{"id": "validation", "artifact": str(artifact), "status": "success"}],
         })
         staging = next(step for step in run["steps"] if step["name"] == "staging")
         staging.update({
@@ -97,6 +99,7 @@ class StoragePruningTests(unittest.TestCase):
         previous.write_bytes(b"old")
         (workspace / "unknown.bin").write_bytes(b"unknown")
         self.store.save(run)
+        record_canonical_validation(self.store, run, attempt_id="validation")
         with mock.patch.object(artifact_publication.deb_inspector, "inspect_deb", return_value=self.inspection):
             published = artifact_publication.publish_artifact(
                 run_id, store=self.store, repo_root=self.repo, distribution="bookworm",
@@ -136,7 +139,7 @@ class StoragePruningTests(unittest.TestCase):
         self.assertEqual(result["pruned"], [run["id"]], result)
         self.assertEqual(result["manifests_pruned"], [run["id"]])
         self.assertFalse(artifact.exists())
-        self.assertTrue((self.repo / run["publications"][-1]["proof"]["pool"]["path"]).is_file())
+        self.assertTrue((self.repo / run["publications"][-1]["proof"]["targets"][0]["pool"]["path"]).is_file())
         self.assertFalse((workspace / storage_pruning.STAGING_MANIFEST).exists())
         self.assertTrue((workspace / "manifests/artifact-files.json").is_file())
         self.assertTrue((workspace / "validation/old/previous.deb").is_file())
@@ -144,16 +147,24 @@ class StoragePruningTests(unittest.TestCase):
         persisted = self.store.load(run["id"])
         self.assertEqual(persisted["artifact"]["pruning"]["status"], "pruned")
         self.assertEqual(persisted["publications"][-1]["proof"], run["publications"][-1]["proof"])
+        publication_evidence = artifact_publication.publication_evidence_projection(
+            persisted, repo_root=self.repo, distribution="bookworm", component="main",
+        )
+        self.assertTrue(publication_evidence["already_published"])
+        self.assertFalse(publication_evidence["publication_reconciliation_available"])
         staging = next(step for step in persisted["steps"] if step["name"] == "staging")
         self.assertNotIn("content_manifest", staging["details"])
         self.assertEqual(staging["details"]["content_manifest_pruning"]["content_file_count"], 42)
         self.assertFalse(package_store.allowed_actions("up_to_date", "demo", persisted)["validate"])
         self.assertFalse(package_store.allowed_actions("up_to_date", "demo", persisted)["publish"])
         with self.assertRaises(artifact_validation.ValidationError) as raised:
-            artifact_validation.validate_artifact(run["id"], store=self.store)
+            artifact_validation.validate_artifact(
+                run["id"], store=self.store, prepared_dependencies={},
+                attempt_id="pruned-artifact", registry_root=self.base / "registry",
+            )
         self.assertEqual(raised.exception.code, "artifact_not_available")
-        self.assertFalse(artifact_publication.publication_readiness(persisted)["ready"])
-        self.assertIn("artifact_unavailable", artifact_publication.publication_readiness(persisted)["reasons"])
+        self.assertFalse(artifact_publication.publication_readiness(persisted, store=self.store)["ready"])
+        self.assertIn("artifact_unavailable", artifact_publication.publication_readiness(persisted, store=self.store)["reasons"])
         self.assertEqual(self.sweep()["already_pruned"], [run["id"]])
         artifact.write_bytes(b"test deb payload")
         reappeared = self.sweep()
@@ -188,6 +199,79 @@ class StoragePruningTests(unittest.TestCase):
         self.assertEqual(result["errors"][0]["id"], run["id"])
         self.assertTrue(artifact.is_file())
         self.assertFalse((workspace / storage_pruning.STAGING_MANIFEST).exists())
+
+    def test_no_artifact_runs_are_skipped_without_malformed_path_errors_or_mutation(self):
+        current = self.store.create(recipe(), mode="build", run_id="current-no-artifact")
+        current.update({"status": "success", "finished_at": "2026-09-09T10:00:00+00:00"})
+        self.store.save(current)
+        current_sentinel = Path(current["workspace"]) / "artifacts/unclaimed.deb"
+        current_sentinel.write_bytes(b"not claimed by artifact metadata")
+
+        before = {
+            current["id"]: (Path(current["workspace"]) / "run.json").read_bytes(),
+        }
+        result = self.sweep()
+
+        self.assertEqual(result["errors"], [], result)
+        self.assertEqual(result["skipped"], [current["id"]])
+        self.assertTrue(current_sentinel.is_file())
+        for run_id, contents in before.items():
+            self.assertEqual((self.store.run_dir(run_id) / "run.json").read_bytes(), contents)
+        self.assertIsNone(self.store.load(current["id"])["artifact"])
+        self.assertNotIn("publications", self.store.load(current["id"]))
+
+    def test_malformed_claimed_artifact_path_retains_diagnostic(self):
+        run = self.store.create(recipe(), mode="build", run_id="malformed-artifact-path")
+        run.update({
+            "status": "success",
+            "finished_at": "2026-09-09T10:00:00+00:00",
+            "artifact": {"path": str(self.base / "outside.deb")},
+        })
+        self.store.save(run)
+
+        result = self.sweep()
+
+        self.assertEqual(result["skipped"], [])
+        self.assertEqual(result["errors"], [{
+            "id": run["id"],
+            "error": "Artifact is not a direct .deb child of the Run artifacts directory",
+        }])
+
+    def test_no_artifact_classification_rejects_current_omission_and_contradictory_state(self):
+        missing = self.store.create(recipe(), mode="build", run_id="current-missing-artifact")
+        missing.update({"status": "success", "finished_at": "2026-09-09T10:00:00+00:00"})
+        self.store.save(missing)
+        missing_path = Path(missing["workspace"]) / "run.json"
+        missing_raw = json.loads(missing_path.read_text())
+        missing_raw.pop("artifact")
+        missing_path.write_text(json.dumps(missing_raw))
+
+        intent = self.store.create(recipe(), mode="build", run_id="no-artifact-with-intent")
+        intent.update({"status": "success", "finished_at": "2026-09-09T10:00:00+00:00"})
+        self.store.save(intent)
+        intent_path = Path(intent["workspace"]) / storage_pruning.PRUNING_INTENT
+        intent_path.write_text(json.dumps({"schema": "malformed-pruning-intent"}))
+
+        published = self.store.create(recipe(), mode="build", run_id="no-artifact-with-publication")
+        published.update({
+            "status": "success",
+            "finished_at": "2026-09-09T10:00:00+00:00",
+            "publications": [{"id": "contradictory", "status": "success"}],
+        })
+        self.store.save(published)
+
+        result = self.sweep()
+
+        self.assertEqual(result["skipped"], [])
+        self.assertEqual({row["id"]: row["error"] for row in result["errors"]}, {
+            missing["id"]: "Current Run is missing artifact metadata",
+            intent["id"]: "Run without an artifact retains artifact pruning intent",
+            published["id"]: "Run without an artifact retains successful publication metadata",
+        })
+        self.assertTrue(intent_path.is_file())
+        self.assertNotIn("artifact", json.loads(missing_path.read_text()))
+        self.assertIsNone(self.store.load(intent["id"])["artifact"])
+        self.assertIsNone(self.store.load(published["id"])["artifact"])
 
     def test_staging_manifest_prunes_independently_for_terminal_run_classes(self):
         fixtures = (
@@ -305,7 +389,7 @@ class StoragePruningTests(unittest.TestCase):
 
     def test_repository_or_local_identity_mismatch_preserves_artifact(self):
         run, _workspace, artifact = self.make_published_run()
-        pool = self.repo / run["publications"][-1]["proof"]["pool"]["path"]
+        pool = self.repo / run["publications"][-1]["proof"]["targets"][0]["pool"]["path"]
         pool.write_bytes(b"tampered repository bytes")
         result = self.sweep()
         self.assertEqual(result["pruned"], [])
@@ -388,9 +472,12 @@ class StoragePruningTests(unittest.TestCase):
             "started_at": None,
             "finished_at": None,
             "status": "queued",
-            "prepared_dependencies": None,
             "result": None,
             "error": None,
+        })
+        storage.save_json(root / "automation.json", {
+            "automatic": False, "publish_after_success": False,
+            "publication_state": "not_requested",
         })
 
         result = self.sweep()

@@ -9,6 +9,7 @@ from debbuilder.build_store import BuildStore
 
 def recipe(name="projection-cancel"):
     return {
+        "schema_version": 5,
         "name": name,
         "active": True,
         "package": {

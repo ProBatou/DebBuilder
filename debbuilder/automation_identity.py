@@ -1,4 +1,4 @@
-"""Bounded, exact upstream identity used only by durable automation coordination."""
+"""Bounded exact upstream identity for durable Run provenance and Automation."""
 from __future__ import annotations
 
 import hashlib
@@ -220,10 +220,6 @@ def normalize_upstream_identity(value: dict) -> dict:
 def canonical_identity_bytes(value: dict, *, _normalized: bool = False) -> bytes:
     normalized = value if _normalized else normalize_upstream_identity(value)
     return json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-
-
-def canonical_identity_json(value: dict) -> str:
-    return canonical_identity_bytes(value).decode("utf-8")
 
 
 def identity_is_complete(value: dict) -> bool:

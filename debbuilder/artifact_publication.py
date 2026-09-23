@@ -64,44 +64,28 @@ class PublicationProofV1:
     package: str
     version: str
     architecture: str
-    database_architecture: str
-    database_architectures: list[str]
-    index: dict
-    pool: dict
     targets: list[dict]
     source: dict
 
 
-def publication_readiness(run: dict, *, store: BuildStore | None = None) -> dict:
-    artifact = run.get("artifact") or {}
-    projected = run
-    validation_inventory_unverifiable = False
-    if store is not None:
-        # Manifest-backed attempts are canonical across cancellation races and
-        # crashes; raw Run rows are only historical lifecycle detail.
-        from . import validation_service
-        projected = validation_service.project_run(run, store)
-        validation_inventory_unverifiable = any(
-            row.get("recovery_blocker") for row in projected.get("validations", [])
-        )
-    validations = [
-        row for row in projected.get("validations", [])
-        if row.get("artifact") == artifact.get("path") or row.get("artifact_matches_run") is True
-    ]
-    successful = [row for row in validations if row.get("status") == "success"]
-    reasons = []
-    if run.get("status") != "success":
-        reasons.append("build_not_successful")
-    if not artifact.get("path") or artifact.get("pruning") is not None:
-        reasons.append("artifact_unavailable")
-    if not successful:
-        reasons.append("validation_not_successful")
-    if validation_inventory_unverifiable:
-        reasons.append("validation_state_unverifiable")
+def publication_readiness(
+    run: dict,
+    *,
+    store: BuildStore,
+    validation_recovery_blocker: dict | None = None,
+) -> dict:
+    """Project the canonical authorization decision for a new insertion."""
+    from . import validation_service
+
+    eligibility = validation_service.publication_insertion_eligibility(
+        run,
+        store,
+        recovery_blocker=validation_recovery_blocker,
+    )
     return {
-        "ready": not reasons,
-        "reasons": reasons,
-        "validation_id": successful[-1]["id"] if successful else "",
+        "ready": eligibility["eligible"],
+        "reasons": eligibility["reasons"],
+        "validation_id": eligibility["validation_id"],
     }
 
 
@@ -456,7 +440,6 @@ def _proof(
             "pool": {"path": entry["Filename"], "size": pool_info.st_size, "sha256": pool_sha, "device": pool_info.st_dev, "inode": pool_info.st_ino},
         })
     _verify_source_fd(source, source_fd, artifacts_fd, artifact_name)
-    primary = targets[0]
     return PublicationProofV1(
         schema="debbuilder.repository-publication-proof.v1",
         proof_version=1,
@@ -464,9 +447,7 @@ def _proof(
         repository=lease.identity,
         distribution={"requested": config.get("requested", ""), "codename": codename, "suite": config.get("suite", "")},
         component=component, package=source.package, version=source.version,
-        architecture=source.architecture, database_architecture=target_architectures[0],
-        database_architectures=target_architectures,
-        index=primary["index"], pool=primary["pool"], targets=targets,
+        architecture=source.architecture, targets=targets,
         source={"path": source.path, "size": source.size, "sha256": source.sha256, "device": source.device, "inode": source.inode},
     )
 
@@ -485,11 +466,13 @@ def verify_published_artifact_exact(
     )
 
 
-def publication_proof_reference(proof: dict | PublicationProofV1) -> dict:
-    """Return the bounded, durable identity used to authorize local pruning."""
+def canonical_publication_proof(proof: dict | PublicationProofV1) -> dict:
+    """Validate and return the canonical strict PublicationProofV1 evidence."""
     value = asdict(proof) if isinstance(proof, PublicationProofV1) else proof
     if not isinstance(value, dict) or value.get("schema") != "debbuilder.repository-publication-proof.v1" or value.get("proof_version") != 1:
         raise PublicationError("publication_proof_invalid", "Publication proof is not a supported PublicationProofV1 record")
+    if any(key in value for key in ("database_architecture", "database_architectures", "index", "pool")):
+        raise PublicationError("publication_proof_invalid", "Publication proof contains non-canonical convenience fields")
 
     def text_value(container: dict, key: str, *, limit: int = 4096) -> str:
         result = container.get(key)
@@ -503,14 +486,19 @@ def publication_proof_reference(proof: dict | PublicationProofV1) -> dict:
             raise PublicationError("publication_proof_invalid", f"Publication proof field {key} is invalid")
         return result
 
+    def optional_text_value(container: dict, key: str, *, limit: int = 4096) -> str:
+        result = container.get(key)
+        if not isinstance(result, str) or len(result) > limit or "\x00" in result:
+            raise PublicationError("publication_proof_invalid", f"Publication proof field {key} is invalid")
+        return result
+
     repository = value.get("repository")
     distribution = value.get("distribution")
     source = value.get("source")
     targets = value.get("targets")
-    architectures = value.get("database_architectures")
     if not isinstance(repository, dict) or not isinstance(distribution, dict) or not isinstance(source, dict):
         raise PublicationError("publication_proof_invalid", "Publication proof identity is incomplete")
-    if not isinstance(targets, list) or not 1 <= len(targets) <= 64 or not isinstance(architectures, list):
+    if not isinstance(targets, list) or not 1 <= len(targets) <= 64:
         raise PublicationError("publication_proof_invalid", "Publication proof targets are invalid")
     canonical_targets = []
     for target in targets:
@@ -529,8 +517,21 @@ def publication_proof_reference(proof: dict | PublicationProofV1) -> dict:
             raise PublicationError("publication_proof_invalid", "Publication proof digest is invalid")
         canonical_targets.append({
             "database_architecture": text_value(target, "database_architecture", limit=128),
-            "index": {"path": index_path, "filename": filename, "size": integer_value(index, "size"), "sha256": index_sha},
-            "pool": {"path": pool_path, "size": integer_value(pool, "size"), "sha256": pool_sha},
+            "index": {
+                "path": index_path,
+                "device": integer_value(index, "device"),
+                "inode": integer_value(index, "inode"),
+                "filename": filename,
+                "size": integer_value(index, "size"),
+                "sha256": index_sha,
+            },
+            "pool": {
+                "path": pool_path,
+                "size": integer_value(pool, "size"),
+                "sha256": pool_sha,
+                "device": integer_value(pool, "device"),
+                "inode": integer_value(pool, "inode"),
+            },
         })
     source_sha = text_value(source, "sha256", limit=64).lower()
     if not SHA256_RE.fullmatch(source_sha):
@@ -538,6 +539,7 @@ def publication_proof_reference(proof: dict | PublicationProofV1) -> dict:
     result = {
         "schema": value["schema"],
         "proof_version": 1,
+        "verified_at": text_value(value, "verified_at", limit=128),
         "repository": {
             "root": text_value(repository, "root"),
             "device": integer_value(repository, "device"),
@@ -546,25 +548,190 @@ def publication_proof_reference(proof: dict | PublicationProofV1) -> dict:
         "distribution": {
             "requested": text_value(distribution, "requested", limit=128),
             "codename": text_value(distribution, "codename", limit=128),
+            "suite": optional_text_value(distribution, "suite", limit=128),
         },
         "component": text_value(value, "component", limit=256),
         "package": text_value(value, "package", limit=256),
         "version": text_value(value, "version", limit=512),
         "architecture": text_value(value, "architecture", limit=128),
-        "database_architectures": list(architectures),
         "source": {
             "path": text_value(source, "path"),
             "size": integer_value(source, "size"),
             "sha256": source_sha,
+            "device": integer_value(source, "device"),
+            "inode": integer_value(source, "inode"),
         },
         "targets": canonical_targets,
     }
-    if not result["database_architectures"] or len(result["database_architectures"]) > 64 or any(
-        not isinstance(item, str) or not item or len(item) > 128
-        for item in result["database_architectures"]
+    repository_root = result["repository"]["root"]
+    if (
+        not Path(repository_root).is_absolute()
+        or os.path.abspath(repository_root) != repository_root
+        or repository_root.startswith("//")
     ):
-        raise PublicationError("publication_proof_invalid", "Publication proof architectures are invalid")
+        raise PublicationError("publication_proof_invalid", "Publication proof repository root is not canonical")
+    if (
+        not REPOSITORY_TOKEN_RE.fullmatch(result["distribution"]["requested"])
+        or not REPOSITORY_TOKEN_RE.fullmatch(result["distribution"]["codename"])
+        or not PACKAGE_RE.fullmatch(result["package"])
+        or not REPOSITORY_TOKEN_RE.fullmatch(result["architecture"])
+    ):
+        raise PublicationError("publication_proof_invalid", "Publication proof package identity is invalid")
+    try:
+        component_path = safe_relative_path(result["component"]).as_posix()
+    except RepositoryLockError as exc:
+        raise PublicationError("publication_proof_invalid", "Publication proof component is invalid") from exc
+    if component_path != result["component"] or any(
+        not REPOSITORY_TOKEN_RE.fullmatch(part) for part in PurePosixPath(component_path).parts
+    ):
+        raise PublicationError("publication_proof_invalid", "Publication proof component is invalid")
+    architectures = [target["database_architecture"] for target in canonical_targets]
+    if len(set(architectures)) != len(architectures):
+        raise PublicationError("publication_proof_invalid", "Publication proof target architectures are not unique")
+    if any(
+        not REPOSITORY_TOKEN_RE.fullmatch(architecture) or architecture in {"all", "source"}
+        for architecture in architectures
+    ):
+        raise PublicationError("publication_proof_invalid", "Publication proof target architecture is invalid")
+    if result["architecture"] != "all" and architectures != [result["architecture"]]:
+        raise PublicationError("publication_proof_invalid", "Publication proof target architecture does not match the artifact")
+    for target in canonical_targets:
+        expected_index = (
+            f"dists/{result['distribution']['codename']}/{component_path}/"
+            f"binary-{target['database_architecture']}/Packages"
+        )
+        if target["index"]["path"] not in {expected_index, expected_index + ".gz"}:
+            raise PublicationError("publication_proof_invalid", "Publication proof index path does not match its target")
+    if any(
+        target["index"]["size"] != result["source"]["size"]
+        or target["index"]["sha256"] != result["source"]["sha256"]
+        or target["pool"]["size"] != result["source"]["size"]
+        or target["pool"]["sha256"] != result["source"]["sha256"]
+        for target in canonical_targets
+    ):
+        raise PublicationError("publication_proof_invalid", "Publication proof target bytes do not match the source artifact")
     return result
+
+
+def publication_proof_reference(proof: dict | PublicationProofV1) -> dict:
+    """Derive stable exact identity for reconciliation and pruning comparison."""
+    canonical = canonical_publication_proof(proof)
+    return {
+        "schema": canonical["schema"],
+        "proof_version": canonical["proof_version"],
+        "repository": dict(canonical["repository"]),
+        "distribution": dict(canonical["distribution"]),
+        "component": canonical["component"],
+        "package": canonical["package"],
+        "version": canonical["version"],
+        "architecture": canonical["architecture"],
+        "source": {
+            key: canonical["source"][key]
+            for key in ("path", "size", "sha256")
+        },
+        "targets": [{
+            "database_architecture": target["database_architecture"],
+            "index": {
+                key: target["index"][key]
+                for key in ("path", "filename", "size", "sha256")
+            },
+            "pool": {
+                key: target["pool"][key]
+                for key in ("path", "size", "sha256")
+            },
+        } for target in canonical["targets"]],
+    }
+
+
+def successful_publication_proof(attempt: dict, *, run: dict | None = None) -> dict | None:
+    """Return strict matching proof only for a canonical terminal success."""
+    if not isinstance(attempt, dict) or attempt.get("status") != "success":
+        return None
+    try:
+        proof = canonical_publication_proof(attempt.get("proof"))
+    except (PublicationError, TypeError, ValueError):
+        return None
+    repository = attempt.get("repository")
+    if not isinstance(repository, dict):
+        return None
+    if (
+        proof["repository"]["root"] != str(attempt.get("repository", {}).get("root") or "")
+        or proof["distribution"]["requested"] != repository.get("distribution")
+        or proof["component"] != repository.get("component")
+        or proof["package"] != attempt.get("package")
+        or proof["version"] != attempt.get("version")
+        or proof["architecture"] != attempt.get("architecture")
+        or proof["source"]["path"] != attempt.get("artifact")
+    ):
+        return None
+    if run is not None:
+        artifact = run.get("artifact")
+        inspection = artifact.get("inspection") if isinstance(artifact, dict) else None
+        if not isinstance(artifact, dict) or not isinstance(inspection, dict) or (
+            attempt.get("build_run_id") != run.get("id")
+            or attempt.get("artifact") != artifact.get("path")
+            or proof["package"] != inspection.get("package")
+            or proof["version"] != inspection.get("version")
+            or proof["architecture"] != inspection.get("architecture")
+            or proof["source"]["size"] != artifact.get("size")
+            or proof["source"]["sha256"] != str(artifact.get("sha256") or "").lower()
+        ):
+            return None
+    return proof
+
+
+def publication_attempt_status(attempt: dict, *, run: dict | None = None) -> str:
+    """Return the fail-closed current-v1 status of one Publication attempt."""
+    status = str(attempt.get("status") or "unknown") if isinstance(attempt, dict) else "unknown"
+    if status == "success" and successful_publication_proof(attempt, run=run) is None:
+        return "failed"
+    return status
+
+
+def publication_evidence_projection(
+    run: dict,
+    *,
+    repo_root: str | Path,
+    distribution: str,
+    component: str,
+) -> dict:
+    """Project durable current-repository evidence without re-reading the repository."""
+    artifact = run.get("artifact") or {}
+    inspection = artifact.get("inspection") or {}
+    expected = {
+        "package": inspection.get("package"),
+        "version": inspection.get("version"),
+        "architecture": inspection.get("architecture"),
+        "size": artifact.get("size"),
+        "sha256": artifact.get("sha256"),
+    }
+    publication_id = ""
+    for row in run.get("publications") or []:
+        proof = successful_publication_proof(row, run=run)
+        if proof is None:
+            continue
+        if (
+            proof["repository"]["root"] == str(Path(repo_root).absolute())
+            and proof["distribution"]["requested"] == distribution
+            and proof["component"] == component
+            and proof["package"] == expected["package"]
+            and proof["version"] == expected["version"]
+            and proof["architecture"] == expected["architecture"]
+            and proof["source"]["size"] == expected["size"]
+            and proof["source"]["sha256"] == expected["sha256"]
+        ):
+            publication_id = str(row.get("id") or "")
+    source_available = bool(
+        artifact.get("path")
+        and artifact.get("pruning") is None
+        and Path(str(artifact["path"])).is_file()
+    )
+    return {
+        # A retry re-verifies the live database, index, and pool while leased.
+        "already_published": bool(publication_id),
+        "publication_reconciliation_available": bool(publication_id) and source_available,
+        "publication_proof_id": publication_id,
+    }
 
 
 @contextmanager
@@ -595,7 +762,14 @@ def verify_source_artifact_fd(
     _verify_source_fd(source, source_fd, artifacts_fd, artifact_name)
 
 
-def _attempt(run: dict, *, store: BuildStore, repo_root: str | Path, distribution: str, component: str, kind: str = "publication") -> tuple[dict, dict, float]:
+def _attempt(
+    run: dict,
+    *,
+    repo_root: str | Path,
+    distribution: str,
+    component: str,
+    kind: str = "publication",
+) -> tuple[dict, float]:
     artifact = run.get("artifact") or {}
     info = artifact.get("inspection") or {}
     attempt = {
@@ -606,19 +780,17 @@ def _attempt(run: dict, *, store: BuildStore, repo_root: str | Path, distributio
         "architecture": info.get("architecture", ""), "status": "running",
         "requested_at": utc_now(), "finished_at": None, "duration": None,
         "repository": {"root": str(Path(repo_root).absolute()), "distribution": distribution, "component": component},
-        "readiness": publication_readiness(run, store=store), "preflight": {}, "command": None,
-        "proof": None, "published_version": "", "error": None,
+        "readiness": {"ready": False, "reasons": ["not_evaluated"], "validation_id": ""},
+        "preflight": {}, "command": None,
+        "proof": None, "error": None,
     }
-    compact = {key: attempt[key] for key in ("id", "status", "requested_at", "finished_at", "published_version")}
     run.setdefault("publications", []).append(attempt)
-    artifact.setdefault("publications", []).append(compact)
-    return attempt, compact, time.monotonic()
+    return attempt, time.monotonic()
 
 
-def _finish(store: BuildStore, run: dict, attempt: dict, compact: dict, started: float, *, event: str) -> dict:
+def _finish(store: BuildStore, run: dict, attempt: dict, started: float, *, event: str) -> dict:
     attempt["finished_at"] = utc_now()
     attempt["duration"] = round(time.monotonic() - started, 6)
-    compact.update({key: attempt[key] for key in ("status", "finished_at", "published_version")})
     store.append_event(run, f"{event} {attempt['id']}: {attempt['status']}", level="error" if attempt["status"] == "failed" else "info")
     return attempt
 
@@ -636,6 +808,7 @@ def _fail(attempt: dict, exc: Exception, *, fallback: str) -> None:
 def publish_artifact(
     run_id: str, *, store: BuildStore, repo_root: str | Path, distribution: str,
     component: str, confirm: str, runner=None,
+    validation_recovery_blocker: dict | None = None,
 ) -> dict:
     if not store.run_dir(run_id).is_dir():
         raise PublicationError("build_run_not_found", "Build Run was not found")
@@ -643,16 +816,14 @@ def publish_artifact(
         run = store.load(run_id)
         if not run:
             raise PublicationError("build_run_not_found", "Build Run was not found")
-        attempt, compact, started = _attempt(
-            run, store=store, repo_root=repo_root, distribution=distribution, component=component,
+        attempt, started = _attempt(
+            run, repo_root=repo_root, distribution=distribution, component=component,
         )
         store.save(run)
         try:
             expected = f"publish:{attempt['package']}:{attempt['version']}"
             if confirm != expected:
                 raise PublicationError("publication_confirmation_required", f"Publication requires explicit confirmation: {expected}")
-            if not attempt["readiness"]["ready"]:
-                raise PublicationError("artifact_not_ready", "Artifact requires a successful Build and Validation", details=attempt["readiness"])
             with repository_lease(repo_root, operation=f"publish:{run_id}") as lease:
                 with _source_artifact(run, workspace_fd) as (source, source_fd, artifacts_fd, artifact_name):
                     config = _repository_config(lease, distribution)
@@ -695,6 +866,14 @@ def publish_artifact(
                             source_fd=source_fd, artifacts_fd=artifacts_fd, artifact_name=artifact_name,
                             runner=runner, database=database,
                         )
+                        # Reconciliation is already proved at this point.
+                        # Eligibility is retained only as a diagnostic and is
+                        # never an input to the exact-present success path.
+                        attempt["readiness"] = publication_readiness(
+                            run,
+                            store=store,
+                            validation_recovery_blocker=validation_recovery_blocker,
+                        )
                         attempt["command"] = {"status": "success", "command": "repository verification only", "arguments": [], "working_directory": str(lease.root), "exit_code": 0, "stdout": "Exact artifact already published", "stderr": "", "duration": 0, "timed_out": False}
                     else:
                         if any(exact_index.values()):
@@ -717,6 +896,22 @@ def publish_artifact(
                             comparison = apt_repo.debian_version_relation(source.version, published_version, **kwargs)
                             if comparison["relation"] == "older":
                                 raise PublicationError("downgrade_refused", f"Candidate {source.version} is older than published version {published_version}")
+                        # Validation authorizes repository insertion, not the
+                        # exact verification of contents already present.  Keep
+                        # this check inside the explicit absent-package branch
+                        # after conflict/downgrade classification so a retry
+                        # can never silently turn into an unauthorized insert.
+                        attempt["readiness"] = publication_readiness(
+                            run,
+                            store=store,
+                            validation_recovery_blocker=validation_recovery_blocker,
+                        )
+                        if not attempt["readiness"]["ready"]:
+                            raise PublicationError(
+                                "artifact_not_ready",
+                                "Canonical lifecycle Validation is required before publication",
+                                details=attempt["readiness"],
+                            )
                         kwargs = {"lease": lease}
                         if runner is not None:
                             kwargs["runner"] = runner
@@ -733,11 +928,11 @@ def publish_artifact(
                             runner=runner,
                         )
                     attempt["proof"] = asdict(proof)
-                    attempt.update({"status": "success", "published_version": source.version})
-                    return _finish(store, run, attempt, compact, started, event="Artifact publication")
+                    attempt["status"] = "success"
+                    return _finish(store, run, attempt, started, event="Artifact publication")
         except Exception as exc:
             _fail(attempt, exc, fallback="publication_execution_failed")
-            return _finish(store, run, attempt, compact, started, event="Artifact publication")
+            return _finish(store, run, attempt, started, event="Artifact publication")
 
 
 def reconcile_publication(
@@ -750,8 +945,8 @@ def reconcile_publication(
         run = store.load(run_id)
         if not run:
             raise PublicationError("build_run_not_found", "Build Run was not found")
-        attempt, compact, started = _attempt(
-            run, store=store, repo_root=repo_root, distribution=distribution, component=component,
+        attempt, started = _attempt(
+            run, repo_root=repo_root, distribution=distribution, component=component,
             kind="reconciliation",
         )
         store.save(run)
@@ -772,8 +967,8 @@ def reconcile_publication(
                     )
                     attempt["proof"] = asdict(proof)
                     attempt["command"] = {"status": "success", "command": "repository reconciliation only", "arguments": [], "working_directory": str(lease.root), "exit_code": 0, "stdout": "Database, exported index, and pool artifact agree", "stderr": "", "duration": 0, "timed_out": False}
-                    attempt.update({"status": "success", "published_version": source.version})
-                    return _finish(store, run, attempt, compact, started, event="Publication reconciliation")
+                    attempt["status"] = "success"
+                    return _finish(store, run, attempt, started, event="Publication reconciliation")
         except Exception as exc:
             _fail(attempt, exc, fallback="publication_reconciliation_failed")
-            return _finish(store, run, attempt, compact, started, event="Publication reconciliation")
+            return _finish(store, run, attempt, started, event="Publication reconciliation")

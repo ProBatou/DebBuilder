@@ -18,12 +18,13 @@ from debbuilder.automation_scheduler import (
 )
 from debbuilder.build_store import canonical_recipe_sha256
 from debbuilder.lifecycle import MutationGate, MutationGateClosed
-from debbuilder.recipe_schema import validate_recipe_metadata
+from debbuilder.recipe_schema import recipe_for_storage
 from debbuilder.upstream_detection import AutomationDetectionService, UpstreamDetectionError, detect_upstream
+from debbuilder.upstream_observation import UpstreamObservationError, UpstreamObservationService, UpstreamObservationStore
 
 
 def recipe(name="demo", *, policy="build", active=True, enabled=True, tracking="latest_release"):
-    return validate_recipe_metadata({
+    return recipe_for_storage({
         "schema_version": 5, "name": name, "active": active,
         "automation": {"enabled": enabled, "policy": policy},
         "package": {"name": name, "architecture": "amd64"},
@@ -50,7 +51,7 @@ def source_mode_recipe(name, *, mode="source_build", tracking="latest_release", 
         })
     elif mode == "upstream_deb":
         artifact["name_pattern"] = "demo_*_amd64.deb"
-    return validate_recipe_metadata({
+    return recipe_for_storage({
         "schema_version": 5, "name": name, "active": True,
         "automation": {"enabled": True, "policy": "build"},
         "package": {"name": name, "architecture": "amd64"},
@@ -80,11 +81,15 @@ class FakeService:
         self.callback = callback
         self.calls = []
 
-    def check(self, recipe_id, *, token="", mutation_lease=None):
+    def check_scheduled(self, recipe_id, *, automation_enabled=True, token="", mutation_lease=None):
         self.calls.append(recipe_id)
         if self.callback:
-            return self.callback(recipe_id, mutation_lease)
-        return success(recipe_id)
+            result = self.callback(recipe_id, mutation_lease)
+        else:
+            result = success(recipe_id)
+        if not automation_enabled:
+            return {**result, "identity": None, "classification": "observed", "change": "none", "attempt_key": None, "generation": None, "attempt_state": None, "claim_eligible": False, "automation_eligible": False}
+        return {**result, "automation_eligible": True}
 
 
 class InjectedDetectionService:
@@ -92,8 +97,11 @@ class InjectedDetectionService:
         self.service = service
         self.detector = detector
 
-    def check(self, recipe_id, *, token="", mutation_lease=None):
-        return self.service.check(recipe_id, token=token, detector=self.detector, mutation_lease=mutation_lease)
+    def check_scheduled(self, recipe_id, *, automation_enabled=True, token="", mutation_lease=None):
+        return self.service.check_scheduled(
+            recipe_id, automation_enabled=automation_enabled, token=token,
+            detector=self.detector, mutation_lease=mutation_lease,
+        )
 
 
 class AutomationSchedulerTests(unittest.TestCase):
@@ -116,6 +124,15 @@ class AutomationSchedulerTests(unittest.TestCase):
     def save(self, configured):
         return recipe_store.save_recipe(self.recipes / f"{configured['name']}.json", configured)
 
+    def detection_service(self, ledger=None):
+        selected = ledger or self.ledger
+        return AutomationDetectionService(
+            self.recipes, selected,
+            observation_service=UpstreamObservationService(
+                UpstreamObservationStore(selected.data_dir), resolver=detect_upstream,
+            ),
+        )
+
     def scheduler(self, service, **kwargs):
         scheduler = AutomationScheduler(
             self.recipes, service, self.ledger, self.retry,
@@ -134,7 +151,7 @@ class AutomationSchedulerTests(unittest.TestCase):
         self.save(recipe("inactive", active=False))
         self.save(recipe("debbuilder", policy="detect"))
 
-        base = AutomationDetectionService(self.recipes, self.ledger)
+        base = self.detection_service()
         service = InjectedDetectionService(base, lambda _recipe, token="": {
             "identity": identity(), "display_version": "1.2.3", "display_ref": "v1.2.3",
         })
@@ -152,7 +169,8 @@ class AutomationSchedulerTests(unittest.TestCase):
         publish.assert_not_called()
         enqueue.assert_not_called()
 
-        self.assertEqual({row["recipe_id"] for row in results}, {f"demo{i}" for i in range(5)})
+        self.assertEqual({row["recipe_id"] for row in results}, {f"demo{i}" for i in range(5)} | {"manual", "disabled", "inactive", "debbuilder"})
+        self.assertTrue(all(row["classification"] == "observed" for row in results if row["recipe_id"] in {"manual", "disabled", "inactive", "debbuilder"}))
         entries = self.ledger.read()["attempts"].values()
         self.assertEqual(len(list(entries)), 5)
         states = {entry["recipe_id"]: entry["generations"][0]["state"] for entry in entries}
@@ -160,6 +178,151 @@ class AutomationSchedulerTests(unittest.TestCase):
         self.assertTrue(all(states[f"demo{i}"] == "claimed" for i in range(1, 5)))
         self.assertFalse((self.data / "builds").exists())
         self.assertFalse(any(self.data.rglob("run.json")))
+
+    def test_periodic_owner_observes_manual_disabled_inactive_and_builtin_but_claims_only_eligible(self):
+        configured = (
+            recipe("automatic", policy="build"),
+            recipe("manual", policy="manual"),
+            recipe("disabled", enabled=False),
+            recipe("inactive", active=False),
+            recipe("debbuilder", policy="manual"),
+        )
+        for row in configured:
+            self.save(row)
+        calls = []
+
+        def detector(snapshot, token=""):
+            calls.append(snapshot["name"])
+            return {"identity": identity(), "display_version": "1.2.3", "display_ref": "v1.2.3"}
+
+        observations = UpstreamObservationStore(self.data)
+        base = AutomationDetectionService(
+            self.recipes, self.ledger,
+            observation_service=UpstreamObservationService(observations, resolver=detector),
+        )
+        service = InjectedDetectionService(base, detector)
+        results = self.scheduler(service, concurrency=2).run_pass()
+
+        self.assertEqual(set(calls), {row["name"] for row in configured})
+        self.assertEqual({row["recipe_id"] for row in results}, set(calls))
+        for row in configured:
+            self.assertIsNotNone(observations.projection(row["name"], canonical_recipe_sha256(row)))
+        attempts = list(self.ledger.read()["attempts"].values())
+        self.assertEqual([row["recipe_id"] for row in attempts], ["automatic"])
+        self.assertTrue(next(row for row in results if row["recipe_id"] == "automatic")["automation_eligible"])
+        self.assertTrue(all(
+            not row["automation_eligible"] for row in results if row["recipe_id"] != "automatic"
+        ))
+
+    def test_global_automation_disable_still_observes_without_ledger_claim(self):
+        configured = recipe("manual-observation", policy="build")
+        self.save(configured)
+        detector = lambda _recipe, token="": {
+            "identity": identity(), "display_version": "2.0", "display_ref": "v2.0",
+        }
+        observations = UpstreamObservationStore(self.data)
+        base = AutomationDetectionService(
+            self.recipes, self.ledger,
+            observation_service=UpstreamObservationService(observations, resolver=detector),
+        )
+        result = self.scheduler(
+            InjectedDetectionService(base, detector), enabled=False,
+        ).run_pass()[0]
+        self.assertEqual(result["classification"], "observed")
+        self.assertFalse(result["automation_eligible"])
+        self.assertIsNotNone(observations.projection(configured["name"], canonical_recipe_sha256(configured)))
+        self.assertEqual(self.ledger.read()["attempts"], {})
+
+    def test_targeted_advisory_observation_never_claims_eligible_automation(self):
+        configured = recipe("demo", policy="build")
+        self.save(configured)
+        detector = lambda _recipe, token="": {
+            "identity": identity(), "display_version": "2.0", "display_ref": "v2.0",
+        }
+        observations = UpstreamObservationStore(self.data)
+        base = AutomationDetectionService(
+            self.recipes, self.ledger,
+            observation_service=UpstreamObservationService(observations, resolver=detector),
+        )
+        scheduler = self.scheduler(InjectedDetectionService(base, detector))
+        with scheduler._condition:
+            scheduler._running = True
+
+        accepted = scheduler.request_observation("demo")
+        result = scheduler.run_pass()[0]
+
+        self.assertTrue(accepted["created"])
+        self.assertEqual(result["classification"], "observed")
+        self.assertFalse(result["automation_eligible"])
+        self.assertEqual(self.ledger.read()["attempts"], {})
+        self.assertIsNotNone(observations.projection("demo", canonical_recipe_sha256(configured)))
+
+    def test_operator_request_supersedes_promoted_advisory_work(self):
+        scheduler = self.scheduler(FakeService())
+        with scheduler._condition:
+            scheduler._running = True
+            scheduler._pass_active = True
+            scheduler._pass_inventory_ready = True
+            scheduler._accept_followup = True
+            scheduler._pass_recipes.add("demo")
+            scheduler._inflight.add("demo")
+            scheduler._observation_only.add("demo")
+
+        accepted = scheduler.request_recipe("demo")
+
+        self.assertTrue(accepted["created"])
+        with scheduler._condition:
+            self.assertIn("demo", scheduler._requested_recipes)
+            self.assertNotIn("demo", scheduler._observation_only)
+            scheduler._inflight.discard("demo")
+
+    def test_advisory_write_failure_does_not_block_fresh_automation_claim(self):
+        configured = recipe("demo", policy="build")
+        self.save(configured)
+        store = UpstreamObservationStore(self.data)
+        observation_service = UpstreamObservationService(
+            store,
+            resolver=lambda _recipe, token="": {
+                "identity": identity(), "display_version": "1.2.3", "display_ref": "v1.2.3",
+            },
+        )
+        service = AutomationDetectionService(
+            self.recipes, self.ledger, observation_service=observation_service,
+        )
+        with mock.patch.object(
+            store, "record_success",
+            side_effect=UpstreamObservationError("observation_state_unavailable", "unavailable"),
+        ):
+            result = service.check("demo", detector=observation_service.resolver)
+        self.assertIsNotNone(result["identity"])
+        self.assertEqual(result["change"], "new")
+        self.assertEqual(len(self.ledger.read()["attempts"]), 1)
+
+    def test_persisted_observation_never_authorizes_automation_when_fresh_resolution_fails(self):
+        configured = recipe("demo", policy="build")
+        self.save(configured)
+        store = UpstreamObservationStore(self.data)
+        store.record_success(
+            "demo", canonical_recipe_sha256(configured),
+            {"display_version": "9.9.9", "display_ref": "v9.9.9"},
+        )
+        observation_service = UpstreamObservationService(
+            store,
+            resolver=lambda _recipe, token="": (_ for _ in ()).throw(
+                UpstreamDetectionError("github_unavailable", "unavailable"),
+            ),
+        )
+        service = AutomationDetectionService(
+            self.recipes, self.ledger, observation_service=observation_service,
+        )
+        result = service.check("demo", detector=observation_service.resolver)
+        self.assertIsNone(result["identity"])
+        self.assertEqual(result["diagnostic"], "github_unavailable")
+        self.assertEqual(self.ledger.read()["attempts"], {})
+        self.assertEqual(
+            store.projection("demo", canonical_recipe_sha256(configured))["last_success"]["display_version"],
+            "9.9.9",
+        )
 
     def test_operator_check_converges_with_an_inflight_scheduled_check(self):
         self.save(recipe("demo"))
@@ -304,7 +467,7 @@ class AutomationSchedulerTests(unittest.TestCase):
                 })
             return {"upstream_identity": selected, "upstream_version": "1.2.3", "ref": selected_ref}
 
-        base = AutomationDetectionService(self.recipes, self.ledger)
+        base = self.detection_service()
         service = InjectedDetectionService(base, detect_upstream)
         with mock.patch.object(source_acquisition, "resolve_source", side_effect=resolved_source), \
                 mock.patch.object(upstream_archive, "resolve_release", return_value=release), \
@@ -322,7 +485,7 @@ class AutomationSchedulerTests(unittest.TestCase):
         configured = recipe("demo")
         self.save(configured)
         chosen = [identity()]
-        base = AutomationDetectionService(self.recipes, self.ledger)
+        base = self.detection_service()
         service = InjectedDetectionService(base, lambda _recipe, token="": {
             "identity": chosen[0], "display_version": "1.2.3", "display_ref": "v1.2.3",
         })
@@ -436,7 +599,7 @@ class AutomationSchedulerTests(unittest.TestCase):
         self.save(recipe("demo"))
         entered = threading.Event()
         release = threading.Event()
-        base = AutomationDetectionService(self.recipes, self.ledger)
+        base = self.detection_service()
 
         def detector(_recipe, token=""):
             entered.set()
@@ -498,7 +661,7 @@ class AutomationSchedulerTests(unittest.TestCase):
         for change in ("delete", "disable", "manual"):
             with self.subTest(change=change):
                 self.save(recipe("demo"))
-                base = AutomationDetectionService(self.recipes, self.ledger)
+                base = self.detection_service()
 
                 def detector(_recipe, token=""):
                     path = self.recipes / "demo.json"
@@ -524,7 +687,7 @@ class AutomationSchedulerTests(unittest.TestCase):
                 return super().claim_current_recipe(*args, **kwargs)
 
         ledger = ObservedLedger(self.data)
-        base = AutomationDetectionService(self.recipes, ledger)
+        base = self.detection_service(ledger)
 
         def detector(_recipe, token=""):
             observed.append(("network", application_gate.active))
@@ -540,22 +703,30 @@ class AutomationSchedulerTests(unittest.TestCase):
 
     def test_scheduled_and_internal_checks_race_to_one_durable_claim(self):
         self.save(recipe("demo"))
-        barrier = threading.Barrier(2)
-        base = AutomationDetectionService(self.recipes, self.ledger)
+        entered = threading.Event()
+        release = threading.Event()
+        base = self.detection_service()
 
         def detector(_recipe, token=""):
-            barrier.wait(3)
+            entered.set()
+            self.assertTrue(release.wait(3))
             return {"identity": identity(), "display_version": "1.2.3", "display_ref": "v1.2.3"}
 
         scheduler = self.scheduler(InjectedDetectionService(base, detector))
         scheduled = []
         thread = threading.Thread(target=lambda: scheduled.extend(scheduler.run_pass()))
         thread.start()
-        internal = base.check("demo", detector=detector)
+        self.assertTrue(entered.wait(3))
+        internal_results = []
+        internal_thread = threading.Thread(target=lambda: internal_results.append(base.check("demo", detector=detector)))
+        internal_thread.start()
+        release.set()
         thread.join(3)
+        internal_thread.join(3)
         self.assertFalse(thread.is_alive())
+        self.assertFalse(internal_thread.is_alive())
         self.assertEqual(len(self.ledger.read()["attempts"]), 1)
-        self.assertEqual({internal["change"], scheduled[0]["change"]}, {"new", "existing"})
+        self.assertEqual({internal_results[0]["change"], scheduled[0]["change"]}, {"new", "existing"})
 
     def test_transient_retry_is_persisted_bounded_jittered_and_restart_safe(self):
         now = [2_000_000_000.0]
@@ -579,10 +750,11 @@ class AutomationSchedulerTests(unittest.TestCase):
         restarted_service = FakeService()
         restarted = self.scheduler(restarted_service, wall_clock=lambda: now[0])
         restarted.run_pass()
-        self.assertEqual(restarted_service.calls, [])
+        self.assertEqual(restarted_service.calls, ["demo"])
+        self.assertIn("demo", self.retry.read()["recipes"])
         now[0] += delay + 1
         restarted.run_pass()
-        self.assertEqual(restarted_service.calls, ["demo"])
+        self.assertEqual(restarted_service.calls, ["demo", "demo"])
         self.assertNotIn("demo", self.retry.read()["recipes"])
 
     def test_overdue_retry_cannot_spin_when_it_cannot_be_consumed(self):
@@ -610,7 +782,7 @@ class AutomationSchedulerTests(unittest.TestCase):
                 if case != "deleted":
                     recipe_store.save_recipe(recipes / "demo.json", configured)
                 if case == "ledger_capacity":
-                    ledger.claim("other", identity(), "b" * 64, "build")
+                    ledger.claim_current_recipe(data / "other.json", "other", identity(), canonical_recipe_sha256(recipe_store.save_recipe(data / "other.json", recipe("other"))), "build")
                 scheduler = AutomationScheduler(
                     recipes, FakeService(), ledger, retry, admission_open=admission,
                     interval_seconds=3600, wall_clock=lambda: now,
@@ -672,7 +844,7 @@ class AutomationSchedulerTests(unittest.TestCase):
         self.assertEqual(row["retry_class"], "operator")
         self.assertIsNone(row["not_before"])
 
-    def test_malformed_future_state_and_ledger_capacity_block_without_network(self):
+    def test_malformed_future_state_blocks_claims_but_keeps_observation(self):
         self.save(recipe("demo"))
         for filename, document, expected in (
             ("automation-scheduler.json", {"schema_version": 99, "recipes": {}}, "automation_scheduler_state_future_version"),
@@ -687,9 +859,102 @@ class AutomationSchedulerTests(unittest.TestCase):
                 retry = AutomationRetryStore(isolated)
                 scheduler = AutomationScheduler(self.recipes, service, ledger, retry, interval_seconds=3600)
                 self.schedulers.append(scheduler)
-                self.assertEqual(scheduler.run_pass(), [])
+                self.assertEqual([row["classification"] for row in scheduler.run_pass()], ["observed"])
                 self.assertEqual(scheduler.status()["global_blocker"]["code"], expected)
-                self.assertEqual(service.calls, [])
+                self.assertEqual(service.calls, ["demo"])
+
+    def test_unsafe_automation_state_still_observes_without_claiming(self):
+        configured = recipe("demo")
+        self.save(configured)
+        cases = ("retry_future", "ledger_future", "ledger_capacity")
+        for case in cases:
+            with self.subTest(case=case):
+                isolated = self.root / f"scheduled-{case}"
+                isolated.mkdir()
+                ledger = AutomationLedger(isolated, max_attempts=1)
+                retry = AutomationRetryStore(isolated)
+                if case == "retry_future":
+                    retry.path.write_text(json.dumps({"schema_version": 99, "recipes": {}}))
+                elif case == "ledger_future":
+                    ledger.path.write_text(json.dumps({"schema_version": 99, "attempts": {}}))
+                else:
+                    ledger.claim_current_recipe(isolated / "other.json", "other", identity(), canonical_recipe_sha256(recipe_store.save_recipe(isolated / "other.json", recipe("other"))), "build")
+
+                calls = []
+
+                def detector(_snapshot, token=""):
+                    calls.append("demo")
+                    return {
+                        "identity": identity(),
+                        "display_version": "1.2.3",
+                        "display_ref": "v1.2.3",
+                    }
+
+                observations = UpstreamObservationStore(isolated)
+                base = AutomationDetectionService(
+                    self.recipes, ledger,
+                    observation_service=UpstreamObservationService(observations, resolver=detector),
+                )
+                scheduler = AutomationScheduler(
+                    self.recipes, InjectedDetectionService(base, detector), ledger, retry,
+                    interval_seconds=3600,
+                )
+                self.schedulers.append(scheduler)
+
+                results = scheduler.run_pass()
+
+                self.assertEqual(calls, ["demo"])
+                self.assertEqual(results[0]["classification"], "observed")
+                self.assertFalse(results[0]["automation_eligible"])
+                self.assertIsNotNone(
+                    observations.projection("demo", canonical_recipe_sha256(configured)),
+                )
+                if case == "ledger_capacity":
+                    self.assertEqual(len(ledger.read()["attempts"]), 1)
+                elif case == "retry_future":
+                    self.assertEqual(ledger.read()["attempts"], {})
+
+    def test_corrupt_ledger_retry_delay_does_not_stop_periodic_observation(self):
+        configured = recipe("demo")
+        self.save(configured)
+        first = threading.Event()
+        second = threading.Event()
+        retry_delay_checked = threading.Event()
+        calls = []
+
+        def detector(_snapshot, token=""):
+            calls.append("demo")
+            (first if len(calls) == 1 else second).set()
+            return {
+                "identity": identity(), "display_version": "1.2.3", "display_ref": "v1.2.3",
+            }
+
+        observations = UpstreamObservationStore(self.data)
+        base = AutomationDetectionService(
+            self.recipes, self.ledger,
+            observation_service=UpstreamObservationService(observations, resolver=detector),
+        )
+        orchestrator = mock.Mock()
+        failure = AutomationLedgerError("automation_ledger_future_version", "future")
+        orchestrator.advance_all.side_effect = failure
+
+        def fail_retry_delay():
+            retry_delay_checked.set()
+            raise failure
+
+        orchestrator.next_retry_delay.side_effect = fail_retry_delay
+        scheduler = self.scheduler(
+            InjectedDetectionService(base, detector), orchestrator=orchestrator,
+        )
+        scheduler.start()
+        self.assertTrue(first.wait(2))
+        self.assertTrue(retry_delay_checked.wait(2))
+        self.assertTrue(scheduler.is_alive())
+        self.assertTrue(scheduler.request())
+        self.assertTrue(second.wait(2))
+        with scheduler._condition:
+            self.assertTrue(scheduler._condition.wait_for(lambda: not scheduler._pass_active, timeout=2))
+        self.assertEqual(self.ledger.read()["attempts"], {})
 
     def test_orchestrator_malformed_ledger_keeps_the_exact_fail_closed_blocker(self):
         self.save(recipe("demo"))
@@ -700,21 +965,21 @@ class AutomationSchedulerTests(unittest.TestCase):
         )
         scheduler = self.scheduler(service, orchestrator=orchestrator)
 
-        self.assertEqual(scheduler.run_pass(), [])
+        self.assertEqual([row["classification"] for row in scheduler.run_pass()], ["observed"])
         self.assertEqual(
             scheduler.status()["global_blocker"]["code"],
             "automation_ledger_malformed",
         )
-        self.assertEqual(service.calls, [])
+        self.assertEqual(service.calls, ["demo"])
 
-    def test_global_admission_and_disabled_scheduler_skip_everything(self):
+    def test_global_admission_and_disabled_scheduler_keep_advisory_observation(self):
         self.save(recipe("demo"))
         for enabled, admission in ((False, lambda: True), (True, lambda: False)):
             with self.subTest(enabled=enabled):
                 service = FakeService()
                 scheduler = self.scheduler(service, enabled=enabled, admission_open=admission)
-                self.assertEqual(scheduler.run_pass(), [])
-                self.assertEqual(service.calls, [])
+                self.assertEqual([row["classification"] for row in scheduler.run_pass()], ["observed"])
+                self.assertEqual(service.calls, ["demo"])
 
     def test_disabled_detection_still_reconciles_durable_lifecycle(self):
         service = FakeService()
@@ -750,16 +1015,16 @@ class AutomationSchedulerTests(unittest.TestCase):
         self.assertTrue(any("bad" in line for line in logs.output))
         self.assertNotIn("/tmp/path", "\n".join(logs.output))
 
-    def test_ledger_capacity_blocks_checks_without_pruning_or_run_creation(self):
+    def test_ledger_capacity_blocks_claims_without_pruning_or_run_creation(self):
         self.save(recipe("demo"))
         limited = AutomationLedger(self.data, max_attempts=1)
-        limited.claim("other", identity(), "a" * 64, "build")
+        limited.claim_current_recipe(self.data / "other.json", "other", identity(), canonical_recipe_sha256(recipe_store.save_recipe(self.data / "other.json", recipe("other"))), "build")
         service = FakeService()
         scheduler = AutomationScheduler(self.recipes, service, limited, self.retry, interval_seconds=3600)
         self.schedulers.append(scheduler)
-        self.assertEqual(scheduler.run_pass(), [])
+        self.assertEqual([row["classification"] for row in scheduler.run_pass()], ["observed"])
         self.assertEqual(scheduler.status()["global_blocker"]["code"], "automation_ledger_capacity_exhausted")
-        self.assertEqual(service.calls, [])
+        self.assertEqual(service.calls, ["demo"])
         self.assertEqual(len(limited.read()["attempts"]), 1)
 
 

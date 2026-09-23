@@ -121,12 +121,6 @@ class ExecutionManager:
             return self._active_run_id
 
     @property
-    def active_cancellation_control(self) -> CancellationControl | None:
-        """Return the worker-owned control for internal orchestration only."""
-        with self._condition:
-            return self._active_cancellation_control
-
-    @property
     def queued_run_ids(self) -> tuple[str, ...]:
         with self._condition:
             return tuple(self._queue)
@@ -220,8 +214,30 @@ class ExecutionManager:
     def _persist_and_enqueue(self, run_id: str, *, reservation_token: object | None = None) -> dict:
         try:
             run = self._mark_queued(run_id)
-        except BaseException:
+        except BaseException as exc:
+            # Direct submissions have no request reservation to retain a Run
+            # when the queue transition commits and then reports failure.
+            unresolved = False
+            if reservation_token is None:
+                try:
+                    unresolved = self.store.run_dir(run_id).exists() and not self._durably_terminal(run_id)
+                except BaseException:
+                    unresolved = True
             with self._condition:
+                if unresolved:
+                    self._unresolved_admission_runs.setdefault(run_id, {
+                        "code": "execution_enqueue_persistence_unresolved",
+                        "message": "Direct Build Run submission failed before durable ownership could be confirmed",
+                        "run_id": run_id,
+                        "exception_type": type(exc).__name__,
+                    })
+                    self._shutdown_failures.setdefault(run_id, {
+                        "code": "execution_shutdown_persistence_failed",
+                        "message": "Direct-submission Run remains durably non-terminal",
+                        "run_id": run_id,
+                        "ownership": "admission",
+                        "exception_type": type(exc).__name__,
+                    })
                 self._submitting_run_ids.discard(run_id)
                 self._condition.notify_all()
             raise

@@ -1,3 +1,4 @@
+from tests.lifecycle_helpers import clean_workspace, stop_partial_manager
 import json
 import os
 import secrets
@@ -43,6 +44,7 @@ from tests.admin_api_case import AdminApiCase
 
 def recipe(name="recovery"):
     return {
+        "schema_version": 5,
         "name": name,
         "active": True,
         "package": {
@@ -51,7 +53,7 @@ def recipe(name="recovery"):
             "maintainer": "Recovery <recovery@example.test>",
             "description": "Recovery test",
         },
-        "source": {"repository": f"owner/{name}"},
+        "source": {"repository": f"owner/{name}", "tracking": "manual", "ref": "v1.0.0"},
     }
 
 
@@ -128,13 +130,9 @@ class StartupRecoveryTests(unittest.TestCase):
         run = self.create("stale-publication", "success")
         attempt = {
             "id": "publication-one", "status": "running", "requested_at": run["created_at"],
-            "finished_at": None, "duration": None, "published_version": "",
+            "finished_at": None, "duration": None,
         }
         run["publications"] = [attempt]
-        run["artifact"] = {"publications": [{
-            "id": attempt["id"], "status": "running", "requested_at": run["created_at"],
-            "finished_at": None, "published_version": "",
-        }]}
         self.store.save(run)
 
         result = recover_startup(self.store)
@@ -144,8 +142,7 @@ class StartupRecoveryTests(unittest.TestCase):
         self.assertEqual(recovered["status"], "success")
         self.assertEqual(recovered["publications"][0]["status"], "failed")
         self.assertEqual(recovered["publications"][0]["error"]["code"], "publication_interrupted")
-        self.assertEqual(recovered["artifact"]["publications"][0]["status"], "failed")
-        workspace_cleanup.clean_workspace(self.store, run["id"])
+        clean_workspace(self.store, run["id"])
 
     def test_no_metadata_decision_table_blocks_execution_evidence_and_active_states(self):
         pending = self.create("pending-with-evidence", "pending")
@@ -165,7 +162,7 @@ class StartupRecoveryTests(unittest.TestCase):
             self.assertNotEqual(run["status"], "failed")
             self.assertEqual(run["recovery"]["status"], "blocked")
             with self.assertRaises(workspace_cleanup.WorkspaceBusyError):
-                workspace_cleanup.clean_workspace(self.store, run_id)
+                clean_workspace(self.store, run_id)
 
     def test_running_step_is_failed_future_steps_and_cancellation_are_preserved(self):
         run = self.create("old-boot-cancelling", "cancelling")
@@ -322,6 +319,45 @@ class StartupRecoveryTests(unittest.TestCase):
         terminate.assert_not_called()
         systemd.assert_not_called()
 
+    def test_persisted_v1_v2_identities_block_restart_without_cleanup(self):
+        versions = (1, 2)
+        for version in versions:
+            run = self.create(f"old-identity-{version}", "running")
+            current = self.process_identity(run["id"])
+            historical = {
+                key: value for key, value in current.items()
+                if key not in {"resource_limits", "resource_io_targets"}
+            }
+            if version == 1:
+                historical.pop("backend")
+                historical.pop("containment_state")
+            historical["schema_version"] = version
+            (self.store.run_dir(run["id"]) / ACTIVE_COMMAND_FILE).write_text(json.dumps(historical))
+        systemd_run = self.create("old-systemd-identity-2", "running")
+        historical_systemd = self.systemd_identity(systemd_run["id"], "active")
+        historical_systemd.pop("resource_limits")
+        historical_systemd.pop("resource_io_targets")
+        historical_systemd["schema_version"] = 2
+        (self.store.run_dir(systemd_run["id"]) / ACTIVE_COMMAND_FILE).write_text(json.dumps(historical_systemd))
+
+        with mock.patch("debbuilder.execution_recovery.terminate_verified_process_group") as terminate, \
+                mock.patch("debbuilder.execution_recovery.recover_systemd_containment") as systemd, \
+                mock.patch("debbuilder.execution_recovery.loaded_command_units", return_value={historical_systemd["unit_name"]}), \
+                mock.patch("debbuilder.execution_recovery.recover_orphan_systemd_containment") as orphan:
+            result = recover_startup(self.store)
+
+        self.assertEqual(result.admission_blocker["details"]["unresolved_run_ids"], [
+            "old-identity-1", "old-identity-2", "old-systemd-identity-2",
+        ])
+        terminate.assert_not_called()
+        systemd.assert_not_called()
+        orphan.assert_not_called()
+        self.assertIn(historical_systemd["unit_name"], result.stray_units)
+        for run_id in ("old-identity-1", "old-identity-2", "old-systemd-identity-2"):
+            self.assertEqual(self.store.load(run_id)["status"], "running")
+            self.assertEqual(self.store.load(run_id)["recovery"]["status"], "blocked")
+            self.assertTrue((self.store.run_dir(run_id) / ACTIVE_COMMAND_FILE).is_file())
+
     def test_unsafe_run_file_and_unavailable_inventories_fail_closed(self):
         unsafe = self.create("unsafe-run-file", "running")
         path = self.store.run_dir(unsafe["id"]) / "run.json"
@@ -399,7 +435,7 @@ class StartupRecoveryTests(unittest.TestCase):
 
         self.assertEqual(result.admission_blocker["details"]["unresolved_run_ids"], [run["id"]])
         with self.assertRaises(workspace_cleanup.WorkspaceBusyError):
-            workspace_cleanup.clean_workspace(self.store, run["id"])
+            clean_workspace(self.store, run["id"])
 
     def test_removing_terminal_identity_does_not_erase_a_durable_blocker(self):
         run = self.create("terminal-missing-blocked-identity", "failed")
@@ -532,11 +568,19 @@ class StartupRecoveryTests(unittest.TestCase):
             release.wait(2)
             return StartupRecoveryResult()
 
-        migration = mock.Mock()
-        migration.as_dict.return_value = {"ok": True}
+        validation = mock.Mock()
+        validation.as_dict.return_value = {"ok": True}
         reconciliation = mock.Mock(action="current", definition_version=1, previous_definition_version=1)
-        starter = threading.Thread(target=app.start_execution_manager, args=(HttpServer(), manager))
-        with mock.patch("debbuilder.app.prepare_recipes_for_startup", return_value=(migration, reconciliation)), \
+        http_server = HttpServer()
+        starter = threading.Thread(target=app.start_execution_manager, args=(http_server, manager))
+
+        def cleanup():
+            release.set()
+            starter.join(2)
+            stop_partial_manager(http_server, timeout=2)
+
+        self.addCleanup(cleanup)
+        with mock.patch("debbuilder.app.prepare_recipes_for_startup", return_value=(validation, reconciliation)), \
                 mock.patch("debbuilder.app.execution_recovery.recover_startup", side_effect=recover):
             starter.start()
             self.assertTrue(entered.wait(1))
@@ -547,7 +591,10 @@ class StartupRecoveryTests(unittest.TestCase):
         self.assertFalse(starter.is_alive())
         self.assertTrue(manager.accepting)
         self.assertTrue(manager.worker.is_alive())
-        manager.stop(timeout=2)
+        validation = http_server.validation_manager
+        self.assertTrue(validation.worker.is_alive())
+        stop_partial_manager(http_server, timeout=2)
+        self.assertFalse(validation.worker.is_alive())
 
     def test_strong_recovery_starting_absent_and_matching_active(self):
         run = self.create("strong-primitive", "running")
@@ -898,7 +945,7 @@ class RecoveryAdmissionApiTests(AdminApiCase):
         return captured.exception.code, json.loads(captured.exception.read())
 
     def test_unresolved_recovery_blocks_build_and_test_but_keeps_history_readable(self):
-        app.stop_execution_manager(self.httpd, timeout=5)
+        stop_partial_manager(self.httpd, timeout=5)
         store = BuildStore(app.DATA / "builds")
         stale = store.create(recipe("api-stale"), mode="build", run_id="api-stale")
         stale["status"] = "running"
@@ -919,11 +966,11 @@ class RecoveryAdmissionApiTests(AdminApiCase):
             )
             self.assertEqual(status, 503)
             self.assertEqual(response["error"]["code"], BLOCKER_CODE)
-            self.assertEqual(response["error"]["details"]["unresolved_run_ids"], [stale["id"]])
+            self.assertNotIn("details", response["error"])
         self.assertEqual(set(path.name for path in store.root.iterdir()), before)
         status, response = self.request("GET", f"/api/executions/{stale['id']}")
         self.assertEqual(status, 200)
-        self.assertEqual(response["execution"]["recovery"]["status"], "blocked")
+        self.assertNotIn("recovery", response["execution"])
         status, storage = self.request("GET", "/api/storage")
         self.assertEqual(status, 200)
         self.assertEqual(storage["storage"]["state"], "collecting")

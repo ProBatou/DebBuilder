@@ -13,9 +13,11 @@ import sys
 import tempfile
 import threading
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
+
+from debbuilder.build_store import canonical_recipe_sha256
+from debbuilder.upstream_observation import UpstreamObservationStore
 
 from . import showcase
 
@@ -51,9 +53,9 @@ class IsolatedRuntime:
 
 def fixture_recipe(name: str, *, commands: list[str] | None = None) -> dict:
     return {
-        "schema_version": 2, "name": name, "active": True,
+        "schema_version": 5, "name": name, "active": True,
         "package": {"name": name, "version_revision": "1", "architecture": "all", "maintainer": "DEV Review <dev@example.test>", "description": "Isolated Behavior Lab fixture"},
-        "source": {"provider": "github", "repository": f"example/{name}", "tracking": "latest_release", "version": {"source": "tag"}},
+        "source": {"provider": "github", "repository": f"example/{name}", "tracking": "manual", "ref": "v1.0.0", "version": {"source": "tag"}},
         "artifact": {"mode": "source_build", "type": "deb", "architecture": "all"},
         "build": {"commands": commands or [], "working_directory": ".", "environment": {}, "extra_dependencies": [], "source_changes": [], "output": {"mode": "source"}, "inactivity_timeout": None, "maximum_runtime": 600},
         "install": {"destination": f"/opt/{name}", "content": {"source": "build_output", "path": ""}, "owner": {"user": "root", "group": "root"}, "config_files": [], "directories": []},
@@ -65,10 +67,10 @@ def seed_fixture(data_dir: Path, repository_root: Path, recipe: dict) -> None:
     (data_dir / "workflows").mkdir(parents=True)
     repository_root.mkdir(parents=True)
     (data_dir / "workflows" / f"{recipe['name']}.json").write_text(json.dumps(recipe, indent=2) + "\n")
-    (data_dir / "repo-current-packages-inventory.json").write_text("[]\n")
-    expiry = datetime(2099, 1, 1, tzinfo=timezone.utc).timestamp()
-    release = {recipe["source"]["repository"]: {"expires_at": expiry, "release": {"tag": "v1.0.0", "name": "Behavior Lab 1.0.0", "url": "https://example.invalid/behavior-lab", "assets": []}}}
-    (data_dir / "github-release-cache.json").write_text(json.dumps(release, indent=2) + "\n")
+    UpstreamObservationStore(data_dir).record_success(
+        recipe["name"], canonical_recipe_sha256(recipe),
+        {"display_version": "1.0.0", "display_ref": "v1.0.0"},
+    )
 
 
 def seed_cancellation(data_dir: Path, repository_root: Path) -> None:
@@ -155,7 +157,7 @@ def pipeline_setup(*, running: bool):
         acquire = fixture_acquire(running=running)
 
         def execute(run_id, *, store, expected_initial_status, cancellation_control):
-            def controlled(recipe, workspace, token=""):
+            def controlled(recipe, workspace, token="", expected_identity=None):
                 return acquire(recipe, workspace, token=token, cancellation_event=cancellation_control.event, on_cancel=lambda: {**(cancellation_control.request or {}), "phase": "pipeline", "stage": "source"})
             try:
                 return build_pipeline.execute_pipeline_run(run_id, store=store, expected_initial_status=expected_initial_status, cancellation_control=cancellation_control, acquire=controlled, lifecycle_callback=app.notify_lifecycle)
@@ -266,12 +268,11 @@ def serve(selected: Scenario, *, host: str = "127.0.0.1", port: int = 8765) -> N
         # any HTTP request can modify the disposable workflow store.
         fixture_path = runtime.data_dir / "workflows" / f"{selected.name}.json"
         if selected.allow_run:
-            # validate_recipe_metadata is the established canonicalizer used
-            # by Recipe reads to add schema defaults. Apply it to the seeded
-            # document now, not to any later mutable on-disk document.
-            from debbuilder.recipe_schema import validate_recipe_metadata
+            # Capture the same public Recipe shape served by GET before a
+            # request can mutate the disposable workflow store.
+            from debbuilder.recipe_schema import recipe_document_for_storage
 
-            canonical_recipe = _canonical_json(validate_recipe_metadata(json.loads(fixture_path.read_text())))
+            canonical_recipe = _canonical_json(recipe_document_for_storage(json.loads(fixture_path.read_text())))
         else:
             canonical_recipe = None
         configure_environment(runtime, host=host, port=port)
@@ -364,7 +365,7 @@ def serve(selected: Scenario, *, host: str = "127.0.0.1", port: int = 8765) -> N
         def manager_factory():
             return state.manager or app.create_execution_manager()
 
-        app.serve_application(BehaviorLabHandler, server_factory=server_factory, manager_factory=manager_factory, retention_target=None)
+        app.serve_application(BehaviorLabHandler, server_factory=server_factory, manager_factory=manager_factory)
         if selected.name == "graceful-shutdown":
             from debbuilder.build_store import BuildStore
             runs = BuildStore(runtime.data_dir / "builds").list()

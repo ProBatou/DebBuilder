@@ -1,3 +1,4 @@
+from tests.lifecycle_helpers import cleanup_blockers
 import unittest
 import os
 import tempfile
@@ -12,6 +13,7 @@ from debbuilder.resource_limits import (
     ResourceLimitError,
     admission_contract,
     cpu_quota_usec,
+    default_contract,
     empty_policy,
     io_target_paths,
     normalize_policy,
@@ -147,6 +149,16 @@ class ResourceLimitPolicyTests(unittest.TestCase):
                 tampered = {**contract, "admission_capability": {**contract["admission_capability"], "backend": backend}}
                 with self.assertRaises(ResourceLimitError):
                     validate_contract(tampered)
+
+    def test_current_unbounded_capability_validates_and_historical_is_rejected(self):
+        contract = default_contract()
+        self.assertEqual(contract["admission_capability"]["backend"], "not_evaluated")
+        self.assertEqual(validate_contract(contract), contract)
+        historical = {**contract, "admission_capability": {
+            **contract["admission_capability"], "backend": "historical",
+        }}
+        with self.assertRaises(ResourceLimitError):
+            validate_contract(historical)
 
     def test_run_contract_requires_canonical_policy_objects(self):
         contract = admission_contract({}, {}, {
@@ -287,7 +299,7 @@ class ResourceLimitPolicyTests(unittest.TestCase):
             ):
                 capability = containment._probe_capability()
                 blocker = containment.probe_cleanup_blocker()
-                blocker_reason = containment.cleanup_blockers()[0].reason
+                blocker_reason = cleanup_blockers()[0].reason
         self.assertEqual(capability.backend, "unresolved")
         self.assertFalse(capability.available)
         self.assertIn("StopUnit failure", blocker_reason)
@@ -395,7 +407,7 @@ class ResourceLimitPolicyTests(unittest.TestCase):
                 {"memory_max_bytes": 64 * 1024 * 1024}, workspace=temporary,
             )
             blocker = containment.probe_cleanup_blocker()
-            blocker_reason = containment.cleanup_blockers()[0].reason
+            blocker_reason = cleanup_blockers()[0].reason
         self.assertFalse(first["available"])
         self.assertEqual(second["reason"], blocker)
         self.assertEqual(factory.call_count, 1)

@@ -5,7 +5,6 @@ from unittest import mock
 
 from debbuilder import app as server
 from debbuilder.lifecycle import MutationGate, is_durable_mutation_route
-from debbuilder.release_cache import GitHubReleaseCache
 from tests.admin_api_case import AdminApiCase
 
 
@@ -136,6 +135,7 @@ class HttpMutationLifecycleTests(AdminApiCase):
             ("POST", "/api/workflows/demo"),
             ("POST", "/api/recipes/demo/automation/check"),
             ("POST", "/api/recipes/demo/automation/retry"),
+            ("POST", "/api/recipes/demo/observation/refresh"),
             ("POST", "/api/executions/run/cancel"),
             ("POST", "/api/executions/run/validate"),
             ("POST", "/api/executions/run/publish"),
@@ -153,33 +153,6 @@ class HttpMutationLifecycleTests(AdminApiCase):
             ("POST", "/api/upstream-archive/inspect"),
         ):
             self.assertFalse(is_durable_mutation_route(method, path), (method, path))
-
-    def test_read_triggered_cache_refresh_owns_its_background_durable_write(self):
-        gate = MutationGate()
-        cache = GitHubReleaseCache(server.DATA, lambda: "", workers=1, mutation_gate=gate)
-        entered = threading.Event()
-        release = threading.Event()
-
-        def latest(_repository, *, token):
-            entered.set()
-            self.assertTrue(release.wait(3))
-            return {"tag": "v1"}
-
-        try:
-            with mock.patch("debbuilder.release_cache.github_client.latest_release", side_effect=latest):
-                self.assertIsNone(cache.get("owner/lifecycle"))
-                self.assertTrue(entered.wait(2))
-                gate.begin_shutdown()
-                self.assertFalse(gate.wait_for_quiescence(0)["complete"])
-                release.set()
-                self.assertTrue(gate.wait_for_quiescence(2)["complete"])
-            cache.close()
-        finally:
-            release.set()
-            cache.close()
-
-        self.assertTrue(cache.path.is_file())
-
 
 if __name__ == "__main__":
     import unittest

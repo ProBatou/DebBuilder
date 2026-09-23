@@ -1,3 +1,4 @@
+from tests.lifecycle_helpers import active_cancellation_control
 import shlex
 import sys
 import tempfile
@@ -6,7 +7,7 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
-from debbuilder import build_pipeline
+from debbuilder import build_pipeline, execution_recovery
 from debbuilder.build_store import BuildStore
 from debbuilder.execution_cancellation import CancellationControl
 from debbuilder.execution_manager import ExecutionManager, ExecutionManagerError
@@ -14,6 +15,7 @@ from debbuilder.execution_manager import ExecutionManager, ExecutionManagerError
 
 def recipe(name="demo"):
     return {
+        "schema_version": 5,
         "name": name,
         "active": True,
         "package": {
@@ -269,6 +271,46 @@ class ExecutionManagerTests(unittest.TestCase):
         release_active.set()
         manager.stop(timeout=3)
 
+    def test_direct_submit_terminal_persistence_failure_retains_admission_owner(self):
+        executed = []
+        run = self.create("direct-submit-persistence")
+        manager = self.manager(execute=lambda run_id, **_kwargs: executed.append(run_id))
+        original_save = self.store.save
+
+        def fail_after_queue_commit(value):
+            if value["id"] == run["id"] and value["status"] == "queued":
+                original_save(value)
+                raise OSError("queued transition reported failure after commit")
+            if value["id"] == run["id"] and value["status"] == "failed":
+                raise OSError("terminal storage unavailable")
+            return original_save(value)
+
+        manager.start()
+        with mock.patch.object(self.store, "save", side_effect=fail_after_queue_commit):
+            with self.assertRaises(OSError):
+                manager.submit(run["id"])
+            self.assertEqual(self.store.load(run["id"])["status"], "queued")
+            self.assertEqual(manager.queued_run_ids, ())
+            first = manager.shutdown(timeout=2)
+
+        self.assertFalse(first["complete"])
+        self.assertEqual(first["unresolved_admission_run_ids"], [run["id"]])
+        self.assertEqual(first["errors"][0]["ownership"], "admission")
+        self.assertEqual(self.store.load(run["id"])["status"], "queued")
+        self.assertEqual(executed, [])
+
+        with mock.patch.object(execution_recovery, "current_boot_id", return_value="test-boot"), \
+                mock.patch.object(execution_recovery, "loaded_command_units", return_value=set()):
+            recovered = execution_recovery.recover_startup(BuildStore(self.store.root))
+        self.assertEqual(recovered.recovered_run_ids, [run["id"]])
+        self.assertIsNone(recovered.admission_blocker)
+        self.assertEqual(self.store.load(run["id"])["status"], "failed")
+
+        second = manager.shutdown(timeout=2)
+        self.assertTrue(second["complete"])
+        self.assertEqual(second["unresolved_admission_run_ids"], [])
+        self.assertEqual(self.store.load(run["id"])["status"], "failed")
+
     def test_cancel_sole_queued_run_persists_canonical_result_idempotently(self):
         active_started = threading.Event()
         release_active = threading.Event()
@@ -475,7 +517,7 @@ class ExecutionManagerTests(unittest.TestCase):
 
         def execute(run_id, **_kwargs):
             observation["active_run_id"] = manager.active_run_id
-            observation["control"] = manager.active_cancellation_control
+            observation["control"] = active_cancellation_control(manager)
             observation["persisted_status"] = self.store.load(run_id)["status"]
             worker_entered.set()
             release_worker.wait(3)
@@ -549,7 +591,7 @@ class ExecutionManagerTests(unittest.TestCase):
         manager.start()
         manager.submit(run["id"])
         self.assertTrue(worker_entered.wait(2))
-        control = manager.active_cancellation_control
+        control = active_cancellation_control(manager)
 
         self.assertEqual(manager.cancel("different-run")["outcome"], "not_found")
         self.assertFalse(control.event.is_set())
@@ -585,7 +627,7 @@ class ExecutionManagerTests(unittest.TestCase):
         result = manager.cancel(run["id"])
 
         self.assertEqual(result["outcome"], "terminal_not_cancellable")
-        self.assertFalse(manager.active_cancellation_control.event.is_set())
+        self.assertFalse(active_cancellation_control(manager).event.is_set())
         release_worker.set()
         manager.stop(timeout=3)
         self.assertEqual(self.store.load(run["id"])["status"], "success")
@@ -605,13 +647,14 @@ class ExecutionManagerTests(unittest.TestCase):
         )
 
     def test_queued_build_executes_to_success(self):
-        def acquire(_recipe, workspace, token=""):
+        def acquire(_recipe, workspace, token="", expected_identity=None):
             source = Path(workspace) / "source"
             (source / "package.json").write_text("{}")
             return {"repository":"owner/queued-build","ref":"v1","tag":"v1","upstream_version":"1.0","debian_version":"1.0-1","source_directory":str(source)}
 
         available = lambda detected, manual, **_kwargs: {"detected":detected,"manually_added":manual,"required":detected,"available":detected,"missing":[],"checks":[],"installation_attempted":False}
         configured = recipe("queued-build")
+        configured["source"].update({"tracking": "manual", "ref": "v1"})
         configured["build"] = {
             "commands": [f"{shlex.quote(sys.executable)} -c 'import pathlib; pathlib.Path(\"dist\").mkdir(); pathlib.Path(\"dist/result\").write_text(\"ok\")'"],
             "output": {"mode": "path", "path": "dist"},
@@ -631,13 +674,15 @@ class ExecutionManagerTests(unittest.TestCase):
         self.assertTrue(Path(persisted["artifact"]["path"]).is_file())
 
     def test_queued_dry_run_executes_to_prepared(self):
-        def acquire(_recipe, workspace, token=""):
+        def acquire(_recipe, workspace, token="", expected_identity=None):
             source = Path(workspace) / "source"
             (source / "package.json").write_text("{}")
             return {"repository":"owner/queued-dry","ref":"v1","tag":"v1","upstream_version":"1.0","debian_version":"1.0-1","source_directory":str(source)}
 
         available = lambda detected, manual, **_kwargs: {"detected":detected,"manually_added":manual,"required":detected,"available":detected,"missing":[],"checks":[],"installation_attempted":False}
-        run = self.create("queued-dry", dry_run=True)
+        configured = recipe("queued-dry")
+        configured["source"].update({"tracking": "manual", "ref": "v1"})
+        run = build_pipeline.create_pipeline_run(configured, store=self.store, dry_run=True)
 
         def execute(run_id, **kwargs):
             return build_pipeline.execute_pipeline_run(run_id, acquire=acquire, dependency_check=available, **kwargs)

@@ -34,7 +34,7 @@ MAX_GENERATIONS = 8
 MAX_DIAGNOSTIC = 80
 MAX_ERROR_CODE = 80
 MAX_LEDGER_BYTES = 16 * 1024 * 1024
-STATES = {"detected", "claimed", "run_preallocated", "admitted", "terminal", "retry_delayed", "blocked"}
+STATES = {"claimed", "run_preallocated", "admitted", "terminal", "retry_delayed", "blocked"}
 TERMINAL_CLASSIFICATIONS = {"success", "terminal_failure", "transient_retryable", "blocked_manual", "cancelled", "disabled"}
 RETRY_CLASSES = {"none", "transient", "operator"}
 POLICIES = {"manual", "detect", "test", "build", "build_validate", "full"}
@@ -44,10 +44,6 @@ GENERATION_FIELDS = {
     "preallocated_run_id", "run_id", "terminal_classification", "retry_class",
     "retry_count", "not_before", "last_error_code", "diagnostic", "stage",
     "validation_attempt_id", "publication_attempt_id", "completion_notified",
-    "run_retry_count", "validation_retry_count", "publication_retry_count",
-}
-CP3_GENERATION_FIELDS = GENERATION_FIELDS - {
-    "stage", "validation_attempt_id", "publication_attempt_id", "completion_notified",
     "run_retry_count", "validation_retry_count", "publication_retry_count",
 }
 STAGES = {
@@ -104,19 +100,6 @@ def _diagnostic(value) -> str | None:
 
 def _validate_generation(value: dict, *, expected: int) -> dict:
     path = f"$.generations[{expected}]"
-    if isinstance(value, dict) and set(value) == CP3_GENERATION_FIELDS:
-        value = {
-            **value,
-            "stage": "terminal" if value.get("state") in {"terminal", "blocked"} else (
-                "run" if value.get("run_id") else "run_admission" if value.get("preallocated_run_id") else "detection"
-            ),
-            "validation_attempt_id": None,
-            "publication_attempt_id": None,
-            "completion_notified": False,
-            "run_retry_count": value.get("retry_count", 0) if value.get("state") == "retry_delayed" else 0,
-            "validation_retry_count": 0,
-            "publication_retry_count": 0,
-        }
     if not isinstance(value, dict) or set(value) != GENERATION_FIELDS:
         raise AutomationLedgerError("automation_ledger_invalid", "Automation generation has an invalid shape", path=path)
     generation = value["generation"]
@@ -182,6 +165,18 @@ def _validate_generation(value: dict, *, expected: int) -> dict:
             raise AutomationLedgerError("automation_ledger_invalid", f"{field} is unsafe", path=f"{path}.{field}")
     if publication_attempt_id and not validation_attempt_id:
         raise AutomationLedgerError("automation_ledger_invalid", "Publication linkage requires Validation linkage", path=path)
+    if stage == "detection" and any((preallocated, run_id, validation_attempt_id, publication_attempt_id)):
+        raise AutomationLedgerError("automation_ledger_invalid", "Detection stage cannot carry lifecycle links", path=path)
+    if stage == "run_admission" and (not preallocated or run_id or validation_attempt_id or publication_attempt_id):
+        raise AutomationLedgerError("automation_ledger_invalid", "Run admission has inconsistent lifecycle links", path=path)
+    if stage == "run" and (not run_id or validation_attempt_id or publication_attempt_id):
+        raise AutomationLedgerError("automation_ledger_invalid", "Run stage has inconsistent lifecycle links", path=path)
+    if stage == "validation_admission" and (not run_id or publication_attempt_id):
+        raise AutomationLedgerError("automation_ledger_invalid", "Validation admission has inconsistent lifecycle links", path=path)
+    if stage == "validation" and (not run_id or not validation_attempt_id or publication_attempt_id):
+        raise AutomationLedgerError("automation_ledger_invalid", "Validation stage requires its canonical links", path=path)
+    if stage == "publication" and (not run_id or not validation_attempt_id):
+        raise AutomationLedgerError("automation_ledger_invalid", "Publication stage requires Run and Validation links", path=path)
     if not isinstance(value["completion_notified"], bool):
         raise AutomationLedgerError("automation_ledger_invalid", "completion_notified must be boolean", path=path)
     if value["completion_notified"] and state not in {"terminal", "blocked"}:
@@ -259,7 +254,11 @@ class AutomationLedger:
             if not isinstance(recipe_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", recipe_sha):
                 raise AutomationLedgerError("automation_ledger_invalid", "Recipe SHA-256 is invalid", path=f"{path}.recipe_sha256")
             identity = normalize_upstream_identity(entry["upstream_identity"])
-            if identity["completeness"] != "complete" or automation_attempt_key(recipe_id, identity, recipe_sha) != key:
+            if (
+                entry["upstream_identity"] != identity
+                or identity["completeness"] != "complete"
+                or automation_attempt_key(recipe_id, identity, recipe_sha) != key
+            ):
                 raise AutomationLedgerError("automation_ledger_invalid", "Attempt key does not match its exact inputs", path=path)
             generations = entry["generations"]
             if not isinstance(generations, list) or not 1 <= len(generations) <= MAX_GENERATIONS:
@@ -307,7 +306,7 @@ class AutomationLedger:
         return self._validate(document)
 
     def read(self) -> dict:
-        """Read without repair, migration, directory creation, or hidden writes."""
+        """Read without repair, directory creation, or hidden writes."""
         return copy.deepcopy(self._load_unlocked())
 
     @contextmanager
@@ -339,11 +338,11 @@ class AutomationLedger:
         self.path.chmod(0o600)
 
     @staticmethod
-    def _generation(policy: str, detected_at: str, generation: int, *, state: str = "claimed") -> dict:
+    def _generation(policy: str, detected_at: str, generation: int) -> dict:
         now = utc_now()
         return {
             "generation": generation,
-            "state": state,
+            "state": "claimed",
             "desired_policy": policy,
             "detected_at": detected_at,
             "created_at": now,
@@ -366,100 +365,14 @@ class AutomationLedger:
         }
 
     @staticmethod
-    def _new_entry(key: str, recipe_id: str, recipe_sha256: str, identity: dict, policy: str, detected_at: str, *, state: str) -> dict:
+    def _new_entry(key: str, recipe_id: str, recipe_sha256: str, identity: dict, policy: str, detected_at: str) -> dict:
         return {
             "key": key,
             "recipe_id": recipe_id,
             "recipe_sha256": recipe_sha256.lower(),
             "upstream_identity": identity,
-            "generations": [AutomationLedger._generation(policy, detected_at, 0, state=state)],
+            "generations": [AutomationLedger._generation(policy, detected_at, 0)],
         }
-
-    def record_detection(self, recipe_id: str, identity: dict, recipe_sha256: str, desired_policy: str, *, detected_at: str | None = None) -> ClaimResult:
-        """Persist a complete detection without admitting or claiming work."""
-        if desired_policy not in POLICIES or desired_policy == "manual":
-            raise AutomationLedgerError("automation_policy_ineligible", "A manual/unsupported policy cannot be detected")
-        normalized_identity = normalize_upstream_identity(identity)
-        key = automation_attempt_key(recipe_id, normalized_identity, recipe_sha256)
-        detected = _timestamp(detected_at or utc_now(), "$.detected_at")
-        with self._locked():
-            document = self._load_unlocked()
-            existing = document["attempts"].get(key)
-            if existing is not None:
-                latest = existing["generations"][-1]
-                if latest["desired_policy"] != desired_policy:
-                    raise AutomationLedgerError("automation_policy_mismatch", "Attempt policy does not match its Recipe revision")
-                return ClaimResult(False, key, latest["generation"], copy.deepcopy(existing))
-            if len(document["attempts"]) >= self.max_attempts:
-                raise AutomationLedgerError("automation_ledger_bounds_exceeded", "Automation ledger is full")
-            if sum(entry["recipe_id"] == recipe_id for entry in document["attempts"].values()) >= self.max_attempts_per_recipe:
-                raise AutomationLedgerError("automation_ledger_bounds_exceeded", "Recipe automation history is full")
-            entry = self._new_entry(
-                key, recipe_id, recipe_sha256, normalized_identity, desired_policy, detected, state="detected",
-            )
-            document["attempts"][key] = entry
-            self._save_unlocked(document)
-            return ClaimResult(True, key, 0, copy.deepcopy(entry))
-
-    def record_handled_detection(self, recipe_id: str, identity: dict, recipe_sha256: str, *, detected_at: str | None = None) -> ClaimResult:
-        """Atomically persist a detect-only identity as durably handled."""
-        normalized_identity = normalize_upstream_identity(identity)
-        key = automation_attempt_key(recipe_id, normalized_identity, recipe_sha256)
-        detected = _timestamp(detected_at or utc_now(), "$.detected_at")
-        with self._locked():
-            document = self._load_unlocked()
-            existing = document["attempts"].get(key)
-            if existing is not None:
-                latest = existing["generations"][-1]
-                if latest["desired_policy"] != "detect":
-                    raise AutomationLedgerError("automation_policy_mismatch", "Attempt policy does not match its Recipe revision")
-                return ClaimResult(False, key, latest["generation"], copy.deepcopy(existing))
-            if len(document["attempts"]) >= self.max_attempts:
-                raise AutomationLedgerError("automation_ledger_bounds_exceeded", "Automation ledger is full")
-            if sum(entry["recipe_id"] == recipe_id for entry in document["attempts"].values()) >= self.max_attempts_per_recipe:
-                raise AutomationLedgerError("automation_ledger_bounds_exceeded", "Recipe automation history is full")
-            entry = self._new_entry(
-                key, recipe_id, recipe_sha256, normalized_identity, "detect", detected, state="detected",
-            )
-            entry["generations"][0].update({
-                "state": "terminal",
-                "terminal_classification": "success",
-                "diagnostic": "detect_only_handled",
-                "stage": "terminal",
-                "updated_at": utc_now(),
-            })
-            document["attempts"][key] = entry
-            self._save_unlocked(document)
-            return ClaimResult(True, key, 0, copy.deepcopy(entry))
-
-    def claim(self, recipe_id: str, identity: dict, recipe_sha256: str, desired_policy: str, *, detected_at: str | None = None) -> ClaimResult:
-        if desired_policy not in POLICIES or desired_policy == "manual":
-            raise AutomationLedgerError("automation_policy_ineligible", "A manual/unsupported policy cannot be claimed")
-        normalized_identity = normalize_upstream_identity(identity)
-        key = automation_attempt_key(recipe_id, normalized_identity, recipe_sha256)
-        detected = _timestamp(detected_at or utc_now(), "$.detected_at")
-        with self._locked():
-            document = self._load_unlocked()
-            existing = document["attempts"].get(key)
-            if existing is not None:
-                latest = existing["generations"][-1]
-                if latest["desired_policy"] != desired_policy:
-                    raise AutomationLedgerError("automation_policy_mismatch", "Claim policy does not match its Recipe revision")
-                if latest["state"] == "detected":
-                    latest.update({"state": "claimed", "updated_at": utc_now()})
-                    self._save_unlocked(document)
-                    return ClaimResult(True, key, latest["generation"], copy.deepcopy(existing))
-                return ClaimResult(False, key, latest["generation"], copy.deepcopy(existing))
-            if len(document["attempts"]) >= self.max_attempts:
-                raise AutomationLedgerError("automation_ledger_bounds_exceeded", "Automation ledger is full")
-            if sum(entry["recipe_id"] == recipe_id for entry in document["attempts"].values()) >= self.max_attempts_per_recipe:
-                raise AutomationLedgerError("automation_ledger_bounds_exceeded", "Recipe automation history is full")
-            entry = self._new_entry(
-                key, recipe_id, recipe_sha256, normalized_identity, desired_policy, detected, state="claimed",
-            )
-            document["attempts"][key] = entry
-            self._save_unlocked(document)
-            return ClaimResult(True, key, 0, copy.deepcopy(entry))
 
     def claim_current_recipe(
         self, recipe_path: str | Path, recipe_id: str, identity: dict,
@@ -504,8 +417,7 @@ class AutomationLedger:
                         raise AutomationLedgerError("automation_ledger_bounds_exceeded", "Automation ledger is full")
                     if sum(entry["recipe_id"] == recipe_id for entry in document["attempts"].values()) >= self.max_attempts_per_recipe:
                         raise AutomationLedgerError("automation_ledger_bounds_exceeded", "Recipe automation history is full")
-                    state = "detected" if detect_only else "claimed"
-                    entry = self._new_entry(key, recipe_id, recipe_sha256, normalized_identity, desired_policy, detected, state=state)
+                    entry = self._new_entry(key, recipe_id, recipe_sha256, normalized_identity, desired_policy, detected)
                     if detect_only:
                         entry["generations"][0].update({
                             "state": "terminal", "terminal_classification": "success",
@@ -519,40 +431,6 @@ class AutomationLedger:
                 raise AutomationLedgerError(
                     "recipe_changed_during_detection", "Recipe became unavailable during upstream detection",
                 ) from exc
-
-    def explicit_retry(
-        self,
-        attempt_key: str,
-        desired_policy: str | None = None,
-        *,
-        expected_generation: int | None = None,
-    ) -> ClaimResult:
-        with self._locked():
-            document = self._load_unlocked()
-            entry = document["attempts"].get(attempt_key)
-            if entry is None:
-                raise AutomationLedgerError("automation_attempt_not_found", "Automation attempt was not found")
-            latest = entry["generations"][-1]
-            if expected_generation is not None:
-                if isinstance(expected_generation, bool) or not isinstance(expected_generation, int):
-                    raise AutomationLedgerError("automation_retry_stale", "Automation retry generation is stale")
-                if latest["generation"] == expected_generation + 1:
-                    return ClaimResult(False, attempt_key, latest["generation"], copy.deepcopy(entry))
-                if latest["generation"] != expected_generation:
-                    raise AutomationLedgerError("automation_retry_stale", "Automation retry generation is stale")
-            if latest["state"] not in {"terminal", "retry_delayed", "blocked"}:
-                raise AutomationLedgerError("automation_retry_not_terminal", "Only a stopped generation can be explicitly retried")
-            if len(entry["generations"]) >= MAX_GENERATIONS:
-                raise AutomationLedgerError("automation_ledger_bounds_exceeded", "Automation retry generation limit reached")
-            policy = desired_policy or latest["desired_policy"]
-            if policy not in POLICIES or policy == "manual":
-                raise AutomationLedgerError("automation_policy_ineligible", "Retry policy is ineligible")
-            if policy != latest["desired_policy"]:
-                raise AutomationLedgerError("automation_policy_mismatch", "Retry cannot change the captured Recipe policy")
-            generation = len(entry["generations"])
-            entry["generations"].append(self._generation(policy, latest["detected_at"], generation))
-            self._save_unlocked(document)
-            return ClaimResult(True, attempt_key, generation, copy.deepcopy(entry))
 
     def explicit_retry_current_recipe(
         self,
@@ -641,7 +519,7 @@ class AutomationLedger:
             row = self._row(document, attempt_key, generation)
             if row["preallocated_run_id"]:
                 return copy.deepcopy(row)
-            if row["state"] not in {"claimed", "detected"}:
+            if row["state"] != "claimed":
                 raise AutomationLedgerError("automation_state_conflict", "Generation cannot preallocate a Run from its current state")
             if row["desired_policy"] == "detect":
                 raise AutomationLedgerError("automation_policy_ineligible", "Detect-only policy cannot preallocate a Run")
@@ -815,15 +693,14 @@ class AutomationLedger:
                 self._save_unlocked(document)
             return copy.deepcopy(row)
 
-    def may_create_run(self, attempt_key: str, generation: int | None = None) -> bool:
+    def may_create_run(self, attempt_key: str, generation: int) -> bool:
         document = self.read()
         entry = document["attempts"].get(attempt_key)
         if not entry:
             return False
-        index = len(entry["generations"]) - 1 if generation is None else generation
-        if not 0 <= index < len(entry["generations"]):
+        if isinstance(generation, bool) or not isinstance(generation, int) or not 0 <= generation < len(entry["generations"]):
             return False
-        row = entry["generations"][index]
+        row = entry["generations"][generation]
         if row["desired_policy"] == "detect" or row["state"] not in {"claimed", "run_preallocated"} or row["run_id"] is not None:
             return False
         if row["state"] == "run_preallocated" and BuildStore(self.data_dir / "builds").run_dir(row["preallocated_run_id"]).exists():

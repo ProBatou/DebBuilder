@@ -85,6 +85,32 @@ class FakeAutomationScheduler:
         return self.alive
 
 
+class DeterministicMaintenanceService:
+    def __init__(self, target):
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=target,
+            args=(self._stop,),
+            name="storage-maintenance",
+            daemon=False,
+        )
+
+    def start(self):
+        self._thread.start()
+
+    def request(self, *, refresh=True, cleanup=False):
+        return None
+
+    def stop(self):
+        self._stop.set()
+
+    def join(self, timeout=None):
+        self._thread.join(timeout)
+
+    def is_alive(self):
+        return self._thread.is_alive()
+
+
 class ServerLifecycleTests(unittest.TestCase):
     def setUp(self):
         self.scheduler_patch = mock.patch(
@@ -96,7 +122,7 @@ class ServerLifecycleTests(unittest.TestCase):
     def tearDown(self):
         self.scheduler_patch.stop()
 
-    def lifecycle(self, *, serve=lambda: None, accepting=True, shutdown_result=None, retention_target=None):
+    def lifecycle(self, *, serve=lambda: None, accepting=True, shutdown_result=None):
         events = []
         retention_started = threading.Event()
         manager = FakeManager(events, accepting=accepting, shutdown_result=shutdown_result)
@@ -126,7 +152,7 @@ class ServerLifecycleTests(unittest.TestCase):
                 server_factory=lambda *_args: events.append("listener_bound") or server,
                 manager_factory=lambda: events.append("manager_constructed") or manager,
                 automation_scheduler_factory=lambda _server: automation,
-                retention_target=retention_target or retention,
+                maintenance_factory=lambda _server: DeterministicMaintenanceService(retention),
                 install_signal_handlers=False,
                 shutdown_timeout=7,
             )
@@ -187,7 +213,9 @@ class ServerLifecycleTests(unittest.TestCase):
             outcome = app.serve_application(
                 object(), server_factory=lambda *_args: server,
                 manager_factory=lambda: manager,
-                retention_target=lambda stop: stop.wait(),
+                maintenance_factory=lambda _server: DeterministicMaintenanceService(
+                    lambda stop: stop.wait()
+                ),
                 install_signal_handlers=False, shutdown_timeout=2,
             )
 
@@ -287,6 +315,7 @@ class ServerLifecycleTests(unittest.TestCase):
                 manager = FakeManager(events, accepting=not blocked)
                 store = BuildStore(Path(temporary) / "builds")
                 run = store.create({
+                    "schema_version": 5,
                     "name": "recovered",
                     "package": {
                         "name": "recovered",
@@ -462,7 +491,8 @@ class ServerLifecycleTests(unittest.TestCase):
             try:
                 outcome["value"] = app.serve_application(
                     object(), server_factory=lambda *_args: server,
-                    manager_factory=lambda: manager, retention_target=retention,
+                    manager_factory=lambda: manager,
+                    maintenance_factory=lambda _server: DeterministicMaintenanceService(retention),
                     install_signal_handlers=False, shutdown_timeout=0,
                 )
             except BaseException as exc:
@@ -522,7 +552,9 @@ class ServerLifecycleTests(unittest.TestCase):
             object(),
             server_factory=lambda *_args: server,
             manager_factory=lambda: manager,
-            retention_target=None,
+            maintenance_factory=lambda _server: DeterministicMaintenanceService(
+                lambda stop: stop.wait()
+            ),
             install_signal_handlers=False,
             shutdown_timeout=0,
         )))

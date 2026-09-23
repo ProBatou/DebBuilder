@@ -4,7 +4,6 @@ import os
 import stat
 import tempfile
 import unittest
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -12,11 +11,14 @@ from debbuilder.recipe_schema import recipe_document_for_storage
 from debbuilder.recipe_store import (
     RecipeStoreError,
     load_recipe,
-    load_recipe_result,
     locked_recipe,
-    migrate_recipe_directory,
     save_recipe,
+    validate_recipe_directory,
 )
+
+
+def current_recipe(name: str, **values) -> dict:
+    return {"schema_version": 5, "name": name, **values}
 
 
 def _hold_recipe_lease(path: str, ready, release) -> None:
@@ -26,7 +28,7 @@ def _hold_recipe_lease(path: str, ready, release) -> None:
 
 
 def _save_recipe_in_process(path: str, finished) -> None:
-    save_recipe(Path(path), {"name": Path(path).stem, "active": False})
+    save_recipe(Path(path), current_recipe(Path(path).stem, active=False))
     finished.set()
 
 
@@ -43,38 +45,65 @@ class RecipeStoreTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def test_load_migrates_legacy_recipe_and_writes_canonical_v4(self):
-        path = self.directory / "legacy.json"
-        path.write_text(json.dumps({
-            "schema_version": 1,
-            "name": "legacy",
-            "build": {"timeout": 75, "output": {"mode": "source"}},
-            "steps": [],
-        }))
+    def test_v5_save_load_edit_round_trip_is_canonical(self):
+        path = self.directory / "demo.json"
+        first = save_recipe(path, current_recipe("demo", active=True))
+        loaded = load_recipe(path)
+        edited = {**loaded, "active": False}
+        second = save_recipe(path, edited)
 
-        result = load_recipe_result(path)
+        self.assertEqual(first["schema_version"], 5)
+        self.assertTrue(first["active"])
+        self.assertFalse(second["active"])
+        self.assertEqual(load_recipe(path), second)
+        self.assertEqual(path.read_bytes(), canonical_bytes(second))
 
-        self.assertEqual(result.recipe["schema_version"], 5)
-        self.assertEqual(result.recipe["runtime_apt_repositories"], [])
-        self.assertEqual(result.recipe["build"]["inactivity_timeout"], 75)
-        self.assertEqual(result.applied_migrations, ("v1_to_v2", "v2_to_v3", "v3_to_v4", "v4_to_v5"))
-        self.assertTrue(result.rewritten)
-        self.assertEqual(path.read_bytes(), canonical_bytes(result.recipe))
-
-    def test_load_without_write_back_migrates_only_in_memory(self):
+    def test_load_is_read_only_even_when_v5_json_is_not_canonical_bytes(self):
         path = self.directory / "snapshot.json"
-        original = json.dumps({"schema_version": 1, "name": "snapshot", "steps": []}).encode()
+        original = b'{"schema_version":5,"name":"snapshot"}'
         path.write_bytes(original)
 
-        loaded = load_recipe(path, write_back=False)
+        loaded = load_recipe(path)
 
         self.assertEqual(loaded["schema_version"], 5)
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_old_and_unversioned_schemas_are_explicitly_rejected_without_rewrite(self):
+        for version in (None, 0, 1, 2, 3, 4):
+            with self.subTest(version=version):
+                path = self.directory / f"old-{version}.json"
+                document = {"name": path.stem}
+                if version is not None:
+                    document["schema_version"] = version
+                original = json.dumps(document).encode()
+                path.write_bytes(original)
+                with self.assertRaises(RecipeStoreError) as raised:
+                    load_recipe(path)
+                self.assertEqual(raised.exception.code, "unsupported_recipe_schema")
+                self.assertEqual(raised.exception.path, "$.schema_version")
+                self.assertEqual(path.read_bytes(), original)
+
+    def test_build_version_source_is_rejected_on_save_and_load_without_rewrite(self):
+        document = current_recipe("unsupported", source={"version": {"source": "build"}})
+        path = self.directory / "unsupported.json"
+        with self.assertRaises(RecipeStoreError) as saved:
+            save_recipe(path, document)
+        self.assertEqual(saved.exception.code, "unsupported_version_source")
+        self.assertEqual(saved.exception.path, "$.source.version.source")
+        self.assertFalse(path.exists())
+
+        original = json.dumps(document).encode()
+        path.write_bytes(original)
+        with self.assertRaises(RecipeStoreError) as loaded:
+            load_recipe(path)
+        self.assertEqual(loaded.exception.code, "unsupported_version_source")
+        self.assertEqual(loaded.exception.path, "$.source.version.source")
         self.assertEqual(path.read_bytes(), original)
 
     @unittest.skipUnless("fork" in multiprocessing.get_all_start_methods(), "fork multiprocessing is unavailable")
     def test_recipe_lease_blocks_writers_in_another_process(self):
         path = self.directory / "leased.json"
-        save_recipe(path, {"name": "leased"})
+        save_recipe(path, current_recipe("leased"))
         context = multiprocessing.get_context("fork")
         ready = context.Event()
         release = context.Event()
@@ -93,64 +122,32 @@ class RecipeStoreTests(unittest.TestCase):
         self.assertEqual(holder.exitcode, 0)
         self.assertEqual(writer.exitcode, 0)
         self.assertTrue(finished.is_set())
-        self.assertFalse(load_recipe(path, write_back=False)["active"])
+        self.assertFalse(load_recipe(path)["active"])
 
-    def test_canonical_current_recipe_is_not_rewritten(self):
+    def test_repeated_identical_save_does_not_replace_file(self):
         path = self.directory / "current.json"
-        path.write_bytes(canonical_bytes({"name": "current"}))
+        document = current_recipe("current")
+        stored = save_recipe(path, document)
         before = path.stat().st_mtime_ns
 
         with mock.patch("debbuilder.recipe_store.os.replace") as replace:
-            result = load_recipe_result(path)
+            repeated = save_recipe(path, stored)
 
-        self.assertFalse(result.rewritten)
-        replace.assert_not_called()
-        self.assertEqual(path.stat().st_mtime_ns, before)
-
-    def test_concurrent_loads_serialize_one_migrating_replacement(self):
-        path = self.directory / "concurrent.json"
-        path.write_text(json.dumps({"schema_version": 1, "name": "concurrent", "steps": []}))
-
-        with mock.patch("debbuilder.recipe_store.os.replace", wraps=os.replace) as replace:
-            with ThreadPoolExecutor(max_workers=8) as executor:
-                loaded = list(executor.map(lambda _index: load_recipe(path), range(16)))
-
-        self.assertTrue(all(recipe["schema_version"] == 5 for recipe in loaded))
-        self.assertEqual(replace.call_count, 1)
-
-    def test_save_accepts_frontend_v1_and_is_idempotent(self):
-        path = self.directory / "frontend.json"
-        frontend = {
-            "schema_version": 1,
-            "name": "frontend",
-            "package": {"name": "frontend"},
-            "build": {"inactivity_timeout": 300, "output": {"mode": "source"}},
-            "service": {"enabled": False},
-        }
-        stored = save_recipe(path, frontend)
-        before = path.stat().st_mtime_ns
-
-        with mock.patch("debbuilder.recipe_store.os.replace") as replace:
-            repeated = save_recipe(path, frontend)
-
-        self.assertEqual(stored["schema_version"], 5)
         self.assertEqual(repeated, stored)
         replace.assert_not_called()
         self.assertEqual(path.stat().st_mtime_ns, before)
 
     def test_save_rejects_document_identity_that_differs_from_storage_identity(self):
         path = self.directory / "alias.json"
-
         with self.assertRaises(RecipeStoreError) as raised:
-            save_recipe(path, {"name": "debbuilder"})
-
+            save_recipe(path, current_recipe("debbuilder"))
         self.assertEqual(raised.exception.code, "recipe_identity_mismatch")
         self.assertEqual(raised.exception.path, "$.name")
         self.assertFalse(path.exists())
 
-    def test_durable_write_preserves_existing_permissions_and_syncs_directory(self):
+    def test_durable_save_preserves_permissions_and_syncs_directory(self):
         path = self.directory / "permissions.json"
-        path.write_text(json.dumps({"schema_version": 1, "name": "permissions", "steps": []}))
+        save_recipe(path, current_recipe("permissions"))
         path.chmod(0o640)
         real_fsync = os.fsync
         descriptors = []
@@ -160,7 +157,7 @@ class RecipeStoreTests(unittest.TestCase):
             real_fsync(descriptor)
 
         with mock.patch("debbuilder.recipe_store.os.fsync", side_effect=recording_fsync):
-            load_recipe(path)
+            save_recipe(path, current_recipe("permissions", active=False))
 
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o640)
         self.assertIn(stat.S_IFREG, descriptors)
@@ -168,26 +165,25 @@ class RecipeStoreTests(unittest.TestCase):
 
     def test_replace_failure_keeps_original_and_cleans_temporary_file(self):
         path = self.directory / "failure.json"
-        original = json.dumps({"schema_version": 1, "name": "failure", "steps": []}).encode()
-        path.write_bytes(original)
+        save_recipe(path, current_recipe("failure"))
+        original = path.read_bytes()
 
         with mock.patch("debbuilder.recipe_store.os.replace", side_effect=OSError("injected")):
             with self.assertRaises(RecipeStoreError) as raised:
-                load_recipe(path)
+                save_recipe(path, current_recipe("failure", active=False))
 
         self.assertEqual(raised.exception.code, "recipe_write_failed")
         self.assertEqual(path.read_bytes(), original)
         self.assertEqual(list(self.directory.glob(".failure.json.*.tmp")), [])
 
-    def test_corrupt_incompatible_and_manual_review_files_remain_unchanged(self):
+    def test_corrupt_or_non_v5_files_remain_unchanged(self):
         cases = {
             "encoding.json": (b"\xff", "invalid_recipe_encoding"),
             "syntax.json": (b'{"name":', "invalid_recipe_json"),
-            "duplicate.json": (b'{"name":"one","name":"two"}', "invalid_recipe_json"),
+            "duplicate.json": (b'{"schema_version":5,"name":"one","name":"two"}', "invalid_recipe_json"),
             "scalar.json": (b"[]", "invalid_root"),
-            "future.json": (b'{"schema_version":99,"name":"future"}', "future_schema_version"),
-            "review.json": (b'{"schema_version":1,"name":"review","steps":[{"name":"build"}]}', "manual_recipe_migration_required"),
-            "unknown.json": (b'{"schema_version":2,"name":"unknown","new_meaning":true}', "unknown_field"),
+            "future.json": (b'{"schema_version":99,"name":"future"}', "unsupported_recipe_schema"),
+            "legacy.json": (b'{"schema_version":1,"name":"legacy","steps":[]}', "unsupported_recipe_schema"),
         }
         for filename, (original, code) in cases.items():
             with self.subTest(filename=filename):
@@ -198,51 +194,34 @@ class RecipeStoreTests(unittest.TestCase):
                 self.assertEqual(raised.exception.code, code)
                 self.assertEqual(path.read_bytes(), original)
 
-    def test_directory_scan_is_deterministic_complete_and_idempotent(self):
-        (self.directory / "b-legacy-v0.json").write_text(json.dumps({
-            "name": "b-legacy-v0", "steps": [],
-        }))
-        (self.directory / "c-legacy-v1.json").write_text(json.dumps({
-            "schema_version": 1, "name": "c-legacy-v1", "steps": [],
-        }))
-        (self.directory / "a-current.json").write_bytes(canonical_bytes({"name": "a-current"}))
-        (self.directory / "f-future.json").write_text(json.dumps({
-            "schema_version": 8, "name": "f-future",
-        }))
-        corrupt = self.directory / "d-corrupt.json"
+    def test_directory_validation_is_deterministic_complete_and_read_only(self):
+        valid = self.directory / "a-current.json"
+        valid.write_bytes(canonical_bytes(current_recipe("a-current")))
+        old = self.directory / "b-old.json"
+        old.write_text('{"schema_version":4,"name":"b-old"}')
+        corrupt = self.directory / "c-corrupt.json"
         corrupt.write_text("{")
-        (self.directory / "e-review.json").write_text(json.dumps({
-            "schema_version": 1, "name": "e-review", "steps": [{"name": "build"}],
-        }))
-        ignored = self.directory / "ignored.txt"
-        ignored.write_text("not a Recipe")
+        (self.directory / "ignored.txt").write_text("not a Recipe")
+        before = {path.name: path.read_bytes() for path in self.directory.iterdir()}
 
-        first = migrate_recipe_directory(self.directory)
-        second = migrate_recipe_directory(self.directory)
+        report = validate_recipe_directory(self.directory)
 
-        self.assertFalse(first.ok)
-        self.assertEqual((first.inspected, first.current, first.migrated, first.failed), (6, 1, 2, 3))
-        self.assertEqual([row.file for row in first.files], [
-            "a-current.json", "b-legacy-v0.json", "c-legacy-v1.json", "d-corrupt.json",
-            "e-review.json", "f-future.json",
-        ])
-        self.assertEqual(first.files[3].error["code"], "invalid_recipe_json")
-        self.assertEqual(first.files[4].error["code"], "manual_recipe_migration_required")
-        self.assertEqual(first.files[5].error["code"], "future_schema_version")
-        self.assertEqual((second.inspected, second.current, second.migrated, second.failed), (6, 3, 0, 3))
-        self.assertEqual(corrupt.read_text(), "{")
+        self.assertFalse(report.ok)
+        self.assertEqual((report.inspected, report.valid, report.failed), (3, 1, 2))
+        self.assertEqual([row.file for row in report.files], ["a-current.json", "b-old.json", "c-corrupt.json"])
+        self.assertEqual(report.files[1].error["code"], "unsupported_recipe_schema")
+        self.assertEqual(report.files[2].error["code"], "invalid_recipe_json")
+        self.assertEqual(before, {path.name: path.read_bytes() for path in self.directory.iterdir()})
 
     @unittest.skipUnless(hasattr(os, "symlink"), "symbolic links are unavailable")
     def test_symbolic_link_recipe_is_refused_without_touching_target(self):
         target = self.directory / "target.data"
-        target.write_bytes(canonical_bytes({"name": "target"}))
+        target.write_bytes(canonical_bytes(current_recipe("target")))
         link = self.directory / "linked.json"
         link.symlink_to(target)
         original = target.read_bytes()
-
         with self.assertRaises(RecipeStoreError) as raised:
             load_recipe(link)
-
         self.assertEqual(raised.exception.code, "unsafe_recipe_path")
         self.assertEqual(target.read_bytes(), original)
 

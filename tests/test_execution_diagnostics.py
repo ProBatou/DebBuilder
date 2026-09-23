@@ -9,6 +9,7 @@ from debbuilder.build_store import BuildStore
 
 def recipe():
     return {
+        "schema_version": 5,
         "name": "demo", "active": True,
         "package": {"name": "demo", "architecture": "all", "maintainer": "Demo <demo@example.test>", "description": "Demo"},
         "source": {"repository": "owner/demo"},
@@ -82,7 +83,7 @@ class ExecutionDiagnosticTests(unittest.TestCase):
                 self.assertIn(limit_name, facts)
                 self.assertIn(expected_action, diagnostic["next_action"])
 
-    def test_source_change_absent_and_ambiguous_expose_index_file_anchor(self):
+    def test_source_change_absent_and_ambiguous_expose_summary_without_source_excerpt(self):
         for code, matches in (("source_match_not_found", 0), ("source_match_ambiguous", 3)):
             with self.subTest(code=code):
                 diagnostic = self.failed_run(code, "Source change failed", stage="source_changes", details={
@@ -92,7 +93,8 @@ class ExecutionDiagnosticTests(unittest.TestCase):
                 rows = {row["label"]: row["value"] for row in diagnostic["where"] + diagnostic["facts"]}
                 self.assertEqual(rows["Change"], "2")
                 self.assertEqual(rows["File"], "src/app.js")
-                self.assertEqual(rows["Anchor"], "oldCall()")
+                self.assertNotIn("Anchor", rows)
+                self.assertNotIn("oldCall()", str(diagnostic))
 
     def test_expected_output_and_mapping_have_precise_locations(self):
         output = self.failed_run("expected_output_missing", "Output missing", details={
@@ -111,14 +113,15 @@ class ExecutionDiagnosticTests(unittest.TestCase):
         run = self.store.create(recipe(), mode="build")
         artifact = Path(run["workspace"]) / "artifacts/demo.deb"
         artifact.write_bytes(b"deb")
-        run.update({"status": "success", "artifact": {"path": str(artifact)}, "validations": [{
+        run.update({"status": "success", "artifact": {"path": str(artifact)}})
+        projected = {**run, "_validation_attempts": [{
             "status": "failed", "profile": {"name": "bookworm-node22"},
             "checks": [{"name": "systemd_active", "status": "failed", "error": "unit exited"}],
             "commands": [{"command": "systemctl is-active demo", "arguments": ["systemctl", "is-active", "demo"], "accepted": False, "exit_code": 3, "stderr": "inactive"}],
             "error": {"code": "validation_failed", "message": "Service validation failed", "details": {}},
-        }]})
+        }]}
         self.store.save(run)
-        diagnostic = execution_service.get_execution(self.store, run["id"])["diagnostic"]
+        diagnostic = execution_service.get_execution(self.store, run["id"], run=projected)["diagnostic"]
         rows = {row["label"]: row["value"] for row in diagnostic["where"] + diagnostic["facts"]}
         self.assertEqual(rows["Profile"], "bookworm-node22")
         self.assertEqual(rows["Failed checks"], "systemd_active")
@@ -128,7 +131,7 @@ class ExecutionDiagnosticTests(unittest.TestCase):
         run = self.store.create(recipe(), mode="build")
         artifact = Path(run["workspace"]) / "artifacts/demo.deb"
         artifact.write_bytes(b"deb")
-        run.update({"status": "success", "artifact": {"path": str(artifact)}, "validations": [{"status": "success"}], "publications": [{
+        run.update({"status": "success", "artifact": {"path": str(artifact)}, "publications": [{
             "status": "failed", "repository": {"distribution": "bookworm", "component": "main"},
             "readiness": {"ready": True, "reasons": []},
             "command": {"command": "reprepro includedeb bookworm demo.deb", "status": "failed", "exit_code": 1, "stderr": "signature failed"},
@@ -141,16 +144,29 @@ class ExecutionDiagnosticTests(unittest.TestCase):
         self.assertEqual(rows["Preflight"], "reprepro_include_failed")
         self.assertIn("signature failed", rows["Last command output"])
 
-    def test_success_has_no_diagnostic_and_legacy_error_has_generic_fallback(self):
+    def test_proofless_publication_success_is_diagnosed_as_failure(self):
+        run = self.store.create(recipe(), mode="build")
+        run.update({
+            "status": "success",
+            "publications": [{"id": "proofless", "status": "success", "version": "1.0-1", "proof": None}],
+        })
+        self.store.save(run)
+
+        diagnostic = execution_service.get_execution(self.store, run["id"])["diagnostic"]
+
+        self.assertEqual(diagnostic["code"], "publication_proof_invalid")
+        self.assertEqual(diagnostic["stage"], "publication")
+
+    def test_success_has_no_diagnostic_and_missing_error_code_has_default(self):
         run = self.store.create(recipe(), mode="build")
         run["status"] = "success"
         self.store.save(run)
         self.assertIsNone(execution_service.get_execution(self.store, run["id"])["diagnostic"])
         run["status"] = "failed"
-        run["error"] = {"message": "Old run failed"}
+        run["error"] = {"message": "Build failed"}
         self.store.save(run)
         diagnostic = execution_service.get_execution(self.store, run["id"])["diagnostic"]
-        self.assertEqual(diagnostic["reason"], "Old run failed")
+        self.assertEqual(diagnostic["reason"], "Build failed")
         self.assertEqual(diagnostic["code"], "build_failed")
         self.assertNotIn("undefined", str(diagnostic))
 

@@ -78,65 +78,6 @@ class OciRecoveryResult:
         }
 
 
-def inventory_owned_containers(registry_root: str | Path, *, workspace: str | Path, runner=run_command) -> dict:
-    """Return a bounded read-only ownership inventory with explicit trust states."""
-    registry = IdentityRegistry(registry_root)
-    runtime = PodmanRuntime(workspace, runner=runner)
-    identities, registry_blockers = registry.load_all()
-    rows: list[dict] = []
-    blockers = list(registry_blockers)
-    if registry_blockers:
-        rows.extend({"classification": "known_malformed", "state": "unverifiable", "record": row.get("record", "")} for row in registry_blockers)
-    try:
-        candidates = runtime.namespace_candidates()
-        inspected_by_id = {}
-        for candidate in candidates:
-            candidate_id = str(candidate.get("Id") or candidate.get("ID") or "").lower()
-            inspected = runtime.inspect_container(candidate_id)
-            if inspected is not None:
-                inspected_by_id[_inspect_facts(inspected)["id"]] = inspected
-    except OciOwnershipError as exc:
-        blockers.append({"code": exc.code, "reason": str(exc)[:1000]})
-        return {"trustworthy": False, "rows": rows, "blockers": blockers}
-    authenticated: set[str] = set()
-    for _path, identity in identities:
-        try:
-            inspected = runtime.inspect_container(identity.get("container_id") or identity["name"])
-            if inspected is None and identity.get("container_id"):
-                inspected = runtime.inspect_container(identity["name"])
-            if inspected is None:
-                rows.append({
-                    "classification": "known_authenticated", "state": "absent",
-                    "attempt_id": identity["attempt_id"], "container_id": identity.get("container_id"),
-                })
-                continue
-            facts = verify_owned_container(identity, inspected)
-            verify_container_configuration(identity, inspected)
-            authenticated.add(facts["id"])
-            rows.append({
-                "classification": "known_authenticated", "state": "running" if facts["running"] else "stopped",
-                "attempt_id": identity["attempt_id"], "container_id": facts["id"],
-            })
-        except OciOwnershipError as exc:
-            blocker = {"code": exc.code, "reason": str(exc)[:1000], "attempt_id": identity["attempt_id"]}
-            blockers.append(blocker)
-            rows.append({"classification": "known_unverifiable", "state": "unverifiable", "attempt_id": identity["attempt_id"]})
-    for container_id, inspected in inspected_by_id.items():
-        if container_id in authenticated:
-            continue
-        facts = _inspect_facts(inspected)
-        blocker = {
-            "code": "validation_container_ownership_unverifiable",
-            "reason": "namespace-looking container has no matching trustworthy durable identity",
-            "container_id": facts["id"][:64], "container_name": facts["name"][:128],
-        }
-        blockers.append(blocker)
-        rows.append({
-            "classification": "namespace_unverifiable", "state": "running" if facts["running"] else "stopped",
-            "container_id": facts["id"][:64], "container_name": facts["name"][:128],
-        })
-    return {"trustworthy": not blockers, "rows": rows, "blockers": blockers}
-
 def ownership_labels(identity: dict) -> dict[str, str]:
     """Return the one authoritative exact ownership-label set."""
     return {

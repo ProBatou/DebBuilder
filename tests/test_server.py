@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import json
 import sys
 import tempfile
@@ -14,9 +16,9 @@ import debbuilder.app as server
 
 class WorkflowStorageTests(unittest.TestCase):
     def test_data_directory_can_be_separated_from_application_code(self):
-        self.assertEqual(server.application_data_dir(Path("/opt/demo"), {}), Path("/opt/demo/data"))
+        self.assertEqual(server.RuntimeConfig.from_environment(Path("/opt/demo"), {}).data, Path("/opt/demo/data"))
         self.assertEqual(
-            server.application_data_dir(Path("/opt/demo"), {"DEBBUILDER_DATA_DIR": "/var/lib/demo"}),
+            server.RuntimeConfig.from_environment(Path("/opt/demo"), {"DEBBUILDER_DATA_DIR": "/var/lib/demo"}).data,
             Path("/var/lib/demo"),
         )
         self.assertEqual(server.REPOSITORY_ROOT, Path(server.os.environ.get("DEBBUILDER_REPO_ROOT", "/var/www/html")))
@@ -49,7 +51,7 @@ class AuthTests(unittest.TestCase):
         self.assertTrue(query["nonce"][0])
         self.assertEqual(query["code_challenge_method"], ["S256"])
         session = server.SESSIONS.pop(f"state:{state}")
-        expected = server.base64.urlsafe_b64encode(server.hashlib.sha256(session["code_verifier"].encode()).digest()).rstrip(b"=").decode()
+        expected = base64.urlsafe_b64encode(hashlib.sha256(session["code_verifier"].encode()).digest()).rstrip(b"=").decode()
         self.assertEqual(query["code_challenge"], [expected])
         self.assertEqual(session["return_to"], "/settings")
 

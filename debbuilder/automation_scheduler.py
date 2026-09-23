@@ -217,14 +217,17 @@ class AutomationScheduler:
         self._admission_gate = MutationGate()
         # Durable lifecycle reconciliation is independent from whether new
         # upstream network checks are enabled.
-        self._wake_requested = self.enabled or self.orchestrator is not None
+        self._wake_requested = True
         self._stop_requested = False
         self._pass_active = False
         self._pass_inventory_ready = False
+        self._automation_checks_allowed = False
         self._pass_recipes: set[str] = set()
         self._accept_followup = False
         self._inflight: set[str] = set()
+        self._observation_only: set[str] = set()
         self._requested_recipes: set[str] = set()
+        self._requested_observations: set[str] = set()
         self._observations: dict[str, dict] = {}
         self._futures = set()
         self._thread: threading.Thread | None = None
@@ -255,7 +258,7 @@ class AutomationScheduler:
 
     def request(self) -> bool:
         with self._condition:
-            if self._stop_requested or not self.enabled:
+            if self._stop_requested:
                 return False
             if self._pass_active and not self._accept_followup:
                 return False
@@ -293,11 +296,14 @@ class AutomationScheduler:
             # Every pass evaluates the full eligible Recipe set. Once its
             # inventory is known, a matching target converges with that pass.
             # Before then, the pass has not taken its Recipe snapshot yet.
+            observation_inflight = recipe_id in self._inflight and recipe_id in self._observation_only
             existing = (
-                recipe_id in self._inflight
+                (recipe_id in self._inflight and not observation_inflight)
                 or recipe_id in self._requested_recipes
                 or (self._pass_active and self._pass_inventory_ready and recipe_id in self._pass_recipes)
             )
+            if observation_inflight:
+                existing = False
             if not existing:
                 if len(self._requested_recipes) >= MAX_RECIPES:
                     raise AutomationSchedulerError(
@@ -308,6 +314,33 @@ class AutomationScheduler:
                         "automation_scheduler_busy", "Automation scheduler cannot accept another check yet",
                     )
                 self._requested_recipes.add(recipe_id)
+                if not self._pass_active:
+                    self._wake_requested = True
+                self._condition.notify_all()
+            self._requested_observations.discard(recipe_id)
+            self._observation_only.discard(recipe_id)
+            return {"accepted": True, "created": not existing, "recipe_id": recipe_id}
+
+    def request_observation(self, recipe_id: str) -> dict:
+        """Queue one valid Recipe for advisory observation regardless of Automation policy."""
+        require_safe_name(recipe_id, "Recipe ID")
+        with self._condition:
+            if self._stop_requested or not self._running or not self._admission_gate.accepting:
+                raise AutomationSchedulerError(
+                    "automation_scheduler_unavailable", "Observation scheduler is unavailable",
+                )
+            existing = (
+                recipe_id in self._inflight
+                or recipe_id in self._requested_recipes
+                or (self._pass_active and self._pass_inventory_ready and recipe_id in self._pass_recipes)
+            )
+            if not existing:
+                if len(self._requested_recipes) >= MAX_RECIPES:
+                    raise AutomationSchedulerError(
+                        "automation_recipe_capacity", "Observation Recipe request capacity is exhausted",
+                    )
+                self._requested_recipes.add(recipe_id)
+                self._requested_observations.add(recipe_id)
                 if not self._pass_active:
                     self._wake_requested = True
                 self._condition.notify_all()
@@ -328,6 +361,7 @@ class AutomationScheduler:
             self._stop_requested = True
             self._wake_requested = False
             self._requested_recipes.clear()
+            self._requested_observations.clear()
             for future in tuple(self._futures):
                 future.cancel()
             self._condition.notify_all()
@@ -374,6 +408,7 @@ class AutomationScheduler:
                     yield
 
     def _eligible(self, retry_rows: dict) -> list[str]:
+        """Return every valid observable Recipe; Automation policy is evaluated later."""
         paths = sorted(self.recipe_directory.glob("*.json"))
         if len(paths) > MAX_RECIPES:
             raise AutomationSchedulerError("automation_recipe_capacity", "Automation Recipe inventory exceeds its bound")
@@ -381,20 +416,22 @@ class AutomationScheduler:
         now = self.wall_clock()
         for path in paths:
             recipe_id = path.stem
-            if recipe_id == BUILTIN_RECIPE_ID:
-                continue
             try:
-                recipe = validate_recipe_metadata(recipe_store.load_recipe(path, write_back=False))
+                recipe = validate_recipe_metadata(recipe_store.load_recipe(path))
             except (OSError, TypeError, ValueError, recipe_store.RecipeStoreError):
                 continue
-            automation = recipe["automation"]
-            if recipe.get("name") != recipe_id or not recipe["active"] or not automation["enabled"] or automation["policy"] == "manual":
+            if recipe.get("name") != recipe_id:
                 continue
+            automation = recipe["automation"]
+            automation_eligible = bool(
+                self.enabled and recipe_id != BUILTIN_RECIPE_ID and recipe["active"]
+                and automation["enabled"] and automation["policy"] != "manual"
+            )
             retry = retry_rows.get(recipe_id)
-            if retry and retry["recipe_sha256"] == canonical_recipe_sha256(recipe) and retry.get("not_before"):
+            if automation_eligible and retry and retry["recipe_sha256"] == canonical_recipe_sha256(recipe) and retry.get("not_before"):
                 remaining = datetime.fromisoformat(retry["not_before"]).timestamp() - now
                 if 0 < remaining <= MAX_BACKOFF_SECONDS:
-                    continue
+                    self._observation_only.add(recipe_id)
             eligible.append(recipe_id)
         return eligible
 
@@ -411,8 +448,15 @@ class AutomationScheduler:
         try:
             if self._stop_requested:
                 return self._failure_result(recipe_id, "automation_shutting_down")
-            return self.detection_service.check(
-                recipe_id, token=self.token_provider(), mutation_lease=self._mutation_lease,
+            with self._condition:
+                observation_only = recipe_id in self._observation_only
+                automation_checks_allowed = self._automation_checks_allowed
+            return self.detection_service.check_scheduled(
+                recipe_id,
+                automation_enabled=(
+                    automation_checks_allowed and self.admission_open() and not observation_only
+                ),
+                token=self.token_provider(), mutation_lease=self._mutation_lease,
             )
         except Exception as exc:
             LOGGER.error("Automatic upstream detection failed for Recipe %s (%s)", recipe_id, type(exc).__name__)
@@ -455,9 +499,13 @@ class AutomationScheduler:
                 "display_version": str(result.get("display_version") or "")[:200],
                 "display_ref": str(result.get("display_ref") or "")[:200],
             }
+        if result.get("classification") == "observed":
+            return
         if result.get("identity") is not None:
             with self._mutation_lease():
                 self.retry_store.clear(recipe_id)
+            return
+        if result.get("automation_eligible") is False:
             return
         if classification == "shutting_down" or result.get("diagnostic") == "automation_shutting_down":
             return
@@ -494,45 +542,54 @@ class AutomationScheduler:
                 return []
             self._pass_active = True
             self._pass_inventory_ready = False
+            self._automation_checks_allowed = False
             self._pass_recipes.clear()
+            self._observation_only.clear()
             self._accept_followup = _accept_followup
             self._last_started = _utc_now(self.wall_clock)
         results = []
         LOGGER.info("Automation detection pass started")
         try:
-            if not self.admission_open():
-                with self._condition:
-                    self._blocker = {"code": "automation_admission_blocked"}
-                return []
+            automation_state_safe = True
             if self.orchestrator is not None:
                 try:
                     self.orchestrator.advance_all()
                 except AutomationLedgerError as exc:
+                    automation_state_safe = False
                     with self._condition:
                         self._blocker = {"code": exc.code}
-                    return []
-            if not self.enabled:
-                return []
             try:
                 ledger = self.ledger.read()
                 state = self.retry_store.read()
             except (AutomationLedgerError, AutomationSchedulerError) as exc:
+                automation_state_safe = False
                 with self._condition:
                     self._blocker = {"code": getattr(exc, "code", "automation_state_unavailable")}
-                return []
+                ledger = {"attempts": {}}
+                state = {"recipes": {}}
+            else:
+                if automation_state_safe:
+                    with self._condition:
+                        self._blocker = None
             if len(ledger["attempts"]) >= self.ledger.max_attempts:
+                automation_state_safe = False
                 with self._condition:
                     self._blocker = {"code": "automation_ledger_capacity_exhausted"}
-                return []
             with self._condition:
-                self._blocker = None
+                self._automation_checks_allowed = bool(
+                    automation_state_safe and self.enabled and self.admission_open()
+                )
             recipe_ids = self._eligible(state["recipes"])
             with self._condition:
                 self._pass_recipes = set(recipe_ids)
                 self._pass_inventory_ready = True
                 requested = set(self._requested_recipes)
                 satisfied = requested.intersection(recipe_ids)
+                self._observation_only.update(self._requested_observations.intersection(satisfied))
                 self._requested_recipes.difference_update(
+                    requested if not self._accept_followup else satisfied
+                )
+                self._requested_observations.difference_update(
                     requested if not self._accept_followup else satisfied
                 )
             recipe_ids.sort(key=lambda recipe_id: (recipe_id not in requested, recipe_id))
@@ -568,7 +625,7 @@ class AutomationScheduler:
                         )
                     try:
                         self._record_outcome(result, state["recipes"].get(result["recipe_id"]))
-                        if self.orchestrator is not None:
+                        if self.orchestrator is not None and result.get("automation_eligible"):
                             self.orchestrator.on_detection(result)
                     except (AutomationSchedulerError, MutationGateClosed):
                         if not self._stop_requested:
@@ -599,7 +656,9 @@ class AutomationScheduler:
                 self._last_finished = _utc_now(self.wall_clock)
                 self._pass_active = False
                 self._pass_inventory_ready = False
+                self._automation_checks_allowed = False
                 self._pass_recipes.clear()
+                self._observation_only.clear()
                 self._condition.notify_all()
 
     def _next_retry_delay(self) -> float | None:
@@ -614,7 +673,15 @@ class AutomationScheduler:
                 for row in rows if row.get("not_before")
             )
         if self.orchestrator is not None:
-            orchestration_delay = self.orchestrator.next_retry_delay()
+            try:
+                orchestration_delay = self.orchestrator.next_retry_delay()
+            except AutomationLedgerError as exc:
+                # A corrupt/unavailable Automation ledger must fail Automation
+                # closed without terminating the independent periodic
+                # observation lifecycle.
+                with self._condition:
+                    self._blocker = {"code": exc.code}
+                orchestration_delay = None
             if orchestration_delay is not None:
                 delays.append(min(MAX_BACKOFF_SECONDS, max(0.0, orchestration_delay)))
         if not delays:

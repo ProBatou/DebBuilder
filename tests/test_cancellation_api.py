@@ -1,3 +1,5 @@
+from tests.lifecycle_helpers import active_cancellation_control
+from tests.lifecycle_helpers import stop_partial_manager
 import json
 import shlex
 import sys
@@ -16,7 +18,7 @@ from tests.admin_api_case import AdminApiCase
 
 def recipe(name: str) -> dict:
     return {
-        "schema_version": 1,
+        "schema_version": 5,
         "name": name,
         "active": True,
         "package": {
@@ -36,7 +38,7 @@ def recipe(name: str) -> dict:
 
 class CancellationApiTests(AdminApiCase):
     def replace_manager(self, execute):
-        server.stop_execution_manager(self.httpd, timeout=5)
+        stop_partial_manager(self.httpd, timeout=5)
         manager = server.create_execution_manager(
             store=BuildStore(server.DATA / "builds"), execute=execute,
         )
@@ -282,7 +284,7 @@ class CancellationApiTests(AdminApiCase):
         run = self.create_run("concurrent-cancel")
         manager.submit(run["id"])
         self.assertTrue(entered.wait(2))
-        control = manager.active_cancellation_control
+        control = active_cancellation_control(manager)
 
         def cancel(_index):
             return self.request("POST", f"/api/executions/{run['id']}/cancel", {})
@@ -392,8 +394,9 @@ class CancellationApiTests(AdminApiCase):
             status, response = self.error_response(f"/api/executions/{run['id']}/cancel", {})
             self.assertEqual(status, 409)
             self.assertEqual(response["error"]["code"], "execution_not_cancellable")
-            self.assertEqual(response["error"]["details"]["status"], "running")
-            self.assertFalse(manager.active_cancellation_control.event.is_set())
+            self.assertNotIn("details", response["error"])
+            self.assertIn("status running", response["error"]["message"])
+            self.assertFalse(active_cancellation_control(manager).event.is_set())
         finally:
             release.set()
         self.assertTrue(finished.wait(2))
@@ -450,18 +453,20 @@ class CancellationApiTests(AdminApiCase):
                 status, response = self.error_response(f"/api/executions/{run['id']}/cancel", {})
                 self.assertEqual(status, 409)
                 self.assertEqual(response["error"]["code"], "execution_not_cancellable")
-                self.assertEqual(response["error"]["details"]["status"], terminal)
+                self.assertNotIn("details", response["error"])
+                self.assertIn(f"status {terminal}", response["error"]["message"])
 
         pending = self.create_run("pending-not-owned")
         status, response = self.error_response(f"/api/executions/{pending['id']}/cancel", {})
         self.assertEqual(status, 409)
-        self.assertEqual(response["error"]["details"]["status"], "pending")
+        self.assertNotIn("details", response["error"])
+        self.assertIn("status pending", response["error"]["message"])
         status, response = self.error_response("/api/executions/missing-run/cancel", {})
         self.assertEqual((status, response["error"]["code"]), (404, "build_run_not_found"))
         status, response = self.error_response("/api/executions/..%2Funsafe/cancel", {})
         self.assertEqual((status, response["error"]["code"]), (400, "invalid_execution_id"))
 
-        server.stop_execution_manager(self.httpd, timeout=5)
+        stop_partial_manager(self.httpd, timeout=5)
         status, response = self.error_response(f"/api/executions/{pending['id']}/cancel", {})
         self.assertEqual((status, response["error"]["code"]), (503, "execution_manager_unavailable"))
 

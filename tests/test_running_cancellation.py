@@ -10,15 +10,17 @@ from pathlib import Path
 from unittest import mock
 
 from debbuilder import automation_service, build_pipeline, deb_inspector, debian_packaging, dependency_checker, upstream_artifact
+from debbuilder.automation_identity import release_asset_identity
 from debbuilder.build_store import BuildStore
 from debbuilder.execution_cancellation import SERVER_SHUTDOWN, CancellationControl, ExecutionCancelled
 from debbuilder.execution_manager import ExecutionManager
-from debbuilder.recipe_schema import validate_recipe_metadata
+from debbuilder.recipe_schema import runtime_recipe_for_storage, validate_recipe_metadata
 from debbuilder.workspace_cleanup import _require_unused_workspace
 
 
 def source_recipe(name="cancel-build", *, commands=None):
     return {
+        "schema_version": 5,
         "name": name,
         "active": True,
         "package": {
@@ -27,7 +29,7 @@ def source_recipe(name="cancel-build", *, commands=None):
             "maintainer": "Demo <demo@example.test>",
             "description": "Cancellation test package",
         },
-        "source": {"repository": f"owner/{name}"},
+        "source": {"repository": f"owner/{name}", "tracking": "manual", "ref": "v1"},
         "build": {
             "commands": commands or [],
             "output": {"mode": "source"},
@@ -39,6 +41,7 @@ def source_recipe(name="cancel-build", *, commands=None):
 
 def upstream_deb_recipe():
     return validate_recipe_metadata({
+        "schema_version": 5,
         "name": "upstream-cancel",
         "package": {"name": "upstream-cancel", "architecture": "amd64"},
         "source": {"repository": "owner/upstream-cancel", "tracking": "latest_release"},
@@ -48,6 +51,7 @@ def upstream_deb_recipe():
 
 def upstream_archive_recipe():
     return validate_recipe_metadata({
+        "schema_version": 5,
         "name": "archive-cancel",
         "package": {
             "name": "archive-cancel", "architecture": "all",
@@ -56,7 +60,9 @@ def upstream_archive_recipe():
         "source": {"repository": "owner/archive-cancel", "tracking": "latest_release"},
         "artifact": {
             "mode": "upstream_archive", "type": "archive", "architecture": "amd64",
-            "asset_name": "archive.tar.gz", "selected_files": ["app"],
+            "archive_source": "release_asset", "asset_selection": "exact",
+            "asset_name": "archive.tar.gz",
+            "payload": {"mode": "paths", "include": ["app"], "exclude": []},
         },
         "build": {"commands": [], "source_changes": [], "output": {"mode": "source"}},
         "install": {
@@ -73,11 +79,15 @@ def upstream_archive_recipe():
 def upstream_release():
     return {
         "repository": "owner/upstream-cancel",
+        "release_id": 101,
         "tag": "v1.0.0",
         "ref": "v1.0.0",
         "url": "https://example.test/release",
         "upstream_version": "1.0.0",
-        "assets": [{"name": "upstream-cancel_1.0.0_amd64.deb", "url": "https://example.test/demo.deb"}],
+        "assets": [{
+            "asset_id": 202, "name": "upstream-cancel_1.0.0_amd64.deb",
+            "url": "https://example.test/demo.deb", "size": 3,
+        }],
     }
 
 
@@ -143,7 +153,7 @@ class RunningCancellationTests(unittest.TestCase):
             os.killpg(pids[0], 0)
 
     @staticmethod
-    def acquire_source(_recipe, workspace, token=""):
+    def acquire_source(_recipe, workspace, token="", expected_identity=None):
         source = Path(workspace) / "source"
         (source / "package.json").write_text("{}")
         return {
@@ -381,7 +391,9 @@ class RunningCancellationTests(unittest.TestCase):
         control = CancellationControl()
         control.request_cancel()
         acquire = mock.Mock()
-        run = build_pipeline.create_pipeline_run(upstream_archive_recipe(), store=self.store, dry_run=False)
+        run = build_pipeline.create_pipeline_run(
+            runtime_recipe_for_storage(upstream_archive_recipe()), store=self.store, dry_run=False,
+        )
 
         result = build_pipeline.execute_pipeline_run(
             run["id"], store=self.store, cancellation_control=control, acquire=acquire,
@@ -416,17 +428,24 @@ class RunningCancellationTests(unittest.TestCase):
             release_boundary.wait(3)
             return original_claim()
 
-        def acquire(_recipe, workspace, token=""):
+        configured = runtime_recipe_for_storage(upstream_deb_recipe())
+        release = upstream_release()
+        expected = release_asset_identity(configured, release, release["assets"][0], "deb")
+
+        def acquire(_recipe, workspace, token="", expected_identity=None, cancellation_event=None, on_cancel=None):
             artifact = Path(workspace) / "artifacts/upstream-cancel_1.0.0_amd64.deb"
             artifact.write_bytes(b"deb")
             return {
                 "path": str(artifact), "name": artifact.name, "size": 3,
                 "sha256": "a" * 64, "source": "upstream_release",
-                "release_asset": upstream_release()["assets"][0],
+                "release_asset": release["assets"][0], "upstream_identity": expected_identity,
                 "inspection": {"ok": True, "package": "upstream-cancel", "version": "1.0.0", "architecture": "amd64"},
             }
 
-        run = build_pipeline.create_pipeline_run(upstream_deb_recipe(), store=self.store, dry_run=dry_run)
+        run = build_pipeline.create_pipeline_run(
+            configured, store=self.store, dry_run=dry_run,
+            manual_source_provenance=expected,
+        )
         results = []
         errors = []
 
@@ -498,7 +517,7 @@ class RunningCancellationTests(unittest.TestCase):
             release_boundary.wait(3)
             return original_claim()
 
-        def acquire(_recipe, workspace, token=""):
+        def acquire(_recipe, workspace, token="", expected_identity=None, cancellation_event=None, on_cancel=None):
             source = Path(workspace) / "source"
             (source / "index.html").write_text("ok")
             return {

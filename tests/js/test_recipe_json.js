@@ -43,7 +43,7 @@ assert.equal(nodes.btnValidateRecipeJson.hidden, false);
 
 const tools = context.window.recipeJsonTools;
 const recipe = {
-  schema_version: 1,
+  schema_version: 5,
   name: 'typed-demo',
   active: false,
   package: {name: 'typed-demo', version_revision: '1+b1', description: 'Typed demo\nLong description: café & <safe>', runtime_dependencies: []},

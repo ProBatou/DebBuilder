@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import secrets
 import shutil
 import stat
 import time
@@ -24,7 +23,7 @@ from .dependency_preparation import (
 from .execution_cancellation import ExecutionCancelled
 from .recipe_schema import require_safe_name, validate_recipe_metadata
 from .repository_lock import RepositoryLockError, repository_lease, safe_relative_path
-from .validation_backend import BackendError, OciSystemdBackend, OwnedOciSystemdBackend
+from .validation_backend import BackendError, OwnedOciSystemdBackend
 from .validation_contracts import MAX_PACKAGES, ValidationContractError, normalize_prepared_runtime_dependencies
 from .validation_profiles import node_satisfies, python_satisfies, resolve_profile
 
@@ -67,30 +66,6 @@ def _container_artifact(workspace: Path, artifact: Path) -> str:
     except ValueError as exc:
         raise ValidationError("artifact_outside_workspace", "Artifact must be inside the selected Build Run workspace") from exc
     return "/validation/" + relative.as_posix()
-
-
-def snapshot_previous_for_preparation(
-    run_id: str,
-    previous_artifact: str,
-    *,
-    store: BuildStore,
-    attempt_id: str,
-    allowed_previous_roots: tuple[str | Path, ...] = (),
-) -> Path:
-    """Confine and snapshot a previous artifact before networked preparation."""
-    require_safe_name(attempt_id, "validation attempt id")
-    with store.locked_run(run_id):
-        run = store.load(run_id)
-        if not run:
-            raise ValidationError("build_run_not_found", "Build Run was not found")
-        return snapshot_previous_for_preparation_locked(
-            run_id,
-            previous_artifact,
-            store=store,
-            run=run,
-            attempt_id=attempt_id,
-            allowed_previous_roots=allowed_previous_roots,
-        )
 
 
 def snapshot_previous_for_preparation_locked(
@@ -447,24 +422,21 @@ def _config_paths(run: dict) -> list[str]:
     return [row["destination"] for row in staging.get("configurations", []) if row.get("destination")]
 
 
-def _runtime_dependency_specs(artifact_data: dict, recipe: dict) -> list[dict]:
-    """Return runtime packages from the final Debian control metadata.
-
-    Project detection describes the source build environment. It is not a
-    declaration about what the installed artifact needs. The inspected
-    ``Depends`` field is authoritative; the Recipe is a compatibility fallback
-    for historical runs that predate inspection data.
-    """
-    inspection = artifact_data.get("inspection") if isinstance(artifact_data.get("inspection"), dict) else {}
-    depends = inspection.get("depends")
-    if depends is None:
-        depends = ", ".join(recipe.get("package", {}).get("runtime_dependencies") or [])
+def _runtime_dependency_specs(artifact_data: dict) -> list[dict]:
+    """Return runtime packages from the inspected final Debian control metadata."""
+    inspection = artifact_data.get("inspection")
+    if not isinstance(inspection, dict) or not isinstance(inspection.get("depends"), str):
+        raise ValidationError("artifact_metadata_invalid", "Final artifact dependency inspection is missing or invalid")
+    depends = inspection["depends"]
     specs = []
-    for clause in str(depends or "").split(","):
+    if not depends.strip():
+        return specs
+    for clause in depends.split(","):
         for alternative in clause.split("|"):
-            match = re.match(r"\s*([a-z0-9][a-z0-9+.-]*)(?::[a-z0-9-]+)?(?:\s*\((>=|<=|=|<<|>>)\s*([^)]*)\))?", alternative, re.I)
-            if match:
-                specs.append({"package": match.group(1).lower(), "operator": match.group(2) or "", "version": (match.group(3) or "").strip()})
+            match = re.fullmatch(r"\s*([a-z0-9][a-z0-9+.-]*)(?::[a-z0-9-]+)?(?:\s*\((>=|<=|=|<<|>>)\s*([^)]*?)\s*\))?\s*", alternative, re.I)
+            if not match or (match.group(2) and not (match.group(3) or "").strip()):
+                raise ValidationError("artifact_metadata_invalid", "Final artifact dependency inspection is malformed")
+            specs.append({"package": match.group(1).lower(), "operator": match.group(2) or "", "version": (match.group(3) or "").strip()})
     return specs
 
 
@@ -515,9 +487,9 @@ def validate_artifact(
     backend_factory=None,
     profile: str = "bookworm",
     allowed_previous_roots: tuple[str | Path, ...] = (),
-    prepared_dependencies: dict | None = None,
-    attempt_id: str = "",
-    registry_root: str | Path | None = None,
+    prepared_dependencies: dict,
+    attempt_id: str,
+    registry_root: str | Path,
     cancellation_event=None,
     runner=run_command,
 ) -> dict:
@@ -559,9 +531,9 @@ def _validate_artifact_locked(
     backend_factory=None,
     profile: str = "bookworm",
     allowed_previous_roots: tuple[str | Path, ...] = (),
-    prepared_dependencies: dict | None = None,
-    attempt_id: str = "",
-    registry_root: str | Path | None = None,
+    prepared_dependencies: dict,
+    attempt_id: str,
+    registry_root: str | Path,
     cancellation_event=None,
     runner=run_command,
     workspace_fd: int,
@@ -581,7 +553,18 @@ def _validate_artifact_locked(
     artifact = Path(artifact_data["path"]).resolve()
     if not artifact.is_file():
         raise ValidationError("artifact_not_available", "Build Run artifact no longer exists")
-    validation_id = attempt_id or (utc_now().replace(":", "").replace("+", "-").replace(".", "-") + "-" + secrets.token_hex(2))
+    runtime_specs = _runtime_dependency_specs(artifact_data)
+    if not isinstance(prepared_dependencies, dict):
+        raise ValidationError(
+            "prepared_dependencies_required",
+            "Canonical prepared dependency evidence is required for lifecycle validation",
+        )
+    if not attempt_id or registry_root is None:
+        raise ValidationError(
+            "prepared_bundle_mismatch",
+            "Prepared lifecycle requires an attempt identity and OCI registry",
+        )
+    validation_id = attempt_id
     require_safe_name(validation_id, "validation attempt id")
     validation_dir = workspace / "validation" / validation_id
     commands_dir = validation_dir / "commands"
@@ -604,7 +587,11 @@ def _validate_artifact_locked(
     result = {
         "id": validation_id, "build_run_id": run_id, "artifact": str(artifact), "previous_artifact": "",
         "status": "running", "started_at": utc_now(), "finished_at": None, "duration": None,
-        "backend": {}, "profile": selected_profile, "checks": [], "commands": commands, "error": None,
+        "backend": {
+            "network": "unverified", "network_verified": False,
+            "stop": {"status": "success", "absence_proved": True},
+        },
+        "profile": selected_profile, "checks": [], "commands": commands, "error": None,
     }
     checks = result["checks"]
     snapshot_recipe = validate_recipe_metadata(json.loads((workspace / "recipe.json").read_text()))
@@ -655,152 +642,119 @@ def _validate_artifact_locked(
         previous_copy.chmod(0o400)
         previous_container = "/validation/" + previous_copy.relative_to(workspace).as_posix()
         result["previous_artifact"] = str(previous)
-    bundle = None
-    if prepared_dependencies is not None:
-        if not attempt_id or registry_root is None:
-            raise ValidationError("prepared_bundle_mismatch", "Prepared lifecycle requires an attempt identity and OCI registry")
-        try:
-            bundle = _prepare_lifecycle_inputs(
-                workspace=workspace,
-                validation_dir=validation_dir,
-                attempt_id=attempt_id,
-                current_artifact=artifact,
-                previous_artifact=previous_copy if previous_container else None,
-                prepared_dependencies=prepared_dependencies,
-                selected_profile=selected_profile,
-                runner=runner,
-                cancellation_event=cancellation_event,
-            )
-        except ExecutionCancelled:
-            result["status"] = "cancelled"
-            result["error"] = {
-                "code": "validation_lifecycle_cancelled",
-                "message": "Offline lifecycle validation was cancelled",
-                "details": {},
-            }
-            result["finished_at"] = utc_now()
-            result["duration"] = round(time.monotonic() - started, 6)
-            artifact_validation_state = {
-                "id": validation_id,
-                "status": result["status"],
-                "started_at": result["started_at"],
-                "finished_at": result["finished_at"],
-                "previous_artifact": result["previous_artifact"],
-            }
-            run.setdefault("validations", []).append(result)
-            run["artifact"].setdefault("validations", []).append(artifact_validation_state)
-            store.append_event(run, f"Artifact validation {validation_id}: cancelled", level="info")
-            store.save(run)
-            return result
-        container_artifact = bundle["current_artifact"]
-        previous_container = bundle["previous_artifact"]
-        factory = backend_factory or (lambda **kwargs: OwnedOciSystemdBackend(**kwargs))
-        backend = factory(
+    try:
+        bundle = _prepare_lifecycle_inputs(
             workspace=workspace,
-            image=selected_profile["image"],
-            on_result=command_completed,
-            run_id=run_id,
+            validation_dir=validation_dir,
             attempt_id=attempt_id,
-            registry_root=registry_root,
-            resource_policy=run["resource_limits"]["effective"],
-            mounts=bundle["mounts"],
-            expected_image=bundle["prepared"]["image"],
-            cancellation_event=cancellation_event,
+            current_artifact=artifact,
+            previous_artifact=previous_copy if previous_container else None,
+            prepared_dependencies=prepared_dependencies,
+            selected_profile=selected_profile,
             runner=runner,
+            cancellation_event=cancellation_event,
         )
-    else:
-        factory = backend_factory or (lambda **kwargs: OciSystemdBackend(**kwargs))
-        backend = factory(workspace=workspace, image=selected_profile["image"], on_result=command_completed)
+    except ExecutionCancelled:
+        result["status"] = "cancelled"
+        result["error"] = {
+            "code": "validation_lifecycle_cancelled",
+            "message": "Offline lifecycle validation was cancelled",
+            "details": {},
+        }
+        result["finished_at"] = utc_now()
+        result["duration"] = round(time.monotonic() - started, 6)
+        store.append_event(run, f"Artifact validation {validation_id}: cancelled", level="info")
+        return result
+    container_artifact = bundle["current_artifact"]
+    previous_container = bundle["previous_artifact"]
+    factory = backend_factory or (lambda **kwargs: OwnedOciSystemdBackend(**kwargs))
+    backend = factory(
+        workspace=workspace,
+        image=selected_profile["image"],
+        on_result=command_completed,
+        run_id=run_id,
+        attempt_id=attempt_id,
+        registry_root=registry_root,
+        resource_policy=run["resource_limits"]["effective"],
+        mounts=bundle["mounts"],
+        expected_image=bundle["prepared"]["image"],
+        cancellation_event=cancellation_event,
+        runner=runner,
+    )
     recipe = snapshot_recipe
     package = recipe["package"]["name"]
     configs = artifact_data.get("inspection", {}).get("conffiles", []) if upstream_mode else _config_paths(run)
     config_policies = {row["destination"]: row["policy"] for row in recipe["install"]["config_files"]} if not upstream_mode else {}
     marker = f"debbuilder-validation-{validation_id}"
     installed = False
-    artifact_validation_state = {
-        "id": validation_id, "status": "running", "started_at": result["started_at"],
-        "finished_at": None, "previous_artifact": result["previous_artifact"],
-    }
-    run.setdefault("validations", []).append(result)
-    run["artifact"].setdefault("validations", []).append(artifact_validation_state)
-    store.save(run)
     try:
         result["backend"] = backend.start(validation_id)
         result["backend"]["profile"] = selected_profile["name"]
-        if bundle is not None:
-            network_ok = result["backend"].get("network") == "disabled" and result["backend"].get("network_verified") is True
-            _check(checks, "lifecycle_network_disabled", network_ok, details={"proof": "create-time OCI inspection plus in-container interface/route probe"})
-            if not network_ok:
-                raise ValidationError("validation_network_isolation_unverified", "Lifecycle network isolation was not proved before installation")
-            native = backend.exec(["dpkg", "--print-architecture"], accepted_exit_codes={0})
-            architecture_ok = native.get("accepted") and str(native.get("stdout") or "").strip() == bundle["prepared"]["native_architecture"]
-            _check(
-                checks, "lifecycle_architecture",
-                bool(architecture_ok),
-                details={"expected": bundle["prepared"]["native_architecture"], "actual": str(native.get("stdout") or "").strip()},
-            )
-            if not architecture_ok:
-                raise ValidationError("prepared_bundle_mismatch", "Lifecycle native architecture differs from dependency preparation")
-            inventory_before = _installed_inventory(backend)
+        network_ok = result["backend"].get("network") == "disabled" and result["backend"].get("network_verified") is True
+        _check(checks, "lifecycle_network_disabled", network_ok, details={"proof": "create-time OCI inspection plus in-container interface/route probe"})
+        if not network_ok:
+            raise ValidationError("validation_network_isolation_unverified", "Lifecycle network isolation was not proved before installation")
+        native = backend.exec(["dpkg", "--print-architecture"], accepted_exit_codes={0})
+        architecture_ok = native.get("accepted") and str(native.get("stdout") or "").strip() == bundle["prepared"]["native_architecture"]
+        _check(
+            checks, "lifecycle_architecture",
+            bool(architecture_ok),
+            details={"expected": bundle["prepared"]["native_architecture"], "actual": str(native.get("stdout") or "").strip()},
+        )
+        if not architecture_ok:
+            raise ValidationError("prepared_bundle_mismatch", "Lifecycle native architecture differs from dependency preparation")
+        inventory_before = _installed_inventory(backend)
         _execute(backend, ["dpkg-deb", "--info", container_artifact], checks, "debian_metadata")
         _execute(backend, ["dpkg-deb", "--contents", container_artifact], checks, "debian_contents")
         if previous_container:
-            previous_arguments = (
-                _local_apt_arguments(
-                    conffile_option="--force-confnew",
-                    package_paths=[*bundle["phase_paths"]["previous"], previous_container],
-                ) if bundle is not None else
-                ["dpkg", "--force-confnew", "--install", previous_container]
+            previous_arguments = _local_apt_arguments(
+                conffile_option="--force-confnew",
+                package_paths=[*bundle["phase_paths"]["previous"], previous_container],
             )
             previous_install = _execute(backend, previous_arguments, checks, "previous_version_install", timeout=300)
             installed = bool(previous_install.get("accepted"))
             if not installed:
-                dependencies = {row["package"] for row in bundle["prepared"]["packages"] if row["role"] == "previous"} if bundle else set()
+                dependencies = {row["package"] for row in bundle["prepared"]["packages"] if row["role"] == "previous"}
                 _raise_install_failure(previous_install, phase="previous", target_package=package, dependency_packages=dependencies)
-            if bundle is not None:
-                inventory_after_previous = _installed_inventory(backend)
-                allowed_previous = {
-                    (row["package"], row["architecture"])
-                    for row in bundle["prepared"]["packages"] if row["role"] == "previous"
-                }
-                previous_identity = bundle["prepared"]["artifacts"]["previous"]
-                allowed_previous.add((previous_identity["package"], previous_identity["architecture"]))
-                _verify_transaction_boundary(
-                    inventory_before, inventory_after_previous,
-                    allowed=allowed_previous, phase="previous", checks=checks,
-                )
-                _verify_modeled_state(backend, bundle["prepared"], "previous", checks)
-                inventory_before = inventory_after_previous
+            inventory_after_previous = _installed_inventory(backend)
+            allowed_previous = {
+                (row["package"], row["architecture"])
+                for row in bundle["prepared"]["packages"] if row["role"] == "previous"
+            }
+            previous_identity = bundle["prepared"]["artifacts"]["previous"]
+            allowed_previous.add((previous_identity["package"], previous_identity["architecture"]))
+            _verify_transaction_boundary(
+                inventory_before, inventory_after_previous,
+                allowed=allowed_previous, phase="previous", checks=checks,
+            )
+            _verify_modeled_state(backend, bundle["prepared"], "previous", checks)
+            inventory_before = inventory_after_previous
             for path in configs:
                 _execute(backend, ["sh", "-c", 'printf "\\n%s\\n" "$1" >> "$2"', "debbuilder-config-marker", marker, path], checks, f"configuration_modified:{path}")
         conffile_option = "--force-confold" if previous_container else "--force-confnew"
-        install_arguments = (
-            _local_apt_arguments(
-                conffile_option=conffile_option,
-                package_paths=[*bundle["phase_paths"]["current"], container_artifact],
-            ) if bundle is not None else
-            ["dpkg", conffile_option, "--install", container_artifact]
+        install_arguments = _local_apt_arguments(
+            conffile_option=conffile_option,
+            package_paths=[*bundle["phase_paths"]["current"], container_artifact],
         )
         install = _execute(backend, install_arguments, checks, "package_install", timeout=300)
         installed = bool(install.get("accepted"))
-        if bundle is not None and not installed:
+        if not installed:
             dependencies = {row["package"] for row in bundle["prepared"]["packages"] if row["role"] == "current"}
             _raise_install_failure(install, phase="current", target_package=package, dependency_packages=dependencies)
         if installed:
-            if bundle is not None:
-                inventory_after_current = _installed_inventory(backend)
-                allowed_current = {
-                    (row["package"], row["architecture"])
-                    for row in bundle["prepared"]["packages"] if row["role"] == "current"
-                }
-                current_identity = bundle["prepared"]["artifacts"]["current"]
-                allowed_current.add((current_identity["package"], current_identity["architecture"]))
-                _verify_transaction_boundary(
-                    inventory_before, inventory_after_current,
-                    allowed=allowed_current, phase="current", checks=checks,
-                )
-                _verify_modeled_state(backend, bundle["prepared"], "current", checks)
-            _runtime_checks(_runtime_dependency_specs(artifact_data, recipe), backend, checks, selected_profile)
+            inventory_after_current = _installed_inventory(backend)
+            allowed_current = {
+                (row["package"], row["architecture"])
+                for row in bundle["prepared"]["packages"] if row["role"] == "current"
+            }
+            current_identity = bundle["prepared"]["artifacts"]["current"]
+            allowed_current.add((current_identity["package"], current_identity["architecture"]))
+            _verify_transaction_boundary(
+                inventory_before, inventory_after_current,
+                allowed=allowed_current, phase="current", checks=checks,
+            )
+            _verify_modeled_state(backend, bundle["prepared"], "current", checks)
+            _runtime_checks(runtime_specs, backend, checks, selected_profile)
             package_status = backend.exec(["dpkg-query", "--show", "--showformat=${Status}\\n", package], accepted_exit_codes={0})
             status_ok = bool(package_status.get("accepted")) and package_status.get("stdout", "").strip() == "install ok installed"
             _check(checks, "package_status_installed", status_ok, details={"status": package_status.get("stdout", "").strip()}, error=package_status.get("stderr") or "Package is not fully installed")
@@ -908,13 +862,12 @@ def _validate_artifact_locked(
                 result["backend"]["stop"] = stopped
         except BackendError as exc:
             result["status"] = "failed"
-            result["error"] = {"code": exc.code, "message": str(exc), "details": exc.details}
+            result["error"] = {
+                "code": "validation_container_cleanup_unresolved",
+                "message": "Validation container cleanup could not be proved",
+                "details": {"cleanup_code": exc.code},
+            }
         result["finished_at"] = utc_now()
         result["duration"] = round(time.monotonic() - started, 6)
-        artifact_validation_state.update({
-            "status": result["status"], "finished_at": result["finished_at"],
-            "previous_artifact": result["previous_artifact"],
-        })
         store.append_event(run, f"Artifact validation {validation_id}: {result['status']}", level="error" if result["status"] == "failed" else "info")
-        store.save(run)
     return result

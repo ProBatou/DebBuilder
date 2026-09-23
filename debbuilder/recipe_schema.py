@@ -5,11 +5,10 @@ import copy
 import re
 
 from .archive_payload import normalize_archive_payload
-from .recipe_migrations import CURRENT_SCHEMA_VERSION, RecipeMigrationError, migrate_recipe_document
 from .resource_limits import ResourceLimitError, normalize_policy
 from .runtime_apt_repositories import normalize_runtime_apt_repositories
 
-SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
+SCHEMA_VERSION = 5
 SAFE_NAME = re.compile(r"^[a-zA-Z0-9_.+-]+$")
 SAFE_PACKAGE = re.compile(r"^[a-z0-9][a-z0-9+.-]*$")
 SAFE_ARCH = {"all", "amd64", "arm64", "armhf"}
@@ -19,6 +18,7 @@ ARTIFACT_MODES = {"source_build", "upstream_deb", "upstream_archive"}
 ARCHIVE_SOURCES = {"auto", "github_source", "release_asset"}
 ARCHIVE_ASSET_SELECTIONS = {"pattern", "exact"}
 SOURCE_ARCHIVE_FORMATS = {"tar.gz", "zip"}
+VERSION_SOURCES = {"tag", "release_name", "regex"}
 CONFIG_POLICIES = {"dpkg_conffile", "replace", "create_if_missing"}
 SERVICE_TYPES = {"simple", "exec", "forking", "oneshot", "notify", "dbus"}
 RESTART_POLICIES = {"", "no", "always", "on-success", "on-failure", "on-abnormal", "on-abort", "on-watchdog"}
@@ -104,7 +104,7 @@ def normalize_automation_policy(value) -> dict:
 def automation_eligible(recipe: dict) -> bool:
     """Answer future automation eligibility without performing any action."""
     try:
-        canonical = validate_recipe_metadata(recipe)
+        canonical = _validate_runtime_recipe(recipe)
     except (TypeError, ValueError):
         return False
     automation = canonical["automation"]
@@ -292,16 +292,56 @@ def _directories(value) -> list[dict]:
     return normalized
 
 
+def _require_current_schema(workflow: dict) -> None:
+    version = workflow.get("schema_version")
+    if version != SCHEMA_VERSION or isinstance(version, bool):
+        source_version = version if isinstance(version, int) and not isinstance(version, bool) else None
+        raise RecipeDocumentError(
+            "unsupported_recipe_schema",
+            f"Recipe schema_version must be {SCHEMA_VERSION}",
+            path="$.schema_version",
+            source_version=source_version,
+            target_version=SCHEMA_VERSION,
+        )
+
+
+def _reject_removed_recipe_fields(workflow: dict) -> None:
+    """Reject pre-v1 aliases at every current Recipe validation boundary."""
+    removed_fields = (
+        (workflow, "steps", "$.steps"),
+        (workflow.get("build"), "timeout", "$.build.timeout"),
+        (workflow.get("install"), "config_policy", "$.install.config_policy"),
+        (workflow.get("service"), "configured", "$.service.configured"),
+        (workflow.get("artifact"), "selected_files", "$.artifact.selected_files"),
+        (
+            workflow.get("artifact", {}).get("payload") if isinstance(workflow.get("artifact"), dict) else None,
+            "legacy_file_layout",
+            "$.artifact.payload.legacy_file_layout",
+        ),
+    )
+    removed_path = next(
+        (path for parent, field, path in removed_fields if isinstance(parent, dict) and field in parent),
+        None,
+    )
+    if removed_path:
+        raise RecipeDocumentError(
+            "unknown_field",
+            f"Unknown Recipe field: {removed_path}",
+            path=removed_path,
+        )
+
+
 def normalize_recipe(workflow: dict) -> dict:
     """Return a canonical current-schema Recipe with defaults applied."""
     if not isinstance(workflow, dict):
         raise ValueError("workflow must be an object")
+    _require_current_schema(workflow)
+    _reject_removed_recipe_fields(workflow)
     if "resource_limits" in workflow and not isinstance(workflow["resource_limits"], dict):
         raise ResourceLimitError(
             "invalid_resource_limits", "Resource limits must be an object",
             path="$.resource_limits",
         )
-    workflow = migrate_recipe_document(workflow).document
     package_in = _dict(workflow.get("package"), "package")
     source_in = _dict(workflow.get("source"), "source")
     build_in = _dict(workflow.get("build"), "build")
@@ -482,8 +522,12 @@ def validate_recipe_metadata(workflow: dict) -> dict:
         ref = source["ref"]
         if not ref or len(ref) > 200 or any(character.isspace() for character in ref):
             raise ValueError("source.ref is required for explicit tag or manual tracking")
-    if source["version"]["source"] not in {"tag", "release_name", "regex", "build"}:
-        raise ValueError("unsupported GitHub version source")
+    if source["version"]["source"] not in VERSION_SOURCES:
+        raise RecipeDocumentError(
+            "unsupported_version_source",
+            "source.version.source must be one of: release_name, regex, tag",
+            path="$.source.version.source",
+        )
     expression = source["version"]["expression"]
     if source["version"]["source"] == "regex":
         if not expression or len(expression) > 200:
@@ -525,7 +569,7 @@ def validate_recipe_metadata(workflow: dict) -> dict:
             raise ValueError("release asset fields are only valid with release_asset archive source")
         if artifact["payload"]["mode"] == "paths" and not artifact["payload"]["include"]:
             raise ValueError("paths archive payload requires at least one included path")
-    elif artifact["payload"]["mode"] != "paths" or artifact["payload"]["include"] or artifact["payload"]["exclude"] or artifact["payload"]["legacy_file_layout"]:
+    elif artifact["payload"]["mode"] != "paths" or artifact["payload"]["include"] or artifact["payload"]["exclude"]:
         raise ValueError("artifact.payload is only configurable for upstream_archive")
     if not isinstance(artifact["match_package"], bool) or not isinstance(artifact["match_version"], bool):
         raise ValueError("artifact matching flags must be booleans")
@@ -616,17 +660,42 @@ def validate_recipe_metadata(workflow: dict) -> dict:
     return recipe
 
 
-def recipe_for_storage(workflow: dict) -> dict:
-    """Return the compact canonical persisted Recipe."""
-    recipe = validate_recipe_metadata(workflow)
+def _compact_recipe(recipe: dict) -> dict:
+    """Compact a newly validated runtime Recipe into its persisted shape."""
     if recipe["build"]["output"]["mode"] != "path":
         recipe["build"]["output"].pop("path", None)
     if recipe["artifact"]["mode"] != "upstream_archive":
         recipe["artifact"].pop("payload", None)
-    elif not recipe["artifact"]["payload"]["legacy_file_layout"]:
-        recipe["artifact"]["payload"].pop("legacy_file_layout")
     recipe["service"].pop("configured", None)
     return recipe
+
+
+def _validate_runtime_recipe(workflow: dict) -> dict:
+    """Revalidate an internal Recipe while allowing its exact derived service flag."""
+    document = copy.deepcopy(workflow)
+    service = document.get("service") if isinstance(document, dict) else None
+    configured = service.pop("configured") if isinstance(service, dict) and "configured" in service else None
+    had_configured = isinstance(service, dict) and isinstance(workflow.get("service"), dict) and "configured" in workflow["service"]
+    recipe = validate_recipe_metadata(document)
+    if had_configured and (
+        not isinstance(configured, bool) or configured != recipe["service"]["configured"]
+    ):
+        raise RecipeDocumentError(
+            "invalid_recipe",
+            "Internal service.configured value does not match the derived v5 service state",
+            path="$.service.configured",
+        )
+    return recipe
+
+
+def recipe_for_storage(workflow: dict) -> dict:
+    """Validate authored v5 input and return the compact persisted Recipe."""
+    return _compact_recipe(validate_recipe_metadata(workflow))
+
+
+def runtime_recipe_for_storage(workflow: dict) -> dict:
+    """Compact a validated internal Recipe whose service flag is derived."""
+    return _compact_recipe(_validate_runtime_recipe(workflow))
 
 
 def _find_unknown_field(value, canonical, path: str = "$") -> str | None:
@@ -659,16 +728,8 @@ def recipe_document_for_storage(workflow) -> dict:
     if "name" not in workflow or not isinstance(workflow.get("name"), str) or not workflow["name"].strip():
         raise RecipeDocumentError("missing_id", "Recipe JSON must contain a non-empty string name", path="$.name")
     try:
-        migrated = migrate_recipe_document(workflow).document
-        normalized = validate_recipe_metadata(migrated)
-    except RecipeMigrationError as exc:
-        raise RecipeDocumentError(
-            exc.code,
-            str(exc),
-            path=exc.path,
-            source_version=exc.source_version,
-            target_version=exc.target_version,
-        ) from exc
+        _require_current_schema(workflow)
+        normalized = validate_recipe_metadata(workflow)
     except RecipeDocumentError:
         raise
     except ResourceLimitError as exc:
@@ -686,10 +747,10 @@ def recipe_document_for_storage(workflow) -> dict:
         raise RecipeDocumentError(code, str(exc), path=path) from exc
     except (TypeError, re.error) as exc:
         raise RecipeDocumentError("invalid_recipe", str(exc)) from exc
-    unknown = _find_unknown_field(migrated, normalized)
+    unknown = _find_unknown_field(workflow, normalized)
     if unknown:
         raise RecipeDocumentError("unknown_field", f"Unknown Recipe field: {unknown}", path=unknown)
-    return recipe_for_storage(normalized)
+    return _compact_recipe(normalized)
 
 
 def normalize_github_version(value: str) -> str:

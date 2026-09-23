@@ -25,6 +25,9 @@ class StaticUiTests(unittest.TestCase):
     def styles(self):
         return "\n".join(self.read(path) for path in self.STYLESHEETS)
 
+    def assert_versioned_asset(self, html, path):
+        self.assertRegex(html, rf'{re.escape(path)}\?v=[0-9]+(?:-[0-9]+)*')
+
     def test_package_actions_expose_canonical_validation_and_publication_endpoints(self):
         admin = self.admin_scripts()
         self.assertIn('data-admin-action="validate-package"', admin)
@@ -175,6 +178,23 @@ class StaticUiTests(unittest.TestCase):
         self.assertIn("assertRecipeVersionRevisionIsValid", app)
         self.assertIn("'recipePackageVersionRevision'", app)
 
+    def test_recipe_ui_only_offers_supported_version_sources(self):
+        html = self.read("static/index.html")
+        serialization = self.read("static/recipe_serialization.js")
+        packages = self.read("static/js/pages/packages.js")
+        for source, label in (
+            ("tag", "From GitHub tag"),
+            ("release_name", "From release name"),
+            ("regex", "Custom expression"),
+        ):
+            self.assertEqual(html.count(f'<option value="{source}">{label}</option>'), 2)
+        self.assertNotIn("Provided by build", html)
+        version_selects = re.findall(r'<select id="(?:recipeMeta|newRecipe)VersionSource">(.*?)</select>', html)
+        self.assertEqual(len(version_selects), 2)
+        self.assertTrue(all('<option value="build">' not in select for select in version_selects))
+        self.assertIn("canonicalRecipeVersionSource($('recipeMetaVersionSource')?.value)", serialization)
+        self.assertIn("canonicalRecipeVersionSource($('newRecipeVersionSource').value)", packages)
+
     @unittest.skipUnless(shutil.which("node"), "node unavailable")
     def test_recipe_serialization_keeps_placeholders_out_of_persistent_directories(self):
         subprocess.run(
@@ -300,7 +320,7 @@ class StaticUiTests(unittest.TestCase):
         app = (ROOT / "static" / "app.js").read_text()
         insight = self.read("static/js/build_insight.js")
         self.assertIn("detection_proposal", insight)
-        self.assertIn("Detected suggestions are read-only", insight)
+        self.assertIn("Detected suggestions must be reviewed and saved", insight)
         self.assertNotIn("renderBuildCommands(data.detection.proposed_commands)", app)
         self.assertIn("Test queued: ${data.run_id}", app)
         self.assertIn("openExecution(data.run_id)", app)
@@ -419,7 +439,7 @@ class StaticUiTests(unittest.TestCase):
         self.assertIn("artifact.archive_source = archiveSource", serialization)
         self.assertIn("artifact.payload =", serialization)
         self.assertNotIn("artifact.selected_files =", serialization)
-        self.assertIn("legacy_file_layout", serialization)
+        self.assertNotIn("legacy_file_layout", serialization)
         self.assertIn("function visibleNodes", tree)
         self.assertIn("function markArchiveInspectionStale", app)
         self.assertIn("structuredClone(wf)", app)
@@ -605,17 +625,17 @@ class StaticUiTests(unittest.TestCase):
         self.assertIn('title="Collapse sidebar"', html)
         self.assertIn('aria-label="Collapse sidebar"', html)
         self.assertIn('<svg viewBox="0 0 24 24" aria-hidden="true">', html)
-        self.assertIn('/style.css?v=20260905-1', html)
-        self.assertIn('/css/components.css?v=20260905-4', html)
-        self.assertIn('/css/pages.css?v=20260908-1', html)
+        self.assert_versioned_asset(html, "/style.css")
+        self.assert_versioned_asset(html, "/css/components.css")
+        self.assert_versioned_asset(html, "/css/pages.css")
         self.assertNotIn('/css/logs.css', html)
         for script in ("/js/pages/dashboard.js", "/js/pages/packages.js", "/js/pages/logs.js", "/js/recipe/source_changes.js", "/js/admin.js"):
             self.assertIn(script, html)
-        self.assertIn('/ui_core.js?v=20260906-1', html)
-        self.assertIn('/settings.js?v=20260908-1', html)
-        self.assertIn('/js/pages/dashboard.js?v=20260905-2', html)
-        self.assertIn('/js/pages/logs.js?v=20260905-7', html)
-        self.assertIn('/js/admin.js?v=20260905-4', html)
+        for asset in (
+            "/ui_core.js", "/settings.js", "/js/pages/dashboard.js",
+            "/js/pages/logs.js", "/js/admin.js",
+        ):
+            self.assert_versioned_asset(html, asset)
         self.assertIn("debBuilderSidebarCompact", admin_js)
         self.assertIn("Expand sidebar", admin_js)
         self.assertIn("Collapse sidebar", admin_js)
@@ -630,9 +650,9 @@ class StaticUiTests(unittest.TestCase):
     def test_stylesheets_follow_the_shared_component_architecture(self):
         html = self.read("static/index.html")
         pages = self.read("static/css/pages.css")
-        self.assertIn('/style.css?v=20260905-1', html)
-        self.assertIn('/css/components.css?v=20260905-4', html)
-        self.assertIn('/css/pages.css?v=20260908-1', html)
+        self.assert_versioned_asset(html, "/style.css")
+        self.assert_versioned_asset(html, "/css/components.css")
+        self.assert_versioned_asset(html, "/css/pages.css")
         self.assertNotIn('/css/logs.css', html)
         self.assertFalse((ROOT / "static" / "css" / "logs.css").exists())
         self.assertNotRegex(self.styles(), r"nth-(?:child|of-type)\s*\(")

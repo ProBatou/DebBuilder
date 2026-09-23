@@ -1,3 +1,4 @@
+from tests.lifecycle_helpers import cleanup_blockers
 """CP3 startup/runtime convergence and final adversarial regressions."""
 import os
 import tempfile
@@ -21,6 +22,7 @@ from debbuilder.resource_limits import empty_policy
 
 def recipe(name):
     return {
+        "schema_version": 5,
         "name": name,
         "active": True,
         "package": {
@@ -304,7 +306,7 @@ class ConcurrentReconciliationTests(unittest.TestCase):
         self.assertTrue(all(not thread.is_alive() for thread in threads))
         self.assertEqual(sum(result.removed for result in results), 1)
         self.assertEqual(sum(result.stale for result in results), 1)
-        self.assertEqual(containment.cleanup_blockers(), ())
+        self.assertEqual(cleanup_blockers(), ())
 
 
 if __name__ == "__main__":

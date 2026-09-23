@@ -25,10 +25,12 @@ from .runtime_apt_repositories import normalize_runtime_apt_repositories
 from .recipe_schema import require_safe_name
 from .validation_contracts import (
     PREPARED_DEPENDENCIES_CONTRACT_VERSION,
-    VALIDATION_ATTEMPT_CONTRACT_VERSION,
+    VALIDATION_RESULT_CONTRACT_VERSION,
     normalize_prepared_runtime_dependencies,
     normalize_validation_attempt,
+    normalize_validation_result,
 )
+from .validation_automation import normalize_validation_automation
 from .validation_oci import (
     IdentityRegistry,
     OciOwnershipError,
@@ -213,10 +215,10 @@ def recover_interrupted_attempts(store: BuildStore, identities: list[dict], *, i
         try:
             seen.add((run_id, attempt_id))
             with store.locked_run(run_id):
+                from . import validation_service
+
                 attempt_path = root / "attempt.json"
-                attempt = normalize_validation_attempt(_load_recovery_json(attempt_path, 256 * 1024))
-                if attempt["build_run_id"] != run_id or attempt["id"] != attempt_id:
-                    raise DependencyPreparationError("validation_attempt_recovery_unverifiable", "Validation attempt path does not match its durable identity")
+                attempt = validation_service.load_attempt(store, run_id, attempt_id)
                 if attempt["status"] not in {"running", "cancelling"}:
                     continue
                 if not inventory_trustworthy and (run_id, attempt_id) not in resolved:
@@ -226,40 +228,25 @@ def recover_interrupted_attempts(store: BuildStore, identities: list[dict], *, i
                 if prepared_path.exists() or prepared_path.is_symlink():
                     prepared = normalize_prepared_runtime_dependencies(_load_recovery_json(prepared_path, 1024 * 1024))
                 automation_path = root / "automation.json"
-                async_admitted = automation_path.exists() or automation_path.is_symlink()
-                if async_admitted:
-                    automation = _load_recovery_json(automation_path, 16 * 1024)
-                    if (
-                        not isinstance(automation, dict)
-                        or set(automation) not in (
-                            {"automatic", "publish_after_success"},
-                            {"automatic", "publish_after_success", "publication_state"},
-                        )
-                        or not all(isinstance(automation.get(key), bool) for key in ("automatic", "publish_after_success"))
-                        or (
-                            "publication_state" in automation
-                            and automation["publication_state"] not in {"not_requested", "pending", "complete"}
-                        )
-                    ):
-                        raise DependencyPreparationError(
-                            "validation_attempt_recovery_unverifiable",
-                            "Validation automation metadata is invalid",
-                        )
+                try:
+                    normalize_validation_automation(_load_recovery_json(automation_path, 16 * 1024))
+                except (FileNotFoundError, ValueError) as exc:
+                    raise DependencyPreparationError(
+                        "validation_attempt_recovery_unverifiable",
+                        "Validation automation metadata is missing or invalid",
+                    ) from exc
                 if attempt["status"] == "cancelling":
                     attempt = _terminal_attempt(
-                        attempt, status="cancelled", prepared=prepared or attempt.get("prepared_dependencies"),
+                        attempt, status="cancelled",
                         code="validation_recovery_cancelled",
                         message="Validation cancellation completed during startup recovery",
                     )
                 elif prepared is not None:
-                    if async_admitted or attempt.get("prepared_dependencies") is not None:
-                        attempt = _terminal_attempt(
-                            attempt, status="failed", prepared=prepared,
-                            code="validation_lifecycle_interrupted",
-                            message="Offline lifecycle validation was interrupted after dependency preparation",
-                        )
-                    else:
-                        attempt = _terminal_attempt(attempt, status="success", prepared=prepared)
+                    attempt = _terminal_attempt(
+                        attempt, status="failed",
+                        code="validation_lifecycle_interrupted",
+                        message="Offline lifecycle validation was interrupted after dependency preparation",
+                    )
                 else:
                     attempt = _terminal_attempt(
                         attempt, status="failed", code="validation_preparation_interrupted",
@@ -267,7 +254,7 @@ def recover_interrupted_attempts(store: BuildStore, identities: list[dict], *, i
                     )
                 _persist(attempt_path, attempt)
                 recovered.append(attempt_id)
-        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError, DependencyPreparationError) as exc:
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError, json.JSONDecodeError, DependencyPreparationError) as exc:
             blockers.append({
                 "code": "validation_attempt_recovery_unverifiable",
                 "reason": str(exc)[:1000],
@@ -647,11 +634,11 @@ def _persist(path: Path, value: dict) -> None:
     path.chmod(0o600)
 
 
-def _terminal_attempt(attempt: dict, *, status: str, prepared: dict | None = None, code: str = "", message: str = "") -> dict:
+def _terminal_attempt(attempt: dict, *, status: str, code: str = "", message: str = "") -> dict:
     finished = utc_now()
     attempt.update({
-        "status": status, "finished_at": finished, "prepared_dependencies": prepared,
-        "result": None if status == "cancelled" else {"status": status, "reference": "prepared.json" if prepared else None},
+        "status": status, "finished_at": finished,
+        "result": None,
         "error": None if status == "success" else {"code": code, "message": message},
     })
     return normalize_validation_attempt(attempt)
@@ -664,32 +651,120 @@ def begin_lifecycle_attempt(store: BuildStore, run_id: str, attempt_id: str, pre
         with storage.locked_path(path):
             attempt = normalize_validation_attempt(_load_recovery_json(path, 256 * 1024))
             normalized = normalize_prepared_runtime_dependencies(prepared)
+            persisted = normalize_prepared_runtime_dependencies(
+                _load_recovery_json(path.with_name("prepared.json"), 1024 * 1024),
+            )
             if (
                 attempt["id"] != attempt_id or attempt["build_run_id"] != run_id
-                or attempt["status"] not in {"success", "running", "cancelling"} or attempt["prepared_dependencies"] != normalized
+                or attempt["status"] not in {"running", "cancelling"}
+                or persisted != normalized
+                or normalized["profile_name"] != attempt["inputs"]["profile"]
+                or normalized["artifacts"] != {
+                    "current": attempt["inputs"]["artifact"],
+                    "previous": attempt["inputs"]["previous_artifact"],
+                }
+                or normalized["image"] != attempt["selected_profile"]["image"]
             ):
                 raise DependencyPreparationError(
                     "validation_attempt_state_invalid",
                     "Prepared validation attempt cannot enter lifecycle execution",
                 )
-            if attempt["status"] != "cancelling":
-                attempt.update({"status": "running", "finished_at": None, "result": None, "error": None})
-            attempt = normalize_validation_attempt(attempt)
-            _persist(path, attempt)
             return attempt
 
 
+def _canonical_lifecycle_result(attempt: dict, prepared: dict, validation: dict) -> dict:
+    status = str(validation.get("status") or "failed")
+    if status not in {"success", "failed", "cancelled"}:
+        status = "failed"
+    raw_error = validation.get("error") if isinstance(validation.get("error"), dict) else {}
+    code = str(raw_error.get("code") or (
+        "validation_lifecycle_cancelled" if status == "cancelled" else "validation_lifecycle_failed"
+    ))
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", code):
+        code = "validation_lifecycle_failed"
+    checks = []
+    for row in validation.get("checks") or []:
+        if not isinstance(row, dict):
+            continue
+        checks.append({
+            "name": str(row.get("name") or "validation_check")[:256],
+            "status": "success" if row.get("status") == "success" else "failed",
+            "error": "Validation check failed" if row.get("error") else "",
+        })
+    if not checks:
+        checks = [{"name": "lifecycle_execution", "status": "failed", "error": "Validation lifecycle did not produce checks"}]
+        if status == "success":
+            status = "failed"
+            code = "validation_lifecycle_evidence_missing"
+    backend = validation.get("backend") if isinstance(validation.get("backend"), dict) else {}
+    stop = backend.get("stop") if isinstance(backend.get("stop"), dict) else {}
+    commands = []
+    for row in validation.get("commands") or []:
+        if not isinstance(row, dict):
+            continue
+        commands.append({
+            "command": str(row.get("command") or "")[:1000],
+            "arguments": [str(item)[:1000] for item in (row.get("arguments") or [])[:128]],
+            "status": str(row.get("status") or ("success" if row.get("accepted") else "failed")),
+            "exit_code": row.get("exit_code") if isinstance(row.get("exit_code"), int) and not isinstance(row.get("exit_code"), bool) else None,
+            "accepted": row.get("accepted") if isinstance(row.get("accepted"), bool) else None,
+            "stdout": str(row.get("stdout") or "")[:4096],
+            "stderr": str(row.get("stderr") or "")[:4096],
+        })
+        if len(commands) >= 100:
+            break
+    details = raw_error.get("details") if isinstance(raw_error.get("details"), dict) else {}
+    failed_checks = details.get("failed_checks") if isinstance(details.get("failed_checks"), list) else [
+        row["name"] for row in checks if row["status"] == "failed"
+    ]
+    error = None if status == "success" else {
+        "code": code,
+        "message": (
+            "Offline lifecycle validation was cancelled"
+            if status == "cancelled"
+            else "Offline lifecycle validation failed"
+        ),
+        "failed_checks": [str(item)[:128] for item in failed_checks[:50]],
+        "cleanup_code": str(details.get("cleanup_code") or "")[:128],
+    }
+    return normalize_validation_result({
+        "contract_version": VALIDATION_RESULT_CONTRACT_VERSION,
+        "attempt_id": attempt["id"],
+        "build_run_id": attempt["build_run_id"],
+        "artifact": attempt["inputs"]["artifact"],
+        "profile": attempt["selected_profile"],
+        "status": status,
+        "started_at": validation.get("started_at") or prepared["finished_at"],
+        "finished_at": validation.get("finished_at") or utc_now(),
+        "checks": checks,
+        "execution": {
+            "network": "disabled" if backend.get("network") == "disabled" else "unverified",
+            "network_verified": backend.get("network_verified") is True,
+            "cleanup": {
+                "status": "success" if stop.get("status") == "success" else "unresolved",
+                "absence_proved": stop.get("absence_proved") is True,
+            },
+        },
+        "commands": commands,
+        "error": error,
+    })
+
+
 def complete_lifecycle_attempt(store: BuildStore, run_id: str, attempt_id: str, validation: dict) -> dict:
-    """Terminalize only after lifecycle cleanup, or retain cancelling on unresolved cleanup."""
-    path = store.run_dir(run_id) / "manifests" / "validation-attempts" / attempt_id / "attempt.json"
+    """Persist result.json after cleanup proof, then terminalize attempt.json."""
+    root = store.run_dir(run_id) / "manifests" / "validation-attempts" / attempt_id
+    path = root / "attempt.json"
+    result_path = root / "result.json"
     with store.locked_run(run_id):
         with storage.locked_path(path):
             attempt = normalize_validation_attempt(_load_recovery_json(path, 256 * 1024))
             if attempt["id"] != attempt_id or attempt["build_run_id"] != run_id or attempt["status"] not in {"running", "cancelling"}:
                 raise DependencyPreparationError("validation_attempt_state_invalid", "Lifecycle attempt state is inconsistent")
-            status = str(validation.get("status") or "failed")
-            error = validation.get("error") if isinstance(validation.get("error"), dict) else {}
-            code = str(error.get("code") or "validation_lifecycle_failed")
+            prepared = normalize_prepared_runtime_dependencies(
+                _load_recovery_json(root / "prepared.json", 1024 * 1024),
+            )
+            raw_error = validation.get("error") if isinstance(validation.get("error"), dict) else {}
+            code = str(raw_error.get("code") or "validation_lifecycle_failed")
             cleanup_unresolved = code in {
                 "validation_container_cleanup_unproved", "validation_container_cleanup_failed",
                 "validation_container_cleanup_unresolved",
@@ -697,23 +772,33 @@ def complete_lifecycle_attempt(store: BuildStore, run_id: str, attempt_id: str, 
             if cleanup_unresolved:
                 attempt.update({"status": "cancelling", "finished_at": None, "result": None, "error": None})
                 SUPERVISOR.block("validation lifecycle cleanup is unresolved")
-            elif attempt["status"] == "cancelling" or status == "cancelled":
-                attempt = _terminal_attempt(
-                    attempt, status="cancelled", prepared=attempt["prepared_dependencies"],
-                    code="validation_lifecycle_cancelled", message="Offline lifecycle validation was cancelled",
-                )
-            elif status == "success":
-                attempt = _terminal_attempt(attempt, status="success", prepared=attempt["prepared_dependencies"])
-                attempt["result"]["reference"] = f"validation/{attempt_id}"
-                attempt = normalize_validation_attempt(attempt)
-            else:
-                attempt = _terminal_attempt(
-                    attempt, status="failed", prepared=attempt["prepared_dependencies"],
-                    code=code if re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", code) else "validation_lifecycle_failed",
-                    message="Offline lifecycle validation failed",
-                )
-                attempt["result"]["reference"] = f"validation/{attempt_id}"
-                attempt = normalize_validation_attempt(attempt)
+                _persist(path, normalize_validation_attempt(attempt))
+                return attempt
+            result = _canonical_lifecycle_result(attempt, prepared, validation)
+            if attempt["status"] == "cancelling" and result["status"] != "cancelled":
+                result = dict(result)
+                result.update({
+                    "status": "cancelled",
+                    "error": {
+                        "code": "validation_lifecycle_cancelled",
+                        "message": "Offline lifecycle validation was cancelled",
+                        "failed_checks": [row["name"] for row in result["checks"] if row["status"] == "failed"][:50],
+                        "cleanup_code": "",
+                    },
+                })
+                result = normalize_validation_result(result)
+            _persist(result_path, result)
+            terminal_status = result["status"]
+            attempt.update({
+                "status": terminal_status,
+                "finished_at": result["finished_at"],
+                "result": {"status": terminal_status, "reference": "result.json"},
+                "error": None if terminal_status == "success" else {
+                    "code": result["error"]["code"],
+                    "message": result["error"]["message"],
+                },
+            })
+            attempt = normalize_validation_attempt(attempt)
             _persist(path, attempt)
             return attempt
 
@@ -733,7 +818,6 @@ def prepare_runtime_dependencies(
     test_ca_certificate: str | Path | None = None,
     update_timeout: float = 180,
     solve_timeout: float = 120,
-    admitted: bool = False,
 ) -> dict:
     """Prepare an exact verified package bundle; never install or unpack it."""
     require_safe_name(run_id, "build run id")
@@ -746,8 +830,6 @@ def prepare_runtime_dependencies(
     attempt: dict | None = None
     main_error: BaseException | None = None
     cleanup_error: BaseException | None = None
-    reservation_cleanup_error: BaseException | None = None
-    reserved_attempt = False
     try:
         existing_identities, identity_blockers = IdentityRegistry(registry_root).load_all()
         if existing_identities or identity_blockers:
@@ -761,31 +843,21 @@ def prepare_runtime_dependencies(
                 raise FileNotFoundError(f"Build Run {run_id} was not found")
             workspace = store.run_dir(run_id).resolve()
             attempt_root.resolve(strict=False).relative_to(workspace)
-            attempt_root.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            if admitted:
-                with storage.locked_path(attempt_path):
-                    attempt = normalize_validation_attempt(_load_recovery_json(attempt_path, 256 * 1024))
-                    if (
-                        attempt["id"] != attempt_id or attempt["build_run_id"] != run_id
-                        or attempt["status"] != "queued"
-                    ):
-                        raise DependencyPreparationError(
-                            "validation_attempt_state_invalid", "Admitted validation attempt is not queued",
-                        )
-                    # Claim the durable attempt before any potentially slow
-                    # image/artifact inspection.  Cancellation can then CAS it
-                    # to cancelling without waiting for the Run lease.
-                    attempt.update({"status": "running", "started_at": utc_now()})
-                    attempt = normalize_validation_attempt(attempt)
-                    _persist(attempt_path, attempt)
-            else:
-                try:
-                    attempt_root.mkdir(mode=0o700)
-                    reserved_attempt = True
-                except FileExistsError as exc:
+            with storage.locked_path(attempt_path):
+                attempt = normalize_validation_attempt(_load_recovery_json(attempt_path, 256 * 1024))
+                if (
+                    attempt["id"] != attempt_id or attempt["build_run_id"] != run_id
+                    or attempt["status"] != "queued"
+                ):
                     raise DependencyPreparationError(
-                        "validation_attempt_conflict", "Validation attempt identity already exists",
-                    ) from exc
+                        "validation_attempt_state_invalid", "Admitted validation attempt is not queued",
+                    )
+                # Claim the durable attempt before any potentially slow
+                # image/artifact inspection. Cancellation can then CAS it
+                # to cancelling without waiting for the Run lease.
+                attempt.update({"status": "running", "started_at": utc_now()})
+                attempt = normalize_validation_attempt(attempt)
+                _persist(attempt_path, attempt)
             with recording_identities(
                 run_id,
                 record=lambda identity: persist_identity(workspace_fd, identity),
@@ -805,44 +877,30 @@ def prepare_runtime_dependencies(
                     if relation["relation"] != "newer":
                         raise DependencyPreparationError("previous_artifact_version_invalid", "Previous artifact version must be strictly older than current")
                 started = utc_now()
-                if admitted:
-                    observed_inputs = {
-                        "profile": profile_name,
-                        "artifact": current.identity(),
-                        "previous_artifact": previous.identity() if previous else None,
-                    }
-                    if attempt["inputs"] != observed_inputs or attempt["selected_profile"] != {"name": profile_name, "image": image}:
+                observed_inputs = {
+                    "profile": profile_name,
+                    "artifact": current.identity(),
+                    "previous_artifact": previous.identity() if previous else None,
+                }
+                if attempt["inputs"] != observed_inputs or attempt["selected_profile"] != {"name": profile_name, "image": image}:
+                    raise DependencyPreparationError(
+                        "validation_admission_identity_changed",
+                        "Validation inputs changed after durable admission",
+                    )
+                # Cancellation owns this manifest independently from the
+                # Run lease. Re-read it under its path lock instead of
+                # overwriting a concurrently persisted cancelling state.
+                with storage.locked_path(attempt_path):
+                    attempt = normalize_validation_attempt(
+                        _load_recovery_json(attempt_path, 256 * 1024),
+                    )
+                    if event.is_set() or attempt["status"] == "cancelling":
+                        raise ExecutionCancelled()
+                    if attempt["status"] != "running":
                         raise DependencyPreparationError(
-                            "validation_admission_identity_changed",
-                            "Validation inputs changed after durable admission",
+                            "validation_attempt_state_invalid",
+                            "Admitted validation attempt lost execution ownership",
                         )
-                else:
-                    attempt = normalize_validation_attempt({
-                        "contract_version": VALIDATION_ATTEMPT_CONTRACT_VERSION,
-                        "id": attempt_id, "build_run_id": run_id,
-                        "inputs": {"profile": profile_name, "artifact": current.identity(), "previous_artifact": previous.identity() if previous else None},
-                        "selected_profile": {"name": profile_name, "image": image},
-                        "created_at": started, "started_at": started, "finished_at": None,
-                        "status": "running", "prepared_dependencies": None, "result": None, "error": None,
-                    })
-                if admitted:
-                    # Cancellation owns this manifest independently from the
-                    # Run lease. Re-read it under its path lock instead of
-                    # overwriting a concurrently persisted cancelling state
-                    # with the older in-memory running record.
-                    with storage.locked_path(attempt_path):
-                        attempt = normalize_validation_attempt(
-                            _load_recovery_json(attempt_path, 256 * 1024),
-                        )
-                        if event.is_set() or attempt["status"] == "cancelling":
-                            raise ExecutionCancelled()
-                        if attempt["status"] != "running":
-                            raise DependencyPreparationError(
-                                "validation_attempt_state_invalid",
-                                "Admitted validation attempt lost execution ownership",
-                            )
-                else:
-                    _persist(attempt_path, attempt)
                 normalized_repositories = normalize_runtime_apt_repositories(repositories or [])
                 coordinates: set[tuple[str, str, str]] = set()
                 for repository in normalized_repositories:
@@ -1009,23 +1067,16 @@ def prepare_runtime_dependencies(
                 container = None
                 if event.is_set():
                     raise ExecutionCancelled()
-                if admitted:
-                    with storage.locked_path(attempt_path):
-                        attempt = normalize_validation_attempt(_load_recovery_json(attempt_path, 256 * 1024))
-                        if event.is_set() or attempt["status"] == "cancelling":
-                            raise ExecutionCancelled()
-                        if attempt["status"] != "running":
-                            raise DependencyPreparationError(
-                                "validation_attempt_state_invalid",
-                                "Admitted validation attempt lost execution ownership",
-                            )
-                        attempt.update({"prepared_dependencies": prepared})
-                        attempt = normalize_validation_attempt(attempt)
-                        _persist(attempt_path, attempt)
-                else:
-                    attempt = _terminal_attempt(attempt, status="success", prepared=prepared)
-                    _persist(attempt_path, attempt)
-                return attempt
+                with storage.locked_path(attempt_path):
+                    attempt = normalize_validation_attempt(_load_recovery_json(attempt_path, 256 * 1024))
+                    if event.is_set() or attempt["status"] == "cancelling":
+                        raise ExecutionCancelled()
+                    if attempt["status"] != "running":
+                        raise DependencyPreparationError(
+                            "validation_attempt_state_invalid",
+                            "Admitted validation attempt lost execution ownership",
+                        )
+                return {**attempt, "prepared": prepared}
     except BaseException as exc:
         main_error = exc
         if container is not None:
@@ -1036,8 +1087,7 @@ def prepare_runtime_dependencies(
                 cleanup_error = cleanup
         if attempt is not None:
             with storage.locked_path(attempt_path):
-                if admitted:
-                    attempt = normalize_validation_attempt(_load_recovery_json(attempt_path, 256 * 1024))
+                attempt = normalize_validation_attempt(_load_recovery_json(attempt_path, 256 * 1024))
                 if attempt["status"] in {"queued", "running", "cancelling"}:
                     if cleanup_error is not None:
                         attempt["status"] = "cancelling"
@@ -1049,15 +1099,6 @@ def prepare_runtime_dependencies(
                         code = getattr(exc, "code", "dependency_preparation_failed")
                         attempt = _terminal_attempt(attempt, status="failed", code=code, message="Dependency preparation failed")
                         _persist(attempt_path, attempt)
-        elif reserved_attempt:
-            try:
-                info = attempt_root.lstat()
-                if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
-                    raise DependencyPreparationError("validation_attempt_recovery_unverifiable", "Reserved attempt path became unsafe")
-                attempt_root.resolve(strict=True).relative_to(store.run_dir(run_id).resolve(strict=True))
-                shutil.rmtree(attempt_root)
-            except BaseException as cleanup:
-                reservation_cleanup_error = cleanup
         packages_path = attempt_root / "packages"
         prepared_path = attempt_root / "prepared.json"
         if not prepared_path.is_file() and packages_path.exists():
@@ -1065,13 +1106,6 @@ def prepare_runtime_dependencies(
             resolved_packages.relative_to(attempt_root.resolve())
             if not packages_path.is_symlink():
                 shutil.rmtree(packages_path)
-        if reservation_cleanup_error is not None:
-            SUPERVISOR.block("incomplete validation attempt reservation cleanup is unresolved")
-            raise DependencyPreparationError(
-                "validation_attempt_reservation_cleanup_unresolved",
-                "Dependency preparation failed before its manifest and attempt reservation cleanup remains unresolved",
-                details={"workload_error": type(main_error).__name__, "cleanup_error": type(reservation_cleanup_error).__name__},
-            ) from reservation_cleanup_error
         if cleanup_error is not None:
             SUPERVISOR.block("validation container cleanup is unresolved")
             raise DependencyPreparationError(

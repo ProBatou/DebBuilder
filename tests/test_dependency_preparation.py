@@ -29,14 +29,15 @@ from debbuilder.dependency_preparation import (
     prepare_runtime_dependencies,
     recover_interrupted_attempts,
 )
-from debbuilder import storage
+from debbuilder import dependency_preparation, storage
 from debbuilder.execution_cancellation import ExecutionCancelled
 from debbuilder.resource_limits import admission_contract, requested_controls
 from debbuilder.validation_oci import OciOwnershipError
+from tests.validation_helpers import prepare_admitted_for_test
 
 
 def recipe(name="preparation-test"):
-    return {"name": name, "package": {"name": name}, "source": {"repository": f"owner/{name}"}}
+    return {"schema_version": 5, "name": name, "package": {"name": name}, "source": {"repository": f"owner/{name}"}}
 
 
 def build_deb(
@@ -152,6 +153,38 @@ def start_https(directory: Path, cert: Path, key: Path, *, handler_class=QuietHa
 
 
 class DependencyPreparationUnitTests(unittest.TestCase):
+    @staticmethod
+    def save_manual_automation(root: Path) -> None:
+        storage.save_json(root / "automation.json", {
+            "automatic": False,
+            "publish_after_success": False,
+            "publication_state": "not_requested",
+        })
+
+    @staticmethod
+    def lifecycle_evidence(prepared: dict, *, status: str = "success", code: str = "") -> dict:
+        failed = status != "success"
+        return {
+            "status": status,
+            "started_at": prepared["finished_at"],
+            "finished_at": "2026-09-13T08:00:03+00:00",
+            "backend": {
+                "network": "disabled",
+                "network_verified": True,
+                "stop": {"status": "success", "absence_proved": True},
+            },
+            "checks": [{"name": name, "status": "success", "error": ""} for name in (
+                "lifecycle_network_disabled", "package_install", "package_status_installed",
+                "package_remove", "package_purge", "package_absent_after_purge",
+            )],
+            "commands": [],
+            "error": ({
+                "code": code or "validation_checks_failed",
+                "message": "Validation failed",
+                "details": {},
+            } if failed else None),
+        }
+
     def setUp(self):
         SUPERVISOR.open_admission()
 
@@ -259,38 +292,18 @@ class DependencyPreparationUnitTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, "artifact_changed_during_snapshot")
             self.assertFalse((root / "changed.deb").exists())
 
-    def test_existing_attempt_identity_is_not_reused(self):
+    def test_preparation_requires_manager_admission(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             store = BuildStore(root / "builds")
             run = store.create(recipe("attempt-conflict"), mode="build", run_id="attempt-conflict-run")
-            attempt_root = store.run_dir(run["id"]) / "manifests/validation-attempts/existing"
-            attempt_root.mkdir(parents=True)
-            with self.assertRaises(DependencyPreparationError) as raised:
+            with self.assertRaises(FileNotFoundError):
                 prepare_runtime_dependencies(
-                    run["id"], "existing", store=store, current_artifact=root / "unused.deb",
+                    run["id"], "unadmitted", store=store, current_artifact=root / "unused.deb",
                     registry_root=root / "validation-containers",
-                    runner=lambda *_args, **_kwargs: self.fail("attempt collision must precede execution"),
+                    runner=lambda *_args, **_kwargs: self.fail("admission must precede execution"),
                 )
-            self.assertEqual(raised.exception.code, "validation_attempt_conflict")
-
-    def test_failure_before_attempt_manifest_removes_only_the_new_reservation(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            store = BuildStore(root / "builds")
-            run = store.create(recipe("premanifest"), mode="build", run_id="premanifest-run")
-
-            def unavailable(_command, **_kwargs):
-                return {"status": "failed", "exit_code": 125, "stdout": "", "stderr": "Podman unavailable"}
-
-            with self.assertRaises(OciOwnershipError):
-                prepare_runtime_dependencies(
-                    run["id"], "reserved", store=store, current_artifact=root / "unused.deb",
-                    registry_root=root / "validation-containers", runner=unavailable,
-                )
-            attempts = store.run_dir(run["id"]) / "manifests" / "validation-attempts"
-            self.assertFalse((attempts / "reserved").exists())
-            self.assertEqual(recover_interrupted_attempts(store, [])["blockers"], [])
+            self.assertFalse((store.run_dir(run["id"]) / "manifests/validation-attempts/unadmitted").exists())
 
     def test_admitted_preparation_does_not_overwrite_concurrent_durable_cancellation(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -316,9 +329,10 @@ class DependencyPreparationUnitTests(unittest.TestCase):
                 "inputs": {"profile": "bookworm", "artifact": artifact.identity(), "previous_artifact": None},
                 "selected_profile": {"name": "bookworm", "image": image},
                 "created_at": "2026-09-14T08:00:00+00:00", "started_at": None,
-                "finished_at": None, "status": "queued", "prepared_dependencies": None,
+                "finished_at": None, "status": "queued",
                 "result": None, "error": None,
             })
+            self.save_manual_automation(attempt_root)
             cancelled = threading.Event()
 
             def inspect_and_cancel(*_args, **_kwargs):
@@ -338,7 +352,6 @@ class DependencyPreparationUnitTests(unittest.TestCase):
                 prepare_runtime_dependencies(
                     run["id"], attempt_id, store=store, current_artifact=artifact_path,
                     registry_root=root / "validation-containers", cancellation_event=cancelled,
-                    admitted=True,
                 )
             durable = storage.load_json(attempt_root / "attempt.json", {})
             self.assertEqual(durable["status"], "cancelled")
@@ -368,9 +381,10 @@ class DependencyPreparationUnitTests(unittest.TestCase):
                 "inputs": {"profile": "bookworm", "artifact": artifact.identity(), "previous_artifact": None},
                 "selected_profile": {"name": "bookworm", "image": image},
                 "created_at": "2026-09-14T08:00:00+00:00", "started_at": None,
-                "finished_at": None, "status": "queued", "prepared_dependencies": None,
+                "finished_at": None, "status": "queued",
                 "result": None, "error": None,
             })
+            self.save_manual_automation(attempt_root)
 
             def cancel_then_fail(*_args, **_kwargs):
                 path = attempt_root / "attempt.json"
@@ -386,7 +400,7 @@ class DependencyPreparationUnitTests(unittest.TestCase):
             ):
                 prepare_runtime_dependencies(
                     run["id"], attempt_id, store=store, current_artifact=artifact_path,
-                    registry_root=root / "validation-containers", admitted=True,
+                    registry_root=root / "validation-containers",
                 )
             durable = storage.load_json(attempt_root / "attempt.json", {})
             self.assertEqual(durable["status"], "cancelled")
@@ -404,13 +418,14 @@ class DependencyPreparationUnitTests(unittest.TestCase):
                 "inputs": {"profile": "bookworm", "artifact": artifact, "previous_artifact": None},
                 "selected_profile": {"name": "bookworm", "image": image},
                 "created_at": "2026-09-13T08:00:00+00:00", "started_at": "2026-09-13T08:00:01+00:00",
-                "finished_at": None, "status": "running", "prepared_dependencies": None, "result": None, "error": None,
+                "finished_at": None, "status": "running", "result": None, "error": None,
             }
             identities = []
             for attempt_id in ("incomplete", "durable"):
                 attempt_root = store.run_dir(run["id"]) / "manifests/validation-attempts" / attempt_id
                 attempt_root.mkdir(parents=True)
                 storage.save_json(attempt_root / "attempt.json", {**base_attempt, "id": attempt_id})
+                self.save_manual_automation(attempt_root)
                 identities.append({"run_id": run["id"], "attempt_id": attempt_id})
                 if attempt_id == "durable":
                     storage.save_json(attempt_root / "prepared.json", {
@@ -433,8 +448,12 @@ class DependencyPreparationUnitTests(unittest.TestCase):
             durable = storage.load_json(store.run_dir(run["id"]) / "manifests/validation-attempts/durable/attempt.json", {})
             self.assertEqual(incomplete["status"], "failed")
             self.assertEqual(incomplete["error"]["code"], "validation_preparation_interrupted")
-            self.assertEqual(durable["status"], "success")
-            self.assertEqual(durable["prepared_dependencies"]["artifacts"]["current"], artifact)
+            self.assertEqual(durable["status"], "failed")
+            self.assertEqual(durable["error"]["code"], "validation_lifecycle_interrupted")
+            self.assertEqual(
+                storage.load_json(store.run_dir(run["id"]) / "manifests/validation-attempts/durable/prepared.json", {})["artifacts"]["current"],
+                artifact,
+            )
 
     def test_lifecycle_attempt_reopens_and_terminalizes_only_after_cleanup(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -458,24 +477,47 @@ class DependencyPreparationUnitTests(unittest.TestCase):
                 "inputs": {"profile": "bookworm", "artifact": artifact, "previous_artifact": None},
                 "selected_profile": {"name": "bookworm", "image": image},
                 "created_at": "2026-09-13T08:00:00+00:00", "started_at": "2026-09-13T08:00:01+00:00",
-                "finished_at": "2026-09-13T08:00:02+00:00", "status": "success",
-                "prepared_dependencies": prepared, "result": {"status": "success", "reference": "prepared.json"},
-                "error": None,
+                "finished_at": None, "status": "running", "result": None, "error": None,
             }
             storage.save_json(attempt_root / "attempt.json", attempt)
             storage.save_json(attempt_root / "prepared.json", prepared)
+            self.save_manual_automation(attempt_root)
             active = begin_lifecycle_attempt(store, run["id"], attempt_id, prepared)
             self.assertEqual(active["status"], "running")
             self.assertIsNone(active["finished_at"])
-            terminal = complete_lifecycle_attempt(store, run["id"], attempt_id, {
-                "status": "failed", "error": {"code": "modeled_state_drift"},
-            })
+            writes = []
+            persist = dependency_preparation._persist
+
+            def recording_persist(path, value):
+                writes.append(path.name)
+                persist(path, value)
+
+            with mock.patch("debbuilder.dependency_preparation._persist", side_effect=recording_persist):
+                terminal = complete_lifecycle_attempt(
+                    store, run["id"], attempt_id,
+                    self.lifecycle_evidence(prepared, status="failed", code="modeled_state_drift"),
+                )
+            self.assertEqual(writes, ["result.json", "attempt.json"])
             self.assertEqual(terminal["status"], "failed")
             self.assertEqual(terminal["error"]["code"], "modeled_state_drift")
 
-            terminal.update({"status": "cancelling", "finished_at": None, "result": None, "error": None})
+            terminal.update({"status": "running", "finished_at": None, "result": None, "error": None})
             storage.save_json(attempt_root / "attempt.json", terminal)
-            cancelled = complete_lifecycle_attempt(store, run["id"], attempt_id, {"status": "success"})
+            interrupted = recover_interrupted_attempts(store, [])
+            self.assertEqual(interrupted["recovered"], [])
+            self.assertEqual(len(interrupted["blockers"]), 1)
+            self.assertEqual(storage.load_json(attempt_root / "attempt.json", {})["status"], "running")
+            unresolved = complete_lifecycle_attempt(store, run["id"], attempt_id, {
+                "status": "failed",
+                "error": {"code": "validation_container_cleanup_unresolved"},
+            })
+            self.assertEqual(unresolved["status"], "cancelling")
+            self.assertIsNotNone(SUPERVISOR.blocker)
+
+            SUPERVISOR.open_admission()
+            cancelled = complete_lifecycle_attempt(
+                store, run["id"], attempt_id, self.lifecycle_evidence(prepared),
+            )
             self.assertEqual(cancelled["status"], "cancelled")
             self.assertEqual(cancelled["error"]["code"], "validation_lifecycle_cancelled")
 
@@ -502,9 +544,10 @@ class DependencyPreparationUnitTests(unittest.TestCase):
                 "inputs": {"profile": "bookworm", "artifact": artifact, "previous_artifact": None},
                 "selected_profile": {"name": "bookworm", "image": image},
                 "created_at": "2026-09-13T08:00:00+00:00", "started_at": "2026-09-13T08:00:01+00:00",
-                "finished_at": None, "status": "running", "prepared_dependencies": prepared,
+                "finished_at": None, "status": "running",
                 "result": None, "error": None,
             })
+            self.save_manual_automation(attempt_root)
             result = recover_interrupted_attempts(store, [{"run_id": run["id"], "attempt_id": attempt_id}])
             self.assertEqual(result["blockers"], [])
             recovered = storage.load_json(attempt_root / "attempt.json", {})
@@ -526,9 +569,10 @@ class DependencyPreparationUnitTests(unittest.TestCase):
                 "inputs": {"profile": "bookworm", "artifact": artifact, "previous_artifact": None},
                 "selected_profile": {"name": "bookworm", "image": image},
                 "created_at": "2026-09-13T08:00:00+00:00", "started_at": "2026-09-13T08:00:01+00:00",
-                "finished_at": None, "status": "cancelling", "prepared_dependencies": None,
+                "finished_at": None, "status": "cancelling",
                 "result": None, "error": None,
             })
+            self.save_manual_automation(attempt_root)
             result = recover_interrupted_attempts(store, [])
             self.assertEqual(result["blockers"], [])
             recovered = storage.load_json(attempt_root / "attempt.json", {})
@@ -553,13 +597,13 @@ class DependencyPreparationUnitTests(unittest.TestCase):
                 "diagnostics": [], "enforcement": [],
             }
             storage.save_json(attempt_root / "prepared.json", prepared)
-            storage.save_json(attempt_root / "automation.json", {"automatic": False, "publish_after_success": False})
+            self.save_manual_automation(attempt_root)
             storage.save_json(attempt_root / "attempt.json", {
                 "contract_version": 1, "id": attempt_id, "build_run_id": run["id"],
                 "inputs": {"profile": "bookworm", "artifact": artifact, "previous_artifact": None},
                 "selected_profile": {"name": "bookworm", "image": image},
                 "created_at": "2026-09-13T08:00:00+00:00", "started_at": "2026-09-13T08:00:01+00:00",
-                "finished_at": None, "status": "running", "prepared_dependencies": None,
+                "finished_at": None, "status": "running",
                 "result": None, "error": None,
             })
             result = recover_interrupted_attempts(store, [])
@@ -567,6 +611,61 @@ class DependencyPreparationUnitTests(unittest.TestCase):
             recovered = storage.load_json(attempt_root / "attempt.json", {})
             self.assertEqual(recovered["status"], "failed")
             self.assertEqual(recovered["error"]["code"], "validation_lifecycle_interrupted")
+
+    def test_recovery_accepts_canonical_orchestrator_metadata_and_cancelled_publication(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = BuildStore(root / "builds")
+            run = store.create(recipe("orchestrated-recovery"), mode="build", run_id="orchestrated-recovery-run")
+            image = {"name": "debbuilder-validation:bookworm", "id": "sha256:" + "1" * 64, "digest": None}
+            artifact = {"package": "demo", "version": "1.0-1", "architecture": "all", "size": 10, "sha256": "a" * 64}
+            prepared = {
+                "contract_version": 1, "profile_name": "bookworm", "image": image,
+                "native_architecture": "amd64", "artifacts": {"current": artifact, "previous": None},
+                "repositories": [], "base_packages": [], "packages": [],
+                "started_at": "2026-09-13T08:00:01+00:00", "finished_at": "2026-09-13T08:00:02+00:00",
+                "diagnostics": [], "enforcement": [],
+            }
+            metadata = (
+                {
+                    "automatic": True, "publish_after_success": False,
+                    "publication_state": "not_requested",
+                    "attempt_key": "automation-v1-" + "a" * 64,
+                    "generation": 0, "policy": "build_validate",
+                },
+                {
+                    "automatic": True, "publish_after_success": True,
+                    "publication_state": "cancelled",
+                    "attempt_key": "automation-v1-" + "b" * 64,
+                    "generation": 1, "policy": "full",
+                },
+            )
+            for index, automation in enumerate(metadata):
+                attempt_id = f"orchestrated-{index}"
+                attempt_root = store.run_dir(run["id"]) / "manifests/validation-attempts" / attempt_id
+                attempt_root.mkdir(parents=True)
+                storage.save_json(attempt_root / "prepared.json", prepared)
+                storage.save_json(attempt_root / "automation.json", automation)
+                storage.save_json(attempt_root / "attempt.json", {
+                    "contract_version": 1, "id": attempt_id, "build_run_id": run["id"],
+                    "inputs": {"profile": "bookworm", "artifact": artifact, "previous_artifact": None},
+                    "selected_profile": {"name": "bookworm", "image": image},
+                    "created_at": "2026-09-13T08:00:00+00:00", "started_at": "2026-09-13T08:00:01+00:00",
+                    "finished_at": None, "status": "running",
+                    "result": None, "error": None,
+                })
+
+            result = recover_interrupted_attempts(store, [])
+
+            self.assertEqual(result["blockers"], [])
+            self.assertEqual(set(result["recovered"]), {"orchestrated-0", "orchestrated-1"})
+            for attempt_id in result["recovered"]:
+                recovered = storage.load_json(
+                    store.run_dir(run["id"]) / "manifests/validation-attempts" / attempt_id / "attempt.json",
+                    {},
+                )
+                self.assertEqual(recovered["status"], "failed")
+                self.assertEqual(recovered["error"]["code"], "validation_lifecycle_interrupted")
 
 
 @unittest.skipUnless(os.getenv("DEBBUILDER_REAL_OCI_TESTS") == "1", "controlled real OCI tests disabled")
@@ -580,12 +679,12 @@ class RealDependencyPreparationTests(unittest.TestCase):
                 root, Path(run["workspace"]) / "artifacts/preparation-test_1.0-1_all.deb",
                 package="preparation-test", version="1.0-1", depends="jq (>= 1.6)",
             )
-            attempt = prepare_runtime_dependencies(
-                run["id"], "controlled-bookworm", store=store, current_artifact=artifact,
+            attempt = prepare_admitted_for_test(
+                run["id"], store=store, current_artifact=artifact,
                 registry_root=root / "validation-containers",
             )
-            self.assertEqual(attempt["status"], "success")
-            prepared = attempt["prepared_dependencies"]
+            self.assertEqual(attempt["status"], "running")
+            prepared = attempt["prepared"]
             self.assertEqual(prepared["native_architecture"], "amd64")
             self.assertIn("jq", {row["package"] for row in prepared["packages"]})
             self.assertTrue(prepared["base_packages"])
@@ -611,19 +710,19 @@ class RealDependencyPreparationTests(unittest.TestCase):
                     "id": "controlled", "uri": f"https://host.containers.internal:{server.server_address[1]}",
                     "suite": "bookworm", "components": ["main"], "signing_key": {"armored": armored},
                 }
-                attempt = prepare_runtime_dependencies(
-                    run["id"], "controlled-signed-repo", store=store, current_artifact=artifact,
+                attempt = prepare_admitted_for_test(
+                    run["id"], store=store, current_artifact=artifact,
                     repositories=[repository], registry_root=root / "validation-containers",
                     test_ca_certificate=cert,
                 )
-                self.assertEqual(attempt["status"], "success")
-                rows = attempt["prepared_dependencies"]["packages"]
+                self.assertEqual(attempt["status"], "running")
+                rows = attempt["prepared"]["packages"]
                 self.assertEqual({"cp1b-external", "cp1b-provider"}, {row["package"] for row in rows})
                 self.assertTrue(
                     all((row["origin"] or {}).get("repository_id") == "controlled" for row in rows),
                     rows,
                 )
-                provenance = attempt["prepared_dependencies"]["repositories"][0]
+                provenance = attempt["prepared"]["repositories"][0]
                 self.assertEqual(provenance["signing_key_sha256"], hashlib.sha256(armored.encode()).hexdigest())
                 self.assertTrue(provenance["signing_key_fingerprints"])
                 self.assertEqual(list((root / "validation-containers").glob("*.json")), [])
@@ -664,8 +763,8 @@ class RealDependencyPreparationTests(unittest.TestCase):
                         "signing_key": {"armored": key_material},
                     }
                     with self.subTest(case=suffix), self.assertRaises(OciOwnershipError):
-                        prepare_runtime_dependencies(
-                            run["id"], f"controlled-{suffix}", store=store, current_artifact=artifact,
+                        prepare_admitted_for_test(
+                            run["id"], store=store, current_artifact=artifact,
                             repositories=[repository], registry_root=root / f"registry-{suffix}",
                             test_ca_certificate=cert,
                         )
@@ -689,11 +788,11 @@ class RealDependencyPreparationTests(unittest.TestCase):
                 root, Path(run["workspace"]) / "artifacts/node-profile_1.0-1_all.deb",
                 package="node-profile", version="1.0-1", depends="dpkg",
             )
-            attempt = prepare_runtime_dependencies(
-                run["id"], "controlled-node-profile", store=store, current_artifact=artifact,
+            attempt = prepare_admitted_for_test(
+                run["id"], store=store, current_artifact=artifact,
                 profile_name="bookworm-node22", registry_root=root / "validation-containers",
             )
-            prepared = attempt["prepared_dependencies"]
+            prepared = attempt["prepared"]
             self.assertEqual(prepared["profile_name"], "bookworm-node22")
             self.assertEqual(prepared["image"]["name"], "debbuilder-validation:bookworm-node22")
             self.assertTrue(prepared["image"]["id"].startswith("sha256:"))
@@ -720,11 +819,11 @@ class RealDependencyPreparationTests(unittest.TestCase):
                 root, Path(run["workspace"]) / "artifacts/limited-preparation_1.0-1_all.deb",
                 package="limited-preparation", version="1.0-1", depends="jq",
             )
-            attempt = prepare_runtime_dependencies(
-                run["id"], "controlled-limits", store=store, current_artifact=artifact,
+            attempt = prepare_admitted_for_test(
+                run["id"], store=store, current_artifact=artifact,
                 registry_root=root / "validation-containers",
             )
-            enforcement = {row["control"]: row for row in attempt["prepared_dependencies"]["enforcement"]}
+            enforcement = {row["control"]: row for row in attempt["prepared"]["enforcement"]}
             self.assertEqual(enforcement["memory"]["status"], "enforced")
             self.assertEqual(enforcement["tasks"]["status"], "enforced")
             self.assertEqual(enforcement["cpu"]["status"], "enforced")
@@ -752,11 +851,11 @@ class RealDependencyPreparationTests(unittest.TestCase):
                 root, Path(run["workspace"]) / "artifacts/io-limited-preparation_1.0-1_all.deb",
                 package="io-limited-preparation", version="1.0-1", depends="jq",
             )
-            attempt = prepare_runtime_dependencies(
-                run["id"], "controlled-io", store=store, current_artifact=artifact,
+            attempt = prepare_admitted_for_test(
+                run["id"], store=store, current_artifact=artifact,
                 registry_root=root / "validation-containers",
             )
-            enforcement = {row["control"]: row for row in attempt["prepared_dependencies"]["enforcement"]}
+            enforcement = {row["control"]: row for row in attempt["prepared"]["enforcement"]}
             self.assertEqual(enforcement["io_read"]["status"], "enforced")
             self.assertEqual(enforcement["io_write"]["status"], "enforced")
 
@@ -773,12 +872,12 @@ class RealDependencyPreparationTests(unittest.TestCase):
                 root, Path(run["workspace"]) / "artifacts/upgrade-preparation_2.0-1_all.deb",
                 package="upgrade-preparation", version="2.0-1", depends="jq (>= 1.6), tree | nano",
             )
-            attempt = prepare_runtime_dependencies(
-                run["id"], "controlled-upgrade", store=store, current_artifact=current,
+            attempt = prepare_admitted_for_test(
+                run["id"], store=store, current_artifact=current,
                 previous_artifact=previous, registry_root=root / "validation-containers",
             )
-            self.assertEqual(attempt["status"], "success")
-            rows = attempt["prepared_dependencies"]["packages"]
+            self.assertEqual(attempt["status"], "running")
+            rows = attempt["prepared"]["packages"]
             self.assertIn(("jq", "previous"), {(row["package"], row["role"]) for row in rows})
-            self.assertIn("modeled_transition", {row["code"] for row in attempt["prepared_dependencies"]["diagnostics"]})
+            self.assertIn("modeled_transition", {row["code"] for row in attempt["prepared"]["diagnostics"]})
             self.assertEqual(list((root / "validation-containers").glob("*.json")), [])

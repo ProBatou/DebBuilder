@@ -152,9 +152,7 @@ function archiveAction(page, action, pathValue) {
 async function persistedArchivePayload(page) {
   const response = await page.request.get('/api/workflows/archive-agent');
   expect(response.ok()).toBe(true);
-  const payload = (await response.json()).artifact.payload;
-  if (!payload.legacy_file_layout) delete payload.legacy_file_layout;
-  return payload;
+  return (await response.json()).artifact.payload;
 }
 
 async function expectPersistedArchivePayload(page, expected) {
@@ -403,8 +401,8 @@ test('Packages supports search, status filtering, and details', async ({page}, t
 test('Recipes selects a showcase Recipe, changes step, and closes a safe modal', async ({page}, testInfo) => {
   await openView(page, 'recipes');
   await expect(page.locator('#workflowSelect option')).toHaveCount(8);
-  await page.locator('#workflowSelect').selectOption('debbuilder');
-  await expect(page.locator('#recipeTitle')).toHaveText('debbuilder');
+  await page.locator('#workflowSelect').selectOption('seerr');
+  await expect(page.locator('#recipeTitle')).toHaveText('seerr');
   await expect(page.locator('#recipeMetaActive')).toBeChecked();
   await page.locator('#recipeMetaActive').uncheck();
   await expect(page.locator('#btnDryRun')).toBeDisabled();
@@ -545,8 +543,8 @@ test('Recipe JSON stays canonical across view, edit, apply, export, and import',
     });
   });
   await openView(page, 'recipes');
-  await page.locator('#workflowSelect').selectOption('debbuilder');
-  await expect(page.locator('#recipeTitle')).toHaveText('debbuilder');
+  await page.locator('#workflowSelect').selectOption('seerr');
+  await expect(page.locator('#recipeTitle')).toHaveText('seerr');
 
   await page.locator('#recipePackageVersionRevision').fill('1+b1');
   await page.locator('#btnRecipeJson').click();
@@ -561,7 +559,7 @@ test('Recipe JSON stays canonical across view, edit, apply, export, and import',
   await expect.poll(() => page.evaluate(() => window.__recipeJsonClipboard)).toContain('"version_revision": "1+b1"');
   const downloadPromise = page.waitForEvent('download');
   await page.locator('#btnExportRecipeJson').click();
-  expect((await downloadPromise).suggestedFilename()).toBe('debbuilder.json');
+  expect((await downloadPromise).suggestedFilename()).toBe('seerr.json');
   await expectFullyInViewport(page, page.locator('#btnCancelRecipeJson'));
   await capture(page, testInfo, 'recipe-json-view', {fullPage: false});
 
@@ -597,7 +595,7 @@ test('Recipe JSON stays canonical across view, edit, apply, export, and import',
   imported.install.account = {user: importedId, group: importedId, create_user: false, create_group: false};
   imported.install.directories = imported.install.directories.map(directory => ({
     ...directory,
-    path: directory.path.replace('/debbuilder', `/${importedId}`),
+    path: directory.path.replace('/seerr', `/${importedId}`),
   }));
   await page.locator('#recipeImportFile').setInputFiles({
     name: 'unsafe-client-name.json',
@@ -633,7 +631,7 @@ test('Recipe JSON stays canonical across view, edit, apply, export, and import',
 test('Recipe form and JSON preserve enabled, Debian description, service description, and WorkingDirectory', async ({page}, testInfo) => {
   const id = `recipe-roundtrip-${testInfo.project.name}`;
   const imported = {
-    schema_version: 1, name: id, active: false,
+    schema_version: 5, name: id, active: false,
     package: {name: id, description: 'Imported Debian description\nLong text: café & <package>'},
     source: {provider: 'github', repository: `example/${id}`, tracking: 'latest_release', ref: '', version: {source: 'tag', expression: ''}},
     service: {name: `${id}.service`, command: `/opt/${id}/bin/serve`, description: 'Imported service', working_directory: `/opt/${id}`},
@@ -666,7 +664,21 @@ test('Recipe form and JSON preserve enabled, Debian description, service descrip
     await page.locator('#packageDescription').fill(editedDescription);
     await page.locator('#serviceDescription').fill(' Edited service description ');
     await page.locator('#serviceWorkingDirectory').fill(`/opt/${id}/runtime`);
-    await expect(page.locator('#recipeAutosaveStatus')).toHaveAttribute('data-state', 'saved', {timeout: 3000});
+    await expect.poll(async () => {
+      const response = await page.request.get(`/api/workflows/${id}`);
+      const persisted = await response.json();
+      return {
+        active: persisted.active,
+        description: persisted.package.description,
+        serviceDescription: persisted.service.description,
+        workingDirectory: persisted.service.working_directory,
+      };
+    }).toEqual({
+      active: true,
+      description: editedDescription,
+      serviceDescription: ' Edited service description ',
+      workingDirectory: `/opt/${id}/runtime`,
+    });
     await page.locator('#btnRecipeJson').click();
     json = JSON.parse(await page.locator('#recipeJsonEditor').inputValue());
     expect(json.active).toBe(true);
@@ -681,8 +693,8 @@ test('Recipe form and JSON preserve enabled, Debian description, service descrip
 });
 
 test('Recipe JSON Apply drains an older autosave before persisting JSON', async ({page}, testInfo) => {
-  const workflowUrl = '**/api/workflows/debbuilder';
-  const originalResponse = await page.request.get('/api/workflows/debbuilder');
+  const workflowUrl = '**/api/workflows/seerr';
+  const originalResponse = await page.request.get('/api/workflows/seerr');
   expect(originalResponse.ok()).toBe(true);
   const original = await originalResponse.json();
   let releaseAutosave;
@@ -702,7 +714,7 @@ test('Recipe JSON Apply drains an older autosave before persisting JSON', async 
 
   try {
     await openView(page, 'recipes');
-    await page.locator('#workflowSelect').selectOption('debbuilder');
+    await page.locator('#workflowSelect').selectOption('seerr');
     await page.locator('#packageDescription').fill(`Delayed form autosave on ${testInfo.project.name}`);
     await firstWriteStarted;
 
@@ -725,21 +737,21 @@ test('Recipe JSON Apply drains an older autosave before persisting JSON', async 
     await expect(page.locator('#recipeJsonDialog')).not.toBeVisible();
     expect(writes).toHaveLength(2);
 
-    const persistedResponse = await page.request.get('/api/workflows/debbuilder');
+    const persistedResponse = await page.request.get('/api/workflows/seerr');
     expect(persistedResponse.ok()).toBe(true);
     const persisted = await persistedResponse.json();
     expect(persisted.package.description).toBe(applied.package.description);
   } finally {
     releaseAutosave();
     await page.unroute(workflowUrl);
-    const restored = await page.request.post('/api/workflows/debbuilder', {data: {workflow: original, previous_id: 'debbuilder'}});
+    const restored = await page.request.post('/api/workflows/seerr', {data: {workflow: original, previous_id: 'seerr'}});
     expect(restored.ok()).toBe(true);
   }
 });
 
 test('Recipe JSON Apply failure stays visible and can be retried', async ({page}, testInfo) => {
-  const workflowUrl = '**/api/workflows/debbuilder';
-  const originalResponse = await page.request.get('/api/workflows/debbuilder');
+  const workflowUrl = '**/api/workflows/seerr';
+  const originalResponse = await page.request.get('/api/workflows/seerr');
   expect(originalResponse.ok()).toBe(true);
   const original = await originalResponse.json();
   let failNextWrite = true;
@@ -757,7 +769,7 @@ test('Recipe JSON Apply failure stays visible and can be retried', async ({page}
 
   try {
     await openView(page, 'recipes');
-    await page.locator('#workflowSelect').selectOption('debbuilder');
+    await page.locator('#workflowSelect').selectOption('seerr');
     const previousDescription = await page.locator('#packageDescription').inputValue();
     await page.locator('#btnRecipeJson').click();
     const editor = page.locator('#recipeJsonEditor');
@@ -783,11 +795,11 @@ test('Recipe JSON Apply failure stays visible and can be retried', async ({page}
     await expect(page.locator('#recipeJsonDialog')).not.toBeVisible();
     await expect(page.locator('#packageDescription')).toHaveValue(applied.package.description);
     await expect(page.locator('#recipeAutosaveStatus')).toHaveAttribute('data-state', 'saved');
-    const persisted = await (await page.request.get('/api/workflows/debbuilder')).json();
+    const persisted = await (await page.request.get('/api/workflows/seerr')).json();
     expect(persisted.package.description).toBe(applied.package.description);
   } finally {
     await page.unroute(workflowUrl);
-    const restored = await page.request.post('/api/workflows/debbuilder', {data: {workflow: original, previous_id: 'debbuilder'}});
+    const restored = await page.request.post('/api/workflows/seerr', {data: {workflow: original, previous_id: 'seerr'}});
     expect(restored.ok()).toBe(true);
   }
 });
@@ -802,7 +814,9 @@ test('Read-only Recipe JSON remains viewable, copyable, and exportable', async (
   });
   await openView(page, 'recipes');
   await page.locator('#workflowSelect').selectOption('debbuilder');
-  await page.locator('#workflowSelect option:checked').evaluate(option => { option.dataset.writable = 'false'; });
+  await expect(page.locator('#workflowSelect option:checked')).toHaveAttribute('data-managed', 'true');
+  await expect(page.locator('#recipeMetaActive')).toBeEnabled();
+  await expect(page.locator('#recipePackageVersionRevision')).toBeDisabled();
   await page.locator('#btnRecipeJson').click();
 
   await expect(page.locator('#recipeJsonDialog')).toBeVisible();
@@ -999,7 +1013,7 @@ test('Logs explains build, validation, and publication failures', async ({page},
   await openFailure('ui-05-validation-failed');
   await expect(page.locator('#executionDiagnostic')).toContainText('Package validation failed');
   await expect(page.locator('#executionDiagnostic')).toContainText('bookworm');
-  await expect(page.locator('#executionDiagnostic')).toContainText('systemd_active_after_grace');
+  await expect(page.locator('#executionDiagnostic')).toContainText('validation_checks_failed');
   await capture(page, testInfo, 'log-validation-diagnostic', {fullPage:false});
 
   await openFailure('ui-00-publication-failed');
@@ -1076,7 +1090,6 @@ test('Archive Selected paths persists compact recursive selectors and presents t
       excluded_directories: 1,
       excluded_files: 0,
       excluded_resolved_files: 3,
-      legacy_layout: false,
     });
     await page.locator('#btnDryRun').click();
     await expect(page.locator('#testRunState')).toHaveText('Prepared');
@@ -1122,7 +1135,6 @@ test('Archive Entire archive persists exclusions and remains compact', async ({p
       excluded_directories: 2,
       excluded_files: 0,
       excluded_resolved_files: 3,
-      legacy_layout: false,
     });
     await page.locator('#btnDryRun').click();
     await expect(page.locator('#testRunState')).toHaveText('Prepared');
@@ -1218,55 +1230,6 @@ test('Archive inspection becomes stale only for source-affecting edits', async (
   }
 });
 
-test('Legacy archive placement survives passive UI actions and converts on selection mutation', async ({page}, testInfo) => {
-  test.skip(testInfo.project.name !== 'desktop', 'Desktop legacy journey');
-  const original = await (await page.request.get('/api/workflows/archive-agent')).json();
-  expect(original.artifact.payload.legacy_file_layout).toBe('basename');
-  await routeArchiveInspection(page);
-  try {
-    await openArchiveRecipe(page);
-    await expect(page.locator('#recipeArchivePayloadSummary')).toContainText('Existing file placement is preserved');
-    await page.locator('#packageDescription').fill('Unrelated legacy autosave');
-    await expect.poll(async () => (await persistedArchivePayload(page)).legacy_file_layout).toBe('basename');
-    await page.locator('#btnInspectArchive').click();
-    await archiveAction(page, 'toggle', 'bin/').click();
-    await expect(archiveAction(page, 'toggle', 'bin/')).toHaveAttribute('aria-expanded', 'true');
-    await archiveAction(page, 'toggle', 'bin/').click();
-
-    await page.locator('#btnRecipeJson').click();
-    let viewed = JSON.parse(await page.locator('#recipeJsonEditor').inputValue());
-    expect(viewed.artifact.payload.legacy_file_layout).toBe('basename');
-    const downloadPromise = page.waitForEvent('download');
-    await page.locator('#btnExportRecipeJson').click();
-    await downloadPromise;
-    await page.locator('#btnCancelRecipeJson').click();
-
-    await routeArchivePreparedTest(page, {
-      mode: 'paths', include: ['bin/archive-agent', 'share/defaults.yml'], exclude: [],
-      selected_directories: 0, explicit_files: 2, selected_files: 2,
-      excluded_directories: 0, excluded_files: 0, excluded_resolved_files: 0, legacy_layout: true,
-    });
-    await page.locator('#btnDryRun').click();
-    await expect(page.locator('#testRunState')).toHaveText('Prepared');
-    await page.locator('#btnTestRunClose').click();
-    expect((await persistedArchivePayload(page)).legacy_file_layout).toBe('basename');
-
-    await page.reload();
-    await openArchiveRecipe(page);
-    expect((await persistedArchivePayload(page)).legacy_file_layout).toBe('basename');
-    await page.locator('#btnInspectArchive').click();
-    await archiveAction(page, 'include', 'README.md').click();
-    await expect.poll(async () => (await persistedArchivePayload(page)).legacy_file_layout || '').toBe('');
-    const converted = await persistedArchivePayload(page);
-    expect(converted).toEqual({mode: 'paths', include: ['README.md', 'bin/archive-agent', 'share/defaults.yml'], exclude: []});
-    viewed = await page.evaluate(() => collectWorkflow());
-    expect(viewed.artifact.payload).toEqual(converted);
-    expect(viewed.artifact).not.toHaveProperty('selected_files');
-  } finally {
-    await restoreArchiveRecipe(page, original);
-  }
-});
-
 test('Test accepts HTTP 202 and follows the returned Run in a Recipe modal', async ({page}, testInfo) => {
   await page.route('**/api/run', route => route.fulfill({status:202, contentType:'application/json', body:JSON.stringify({run_id:'ui-01-prepared', status:'queued'})}));
   await openView(page, 'recipes');
@@ -1281,7 +1244,8 @@ test('Test accepts HTTP 202 and follows the returned Run in a Recipe modal', asy
   await expect(page.locator('#testRunPreflightContent')).toContainText('Source & project');
   const serviceSection = page.locator('#testRunPreflightContent .insight-section--service');
   await expect(serviceSection).toContainText('Systemd service');
-  await expect(serviceSection).toContainText('Prepared systemd unit');
+  await expect(serviceSection).toContainText('ExecStart');
+  await expect(serviceSection).toContainText('/opt/debbuilder/server.py');
   await expect(page.locator('#btnTestRunBuild')).toBeVisible();
   await expect(page.locator('.toast-region')).toContainText('Test queued: ui-01-prepared');
   await capture(page, testInfo, 'recipe-test-followed-run', {fullPage:false});
@@ -1315,6 +1279,22 @@ test('Package Test follows the same modal without opening Logs', async ({page}, 
 });
 
 test('Recipe Test modal keeps running progress compact', async ({page}, testInfo) => {
+  const response = await page.request.get('/api/executions/ui-02-worker');
+  expect(response.ok()).toBe(true);
+  const execution = (await response.json()).execution;
+  execution.id = 'ui-02-running';
+  execution.run_id = 'ui-02-running';
+  execution.status = 'running';
+  execution.lifecycle_status = 'building';
+  execution.lifecycle_active = true;
+  execution.steps.find(step => step.name === 'dependencies').status = 'running';
+  await page.route('**/api/executions/ui-02-running', route => route.fulfill({
+    status: 200, contentType: 'application/json', body: JSON.stringify({execution}),
+  }));
+  await page.route('**/api/executions/ui-02-running/logs?**', route => route.fulfill({
+    status: 200, contentType: 'application/json',
+    body: JSON.stringify({log: {text: 'Checking build dependencies\n', offset: 28, size: 28, complete: false, verbosity: 'normal'}}),
+  }));
   await page.route('**/api/run', route => route.fulfill({status:202, contentType:'application/json', body:JSON.stringify({run_id:'ui-02-running', status:'queued'})}));
   await openView(page, 'recipes');
   await page.locator('#workflowSelect').selectOption('worker-agent');
@@ -1355,7 +1335,7 @@ test('queued Test cancellation is immediate, terminal, and retained in Logs', as
   await expect(page.locator('#executionMeta')).toContainText('Cancelled');
   await expect(page.locator('#executionCancellationSummary')).toContainText('Cancelled');
   await expect(page.locator('#executionList [data-execution-id="ui-cancel-queued-test"]')).toContainText('Cancelled');
-  await expect(page.locator('#executionList [data-execution-id="ui-02-running"]')).toContainText('Running');
+  await expect(page.locator('#executionList [data-execution-id="ui-02-worker"]')).toContainText('Validation needed');
 });
 
 test('running Test cancellation protects repeated clicks and converges canonically', async ({page}, testInfo) => {

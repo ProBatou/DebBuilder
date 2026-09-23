@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
 from . import __version__
+from .execution_projection import public_error
 from .lifecycle import MutationGateClosed, is_durable_mutation_route
 
 
@@ -37,6 +38,25 @@ def create_handler(api):
                     api.json_response(self, {"error": {
                         "code": "authentication_unavailable",
                         "message": "Authentication is unavailable",
+                        "details": {},
+                    }}, 503)
+                else:
+                    api.text_response(self, "Authentication is unavailable", 503)
+                return False
+            except (api.SettingsDocumentError, api.resource_limits.ResourceLimitError):
+                if self.command == "POST" and urlparse(self.path).path == "/api/settings":
+                    try:
+                        if api.is_settings_repair_authorized(self.headers):
+                            return True
+                    except (api.SettingsDocumentError, api.resource_limits.ResourceLimitError, api.SessionSecretError):
+                        pass
+                if self.command == "HEAD":
+                    self.send_response(503)
+                    self.end_headers()
+                elif self.path.startswith("/api/"):
+                    api.json_response(self, {"error": {
+                        "code": "settings_unavailable",
+                        "message": "Application settings are unavailable",
                         "details": {},
                     }}, 503)
                 else:
@@ -147,7 +167,7 @@ def create_handler(api):
                         "code": "invalid_recipe_id", "message": str(exc), "details": {},
                     }}, 400)
                 except api.automation_status.AutomationActionError as exc:
-                    api.json_response(self, {"error": exc.as_dict()}, exc.status)
+                    api.json_response(self, {"error": public_error(exc.as_dict())}, exc.status)
             elif path == "/api/executions":
                 api.json_response(self, {"executions": api.list_executions()})
             elif path.startswith("/api/executions/"):
@@ -167,11 +187,11 @@ def create_handler(api):
                         )
                     except ValueError as exc:
                         api.json_response(self, {"error": {
-                            "code": "invalid_validation_identity", "message": str(exc), "details": {},
+                            "code": "invalid_validation_identity", "message": str(exc),
                         }}, 400)
                         return True
                     except api.validation_service.ValidationAdmissionError as exc:
-                        api.json_response(self, {"error": exc.as_dict()}, exc.status)
+                        api.json_response(self, {"error": public_error(exc.as_dict())}, exc.status)
                         return True
                     api.json_response(self, {"validation": validation})
                     return True
@@ -209,6 +229,13 @@ def create_handler(api):
             if action not in {"", "check", "retry"}:
                 return None
             return urllib.parse.unquote(parts[2]), action
+
+        @staticmethod
+        def _observation_identity(path: str):
+            parts = path.strip("/").split("/")
+            if len(parts) != 5 or parts[:2] != ["api", "recipes"] or parts[3:] != ["observation", "refresh"]:
+                return None
+            return urllib.parse.unquote(parts[2])
 
         def _get_package(self, path: str):
             name = urllib.parse.unquote(path.rsplit("/", 1)[-1])
@@ -289,6 +316,8 @@ def create_handler(api):
                     api.json_response(self, {"ok": False, "error": {"code": "invalid_json", "message": f"JSON syntax error at line {exc.lineno}, column {exc.colno}", "path": "$"}}, 400)
                 else:
                     api.json_response(self, {"error": str(exc)}, 400)
+            except api.SettingsDocumentError as exc:
+                api.json_response(self, {"error": exc.as_dict()}, 422)
             except api.resource_limits.ResourceLimitError as exc:
                 api.json_response(self, {"error": exc.as_dict()}, 422)
             except Exception as exc:
@@ -299,6 +328,36 @@ def create_handler(api):
 
         def _post(self, data: dict):
             parsed_path = urlparse(self.path).path
+            observation_recipe_id = self._observation_identity(parsed_path)
+            if observation_recipe_id is not None:
+                if not isinstance(data, dict) or data:
+                    api.json_response(self, {"error": {
+                        "code": "invalid_observation_refresh_request",
+                        "message": "Upstream refresh does not accept request fields",
+                        "details": {},
+                    }}, 400)
+                    return
+                try:
+                    observation = api.refresh_upstream_observation(observation_recipe_id)
+                except FileNotFoundError:
+                    api.json_response(self, {"error": {
+                        "code": "recipe_not_found", "message": "Recipe was not found", "details": {},
+                    }}, 404)
+                    return
+                except api.upstream_detection.UpstreamDetectionError as exc:
+                    api.json_response(self, {"error": {
+                        "code": exc.code, "message": str(exc),
+                        "details": {"classification": exc.classification},
+                    }}, 502)
+                    return
+                except api.upstream_observation.UpstreamObservationError as exc:
+                    status = 409 if exc.code == "recipe_changed_during_detection" else 503
+                    api.json_response(self, {"error": {
+                        "code": exc.code, "message": str(exc), "details": {},
+                    }}, status)
+                    return
+                api.json_response(self, {"ok": True, "observation": observation}, 200)
+                return
             automation_identity = self._automation_identity(parsed_path)
             if automation_identity is not None and automation_identity[1] in {"check", "retry"}:
                 recipe_id, action = automation_identity
@@ -320,7 +379,7 @@ def create_handler(api):
                     }}, 400)
                     return
                 except api.automation_status.AutomationActionError as exc:
-                    api.json_response(self, {"error": exc.as_dict()}, exc.status)
+                    api.json_response(self, {"error": public_error(exc.as_dict())}, exc.status)
                     return
                 api.json_response(self, {"ok": True, "automation": result}, 202)
                 return
@@ -331,7 +390,6 @@ def create_handler(api):
                     api.json_response(self, {"error": {
                         "code": "invalid_validation_cancellation_request",
                         "message": "Validation cancellation does not accept request fields",
-                        "details": {"run_id": run_id, "attempt_id": attempt_id},
                     }}, 400)
                     return
                 try:
@@ -344,10 +402,10 @@ def create_handler(api):
                     }}, 400)
                     return
                 except api.validation_service.ValidationAdmissionError as exc:
-                    api.json_response(self, {"error": exc.as_dict()}, exc.status)
+                    api.json_response(self, {"error": public_error(exc.as_dict())}, exc.status)
                     return
                 except api.validation_service.ValidationCancellationError as exc:
-                    api.json_response(self, {"error": exc.as_dict()}, exc.status)
+                    api.json_response(self, {"error": public_error(exc.as_dict())}, exc.status)
                     return
                 status = 202 if result["validation"]["status"] == "cancelling" else 200
                 api.json_response(self, {"ok": True, **result}, status)
@@ -358,7 +416,6 @@ def create_handler(api):
                     api.json_response(self, {"error": {
                         "code": "invalid_cancellation_request",
                         "message": "Execution cancellation does not accept request fields",
-                        "details": {"run_id": run_id},
                     }}, 400)
                     return
                 try:
@@ -374,7 +431,7 @@ def create_handler(api):
                     }}, 400)
                     return
                 except api.ExecutionCancellationError as exc:
-                    api.json_response(self, {"error": exc.as_dict()}, exc.status)
+                    api.json_response(self, {"error": public_error(exc.as_dict())}, exc.status)
                     return
                 api.json_response(self, {"ok": True, "cancellation": result}, 200 if result["status"] == "cancelled" else 202)
                 return
@@ -411,7 +468,7 @@ def create_handler(api):
                 try:
                     result = api.enqueue_recipe_run(getattr(self.server, "execution_manager", None), workflow, dry_run=dry_run)
                 except api.RunAdmissionError as exc:
-                    api.json_response(self, {"error": exc.as_dict()}, exc.status)
+                    api.json_response(self, {"error": public_error(exc.as_dict())}, exc.status)
                     return
                 api.json_response(self, result, 202)
                 return
@@ -419,6 +476,10 @@ def create_handler(api):
                 workflow = data.get("workflow", data)
                 try:
                     api.json_response(self, {"inspection": api.inspect_upstream_archive(workflow)})
+                except api.RecipeDocumentError as exc:
+                    api.json_response(self, {"error": {
+                        "code": exc.code, "message": str(exc), "path": exc.path,
+                    }}, 422)
                 except api.upstream_archive.UpstreamArchiveError as exc:
                     api.json_response(self, {"error": {"code": exc.code, "message": str(exc), "details": exc.details}}, 422)
                 return
@@ -429,7 +490,7 @@ def create_handler(api):
                         getattr(self.server, "validation_manager", None), run_id, data,
                     )
                 except api.validation_service.ValidationAdmissionError as exc:
-                    api.json_response(self, {"error": exc.as_dict()}, exc.status)
+                    api.json_response(self, {"error": public_error(exc.as_dict())}, exc.status)
                     return
                 api.json_response(self, {"validation": result}, 202)
                 return
@@ -438,7 +499,9 @@ def create_handler(api):
                 try:
                     result = api.publish_build_artifact(run_id, data)
                 except api.artifact_publication.PublicationError as exc:
-                    api.json_response(self, {"error": {"code": exc.code, "message": str(exc), "details": exc.details}}, 400)
+                    api.json_response(self, {"error": public_error({
+                        "code": exc.code, "stage": "publication", "message": str(exc),
+                    })}, 400)
                     return
                 failure_code = str((result.get("error") or {}).get("code") or "")
                 failure_status = 409 if failure_code in {"repository_mutation_busy", "publication_identity_conflict"} else 422

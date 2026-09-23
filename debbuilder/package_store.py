@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from . import apt_repo
+from . import apt_repo, artifact_publication
 
 
 BUILDABLE_PACKAGE_STATES = frozenset({
@@ -49,7 +49,7 @@ def allowed_actions(package_state: str, recipe_id: str, run: dict | None) -> dic
     """Return the canonical actions allowed by package and latest Build Run facts."""
     run = run or {}
     artifact = run.get("artifact") or {}
-    validation = (run.get("validations") or [{}])[-1]
+    validation = (run.get("_validation_attempts") or [{}])[-1]
     publication = (run.get("publications") or [{}])[-1]
     build_ready = (
         run.get("mode") == "build"
@@ -58,7 +58,18 @@ def allowed_actions(package_state: str, recipe_id: str, run: dict | None) -> dic
         and artifact.get("pruning") is None
     )
     validation_status = validation.get("status", "not_run")
-    publication_status = publication.get("status", "not_run")
+    publication_status = artifact_publication.publication_attempt_status(publication, run=run)
+    insertion_eligible = (
+        (run.get("publication_insertion_eligibility") or {}).get("eligible") is True
+    )
+    reconciliation_available = (
+        run.get("publication_reconciliation_available") is True
+        and any(
+            artifact_publication.successful_publication_proof(attempt, run=run) is not None
+            for attempt in run.get("publications") or []
+            if isinstance(attempt, dict)
+        )
+    )
     has_recipe = bool(recipe_id)
     return {
         "test": has_recipe,
@@ -66,7 +77,11 @@ def allowed_actions(package_state: str, recipe_id: str, run: dict | None) -> dic
             run.get("mode") == "dry_run" and run.get("status") == "cancelled"
         ),
         "validate": build_ready and validation_status not in {"queued", "running", "cancelling"} and publication_status != "running",
-        "publish": build_ready and validation_status == "success" and publication_status not in {"running", "success"},
+        "publish": (
+            build_ready
+            and (insertion_eligible or reconciliation_available)
+            and publication_status not in {"running", "success"}
+        ),
     }
 
 
@@ -76,7 +91,7 @@ def summarize_runs(runs: list[dict], summary, *, include_history: bool = True) -
     last_dry = next((run for run in runs if run.get("mode") == "dry_run"), None)
     successful = next((run for run in runs if run.get("mode") == "build" and run.get("status") == "success" and (run.get("artifact") or {}).get("path")), None)
     resolved = next((run for run in runs if (run.get("version") or {}).get("upstream")), None)
-    latest_validation = (last_real.get("validations") or [])[-1] if last_real and last_real.get("validations") else None
+    latest_validation = (last_real.get("_validation_attempts") or [])[-1] if last_real and last_real.get("_validation_attempts") else None
     latest_publication = (last_real.get("publications") or [])[-1] if last_real and last_real.get("publications") else None
     history = []
     if include_history:
@@ -85,10 +100,20 @@ def summarize_runs(runs: list[dict], summary, *, include_history: bool = True) -
                 continue
             build = summary(run)
             history.append(build)
-            for validation in run.get("validations", []):
+            for validation in run.get("_validation_attempts", []):
                 history.append({**build, "action": "validation", "status": validation.get("status", "unknown"), "updated": _event_epoch(validation.get("finished_at") or validation.get("started_at"), build.get("updated")), "event_id": validation.get("id", "")})
             for publication in run.get("publications", []):
-                history.append({**build, "action": "publication", "status": publication.get("status", "unknown"), "version": publication.get("published_version") or build.get("version", ""), "updated": _event_epoch(publication.get("finished_at") or publication.get("requested_at"), build.get("updated")), "event_id": publication.get("id", "")})
+                history.append({
+                    **build,
+                    "action": "publication",
+                    "status": artifact_publication.publication_attempt_status(publication, run=run),
+                    "version": publication.get("version") or build.get("version", ""),
+                    "updated": _event_epoch(
+                        publication.get("finished_at") or publication.get("requested_at"),
+                        build.get("updated"),
+                    ),
+                    "event_id": publication.get("id", ""),
+                })
     return {
         "last_real": summary(last_real) if last_real else None,
         "last_dry_run": summary(last_dry) if last_dry else None,
@@ -148,7 +173,6 @@ def enrich_package(pkg: dict, published_version: str = "", source_version: str =
         **pkg,
         "source": {
             "type": infer_source_type(src),
-            "url": src.get("url") or (f"https://github.com/{src.get('repository')}" if src.get("repository") else ""),
             "repository": src.get("repository", ""),
             "default_branch": src.get("default_branch", ""),
             "ref_type": src.get("ref_type", "release" if src.get("repository") else "local"),
@@ -156,15 +180,12 @@ def enrich_package(pkg: dict, published_version: str = "", source_version: str =
             "tag": src.get("tag", ""),
             "release": src.get("release", ""),
             "latest_release": src.get("latest_release", ""),
-            "release_url": src.get("release_url", ""),
             "release_id": src.get("release_id"),
             "commit": src.get("commit", ""),
             "subdirectory": src.get("subdirectory", ""),
             "asset_pattern": src.get("asset_pattern", ""),
             "asset_id": src.get("asset_id"),
             "asset_name": src.get("asset_name", ""),
-            "asset_url": src.get("asset_url", ""),
-            "asset_api_url": src.get("asset_api_url", ""),
             "content_type": src.get("content_type", ""),
             "declared_size": src.get("declared_size"),
             "download_size": src.get("download_size"),

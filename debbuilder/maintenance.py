@@ -144,31 +144,3 @@ class MaintenanceService:
 
     def is_alive(self) -> bool:
         return bool(self._thread and self._thread.is_alive())
-
-
-class TargetMaintenanceService:
-    """Lifecycle adapter retained for deterministic target-based tests."""
-
-    def __init__(self, target):
-        self._stop = threading.Event()
-        self._thread = threading.Thread(
-            target=target,
-            args=(self._stop,),
-            name="storage-maintenance",
-            daemon=False,
-        )
-
-    def start(self) -> None:
-        self._thread.start()
-
-    def request(self, *, refresh: bool = True, cleanup: bool = False) -> None:
-        return None
-
-    def stop(self) -> None:
-        self._stop.set()
-
-    def join(self, timeout: float | None = None) -> None:
-        self._thread.join(timeout)
-
-    def is_alive(self) -> bool:
-        return self._thread.is_alive()

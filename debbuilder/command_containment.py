@@ -177,7 +177,7 @@ class ContainmentTermination:
 
 @dataclass(frozen=True)
 class ContainmentRecovery:
-    """Authoritative result of reconciling one historical systemd command."""
+    """Authoritative result of reconciling one previously started systemd command."""
 
     verification: VerificationResult
     signalled: bool = False
@@ -259,11 +259,6 @@ _CLEANUP_BLOCKERS: dict[tuple[str, str, str, str], CleanupBlocker] = {}
 _CLEANUP_BLOCKER_GENERATIONS: dict[tuple[str, str, str, str], int] = {}
 _CLEANUP_BLOCKER_REVISION = 0
 _CLEANUP_BLOCKERS_SATURATED = False
-
-
-def cleanup_blockers() -> tuple[CleanupBlocker, ...]:
-    with _CLEANUP_GATE_LOCK:
-        return tuple(_CLEANUP_BLOCKERS[key] for key in sorted(_CLEANUP_BLOCKERS))
 
 
 def _publish_cleanup_blocker(kind: str, reason: str, identity: dict) -> str:
@@ -695,7 +690,7 @@ class _SystemdConnection:
         }
 
     def command_units(self) -> set[str]:
-        """List live loaded units in our namespace for compatibility diagnostics."""
+        """List live loaded units in our namespace for recovery diagnostics."""
         names = self.command_unit_names()
         live = set()
         for name in names:

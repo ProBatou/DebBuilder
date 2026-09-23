@@ -5,7 +5,7 @@ import unittest
 from debbuilder.automation_identity import (
     UpstreamIdentityError,
     automation_attempt_key,
-    canonical_identity_json,
+    canonical_identity_bytes,
     normalize_upstream_identity,
 )
 
@@ -85,12 +85,12 @@ class AutomationIdentityTests(unittest.TestCase):
         non_deb = {"expected_package": "", "expected_architecture": ""}
         raw = normalize_upstream_identity(release_asset(payload_kind="raw_file", **non_deb))
         archive = normalize_upstream_identity(release_asset(payload_kind="archive", **non_deb))
-        self.assertNotEqual(canonical_identity_json(raw), canonical_identity_json(archive))
+        self.assertNotEqual(canonical_identity_bytes(raw), canonical_identity_bytes(archive))
 
     def test_serialization_and_attempt_keys_are_stable_across_input_order(self):
         first = release_asset()
         second = dict(reversed(list(first.items())))
-        self.assertEqual(canonical_identity_json(first), canonical_identity_json(second))
+        self.assertEqual(canonical_identity_bytes(first), canonical_identity_bytes(second))
         self.assertEqual(
             automation_attempt_key("recipe", first, RECIPE_SHA),
             automation_attempt_key("recipe", second, RECIPE_SHA.upper()),
@@ -99,7 +99,7 @@ class AutomationIdentityTests(unittest.TestCase):
             automation_attempt_key("recipe", first, RECIPE_SHA),
             "automation-v1-4e4151e3b6181e800ae1099277be33a6c971b46a1903b90150526ba2a3ce6261",
         )
-        self.assertEqual(json.loads(canonical_identity_json(first))["schema_version"], 1)
+        self.assertEqual(json.loads(canonical_identity_bytes(first))["schema_version"], 1)
 
     def test_attempt_key_binds_recipe_revision_and_exact_identity(self):
         key = automation_attempt_key("recipe", release_asset(), RECIPE_SHA)

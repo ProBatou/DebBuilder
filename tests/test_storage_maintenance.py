@@ -272,6 +272,7 @@ class StorageMaintenanceTests(unittest.TestCase):
             base = Path(temporary)
             store = BuildStore(base / "data/builds")
             run = store.create({
+                "schema_version": 5,
                 "name": "blocked",
                 "package": {"name": "blocked", "maintainer": "A <a@example.test>", "description": "A"},
                 "source": {"repository": "owner/blocked"},
@@ -313,6 +314,7 @@ class StorageMaintenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             store = BuildStore(Path(temporary) / "builds")
             run = store.create({
+                "schema_version": 5,
                 "name": "queued",
                 "package": {"name": "queued", "maintainer": "A <a@example.test>", "description": "A"},
                 "source": {"repository": "owner/queued"},
@@ -372,7 +374,7 @@ class StorageMaintenanceTests(unittest.TestCase):
                     mock.patch.object(app, "validate_recipe_metadata", return_value={"runtime_apt_repositories": []}), \
                     mock.patch.object(app, "notification_service", return_value=notifier), \
                     mock.patch.object(app, "request_maintenance") as request, \
-                    mock.patch.object(app.dependency_preparation, "prepare_runtime_dependencies", return_value={"prepared_dependencies": prepared}), \
+                    mock.patch.object(app.dependency_preparation, "prepare_runtime_dependencies", return_value={"prepared": prepared}), \
                     mock.patch.object(app.dependency_preparation, "begin_lifecycle_attempt"), \
                     mock.patch.object(app.dependency_preparation, "complete_lifecycle_attempt"), \
                     mock.patch.object(app.dependency_preparation.SUPERVISOR, "register"), \
@@ -380,6 +382,7 @@ class StorageMaintenanceTests(unittest.TestCase):
                     mock.patch.object(app.validation_service, "load_attempt", return_value={
                         "inputs": {"profile": "bookworm", "previous_artifact": None},
                     }), \
+                    mock.patch.object(app.validation_service, "load_prepared", return_value=prepared), \
                     mock.patch.object(app.validation_service, "load_automation", return_value={
                         "automatic": False, "publish_after_success": False,
                     }), \

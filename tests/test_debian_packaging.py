@@ -9,8 +9,9 @@ from debbuilder import deb_inspector, debian_packaging, upstream_archive
 from debbuilder.recipe_schema import validate_recipe_metadata
 
 
-def packaging_recipe(*, service=True, policy="dpkg_conffile"):
-    return validate_recipe_metadata({
+def authored_packaging_recipe(*, service=True, policy="dpkg_conffile"):
+    return {
+        "schema_version": 5,
         "name": "demo", "package": {
             "name": "demo", "architecture": "all", "maintainer": "Demo <demo@example.test>",
             "description": "Demo application\nA deterministic package.",
@@ -20,7 +21,9 @@ def packaging_recipe(*, service=True, policy="dpkg_conffile"):
         "build": {"commands": ["true"], "output": {"mode": "source"}},
         "install": {
             "destination": "/opt/demo", "directory_mode": "0750", "file_mode": "0640",
-            "config_files": ["/etc/demo/demo.conf"], "config_policy": policy,
+            "config_files": [{
+                "source": "etc/demo/demo.conf", "destination": "/etc/demo/demo.conf", "policy": policy,
+            }],
             "owner": {"user": "demo-app", "group": "demo-app", "create_user": True, "create_group": True},
             "maintainer_scripts": {"postinst": "echo configured"},
         },
@@ -29,11 +32,15 @@ def packaging_recipe(*, service=True, policy="dpkg_conffile"):
             "user": "demo-service", "group": "demo-service", "command": "/opt/demo/bin/demo",
             "after": ["network.target"],
         },
-    })
+    }
+
+
+def packaging_recipe(*, service=True, policy="dpkg_conffile"):
+    return validate_recipe_metadata(authored_packaging_recipe(service=service, policy=policy))
 
 
 def archive_packaging_recipe(payload):
-    configured = packaging_recipe(service=False)
+    configured = authored_packaging_recipe(service=False)
     configured["artifact"] = {
         "mode": "upstream_archive", "type": "archive", "archive_source": "github_source",
         "archive_format": "tar.gz", "payload": payload,
@@ -44,6 +51,19 @@ def archive_packaging_recipe(payload):
 
 
 class DebianPackagingTests(unittest.TestCase):
+    def test_recipe_helper_keeps_derived_service_state_out_of_authored_input(self):
+        enabled = authored_packaging_recipe(service=True)
+        disabled = authored_packaging_recipe(service=False)
+        self.assertNotIn("configured", enabled["service"])
+        self.assertNotIn("configured", disabled["service"])
+
+        enabled_runtime = validate_recipe_metadata(enabled)
+        disabled_runtime = validate_recipe_metadata(disabled)
+        self.assertTrue(enabled_runtime["service"]["configured"])
+        self.assertTrue(enabled_runtime["service"]["enabled"])
+        self.assertTrue(disabled_runtime["service"]["configured"])
+        self.assertFalse(disabled_runtime["service"]["enabled"])
+
     def test_package_and_inspection_commands_preserve_resource_failures(self):
         failed = {
             "status": "failed", "stdout": "", "stderr": "resource enforcement failed",
@@ -202,7 +222,7 @@ class DebianPackagingTests(unittest.TestCase):
             self.assertIn("public/index.html", result["content_files"])
             self.assertIn("package.json", result["content_files"])
 
-    def test_legacy_individual_nested_file_keeps_basename_staging_behavior(self):
+    def test_individual_nested_build_output_uses_basename_staging(self):
         with tempfile.TemporaryDirectory() as temporary:
             workspace = self.make_workspace(temporary)
             recipe = packaging_recipe(service=False)
@@ -253,24 +273,6 @@ class DebianPackagingTests(unittest.TestCase):
             self.assertEqual((destination / "bin/demo").stat().st_mode & 0o777, 0o751)
             self.assertEqual(result["ownership"], {"user": "demo-app", "group": "demo-app", "applied_by": "postinst"})
             self.assertIn("chown -R demo-app:demo-app /opt/demo", result["maintainer_scripts"]["postinst"])
-
-    def test_archive_payload_legacy_and_new_nested_file_layouts_differ_exactly(self):
-        cases = [
-            ({"mode": "paths", "include": ["bin/demo"], "exclude": []}, "bin/demo", "demo"),
-            ({"mode": "paths", "include": ["bin/demo"], "exclude": [], "legacy_file_layout": "basename"}, "demo", "bin/demo"),
-        ]
-        for payload, present, absent in cases:
-            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as temporary:
-                workspace = self.make_workspace(temporary)
-                recipe = archive_packaging_recipe(payload)
-                plan = upstream_archive.resolve_payload(recipe, workspace / "source")
-                result = debian_packaging.prepare_staging(
-                    recipe, {"output": {"mode": "archive_payload", "payload": plan}, "version": "1.0-1"}, workspace,
-                )
-                destination = workspace / "staging/opt/demo"
-                self.assertTrue((destination / present).is_file())
-                self.assertFalse((destination / absent).exists())
-                self.assertEqual(result["content_files"], [present])
 
     def test_archive_exclusion_does_not_override_explicit_configuration_mapping(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -412,7 +414,7 @@ class DebianPackagingTests(unittest.TestCase):
     def test_fhs_executable_mapping_account_and_persistent_directories(self):
         with tempfile.TemporaryDirectory() as temporary:
             workspace = self.make_workspace(temporary)
-            recipe = packaging_recipe(service=False)
+            recipe = authored_packaging_recipe(service=False)
             recipe["install"].update({
                 "destination": "", "content": {"source": "configured_files"},
                 "owner": {"user": "root", "group": "root", "create_user": False, "create_group": False},
@@ -431,7 +433,7 @@ class DebianPackagingTests(unittest.TestCase):
             self.assertEqual(result["configurations"][0]["owner"], "root")
             self.assertEqual(result["configurations"][0]["mode"], "0755")
 
-    def test_mapping_defaults_remain_backward_compatible(self):
+    def test_mapping_optional_defaults_are_valid(self):
         recipe = packaging_recipe(service=False)
         mapping = recipe["install"]["config_files"][0]
         self.assertNotIn("mode", mapping)

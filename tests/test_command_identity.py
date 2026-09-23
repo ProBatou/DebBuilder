@@ -26,17 +26,18 @@ from debbuilder.command_identity import (
     recording_identities,
     terminate_verified_process_group,
     verify_identity,
-    verify_persisted_identity,
     validated_identity,
 )
 from debbuilder.command_runner import run_command
 from debbuilder.command_containment import command_unit_name, expected_control_group
 from debbuilder.execution_cancellation import ExecutionCancelled
 from debbuilder.build_store import BuildStore
+from debbuilder.resource_limits import empty_policy
 
 
 def recipe(name="identity-run"):
     return {
+        "schema_version": 5,
         "name": name,
         "package": {
             "name": name,
@@ -134,30 +135,35 @@ class CommandIdentityTests(unittest.TestCase):
         self.assertEqual(process.stdout.readline().strip(), "ready")
         return process, capture_identity(process.pid, run_id=run_id, command_id=command_id)
 
-    def test_v3_binds_policy_and_v1_v2_process_identities_remain_readable(self):
-        process, current = self.live_identity()
+    def test_v3_binds_policy_and_rejects_v1_v2_process_identities(self):
+        _process, current = self.live_identity()
         self.assertEqual(current["schema_version"], 3)
         self.assertIn("resource_limits", current)
         self.assertEqual(current["resource_io_targets"], [])
+        self.assertEqual(validated_identity(current), current)
         previous = {key: value for key, value in current.items() if key not in {"resource_limits", "resource_io_targets"}}
         previous["schema_version"] = 2
-        self.assertEqual(validated_identity(previous), previous)
         legacy = {key: value for key, value in previous.items() if key not in {"backend", "containment_state"}}
         legacy["schema_version"] = 1
-        self.assertEqual(validated_identity(legacy), legacy)
+        for old in (previous, legacy):
+            with self.subTest(schema_version=old["schema_version"]), self.assertRaises(CommandIdentityError):
+                validated_identity(old)
+            self.assertEqual(verify_identity(old).status, VerificationStatus.UNVERIFIABLE)
 
-    def test_v2_systemd_starting_and_active_identities_remain_readable(self):
-        run_id = "v2-systemd"
+    def test_v3_systemd_states_validate_and_v2_is_rejected(self):
+        run_id = "v3-systemd"
         command_id = "a" * 32
         unit_name = command_unit_name(run_id, command_id)
         starting = {
-            "schema_version": 2,
+            "schema_version": 3,
             "backend": "systemd_cgroup",
             "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
             "run_id": run_id,
             "command_id": command_id,
             "unit_name": unit_name,
             "containment_state": "starting",
+            "resource_limits": empty_policy(),
+            "resource_io_targets": [],
         }
         self.assertEqual(validated_identity(starting), starting)
         active = {
@@ -167,6 +173,13 @@ class CommandIdentityTests(unittest.TestCase):
             "control_group": expected_control_group(unit_name),
         }
         self.assertEqual(validated_identity(active), active)
+        stopping = {**active, "containment_state": "stopping"}
+        self.assertEqual(validated_identity(stopping), stopping)
+        for old in (starting, active):
+            old = {key: value for key, value in old.items() if key not in {"resource_limits", "resource_io_targets"}}
+            old["schema_version"] = 2
+            with self.subTest(state=old["containment_state"]), self.assertRaises(CommandIdentityError):
+                validated_identity(old)
 
     def test_v3_resource_policy_must_be_an_object(self):
         _process, identity = self.live_identity()
@@ -226,9 +239,8 @@ class CommandIdentityTests(unittest.TestCase):
                     file_fd = os.open(ACTIVE_COMMAND_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=fd)
                     with os.fdopen(file_fd, "wb") as handle:
                         handle.write(payload)
-                    identity, result = verify_persisted_identity(fd, expected_run_id=run["id"])
-                self.assertIsNone(identity)
-                self.assertEqual(result.status, VerificationStatus.UNVERIFIABLE)
+                    with self.assertRaises(CommandIdentityError):
+                        read_persisted_identity(fd)
 
         with mock.patch("debbuilder.command_runner._signal_process_group") as send:
             result = terminate_verified_process_group({"pid": os.getpid()}, expected_run_id="malformed")
@@ -243,9 +255,8 @@ class CommandIdentityTests(unittest.TestCase):
         target.write_text("{}")
         with store.locked_run(run["id"]) as fd:
             os.symlink(target, ACTIVE_COMMAND_FILE, dir_fd=fd)
-            persisted, result = verify_persisted_identity(fd, expected_run_id=run["id"])
-        self.assertIsNone(persisted)
-        self.assertEqual(result.status, VerificationStatus.UNVERIFIABLE)
+            with self.assertRaises(OSError):
+                read_persisted_identity(fd)
 
         process, identity = self.live_identity()
         with mock.patch("debbuilder.command_runner._signal_process_group") as send:
@@ -543,9 +554,7 @@ with recording_identities(run_id, record=before_persist, clear=lambda identity: 
         os.kill(process.pid, signal.SIGKILL)
         process.wait(timeout=2)
         with store.locked_run(run["id"]) as fd:
-            persisted, result = verify_persisted_identity(fd, expected_run_id=run["id"])
-        self.assertIsNone(persisted)
-        self.assertEqual(result.status, VerificationStatus.UNVERIFIABLE)
+            self.assertIsNone(read_persisted_identity(fd))
         self.assertEqual(verify_identity(identity).status, VerificationStatus.MATCH)
         os.killpg(identity["pgid"], signal.SIGKILL)
         self.assert_pids_gone(self, [identity["pid"]])
@@ -581,8 +590,8 @@ with store.locked_run(run_id) as fd:
         os.kill(process.pid, signal.SIGKILL)
         process.wait(timeout=2)
         with store.locked_run(run["id"]) as fd:
-            identity, result = verify_persisted_identity(fd, expected_run_id=run["id"])
-            self.assertEqual(result.status, VerificationStatus.NOT_RUNNING)
+            identity = read_persisted_identity(fd)
+            self.assertEqual(verify_identity(identity, expected_run_id=run["id"]).status, VerificationStatus.NOT_RUNNING)
             self.assertTrue(clear_identity(fd, identity))
             self.assertIsNone(read_persisted_identity(fd))
 

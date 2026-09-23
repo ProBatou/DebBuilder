@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from debbuilder import build_pipeline, source_acquisition, upstream_archive, upstream_artifact
+from debbuilder import app, build_pipeline, source_acquisition, upstream_archive, upstream_artifact
 from debbuilder.automation_identity import (
     UpstreamIdentityError,
     automation_attempt_key,
@@ -17,7 +17,8 @@ from debbuilder.automation_identity import (
     verify_expected_upstream_identity,
 )
 from debbuilder.build_store import BuildStore, canonical_recipe_sha256
-from debbuilder.recipe_schema import validate_recipe_metadata
+from debbuilder.recipe_schema import runtime_recipe_for_storage, validate_recipe_metadata
+from debbuilder.build_models import RunDocumentError
 
 
 COMMIT_A = "a1" * 20
@@ -254,6 +255,29 @@ class AcquisitionPinningTests(unittest.TestCase):
             self.assertEqual(caught.exception.code, "upstream_identity_changed")
             downloader.assert_not_called()
 
+    def test_explicit_release_asset_does_not_fall_back_to_generated_source(self):
+        configured = archive_recipe()
+        admitted = release()
+        expected = release_asset_identity(
+            configured, admitted, admitted["assets"][0], "archive",
+        )
+        moved = {
+            **release(), "assets": [],
+            "commit": COMMIT_A, "ref_object_sha": COMMIT_B,
+            "tarball_url": "https://api.github.com/repos/example/demo/tarball/v1.2.3",
+        }
+        downloader = mock.Mock()
+        with tempfile.TemporaryDirectory() as temporary, self.assertRaises(
+            upstream_archive.UpstreamArchiveError,
+        ) as caught:
+            upstream_archive.resolve_and_extract(
+                configured, temporary, expected_identity=expected,
+                release_resolver=lambda *_args, **_kwargs: moved,
+                downloader=downloader,
+            )
+        self.assertEqual(caught.exception.code, "release_asset_not_found")
+        downloader.assert_not_called()
+
     def test_matching_deb_identity_verifies_bytes_and_manual_unpinned_remains_supported(self):
         payload = b"debdata"
         digest = hashlib.sha256(payload).hexdigest()
@@ -280,6 +304,155 @@ class AcquisitionPinningTests(unittest.TestCase):
         self.assertEqual(seen_urls[0], "https://api.github.com/repos/example/demo/releases/assets/20")
         self.assertEqual(seen_urls[1], rel["assets"][0]["url"])
 
+    def test_manual_latest_release_admission_persists_exact_provenance(self):
+        configured = source_recipe(tracking="latest_release", ref="")
+        resolved = {
+            **ref_resolution(configured, COMMIT_A),
+            "release_id": 10, "ref": "v1.2.3", "tag": "v1.2.3",
+        }
+        expected = source_archive_identity(configured, resolved, generated_release=True)
+        with tempfile.TemporaryDirectory() as temporary:
+            store = BuildStore(Path(temporary) / "builds")
+            run = build_pipeline.create_pipeline_run(
+                runtime_recipe_for_storage(configured), store=store, dry_run=True,
+                manual_source_provenance=expected,
+            )
+            persisted = store.load(run["id"])
+            self.assertEqual(persisted["manual_source_provenance"], expected)
+            persisted["manual_source_provenance"] = {
+                **expected, "commit_sha": COMMIT_B,
+            }
+            with self.assertRaisesRegex(ValueError, "admission metadata seal"):
+                store.save(persisted)
+
+    def test_manual_latest_release_admission_uses_fresh_exact_detection(self):
+        configured = source_recipe(tracking="latest_release", ref="")
+        resolved = {
+            **ref_resolution(configured, COMMIT_A),
+            "release_id": 10, "ref": "v1.2.3", "tag": "v1.2.3",
+        }
+        expected = source_archive_identity(configured, resolved, generated_release=True)
+        with mock.patch.object(
+            app.upstream_detection, "detect_upstream",
+            return_value={"identity": expected, "display_version": "1.2.3", "display_ref": "v1.2.3"},
+        ) as detect, mock.patch.object(app, "github_token", return_value="secret-token"):
+            captured = app._resolve_manual_source_provenance(configured)
+        self.assertEqual(captured, expected)
+        detect.assert_called_once_with(configured, token="secret-token")
+
+    def test_manual_enqueue_forwards_detected_identity_into_durable_creation(self):
+        configured = runtime_recipe_for_storage(
+            source_recipe(tracking="latest_release", ref=""),
+        )
+        resolved = {
+            **ref_resolution(source_recipe(tracking="latest_release", ref=""), COMMIT_A),
+            "release_id": 10, "ref": "v1.2.3", "tag": "v1.2.3",
+        }
+        expected = source_archive_identity(configured, resolved, generated_release=True)
+        manager = object()
+        with mock.patch.object(
+            app, "_prepare_run_admission", return_value=(configured, {"contract": "test"}),
+        ), mock.patch.object(
+            app, "_resolve_manual_source_provenance", return_value=expected,
+        ), mock.patch.object(
+            app, "_enqueue_prepared_recipe_run", return_value={"run_id": "run", "status": "queued"},
+        ) as enqueue:
+            result = app.enqueue_recipe_run(manager, configured, dry_run=True)
+        self.assertEqual(result, {"run_id": "run", "status": "queued"})
+        enqueue.assert_called_once_with(
+            manager, configured, {"contract": "test"}, dry_run=True,
+            manual_source_provenance=expected,
+        )
+
+    def test_manual_exact_ref_admission_does_not_add_latest_release_resolution(self):
+        configured = source_recipe(tracking="manual", ref="v1.2.3")
+        with mock.patch.object(app.upstream_detection, "detect_upstream") as detect:
+            self.assertIsNone(app._resolve_manual_source_provenance(configured))
+        detect.assert_not_called()
+
+    def test_manual_latest_release_matching_identity_succeeds_but_movement_fails_closed(self):
+        configured = source_recipe(tracking="latest_release", ref="")
+        admitted_resolution = {
+            **ref_resolution(configured, COMMIT_A),
+            "release_id": 10, "ref": "v1.2.3", "tag": "v1.2.3",
+        }
+        expected = source_archive_identity(
+            configured, admitted_resolution, generated_release=True,
+        )
+        moved_resolution = {**admitted_resolution, "commit": COMMIT_B}
+        moved = source_archive_identity(
+            configured, moved_resolution, generated_release=True,
+        )
+
+        for actual, source_status, error_code in (
+            (expected, "success", "project_not_detected"),
+            (moved, "failed", "upstream_identity_changed"),
+        ):
+            with self.subTest(moved=actual == moved), tempfile.TemporaryDirectory() as temporary:
+                store = BuildStore(Path(temporary) / "builds")
+                run = build_pipeline.create_pipeline_run(
+                    runtime_recipe_for_storage(configured), store=store, dry_run=True,
+                    manual_source_provenance=expected,
+                )
+
+                def acquire(_recipe, workspace, token="", expected_identity=None):
+                    self.assertEqual(expected_identity, expected)
+                    return {
+                        **admitted_resolution,
+                        "upstream_identity": actual,
+                        "source_directory": str(Path(workspace) / "source"),
+                    }
+
+                result = build_pipeline.execute_pipeline_run(
+                    run["id"], store=store, acquire=acquire,
+                )
+            self.assertEqual(result["steps"][0]["status"], source_status)
+            self.assertEqual(result["error"]["code"], error_code)
+
+    def test_historical_v3_latest_release_run_is_rejected_before_acquisition(self):
+        configured = source_recipe(tracking="latest_release", ref="")
+        acquire = mock.Mock()
+        with tempfile.TemporaryDirectory() as temporary:
+            store = BuildStore(Path(temporary) / "builds")
+            run = store.create(
+                runtime_recipe_for_storage(configured), mode="dry_run",
+                run_id="historical-unpinned",
+            )
+            path = store.run_dir(run["id"]) / "run.json"
+            historical = json.loads(path.read_text())
+            historical["schema_version"] = 3
+            path.write_text(json.dumps(historical))
+            with self.assertRaises(RunDocumentError) as raised:
+                build_pipeline.execute_pipeline_run(
+                    run["id"], store=store, acquire=acquire,
+                )
+        self.assertEqual(raised.exception.code, "unsupported_run_schema_version")
+        acquire.assert_not_called()
+
+    def test_manual_exact_ref_keeps_existing_unpinned_behavior(self):
+        configured = source_recipe(tracking="manual", ref="v1.2.3")
+        actual = source_archive_identity(
+            configured, ref_resolution(configured), generated_release=False,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            store = BuildStore(Path(temporary) / "builds")
+            run = build_pipeline.create_pipeline_run(
+                runtime_recipe_for_storage(configured), store=store, dry_run=True,
+            )
+
+            def acquire(_recipe, workspace, token="", expected_identity=None):
+                return {
+                    **ref_resolution(configured),
+                    "upstream_identity": actual,
+                    "source_directory": str(Path(workspace) / "source"),
+                }
+
+            result = build_pipeline.execute_pipeline_run(
+                run["id"], store=store, acquire=acquire,
+            )
+        self.assertEqual(result["steps"][0]["status"], "success")
+        self.assertEqual(result["error"]["code"], "project_not_detected")
+
     def test_automated_run_rejects_a_recipe_snapshot_hash_mismatch(self):
         configured = source_recipe(policy="build")
         expected = source_archive_identity(configured, ref_resolution(configured), generated_release=False)
@@ -287,7 +460,7 @@ class AcquisitionPinningTests(unittest.TestCase):
             store = BuildStore(Path(temporary) / "builds")
             recipe_sha = canonical_recipe_sha256(configured)
             run = store.create(
-                configured, mode="build", run_id="tampered", recipe_id="demo",
+                runtime_recipe_for_storage(configured), mode="build", run_id="tampered", recipe_id="demo",
                 origin={"kind": "automation", "trigger": "upstream_change", "reason": "ref_advanced"},
                 automation={
                     "attempt_key": automation_attempt_key("demo", expected, recipe_sha),
@@ -297,7 +470,7 @@ class AcquisitionPinningTests(unittest.TestCase):
             changed = copy.deepcopy(configured)
             changed["package"]["description"] = "changed after admission"
             (store.run_dir(run["id"]) / "recipe.json").write_text(
-                json.dumps(changed, indent=2, ensure_ascii=False) + "\n", encoding="utf-8",
+                json.dumps(runtime_recipe_for_storage(changed), indent=2, ensure_ascii=False) + "\n", encoding="utf-8",
             )
             with self.assertRaises(build_pipeline.PipelineRunError) as caught:
                 build_pipeline.execute_pipeline_run(run["id"], store=store)
@@ -312,7 +485,7 @@ class AcquisitionPinningTests(unittest.TestCase):
             store = BuildStore(Path(temporary) / "builds")
             recipe_sha = canonical_recipe_sha256(configured)
             run = store.create(
-                configured, mode="build", run_id="pinned", recipe_id="demo",
+                runtime_recipe_for_storage(configured), mode="build", run_id="pinned", recipe_id="demo",
                 origin={"kind": "automation", "trigger": "upstream_change", "reason": "ref_advanced"},
                 automation={
                     "attempt_key": automation_attempt_key("demo", expected, recipe_sha),
@@ -320,7 +493,7 @@ class AcquisitionPinningTests(unittest.TestCase):
                 },
             )
 
-            def wrong_source(_recipe, _workspace, token=""):
+            def wrong_source(_recipe, _workspace, token="", expected_identity=None):
                 return {"upstream_identity": actual}
 
             result = build_pipeline.execute_pipeline_run(run["id"], store=store, acquire=wrong_source)

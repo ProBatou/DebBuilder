@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import inspect
 import time
 from datetime import datetime
 
@@ -16,7 +15,7 @@ from .build_store import BuildStore, canonical_recipe_sha256
 from .command_identity import clear_identity, persist_identity, recording_identities, update_identity
 from .execution_cancellation import SERVER_SHUTDOWN, CancellationControl, ExecutionCancelled
 from . import build_executor, deb_inspector, debian_packaging, dependency_checker, project_detection, source_acquisition, source_changes, upstream_archive, upstream_artifact
-from .recipe_schema import validate_recipe_metadata
+from .recipe_schema import recipe_for_storage, validate_recipe_metadata
 
 
 class PipelineRunError(RuntimeError):
@@ -122,29 +121,20 @@ def _claim_terminal(control: CancellationControl, run: dict, store: BuildStore, 
     raise RuntimeError("execution terminal ownership could not be settled")
 
 
-def _call_with_cancellation(callback, *args, control: CancellationControl, on_cancel, **kwargs):
-    """Pass cancellation only to callbacks that declare the internal contract."""
-    parameters = inspect.signature(callback).parameters
-    accepts_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
-    if "cancellation_event" in parameters or accepts_kwargs:
-        kwargs["cancellation_event"] = control.event
-    if "on_cancel" in parameters or accepts_kwargs:
-        kwargs["on_cancel"] = on_cancel
-    return callback(*args, **kwargs)
-
-
-def _call_with_expected_identity(callback, *args, expected_identity: dict | None, **kwargs):
-    """Pass the pin only through the narrow acquisition callback contract."""
-    parameters = inspect.signature(callback).parameters
-    accepts_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
-    if expected_identity is not None and ("expected_identity" in parameters or accepts_kwargs):
-        kwargs["expected_identity"] = expected_identity
-    return callback(*args, **kwargs)
-
-
-def _run_expected_identity(run: dict) -> dict | None:
+def _run_expected_identity(run: dict, recipe: dict) -> dict | None:
     automation = run.get("automation")
-    return automation.get("expected_upstream_identity") if isinstance(automation, dict) else None
+    if isinstance(automation, dict):
+        return automation.get("expected_upstream_identity")
+    provenance = run.get("manual_source_provenance")
+    if provenance is not None:
+        return provenance
+    if recipe["source"]["tracking"] == "latest_release":
+        raise UpstreamIdentityError(
+            "incomplete_upstream_identity",
+            "Manual latest-release Run is missing immutable admission provenance",
+            path="$.manual_source_provenance",
+        )
+    return None
 
 
 def _finalize_execution_cancellation(run: dict, store: BuildStore, exc: ExecutionCancelled, lifecycle_callback=None, recipe: dict | None = None) -> dict:
@@ -240,8 +230,8 @@ def _run_upstream_artifact(canonical: dict, run: dict, *, store: BuildStore, dry
         selection_step, selection_started = _start_step(run, store, "detection")
         _cancellation_checkpoint(control, run, store, "detection")
         selected = upstream_artifact.select_asset(release, canonical["artifact"])
-        expected_identity = _run_expected_identity(run)
         try:
+            expected_identity = _run_expected_identity(run, canonical)
             actual_identity = release_asset_identity(canonical, release, selected, "deb")
             verify_expected_upstream_identity(expected_identity, actual_identity)
         except UpstreamIdentityError as exc:
@@ -259,17 +249,11 @@ def _run_upstream_artifact(canonical: dict, run: dict, *, store: BuildStore, dry
             run.update({"status": "prepared", "version": {"upstream": release["upstream_version"], "debian": ""}})
         else:
             acquire_artifact = acquirer or upstream_artifact.acquire
-            artifact_parameters = inspect.signature(acquire_artifact).parameters
-            artifact_accepts_kwargs = any(
-                parameter.kind == inspect.Parameter.VAR_KEYWORD
-                for parameter in artifact_parameters.values()
-            )
-            artifact_kwargs = {"token": github_token}
-            if expected_identity is not None and ("expected_identity" in artifact_parameters or artifact_accepts_kwargs):
-                artifact_kwargs["expected_identity"] = expected_identity
-            artifact = _call_with_cancellation(
-                acquire_artifact, canonical, run["workspace"], **artifact_kwargs,
-                control=control, on_cancel=lambda: _observe_cancellation(control, run, store, "artifact"),
+            artifact = acquire_artifact(
+                canonical, run["workspace"], token=github_token,
+                expected_identity=expected_identity,
+                cancellation_event=control.event,
+                on_cancel=lambda: _observe_cancellation(control, run, store, "artifact"),
             )
             try:
                 verify_expected_upstream_identity(expected_identity, artifact.get("upstream_identity", {}))
@@ -293,10 +277,10 @@ def _run_upstream_artifact(canonical: dict, run: dict, *, store: BuildStore, dry
 
 
 def create_pipeline_run(
-    recipe: dict, *, store: BuildStore, dry_run: bool, recipe_id: str = "", run_id: str | None = None, resource_contract: dict | None = None, origin: dict | None = None, automation: dict | None = None,
+    recipe: dict, *, store: BuildStore, dry_run: bool, recipe_id: str = "", run_id: str | None = None, resource_contract: dict | None = None, origin: dict | None = None, automation: dict | None = None, manual_source_provenance: dict | None = None,
 ) -> dict:
     """Validate a Recipe and persist an isolated pending Run without executing it."""
-    canonical = validate_recipe_metadata(recipe)
+    canonical = recipe_for_storage(recipe)
     return store.create(
         canonical,
         recipe_id=recipe_id or canonical["name"],
@@ -305,6 +289,7 @@ def create_pipeline_run(
         resource_contract=resource_contract,
         origin=origin,
         automation=automation,
+        manual_source_provenance=manual_source_provenance,
     )
 
 
@@ -360,17 +345,6 @@ def execute_pipeline_run(run_id: str, *, store: BuildStore, expected_initial_sta
                 return _finalize_execution_cancellation(run, store, exc, lifecycle_callback, canonical)
 
 
-def run_pipeline(recipe: dict, *, store: BuildStore, dry_run: bool, recipe_id: str = "", github_token: str = "", acquire=None, detector=None, dependency_check=None, change_applier=None, upstream_acquirer=None, lifecycle_callback=None, cancellation_control: CancellationControl | None = None) -> dict:
-    """Create and synchronously execute one canonical Build Run."""
-    run = create_pipeline_run(recipe, store=store, dry_run=dry_run, recipe_id=recipe_id)
-    return execute_pipeline_run(
-        run["id"], store=store, github_token=github_token,
-        acquire=acquire, detector=detector, dependency_check=dependency_check,
-        change_applier=change_applier, upstream_acquirer=upstream_acquirer,
-        lifecycle_callback=lifecycle_callback, cancellation_control=cancellation_control,
-    )
-
-
 def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_run: bool, github_token: str, acquire, detector, dependency_check, change_applier, upstream_acquirer, lifecycle_callback, control: CancellationControl) -> dict:
     run_started = time.monotonic()
     run.update({"status": "running", "started_at": utc_now()})
@@ -389,11 +363,12 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
     source_step, source_started = _start_step(run, store, "source")
     try:
         _cancellation_checkpoint(control, run, store, "source")
-        expected_identity = _run_expected_identity(run)
-        source = _call_with_expected_identity(
-            acquire, canonical, run["workspace"], token=github_token,
-            expected_identity=expected_identity,
-        )
+        try:
+            expected_identity = _run_expected_identity(run, canonical)
+        except UpstreamIdentityError as exc:
+            error_type = upstream_archive.UpstreamArchiveError if archive_mode else source_acquisition.SourceError
+            raise error_type(exc.code, str(exc)) from exc
+        source = acquire(canonical, run["workspace"], token=github_token, expected_identity=expected_identity)
         try:
             verify_expected_upstream_identity(expected_identity, source.get("upstream_identity", {}))
         except UpstreamIdentityError as exc:
@@ -444,14 +419,14 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
             _finish_step(run, store, dependencies_step, dependencies_started, status="skipped", summary="No build dependencies: upstream release artifact", details={**dependencies, "reason": "upstream_archive"})
         else:
             try:
-                dependencies = _call_with_cancellation(
-                    dependency_check,
-                    detection.get("system_build_dependencies", detection.get("build_dependencies", [])),
+                dependencies = dependency_check(
+                    detection["system_build_dependencies"],
                     canonical["build"]["extra_dependencies"], tools=detection.get("build_tools", []),
                     tool_version_requirements=detection.get("tool_version_requirements", {}),
                     workspace=source["source_directory"], working_directory=canonical["build"]["working_directory"],
                     environment=canonical["build"]["environment"],
-                    control=control, on_cancel=lambda: _observe_cancellation(control, run, store, "dependencies"),
+                    cancellation_event=control.event,
+                    on_cancel=lambda: _observe_cancellation(control, run, store, "dependencies"),
                 )
                 _cancellation_checkpoint(control, run, store, "dependencies")
                 store.append_event(run, f"Build tools available: {', '.join(dependencies.get('available_tools', [])) or 'none'}")
@@ -607,51 +582,3 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
                     _finish_step(run, store, package_step, package_started, status="failed", summary=str(exc), details=exc.details, error=error)
                 run.update({"status":"failed","error":error})
     return _finish_terminal_run(run, store, run_started, control, run.get("status", "pipeline"), lifecycle_callback, canonical)
-
-
-def execution_summary(run: dict) -> dict:
-    validations = run.get("validations") or []
-    publications = run.get("publications") or []
-    validation_status = validations[-1]["status"] if validations else "not_run"
-    publication_status = publications[-1]["status"] if publications else "not_run"
-    from .package_store import allowed_actions, derive_lifecycle_status
-    build_status = run.get("status", "pending")
-    lifecycle_status = derive_lifecycle_status(build_status, validation_status, publication_status)
-    actions = allowed_actions(lifecycle_status, str(run.get("recipe_id") or ""), run)
-    return {
-        "id": run["id"], "run_id": run["id"], "package": run.get("recipe_id", ""),
-        "action": "dry-run" if run.get("mode") == "dry_run" else "build",
-        "version": (run.get("version") or {}).get("debian", ""),
-        "status": build_status, "build_status": build_status, "updated": run.get("created_at_epoch"),
-        "origin": run.get("origin") or {"kind": "manual", "trigger": "manual", "reason": None},
-        "duration": run.get("duration"), "workspace": run.get("workspace", ""),
-        "validation_count": len(validations), "validation_status": validation_status, "publication_status": publication_status,
-        "lifecycle_status": lifecycle_status,
-        "lifecycle_active": build_status in {"pending", "queued", "running", "cancelling"} or validation_status in {"queued", "running", "cancelling"} or publication_status == "running",
-        "ready_for_build": run.get("mode") == "dry_run" and build_status == "prepared",
-        "allowed_actions": {"validate": actions["validate"], "publish": actions["publish"]},
-    }
-
-
-def execution_detail(run: dict) -> dict:
-    summary = execution_summary(run)
-    detail = {**summary, **run}
-    # The attempt key and expected-identity seal coordinate internal admission;
-    # they are deliberately absent from existing public execution projections.
-    detail.pop("automation", None)
-    detail.pop("admission_sha256", None)
-    if isinstance(run.get("artifact"), dict):
-        detail["artifact"] = {
-            key: value for key, value in run["artifact"].items() if key != "upstream_identity"
-        }
-    # Historical runs can contain the internal acquisition seal in source details.
-    # Do not mutate the canonical Run while projecting its public representation.
-    detail["steps"] = [
-        {**step, "details": {key: value for key, value in step["details"].items() if key != "upstream_identity"}}
-        if isinstance(step.get("details"), dict) and "upstream_identity" in step["details"] else step
-        for step in run.get("steps", [])
-    ]
-    for field in ("build_status", "validation_status", "publication_status", "lifecycle_status", "lifecycle_active", "allowed_actions"):
-        detail[field] = summary[field]
-    detail["script"] = ""
-    return detail

@@ -1,4 +1,4 @@
-"""Deterministic systemd unit generation from Recipe v1."""
+"""Deterministic systemd unit generation from Recipe v5."""
 from __future__ import annotations
 
 

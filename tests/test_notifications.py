@@ -34,11 +34,6 @@ def fake_app(data_dir: Path, sent: list[dict]):
         "status": "failed",
         "error": {"message": "publication failed"},
     }
-    module.run_recipe_pipeline_with_automation = lambda workflow, dry_run=True: {
-        "run_id": "run-auto",
-        "status": "success",
-        "automation": {"publication": {"build_run_id": "run-auto", "package": "demo", "version": "1.0-1", "status": "success"}},
-    }
     module.recipe_package_name = lambda recipe: (recipe.get("package") or {}).get("name") or recipe.get("name") or ""
     module.build_run_package = lambda run: (((run.get("artifact") or {}).get("inspection") or {}).get("package")) or run.get("package") or run.get("recipe_id") or ""
     module.app_settings = lambda: {
@@ -70,7 +65,7 @@ class NotificationServiceTests(unittest.TestCase):
 
     def create_run(self, run_id: str, package: str = "demo", version: str = "1.0-1"):
         recipe = {
-            "schema_version": 1,
+            "schema_version": 5,
             "name": f"{package}-recipe",
             "active": True,
             "package": {"name": package, "architecture": "all", "maintainer": "Demo <demo@example.test>", "description": "Demo"},
@@ -173,7 +168,14 @@ class NotificationServiceTests(unittest.TestCase):
             service.notify_build_lifecycle("build_failed", run={"id": "run-build", "recipe_id": "demo-recipe", "error": {"message": "source failed"}}, recipe={"package": {"name": "demo"}})
             service.notify_validation_result(module.validate_build_artifact("run-validation", {}))
             service.notify_publication_result(module.publish_build_artifact("run-publication", {}))
-            service.notify_automatic_completion(module.run_recipe_pipeline_with_automation({"name": "demo-recipe"}, dry_run=False))
+            service.notify_automatic_completion({
+                "run_id": "run-auto",
+                "status": "success",
+                "automation": {"publication": {
+                    "build_run_id": "run-auto", "package": "demo",
+                    "version": "1.0-1", "status": "success",
+                }},
+            })
 
         titles = [row["title"] for row in sent]
         self.assertNotIn("Build started", titles)
@@ -184,10 +186,17 @@ class NotificationServiceTests(unittest.TestCase):
         self.assertTrue(any("Failed stage: publication" in row["message"] for row in sent))
         self.assertTrue(all("validation-secret" not in row["message"] for row in sent))
 
-    def test_app_run_recipe_pipeline_passes_lifecycle_callback_to_structured_engine(self):
+    def test_queued_execution_passes_lifecycle_callback_to_structured_engine(self):
         events = []
+        store = BuildStore(self.data / "builds")
+        run = store.create(
+            {"schema_version": 5, "name": "demo", "package": {"name": "demo"}},
+            mode="build",
+            run_id="run-callback",
+        )
 
-        def fake_run_pipeline(_workflow, **kwargs):
+        def fake_execute(run_id, **kwargs):
+            self.assertEqual(run_id, run["id"])
             callback = kwargs.get("lifecycle_callback")
             self.assertTrue(callable(callback))
             callback("build_failed", run={"id": "run-callback", "recipe_id": "demo", "mode": "build"}, recipe={"package": {"name": "demo"}})
@@ -197,11 +206,18 @@ class NotificationServiceTests(unittest.TestCase):
             def notify_build_lifecycle(self, event, **payload):
                 events.append((event, payload))
 
+            def notify_automatic_completion(self, _result):
+                return None
+
         old = server.NOTIFICATION_SERVICE
         server.NOTIFICATION_SERVICE = Recorder()
         try:
-            with mock.patch("debbuilder.app.build_pipeline.run_pipeline", side_effect=fake_run_pipeline):
-                result = server.run_recipe_pipeline({"name": "demo", "package": {"name": "demo"}}, dry_run=False)
+            with mock.patch(
+                "debbuilder.app.build_pipeline.execute_pipeline_run", side_effect=fake_execute,
+            ), mock.patch("debbuilder.app.request_maintenance"):
+                result = server.execute_queued_recipe_run(
+                    run["id"], store=store, expected_initial_status="pending",
+                )
         finally:
             server.NOTIFICATION_SERVICE = old
 
@@ -212,23 +228,28 @@ class NotificationServiceTests(unittest.TestCase):
         events = []
         store = BuildStore(self.data / "builds")
 
-        def fail_acquire(_recipe, _workspace, token=""):
+        def fail_acquire(_recipe, _workspace, token="", expected_identity=None):
             raise source_acquisition.SourceError("download_failed", "source failed")
 
-        result = build_pipeline.run_pipeline(
-            {
-                "name": "demo",
-                "active": True,
-                "package": {"name": "demo", "architecture": "all", "maintainer": "Demo <demo@example.test>", "description": "Demo package"},
-                "source": {"repository": "owner/demo"},
-            },
+        result = build_pipeline.execute_pipeline_run(
+            build_pipeline.create_pipeline_run(
+                {
+                    "schema_version": 5,
+                    "name": "demo",
+                    "active": True,
+                    "package": {"name": "demo", "architecture": "all", "maintainer": "Demo <demo@example.test>", "description": "Demo package"},
+                    "source": {"repository": "owner/demo", "tracking": "manual", "ref": "v1"},
+                },
+                store=store,
+                dry_run=False,
+            )["id"],
             store=store,
-            dry_run=False,
             acquire=fail_acquire,
             lifecycle_callback=lambda event, **payload: events.append((event, payload["run"]["id"])),
         )
 
         self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error"]["code"], "download_failed")
         self.assertEqual([event for event, _run_id in events], ["build_started", "build_failed"])
 
 

@@ -94,7 +94,7 @@ def _metadata(recipe: dict) -> dict:
 def load_builtin_definition(path: Path = BUILTIN_RECIPE_PATH) -> dict:
     """Load and verify the packaged canonical built-in definition."""
     try:
-        definition = recipe_store.load_recipe(path, write_back=False)
+        definition = recipe_store.load_recipe(path)
     except recipe_store.RecipeStoreError as exc:
         raise BuiltinRecipeError(
             "builtin_recipe_invalid", "Packaged DebBuilder Recipe definition is invalid",
@@ -170,7 +170,7 @@ def effective_builtin_recipe(overrides: dict, *, definition: dict | None = None)
 
 def _load_persisted_for_reconciliation(path: Path) -> dict:
     try:
-        result = recipe_store.load_recipe_result(path, write_back=False)
+        recipe = recipe_store.load_recipe(path)
     except recipe_store.RecipeStoreError as exc:
         if exc.code in {
             "builtin_recipe_invalid", "builtin_recipe_override_invalid", "builtin_recipe_upgrade_required",
@@ -182,13 +182,7 @@ def _load_persisted_for_reconciliation(path: Path) -> dict:
             path=exc.path,
             details={"cause_code": exc.code},
         ) from exc
-    if result.source_version < 2 and "management" in result.recipe:
-        raise BuiltinRecipeError(
-            "builtin_recipe_adoption_failed",
-            "Historical Recipe unexpectedly contains built-in management metadata",
-            path="$.management",
-        )
-    return result.recipe
+    return recipe
 
 
 def reconcile_builtin_recipe(
@@ -216,10 +210,11 @@ def reconcile_builtin_recipe(
             )
         existing_management = existing.get("management")
         if existing_management is None:
-            overrides = _extract_operator_overrides(existing, definition)
-            effective = effective_builtin_recipe(overrides, definition=definition)
-            stored = recipe_store.save_recipe(destination, effective)
-            return BuiltinReconciliationResult("adopted", stored, current_version, None)
+            raise BuiltinRecipeError(
+                "builtin_recipe_adoption_failed",
+                "Existing reserved Recipe is not an application-managed v5 definition",
+                path="$.management",
+            )
 
         previous_version = existing_management["definition_version"]
         if previous_version > current_version:
@@ -297,7 +292,7 @@ def update_builtin_recipe(
         if management is None:
             raise BuiltinRecipeError(
                 "builtin_recipe_reserved",
-                "The historical debbuilder Recipe must be reconciled before it can be edited",
+                "The debbuilder Recipe must be application-managed before it can be edited",
                 path="$.name",
             )
         current_definition_version = _metadata(definition)["definition_version"]

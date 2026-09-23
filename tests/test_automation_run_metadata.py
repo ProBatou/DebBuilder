@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from debbuilder.automation_identity import automation_attempt_key
-from debbuilder.build_models import validate_run
+from debbuilder.build_models import RunDocumentError, validate_run
 from debbuilder.build_store import BuildStore, canonical_recipe_sha256
 from debbuilder.execution_service import get_execution, list_executions
 
@@ -78,19 +78,16 @@ class AutomationRunMetadataTests(unittest.TestCase):
         snapshot = json.loads((self.store.run_dir("automated") / "recipe.json").read_text())
         self.assertEqual(snapshot["automation"], {"enabled": True, "policy": "build_validate"})
 
-    def test_historical_run_without_metadata_loads_in_memory_without_rewrite(self):
+    def test_historical_run_schema_is_rejected_without_rewrite(self):
         run = self.store.create(recipe(), run_id="historical")
         path = self.store.run_dir(run["id"]) / "run.json"
         historical = copy.deepcopy(run)
-        historical["schema_version"] = 2
-        historical.pop("origin")
-        historical.pop("automation")
-        historical.pop("admission_sha256")
+        historical["schema_version"] = 3
         path.write_text(json.dumps(historical))
         before = path.read_bytes()
-        loaded = self.store.load("historical")
-        self.assertEqual(loaded["origin"]["kind"], "manual")
-        self.assertIsNone(loaded["automation"])
+        with self.assertRaises(RunDocumentError) as raised:
+            self.store.load("historical")
+        self.assertEqual(raised.exception.code, "unsupported_run_schema_version")
         self.assertEqual(path.read_bytes(), before)
 
     def test_current_run_cannot_drop_or_relabel_automation_provenance(self):
@@ -114,6 +111,22 @@ class AutomationRunMetadataTests(unittest.TestCase):
         relabelled["automation"] = None
         with self.assertRaises(ValueError):
             validate_run(relabelled)
+
+        defaulted = copy.deepcopy(self.store.create(recipe(), run_id="manual-defaulted"))
+        defaulted["origin"] = None
+        with self.assertRaises(ValueError):
+            validate_run(defaulted)
+
+        noncanonical_identity = copy.deepcopy(run)
+        noncanonical_identity["automation"]["expected_upstream_identity"].pop("schema_version")
+        with self.assertRaises(ValueError):
+            validate_run(noncanonical_identity)
+
+    def test_current_run_rejects_artifact_local_publication_state(self):
+        run = self.store.create(recipe(), run_id="artifact-publication-copy")
+        run["artifact"] = {"publications": []}
+        with self.assertRaises(ValueError):
+            validate_run(run)
 
     def test_invalid_or_unbounded_automation_metadata_is_rejected(self):
         configured = recipe({"enabled": True, "policy": "build"})
@@ -239,11 +252,13 @@ class AutomationRunMetadataTests(unittest.TestCase):
         )
         projected = get_execution(self.store, run["id"])
         self.assertEqual(projected["origin"]["kind"], "automation_check_now")
-        self.assertNotIn("automation", projected)
+        self.assertEqual(projected["automation"], {"policy": "build"})
+        self.assertNotIn("attempt_key", projected["automation"])
+        self.assertNotIn("expected_upstream_identity", projected["automation"])
         self.assertNotIn("admission_sha256", projected)
         summaries = list_executions(self.store, lambda candidate: candidate["recipe_id"])
         self.assertEqual(summaries[0]["origin"]["kind"], "automation_check_now")
-        self.assertNotIn("automation", summaries[0])
+        self.assertEqual(summaries[0]["automation"], {"policy": "build"})
         self.assertNotIn("admission_sha256", summaries[0])
 
 

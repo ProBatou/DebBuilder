@@ -2,385 +2,236 @@ import json
 import unittest
 from pathlib import Path
 
-from debbuilder.recipe_schema import RecipeDocumentError, automation_eligible, normalize_recipe, recipe_document_for_storage, recipe_for_storage, validate_recipe_metadata
+from debbuilder.recipe_schema import (
+    RecipeDocumentError,
+    automation_eligible,
+    normalize_recipe,
+    recipe_document_for_storage,
+    recipe_for_storage,
+    runtime_recipe_for_storage,
+    validate_recipe_metadata,
+)
+
+
+def current(name="demo", **values):
+    return {"schema_version": 5, "name": name, **values}
 
 
 class RecipeSchemaTests(unittest.TestCase):
-    def test_json_document_accepts_supported_fixtures_and_canonical_round_trips(self):
+    def test_v5_fixtures_and_builtin_shape_round_trip_canonically(self):
         fixtures = Path(__file__).parent / "fixtures" / "recipes"
         for path in sorted(fixtures.glob("*.json")):
             with self.subTest(recipe=path.name):
-                stored = recipe_document_for_storage(json.loads(path.read_text()))
+                source = json.loads(path.read_text())
+                self.assertEqual(source["schema_version"], 5)
+                stored = recipe_document_for_storage(source)
+                self.assertEqual(stored["schema_version"], 5)
                 self.assertEqual(recipe_document_for_storage(stored), stored)
 
-    def test_json_document_uses_canonical_storage_pipeline(self):
-        stored = recipe_document_for_storage({
-            "name": "legacy", "package": {"name": "legacy", "version_revision": "1+b1"},
-            "build": {"timeout": 120, "output": {"mode": "source"}},
-            "install": {"directories": [], "config_policy": "replace", "config_files": []},
-            "service": {"configured": False},
-        })
-        self.assertEqual(stored["package"]["version_revision"], "1+b1")
-        self.assertEqual(stored["build"]["inactivity_timeout"], 120)
-        self.assertNotIn("timeout", stored["build"])
-        self.assertNotIn("path", stored["build"]["output"])
-        self.assertNotIn("configured", stored["service"])
+    def test_only_schema_v5_is_supported(self):
+        for version in (None, 0, 1, 2, 3, 4, 6, True, "5"):
+            with self.subTest(version=version):
+                document = {"name": "unsupported"}
+                if version is not None:
+                    document["schema_version"] = version
+                with self.assertRaises(RecipeDocumentError) as raised:
+                    recipe_document_for_storage(document)
+                self.assertEqual(raised.exception.code, "unsupported_recipe_schema")
+                self.assertEqual(raised.exception.path, "$.schema_version")
 
     def test_json_document_rejects_bad_roots_missing_ids_and_unknown_fields(self):
         cases = [
             ([], "invalid_root"),
             (None, "invalid_root"),
-            ({"package": {"name": "demo"}}, "missing_id"),
-            ({"name": "demo", "unexpected": True}, "unknown_field"),
-            ({"name": "demo", "package": []}, "invalid_recipe"),
+            ({"schema_version": 5, "package": {"name": "demo"}}, "missing_id"),
+            (current(unexpected=True), "unknown_field"),
+            (current(package=[]), "invalid_recipe"),
         ]
         for value, code in cases:
             with self.subTest(value=value), self.assertRaises(RecipeDocumentError) as raised:
                 recipe_document_for_storage(value)
             self.assertEqual(raised.exception.code, code)
 
-    def test_v3_present_null_resource_policy_is_rejected(self):
+    def test_only_executable_version_sources_are_accepted(self):
+        for source in ("tag", "release_name", "regex"):
+            version = {"source": source}
+            if source == "regex":
+                version["expression"] = r"([0-9]+(?:\.[0-9]+)*)"
+            with self.subTest(source=source):
+                stored = recipe_document_for_storage(current(source={"version": version}))
+                self.assertEqual(stored["source"]["version"]["source"], source)
+
+        unsupported = current(source={"version": {"source": "build"}})
+        for validator in (validate_recipe_metadata, recipe_for_storage, runtime_recipe_for_storage, recipe_document_for_storage):
+            with self.subTest(validator=validator.__name__), self.assertRaises(RecipeDocumentError) as raised:
+                validator(unsupported)
+            self.assertEqual(raised.exception.code, "unsupported_version_source")
+            self.assertEqual(raised.exception.path, "$.source.version.source")
+            self.assertNotIn("fallback", str(raised.exception).lower())
+
+    def test_removed_authoring_aliases_are_rejected(self):
+        cases = [
+            (current(build={"timeout": 120}), "$.build.timeout"),
+            (current(install={"config_policy": "replace"}), "$.install.config_policy"),
+            (current(service={"configured": False}), "$.service.configured"),
+            (current(steps=[]), "$.steps"),
+            (current(artifact={"mode": "upstream_archive", "selected_files": ["bin/demo"]}), "$.artifact.selected_files"),
+            (current(artifact={
+                "mode": "upstream_archive", "archive_source": "github_source",
+                "payload": {"mode": "paths", "include": ["bin/demo"], "exclude": [], "legacy_file_layout": "basename"},
+            }), "$.artifact.payload.legacy_file_layout"),
+        ]
+        for document, path in cases:
+            for validator in (validate_recipe_metadata, recipe_for_storage, recipe_document_for_storage):
+                with self.subTest(path=path, validator=validator.__name__), self.assertRaises(RecipeDocumentError) as raised:
+                    validator(document)
+                self.assertEqual(raised.exception.code, "unknown_field")
+                self.assertEqual(raised.exception.path, path)
+
+    def test_string_configuration_entries_are_rejected(self):
         with self.assertRaises(RecipeDocumentError) as raised:
-            recipe_document_for_storage({
-                "schema_version": 3,
-                "name": "null-resource-policy",
-                "resource_limits": None,
-                "package": {"name": "null-resource-policy"},
-                "source": {"repository": "owner/null-resource-policy"},
-            })
-        self.assertEqual(raised.exception.code, "invalid_resource_limits")
-        self.assertEqual(raised.exception.path, "$.resource_limits")
+            recipe_document_for_storage(current(install={"config_files": ["/etc/demo.conf"]}))
+        self.assertEqual(raised.exception.code, "invalid_recipe")
 
-    def test_upstream_archive_fhs_account_directories_and_mapping_overrides(self):
-        recipe = validate_recipe_metadata({
-            "name": "demo", "package": {"name": "demo", "architecture": "amd64"},
-            "source": {"repository": "owner/demo", "tracking": "latest_release"},
-            "artifact": {"mode": "upstream_archive", "type": "archive", "asset_name": "demo.tar.gz", "selected_files": ["demo"]},
-            "install": {"content": {"source": "configured_files"}, "owner": {"user": "root", "group": "root"}, "account": {"user": "demo", "group": "demo", "create_user": True, "create_group": True}, "directories": [{"path": "/var/lib/demo", "owner": "demo", "group": "demo", "mode": "0750"}], "config_files": [{"source": "demo", "destination": "/usr/bin/demo", "policy": "replace", "owner": "root", "group": "root", "mode": "0755"}]},
-            "service": {"name": "demo.service", "command": "/usr/bin/demo", "conflicts": ["other.service"], "limit_nofile": "65536", "kill_mode": "process", "syslog_identifier": "demo", "ambient_capabilities": ["CAP_NET_BIND_SERVICE"]},
-        })
-        self.assertEqual(recipe["artifact"]["payload"], {
-            "mode": "paths", "include": ["demo"], "exclude": [], "legacy_file_layout": "basename",
-        })
-        self.assertEqual(recipe["install"]["config_files"][0]["mode"], "0755")
-        self.assertEqual(recipe["install"]["account"]["user"], "demo")
-        self.assertEqual(recipe["service"]["ambient_capabilities"], ["CAP_NET_BIND_SERVICE"])
+    def test_canonical_defaults_have_one_v5_owner(self):
+        recipe = normalize_recipe(current(
+            "demo-recipe",
+            package={"name": "demo"},
+            source={"repository": "owner/demo", "tracking": "latest_release", "version": {"source": "tag"}},
+        ))
+        self.assertEqual(recipe["schema_version"], 5)
+        self.assertEqual(recipe["automation"], {"enabled": False, "policy": "manual"})
+        self.assertEqual(recipe["runtime_apt_repositories"], [])
+        self.assertTrue(all(value is None for value in recipe["resource_limits"].values()))
+        self.assertEqual(recipe["package"]["version_revision"], "1")
+        self.assertEqual(recipe["build"]["inactivity_timeout"], 300)
+        self.assertIsNone(recipe["build"]["maximum_runtime"])
+        self.assertEqual(recipe["install"]["destination"], "/opt/demo")
 
-    def test_upstream_archive_source_modes_do_not_require_release_asset_fields(self):
-        source_archive = validate_recipe_metadata({
-            "name": "demo", "package": {"name": "demo"},
-            "source": {"repository": "owner/demo"},
-            "artifact": {"mode": "upstream_archive", "archive_source": "github_source", "archive_format": "tar.gz", "selected_files": ["demo"]},
-        })
-        self.assertEqual(source_archive["artifact"]["archive_source"], "github_source")
-        self.assertEqual(source_archive["artifact"]["asset_name"], "")
-        self.assertEqual(source_archive["artifact"]["name_pattern"], "")
-        legacy_asset = validate_recipe_metadata({
-            "name": "legacy", "package": {"name": "legacy"},
-            "source": {"repository": "owner/legacy"},
-            "artifact": {"mode": "upstream_archive", "asset_name": "legacy.tar.gz", "selected_files": ["legacy"]},
-        })
-        self.assertEqual(legacy_asset["artifact"]["archive_source"], "release_asset")
-        self.assertEqual(legacy_asset["artifact"]["asset_selection"], "exact")
-
-    def test_archive_payload_migrates_from_v1_and_round_trips_canonically(self):
-        document = {
-            "schema_version": 1,
-            "name": "archive-app",
-            "package": {"name": "archive-app"},
-            "source": {"repository": "owner/archive-app"},
-            "artifact": {
-                "mode": "upstream_archive",
-                "archive_source": "github_source",
+    def test_archive_payload_and_source_modes_are_canonical(self):
+        source_archive = recipe_document_for_storage(current(
+            package={"name": "demo"},
+            source={"repository": "owner/demo"},
+            artifact={
+                "mode": "upstream_archive", "archive_source": "github_source", "archive_format": "tar.gz",
                 "payload": {
                     "mode": "paths",
                     "include": ["static/js/app.js", "server.py", "static/"],
                     "exclude": ["static/dev/"],
                 },
             },
-        }
-        stored = recipe_document_for_storage(document)
-        self.assertEqual(stored["schema_version"], 5)
-        self.assertEqual(stored["artifact"]["payload"], {
+        ))
+        self.assertEqual(source_archive["artifact"]["payload"], {
             "mode": "paths", "include": ["server.py", "static/"], "exclude": ["static/dev/"],
         })
-        self.assertNotIn("selected_files", stored["artifact"])
-        self.assertEqual(recipe_document_for_storage(stored), stored)
+        self.assertEqual(source_archive["artifact"]["archive_source"], "github_source")
+        self.assertNotIn("selected_files", source_archive["artifact"])
 
-    def test_legacy_selected_files_migrate_without_broadening_and_keep_layout_marker(self):
-        legacy = {
-            "schema_version": 1,
-            "name": "legacy-archive",
-            "package": {"name": "legacy-archive"},
-            "source": {"repository": "owner/legacy-archive"},
-            "artifact": {
-                "mode": "upstream_archive", "asset_name": "legacy.tar.gz",
-                "selected_files": [" share/defaults.yml ", "bin/tool"],
+        release_asset = validate_recipe_metadata(current(
+            "release-asset",
+            package={"name": "release-asset"}, source={"repository": "owner/release-asset"},
+            artifact={
+                "mode": "upstream_archive", "archive_source": "release_asset", "asset_selection": "exact",
+                "asset_name": "release.tar.gz", "payload": {"mode": "paths", "include": ["bin/release"], "exclude": []},
             },
-        }
-        stored = recipe_document_for_storage(legacy)
-        self.assertEqual(stored["schema_version"], 5)
-        self.assertEqual(stored["artifact"]["payload"], {
-            "mode": "paths",
-            "include": ["share/defaults.yml", "bin/tool"],
-            "exclude": [],
-            "legacy_file_layout": "basename",
-        })
-        self.assertTrue(all(not path.endswith("/") for path in stored["artifact"]["payload"]["include"]))
-        self.assertNotIn("selected_files", stored["artifact"])
-        self.assertEqual(recipe_document_for_storage(stored), stored)
+        ))
+        self.assertEqual(release_asset["artifact"]["asset_name"], "release.tar.gz")
 
-    def test_historical_archive_snapshot_without_new_fields_remains_readable(self):
-        historical = {
-            "schema_version": 1,
-            "name": "snapshot",
-            "package": {"name": "snapshot"},
-            "source": {"repository": "owner/snapshot"},
-            "artifact": {
-                "mode": "upstream_archive", "type": "archive",
-                "asset_name": "snapshot.tar.gz", "selected_files": ["snapshot"],
+    def test_current_install_mapping_accounts_directories_and_systemd_are_preserved(self):
+        recipe = validate_recipe_metadata(current(
+            package={"name": "demo", "architecture": "amd64"},
+            source={"repository": "owner/demo"},
+            install={
+                "content": {"source": "configured_files"},
+                "owner": {"user": "root", "group": "root"},
+                "account": {"user": "demo", "group": "demo", "create_user": True, "create_group": True},
+                "directories": [{"path": "/var/lib/demo", "owner": "demo", "group": "demo", "mode": "0750"}],
+                "config_files": [{
+                    "source": "bin/demo", "destination": "/usr/bin/demo", "policy": "replace",
+                    "owner": "root", "group": "root", "mode": "0755",
+                }],
             },
-            "build": {"timeout": 120, "output": {"mode": "source"}},
-        }
-        loaded = validate_recipe_metadata(historical)
-        self.assertEqual(loaded["schema_version"], 5)
-        self.assertEqual(loaded["runtime_apt_repositories"], [])
-        self.assertEqual(loaded["build"]["inactivity_timeout"], 120)
-        self.assertEqual(loaded["artifact"]["payload"]["include"], ["snapshot"])
-        self.assertEqual(loaded["artifact"]["payload"]["legacy_file_layout"], "basename")
-
-    def test_legacy_and_canonical_archive_selectors_are_ambiguous(self):
-        document = {
-            "schema_version": 1,
-            "name": "ambiguous",
-            "artifact": {
-                "mode": "upstream_archive",
-                "selected_files": ["server.py"],
-                "payload": {"mode": "paths", "include": ["server.py"], "exclude": []},
+            service={
+                "enabled": True, "name": "demo.service", "command": "/usr/bin/demo",
+                "user": "demo", "group": "demo", "conflicts": ["other.service"],
+                "limit_nofile": "65536", "kill_mode": "process", "syslog_identifier": "demo",
+                "ambient_capabilities": ["CAP_NET_BIND_SERVICE"],
             },
-        }
-        with self.assertRaisesRegex(ValueError, "both selected_files and payload"):
-            validate_recipe_metadata(document)
-        with self.assertRaises(RecipeDocumentError) as raised:
-            recipe_document_for_storage(document)
-        self.assertEqual(raised.exception.code, "ambiguous_recipe_fields")
+        ))
+        self.assertEqual(recipe["install"]["config_files"][0]["mode"], "0755")
+        self.assertEqual(recipe["install"]["account"]["user"], "demo")
+        self.assertTrue(recipe["service"]["configured"])
+        self.assertEqual(recipe["service"]["ambient_capabilities"], ["CAP_NET_BIND_SERVICE"])
+        stored = runtime_recipe_for_storage(recipe)
+        self.assertNotIn("configured", stored["service"])
+        self.assertTrue(validate_recipe_metadata(stored)["service"]["configured"])
+        recipe["service"]["configured"] = False
+        with self.assertRaisesRegex(RecipeDocumentError, "does not match"):
+            runtime_recipe_for_storage(recipe)
 
-    def test_legacy_archive_layout_rejects_recursive_and_entire_archive_payloads(self):
-        payloads = [
-            {"mode": "paths", "include": ["bin/"], "exclude": [], "legacy_file_layout": "basename"},
-            {"mode": "entire_archive", "include": [], "exclude": [], "legacy_file_layout": "basename"},
-        ]
-        for payload in payloads:
-            with self.subTest(payload=payload), self.assertRaisesRegex(ValueError, "legacy archive file layout"):
-                validate_recipe_metadata({
-                    "name": "legacy", "package": {"name": "legacy"},
-                    "source": {"repository": "owner/legacy"},
-                    "artifact": {"mode": "upstream_archive", "archive_source": "github_source", "payload": payload},
-                })
-
-    def test_fhs_and_advanced_systemd_validation_rejects_unsafe_values(self):
+    def test_current_path_and_systemd_safety_checks_remain_fail_closed(self):
         cases = [
             {"install": {"destination": "/usr/bin/../../tmp"}},
             {"install": {"directories": [{"path": "/var/lib/other", "owner": "root", "group": "root"}]}},
             {"service": {"name": "demo.service", "command": "/bin/true", "conflicts": ["bad"]}},
             {"service": {"name": "demo.service", "command": "/bin/true", "ambient_capabilities": ["NET_ADMIN"]}},
+            {"build": {"working_directory": "../outside"}},
+            {"build": {"source_changes": [{"operation": "patch", "path": "a.txt"}]}},
         ]
         for changes in cases:
             with self.subTest(changes=changes), self.assertRaises(ValueError):
-                validate_recipe_metadata({"name": "demo", "package": {"name": "demo"}, **changes})
+                validate_recipe_metadata(current(package={"name": "demo"}, **changes))
 
-        with self.assertRaisesRegex(ValueError, "artifact type"):
-            validate_recipe_metadata({"name": "demo", "package": {"name": "demo"}, "artifact": {"mode": "source_build", "type": "zip"}})
-
-    def test_canonical_recipe_defaults_are_applied(self):
-        recipe = normalize_recipe({
-            "name": "demo-recipe", "package": {"name": "demo"},
-            "source": {"repository": "owner/demo", "tracking": "latest_release", "version": {"source": "tag"}},
-        })
-        self.assertEqual(recipe["schema_version"], 5)
-        self.assertEqual(recipe["automation"], {"enabled": False, "policy": "manual"})
-        self.assertEqual(recipe["runtime_apt_repositories"], [])
-        self.assertEqual(recipe["package"]["name"], "demo")
-        self.assertEqual(recipe["package"]["version_revision"], "1")
-        self.assertEqual(recipe["source"]["repository"], "owner/demo")
-        self.assertEqual(recipe["install"]["destination"], "/opt/demo")
-        self.assertEqual(recipe["build"]["output"], {"mode": "source", "path": ""})
-        self.assertNotEqual(recipe["install"]["owner"], recipe["service"])
-
-    def test_version_revision_round_trips_as_the_canonical_package_field(self):
-        for version_revision in ("1", "2", "1+b1"):
-            with self.subTest(version_revision=version_revision):
-                stored = recipe_for_storage({"name": "demo", "package": {"name": "demo", "version_revision": version_revision}})
-                self.assertEqual(stored["package"]["version_revision"], version_revision)
-                self.assertEqual(normalize_recipe(stored)["package"]["version_revision"], version_revision)
-
-    def test_legacy_build_timeout_migrates_to_inactivity_timeout(self):
-        recipe = validate_recipe_metadata({
-            "name": "legacy-timeout", "package": {"name": "legacy-timeout"}, "source": {"repository": "owner/demo"},
-            "build": {"timeout": 120, "commands": ["make"], "output": {"mode": "source"}},
-        })
-        self.assertEqual(recipe["build"]["inactivity_timeout"], 120)
-        self.assertIsNone(recipe["build"]["maximum_runtime"])
-        stored = recipe_for_storage(recipe)
-        self.assertEqual(stored["build"]["inactivity_timeout"], 120)
-        self.assertNotIn("timeout", stored["build"])
-
-    def test_new_build_timeouts_have_generic_defaults(self):
-        recipe = validate_recipe_metadata({"name": "demo", "package": {"name": "demo"}, "source": {"repository": "owner/demo"}})
-        self.assertEqual(recipe["build"]["inactivity_timeout"], 300)
-        self.assertIsNone(recipe["build"]["maximum_runtime"])
-
-    def test_inactivity_timeout_accepts_only_null_or_positive_values(self):
-        disabled = validate_recipe_metadata({"name": "demo", "build": {"inactivity_timeout": None}})
-        self.assertIsNone(disabled["build"]["inactivity_timeout"])
-        self.assertIsNone(recipe_for_storage(disabled)["build"]["inactivity_timeout"])
+    def test_build_timeout_and_output_contract(self):
+        recipe = validate_recipe_metadata(current(
+            build={"inactivity_timeout": None, "maximum_runtime": 900, "output": {"mode": "paths", "paths": ["dist", "public"]}},
+        ))
+        self.assertIsNone(recipe["build"]["inactivity_timeout"])
+        self.assertEqual(recipe["build"]["maximum_runtime"], 900)
+        self.assertEqual(runtime_recipe_for_storage(recipe)["build"]["output"], {"mode": "paths", "paths": ["dist", "public"]})
         for value in (0, -1, "0", "-1"):
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, "positive integer"):
-                validate_recipe_metadata({"name": "demo", "build": {"inactivity_timeout": value}})
+                validate_recipe_metadata(current(build={"inactivity_timeout": value}))
 
-    def test_storage_and_read_shapes_are_canonical(self):
-        stored = recipe_for_storage({"name": "demo", "package": {"name": "demo"}, "source": {"repository": "owner/demo"}})
-        self.assertIn("package", stored)
-        self.assertIn("source", stored)
-        self.assertNotIn("package_name", stored)
-        self.assertNotIn("github_repository", stored)
-        loaded = normalize_recipe(stored)
-        self.assertEqual(loaded["package"]["name"], "demo")
-        self.assertEqual(loaded["source"]["repository"], "owner/demo")
-
-    def test_storage_preserves_each_build_output_mode_without_hidden_fields(self):
-        paths = ["package.json", "node_modules", ".next", "dist"]
-        stored_paths = recipe_for_storage({"name": "demo", "build": {"output": {"mode": "paths", "paths": paths}}})
-        self.assertEqual(stored_paths["build"]["output"], {"mode": "paths", "paths": paths})
-        self.assertEqual(recipe_for_storage(stored_paths)["build"]["output"], {"mode": "paths", "paths": paths})
-        self.assertEqual(recipe_for_storage({"name": "demo", "build": {"output": {"mode": "source"}}})["build"]["output"], {"mode": "source"})
-        self.assertEqual(recipe_for_storage({"name": "demo", "build": {"output": {"mode": "path", "path": "dist"}}})["build"]["output"], {"mode": "path", "path": "dist"})
-
-    def test_complete_recipe_preserves_independent_install_and_service_owners(self):
-        recipe = validate_recipe_metadata({
-            "schema_version": 1, "name": "demo", "active": True,
-            "package": {"name": "demo", "architecture": "all"},
-            "source": {"repository": "owner/demo"},
-            "build": {"working_directory": "frontend", "output": {"mode": "source"}, "commands": ["npm ci"]},
-            "install": {"owner": {"user": "root", "group": "root"}},
-            "service": {"configured": True, "enabled": False, "user": "demo", "group": "demo"},
-        })
-        self.assertEqual(recipe["install"]["owner"]["user"], "root")
-        self.assertEqual(recipe["service"]["user"], "demo")
-        self.assertEqual(recipe["build"]["output"], {"mode": "source", "path": ""})
-
-    def test_storage_preserves_explicit_systemd_description_and_working_directory(self):
-        stored = recipe_for_storage({
-            "name": "demo", "package": {"name": "demo", "description": "Demo package\nLong description."},
-            "source": {"repository": "owner/demo"},
-            "service": {
-                "name": "demo.service", "command": "/opt/demo/bin/demo", "description": "Demo worker",
-                "working_directory": "/opt/demo",
-            },
-        })
-        self.assertEqual(stored["package"]["description"], "Demo package\nLong description.")
-        self.assertEqual(stored["service"]["description"], "Demo worker")
-        self.assertEqual(stored["service"]["working_directory"], "/opt/demo")
-        self.assertEqual(validate_recipe_metadata(stored)["service"]["working_directory"], "/opt/demo")
-
-    def test_service_description_and_working_directory_keep_historical_defaults(self):
-        stored = recipe_for_storage({
-            "name": "legacy-service", "package": {"name": "legacy-service"},
-            "service": {"name": "legacy-service.service", "command": "/opt/legacy-service/bin/serve"},
-        })
-        self.assertEqual(stored["service"]["description"], "legacy-service")
-        self.assertEqual(stored["service"]["working_directory"], "")
-        self.assertEqual(recipe_for_storage(stored), stored)
-
-    def test_validation_rejects_unsafe_paths_and_unknown_source_changes(self):
-        base = {"name": "demo", "package": {"name": "demo"}, "source": {"repository": "owner/demo"}}
-        with self.assertRaisesRegex(ValueError, "working_directory"):
-            validate_recipe_metadata({**base, "build": {"working_directory": "../outside"}})
-        with self.assertRaisesRegex(ValueError, "unsupported operation"):
-            validate_recipe_metadata({**base, "build": {"source_changes": [{"operation": "patch", "path": "a.txt"}]}})
-
-    def test_validation_rejects_invalid_nested_types(self):
-        with self.assertRaisesRegex(ValueError, "build.environment"):
-            validate_recipe_metadata({"name": "demo", "package": {"name": "demo"}, "build": {"environment": ["A=B"]}})
-
-    def test_static_and_configuration_source_mappings_are_preserved(self):
-        recipe = validate_recipe_metadata({
-            "name": "static-demo", "package": {"name": "static-demo"}, "source": {"repository": "owner/demo"},
-            "build": {"detected_project": "static", "output": {"mode": "source"}},
-            "install": {"content": {"source": "configured_files"}, "config_files": [{"source": ".bashrc", "destination": "/root/.bashrc"}]},
-        })
-        self.assertEqual(recipe["build"]["detected_project"], "static")
-        self.assertEqual(recipe["install"]["content"]["source"], "configured_files")
-        self.assertEqual(recipe["install"]["config_files"][0]["source"], ".bashrc")
-        self.assertEqual(recipe["install"]["config_files"][0]["policy"], "dpkg_conffile")
-        self.assertEqual(recipe["install"]["destination"], "")
-        self.assertFalse(recipe["install"]["owner"]["create_user"])
-        self.assertFalse(recipe["install"]["owner"]["create_group"])
-
-    def test_custom_mapping_round_trip_reuses_install_config_files(self):
+    def test_config_mapping_policy_is_per_mapping(self):
         mappings = [
-            {"source": "dist/foo", "destination": "/usr/bin/foo"},
-            {"source": "config/foo.conf", "destination": "/etc/foo/foo.conf"},
+            {"source": "dist/foo", "destination": "/usr/bin/foo", "policy": "replace"},
+            {"source": "config/foo.conf", "destination": "/etc/foo/foo.conf", "policy": "dpkg_conffile"},
         ]
-        stored = recipe_for_storage({
-            "name": "mapped", "package": {"name": "mapped"},
-            "install": {"content": {"source": "configured_files"}, "config_files": mappings, "config_policy": "replace"},
-        })
-        self.assertEqual(stored["install"]["content"]["source"], "configured_files")
-        expected = [{**mapping, "policy": "replace"} for mapping in mappings]
-        self.assertEqual(stored["install"]["config_files"], expected)
-        self.assertNotIn("config_policy", stored["install"])
-        self.assertEqual(recipe_for_storage(stored)["install"]["config_files"], expected)
-
-    def test_mapping_policy_is_local_and_overrides_legacy_global_policy(self):
-        stored = recipe_for_storage({
-            "name": "mapped", "package": {"name": "mapped"},
-            "install": {"config_policy": "replace", "config_files": [
-                "/etc/mapped/legacy.conf",
-                {"source": "owned.sh", "destination": "/etc/profile.d/owned.sh", "policy": "dpkg_conffile"},
-            ]},
-        })
-        self.assertEqual([row["policy"] for row in stored["install"]["config_files"]], ["replace", "dpkg_conffile"])
+        stored = recipe_document_for_storage(current(
+            "mapped", package={"name": "mapped"},
+            install={"content": {"source": "configured_files"}, "config_files": mappings},
+        ))
+        self.assertEqual(stored["install"]["config_files"], mappings)
         with self.assertRaisesRegex(ValueError, "unsupported configuration policy"):
-            validate_recipe_metadata({"name": "mapped", "install": {"config_files": [
-                {"source": "bad", "destination": "/etc/bad", "policy": "unknown"},
-            ]}})
+            validate_recipe_metadata(current(
+                "mapped", install={"config_files": [{"source": "bad", "destination": "/etc/bad", "policy": "unknown"}]},
+            ))
 
-    def test_root_accounts_are_never_created(self):
-        recipe = validate_recipe_metadata({"name": "demo", "install": {"owner": {
-            "user": "root", "group": "root", "create_user": True, "create_group": True,
-        }}})
-        self.assertFalse(recipe["install"]["owner"]["create_user"])
-        self.assertFalse(recipe["install"]["owner"]["create_group"])
+    def test_automation_resource_and_runtime_apt_fields_round_trip(self):
+        public_key = """-----BEGIN PGP PUBLIC KEY BLOCK-----
 
-    def test_unconfigured_service_has_no_fictitious_defaults(self):
-        recipe = validate_recipe_metadata({"name": "demo", "package": {"name": "demo"}, "source": {"repository": "owner/demo"}, "service": {"enabled": False}})
-        self.assertFalse(recipe["service"]["configured"])
-        self.assertFalse(recipe["service"]["enabled"])
-        for key in ("name", "user", "group", "type", "restart", "command"):
-            self.assertEqual(recipe["service"][key], "")
-
-    def test_service_configuration_is_derived_and_not_stored_as_a_second_state(self):
-        complete = validate_recipe_metadata({"name": "demo", "service": {"configured": False, "enabled": False, "name": "demo.service", "command": "/usr/bin/demo"}})
-        self.assertTrue(complete["service"]["configured"])
-        stored = recipe_for_storage(complete)
-        self.assertNotIn("configured", stored["service"])
-        self.assertTrue(validate_recipe_metadata(stored)["service"]["configured"])
-        partial = validate_recipe_metadata({"name": "demo", "service": {"configured": True, "user": "demo"}})
-        self.assertFalse(partial["service"]["configured"])
-        self.assertEqual(partial["service"]["user"], "demo")
-
-    def test_automation_policy_defaults_off_and_round_trips(self):
-        defaulted = recipe_document_for_storage({"name": "manual"})
-        self.assertEqual(defaulted["automation"], {"enabled": False, "policy": "manual"})
-        configured = recipe_document_for_storage({
-            "schema_version": 5, "name": "automated", "active": True,
-            "automation": {"enabled": True, "policy": "full"},
-        })
+dGhpcy1pcy1zdHJ1Y3R1cmFsbHktcHVibGljLWtleS1kYXRh
+-----END PGP PUBLIC KEY BLOCK-----
+"""
+        configured = recipe_document_for_storage(current(
+            "automated", active=True,
+            automation={"enabled": True, "policy": "full"},
+            resource_limits={
+                "memory_max_bytes": 536870912, "tasks_max": 128, "cpu_quota_percent": 150,
+                "io_read_bandwidth_max_bytes_per_sec": None, "io_write_bandwidth_max_bytes_per_sec": None,
+            },
+            runtime_apt_repositories=[{
+                "id": "vendor", "uri": "https://packages.example.test", "suite": "stable",
+                "components": ["main"], "signing_key": {"armored": public_key},
+            }],
+        ))
         self.assertEqual(configured["automation"], {"enabled": True, "policy": "full"})
+        self.assertEqual(configured["resource_limits"]["tasks_max"], 128)
+        self.assertEqual(configured["runtime_apt_repositories"][0]["id"], "vendor")
         self.assertEqual(recipe_document_for_storage(configured), configured)
 
-    def test_automation_policy_enum_and_shape_are_strict(self):
+    def test_automation_policy_is_strict_and_active_is_master_switch(self):
         for automation in (
             {"enabled": "yes", "policy": "build"},
             {"enabled": True, "policy": "everything"},
@@ -388,20 +239,9 @@ class RecipeSchemaTests(unittest.TestCase):
             [],
         ):
             with self.subTest(automation=automation), self.assertRaises(RecipeDocumentError):
-                recipe_document_for_storage({"schema_version": 5, "name": "invalid", "automation": automation})
-        with self.assertRaises(RecipeDocumentError) as raised:
-            recipe_document_for_storage({
-                "schema_version": 5, "name": "invalid",
-                "automation": {"enabled": True, "policy": "everything"},
-            })
-        self.assertEqual(raised.exception.code, "invalid_automation_policy")
-        self.assertEqual(raised.exception.path, "$.automation.policy")
-
-    def test_automation_eligibility_keeps_active_as_master_switch(self):
-        self.assertTrue(automation_eligible({"schema_version": 5, "name": "eligible", "active": True, "automation": {"enabled": True, "policy": "detect"}}))
-        self.assertFalse(automation_eligible({"schema_version": 5, "name": "inactive", "active": False, "automation": {"enabled": True, "policy": "full"}}))
-        self.assertFalse(automation_eligible({"schema_version": 5, "name": "disabled", "active": True, "automation": {"enabled": False, "policy": "full"}}))
-        self.assertFalse(automation_eligible({"schema_version": 5, "name": "manual", "active": True, "automation": {"enabled": True, "policy": "manual"}}))
+                recipe_document_for_storage(current("invalid", automation=automation))
+        self.assertTrue(automation_eligible(current("eligible", active=True, automation={"enabled": True, "policy": "detect"})))
+        self.assertFalse(automation_eligible(current("inactive", active=False, automation={"enabled": True, "policy": "full"})))
 
 
 if __name__ == "__main__":

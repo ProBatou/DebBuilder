@@ -17,13 +17,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class BehaviorLabTests(unittest.TestCase):
-    def start_lab(self, scenario="showcase", module="tests.ui.behavior_lab", host="127.0.0.1"):
+    def start_lab(self, scenario="showcase", host="127.0.0.1"):
         with socket.socket() as reservation:
             reservation.bind(("127.0.0.1", 0))
             port = reservation.getsockname()[1]
-        command = [sys.executable, "-m", module, "--port", str(port)]
-        if module == "tests.ui.behavior_lab":
-            command[3:3] = ["--scenario", scenario, "--host", host]
+        command = [sys.executable, "-m", "tests.ui.behavior_lab", "--scenario", scenario, "--host", host, "--port", str(port)]
         process = subprocess.Popen(
             command,
             cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -217,11 +215,9 @@ class BehaviorLabTests(unittest.TestCase):
         _prepared_process, prepared_url, _prepared_runtime = self.start_lab("prepared-test")
         prepared = self.api(prepared_url, "/api/executions/ui-01-prepared")["execution"]
         self.assertEqual(prepared["status"], "prepared")
-        self.assertTrue(next(step for step in prepared["steps"] if step["name"] == "staging")["details"]["preview"])
-
-    def test_legacy_cancellation_command_uses_same_scenario(self):
-        _process, url, _runtime = self.start_lab(module="tests.ui.cancellation_dev_server")
-        self.assertEqual(self.api(url, "/api/workflows/cancellation-running")["name"], "cancellation-running")
+        staging = next(step for step in prepared["steps"] if step["name"] == "staging")["details"]
+        self.assertEqual(staging["content_file_count"], 38)
+        self.assertNotIn("content_manifest", staging)
 
     def test_recovery_scenarios_use_startup_reconciliation(self):
         _process, url, _runtime = self.start_lab("recovery")
@@ -230,7 +226,7 @@ class BehaviorLabTests(unittest.TestCase):
         self.assertEqual(recovered["error"]["code"], "execution_interrupted")
         _blocked_process, blocked_url, _blocked_runtime = self.start_lab("recovery-blocked")
         blocked = self.api(blocked_url, "/api/executions/behavior-lab-recovery-run")["execution"]
-        self.assertEqual(blocked["recovery"]["status"], "blocked")
+        self.assertNotIn("recovery", blocked)
         workflow = self.api(blocked_url, "/api/workflows/recovery-blocked")
         request = Request(f"{blocked_url}/api/run", data=json.dumps({"workflow": workflow, "dry_run": False}).encode(), method="POST", headers={"Content-Type": "application/json"})
         with self.assertRaises(HTTPError) as rejected:

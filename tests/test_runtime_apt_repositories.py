@@ -26,7 +26,7 @@ def repository(**changes):
 
 def recipe(repositories):
     return {
-        "schema_version": 4,
+        "schema_version": 5,
         "name": "runtime-repository-demo",
         "runtime_apt_repositories": repositories,
         "package": {"name": "runtime-repository-demo"},

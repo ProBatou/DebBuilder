@@ -10,10 +10,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
-from . import recipe_store, validation_service
+from . import artifact_publication, automation_service, recipe_store, validation_service
 from .automation_ledger import AutomationLedger, AutomationLedgerError
 from .build_store import BuildStore, canonical_recipe_sha256
-from .recipe_schema import validate_recipe_metadata
+from .recipe_schema import runtime_recipe_for_storage, validate_recipe_metadata
 
 
 LOGGER = logging.getLogger(__name__)
@@ -92,7 +92,7 @@ class AutomationOrchestrator:
 
     def _recipe(self, recipe_id: str) -> dict | None:
         try:
-            value = recipe_store.load_recipe(self.recipe_directory / f"{recipe_id}.json", write_back=False)
+            value = recipe_store.load_recipe(self.recipe_directory / f"{recipe_id}.json")
             recipe = validate_recipe_metadata(value)
         except (OSError, TypeError, ValueError, recipe_store.RecipeStoreError):
             return None
@@ -277,7 +277,7 @@ class AutomationOrchestrator:
             return
         if status == "failed":
             code = str((attempt.get("error") or {}).get("code") or "validation_failed")
-            phase = validation_service.public_attempt(attempt, run=self.store.load(row["run_id"])).get("phase")
+            phase = validation_service.public_attempt(attempt, run=self.store.load(row["run_id"]), store=self.store).get("phase")
             if phase == "preparation" and code in VALIDATION_TRANSIENT_CODES and row["validation_retry_count"] < MAX_VALIDATION_RETRIES:
                 self._schedule_retry(entry, row, code, "validation_transient_retry")
             else:
@@ -321,7 +321,7 @@ class AutomationOrchestrator:
         try:
             with self.mutation_lease():
                 row = self.ledger.advance_lifecycle(entry["key"], row["generation"], "publication")
-                result = self.publish(row["run_id"], {"confirm": self._publication_confirmation(run)})
+                result = self.publish(row["run_id"], {"confirm": automation_service.publication_confirmation(run)})
         except Exception as exc:
             code = str(getattr(exc, "code", "publication_execution_failed"))
             if code == "application_shutting_down" or not self.admission_open():
@@ -338,25 +338,27 @@ class AutomationOrchestrator:
                 entry["key"], row["generation"], "publication",
                 publication_attempt_id=result["id"],
             )
-        if result.get("status") == "success":
+        persisted_run = self.store.load(row["run_id"]) or {}
+        persisted_attempt = next((
+            attempt for attempt in persisted_run.get("publications") or []
+            if isinstance(attempt, dict) and attempt.get("id") == result.get("id")
+        ), None)
+        if artifact_publication.successful_publication_proof(
+            persisted_attempt, run=persisted_run,
+        ) is not None:
             validation_service.complete_publication_intent(self.store, row["run_id"], attempt_id)
             self._finish(entry, row, "success", "", "publication_succeeded")
             return
-        code = str((result.get("error") or {}).get("code") or "publication_execution_failed")
+        code = str(
+            (result.get("error") or {}).get("code")
+            or ("publication_proof_invalid" if result.get("status") == "success" else "publication_execution_failed")
+        )
         if code in PUBLICATION_TRANSIENT_CODES and row["publication_retry_count"] < MAX_PUBLICATION_RETRIES:
             self._schedule_retry(entry, row, code, "publication_transient_retry")
             return
         validation_service.cancel_publication_intent(self.store, row["run_id"], attempt_id)
         classification = "blocked_manual" if code in PUBLICATION_BLOCKED_CODES else "terminal_failure"
         self._finish(entry, row, classification, code, "publication_failed")
-
-    @staticmethod
-    def _publication_confirmation(run: dict) -> str:
-        artifact = run.get("artifact") or {}
-        inspection = artifact.get("inspection") or {}
-        package = inspection.get("package") or run.get("package") or run.get("recipe_id") or ""
-        version = inspection.get("version") or (run.get("version") or {}).get("debian", "")
-        return f"publish:{package}:{version}"
 
     def _handle_run(self, entry: dict, row: dict) -> None:
         run = self.store.load(row["run_id"])
@@ -430,7 +432,7 @@ class AutomationOrchestrator:
                     }
                     origin = {"kind": "automation", "trigger": "upstream_change", "reason": self._reason(entry)}
                     self.enqueue_run(
-                        self.execution_manager(), recipe,
+                        self.execution_manager(), runtime_recipe_for_storage(recipe),
                         run_id=row["preallocated_run_id"], dry_run=row["desired_policy"] == "test",
                         origin=origin, automation=metadata,
                         created_callback=lambda run: self.ledger.link_run(

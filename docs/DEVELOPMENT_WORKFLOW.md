@@ -120,10 +120,9 @@ manager. Possible controls include memory, task/process count, CPU, and I/O;
 disk-capacity quotas are a separate concern. This is future guidance, not an
 implementation requirement for the current task.
 
-Persisted formats must evolve deliberately. Version durable schemas, migrate
-supported older formats through explicit sequential/idempotent migrations, and
-fail clearly on unsupported future or corrupt formats. Users should not need
-to delete and recreate data merely because internal formats evolved.
+Persisted formats must evolve deliberately. Version durable schemas and fail
+clearly on unsupported or corrupt formats. Any future format transition needs
+an explicit contract before implementation.
 
 ## Prompt convention for Codex work
 

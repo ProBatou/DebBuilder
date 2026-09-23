@@ -306,7 +306,7 @@ async function deleteExecutionLog(id) {
   if (executionIsLive(row) || adminState.executionAction?.id === id) throw new Error('An active execution cannot be deleted. Wait for it to finish.');
   const confirmed = await showConfirm({
     title: 'Delete log/history for this execution?',
-    description: `Package: ${packageLabelForExecution(row)}\nRun ID: ${row.id}\nDate: ${fmtTime(row.updated || row.created_at_epoch)}\n\nThis removes the execution history, detailed logs and disposable workspace files. It does not delete any Recipe, package, published APT entry, or build artifact.`,
+    description: `Package: ${packageLabelForExecution(row)}\nRun ID: ${row.id}\nDate: ${fmtTime(row.updated || row.created_at)}\n\nThis removes the execution history, detailed logs and disposable workspace files. It does not delete any Recipe, package, published APT entry, or build artifact.`,
     confirmLabel: 'Delete log/history',
     danger: true,
   });
@@ -496,7 +496,7 @@ async function publishExecution(id) {
   const execution = adminState.selectedExecution?.id === id ? adminState.selectedExecution : null;
   const artifact = execution?.artifact || {};
   const inspection = artifact.inspection || {};
-  const runVersion = typeof execution?.version === 'object' ? execution.version.debian : execution?.version;
+  const runVersion = execution?.version?.debian;
   const packageName = inspection.package || execution?.package || execution?.recipe_id || '';
   const version = inspection.version || runVersion || '';
   if (!packageName || !version) throw new Error('The selected execution has no publishable package identity');
@@ -524,7 +524,7 @@ function renderOpenExecution(execution, {preserveLog = false} = {}) {
   const artifact = execution.artifact || {};
   const validation = (execution.validations || []).slice(-1)[0] || {};
   const publication = (execution.publications || []).slice(-1)[0] || {};
-  const source = (execution.steps || []).find(step => step.name === 'source')?.details || {};
+  const source = execution.source || {};
   const sourceAsset = source.asset || {};
   const sourceFileCount = Number(source.file_count ?? sourceAsset.file_count ?? 0);
   const sourcePayload = source.payload_kind === 'raw_file'
@@ -532,11 +532,21 @@ function renderOpenExecution(execution, {preserveLog = false} = {}) {
     : source.payload_kind === 'archive'
       ? `Archive payload · ${sourceFileCount} ${sourceFileCount === 1 ? 'file' : 'files'}`
       : '—';
-  const version = typeof execution.version === 'object' ? execution.version : {debian: execution.version};
+  const version = execution.version || {};
   const lifecycle = STATUS_LABELS[execution.lifecycle_status] || execution.lifecycle_status || execution.status || 'Unknown';
   const recovery = validation.recovery_blocker;
-  const meta = [['Run ID', '#' + execution.id], ['Package', execution.package || execution.recipe_id || '—'], ['Origin', executionOriginLabel(execution)], ['Lifecycle', lifecycle], ['Mode', execution.mode || execution.action || '—'], ['Build status', execution.build_status || execution.status], ['Date', fmtTime(execution.updated || execution.created_at_epoch)], ['Validation', execution.validation_status || validation.status || 'Not run'], ['Validation recovery', recovery?.message || '—'], ['Publication', execution.publication_status || publication.status || 'Not run']];
-  const moreMeta = [['Recipe', execution.recipe_id || '—'], ['Source', source.repository || '—'], ['Resolved ref', source.ref || source.tag || '—'], ['Source payload', sourcePayload], ['Source asset', sourceAsset.name || '—'], ['Source SHA-256', sourceAsset.sha256 || '—'], ['Upstream', version.upstream || '—'], ['Debian version', version.debian || '—'], ['Artifact', (artifact.path || '').split('/').pop() || '—'], ['Size', artifact.size || '—'], ['SHA-256', artifact.sha256 || '—']];
+  const insertionReasons = execution.publication_insertion_reasons || [];
+  const publicationEligibility = execution.publication_insertion_eligible
+    ? 'Eligible for repository insertion'
+    : execution.publication_reconciliation_available
+      ? 'Published previously; retry verifies exact repository state'
+      : insertionReasons.includes('validation_state_unverifiable')
+        ? 'Validation state requires operator attention'
+        : insertionReasons.includes('current_validation_required')
+          ? 'Revalidate before publishing'
+          : 'Not eligible';
+  const meta = [['Run ID', '#' + execution.id], ['Package', execution.package || execution.recipe_id || '—'], ['Origin', executionOriginLabel(execution)], ['Lifecycle', lifecycle], ['Mode', execution.mode || execution.action || '—'], ['Build status', execution.build_status || execution.status], ['Date', fmtTime(execution.updated || execution.created_at)], ['Validation', execution.validation_status || validation.status || 'Not run'], ['Publication eligibility', publicationEligibility], ['Validation recovery', recovery?.message || '—'], ['Publication', execution.publication_status || publication.status || 'Not run']];
+  const moreMeta = [['Recipe', execution.recipe_id || '—'], ['Source', source.repository || '—'], ['Resolved ref', source.ref || source.tag || '—'], ['Source payload', sourcePayload], ['Source asset', sourceAsset.name || '—'], ['Source SHA-256', sourceAsset.sha256 || '—'], ['Upstream', version.upstream || '—'], ['Debian version', version.debian || '—'], ['Artifact', artifact.name || '—'], ['Size', artifact.size || '—'], ['SHA-256', artifact.sha256 || '—']];
   const symbols = {pending: '○', running: '◌', success: '✓', failed: '✕', cancelled: '⊘', skipped: '–'};
   if ($('executionMeta')) $('executionMeta').innerHTML = executionMetaHtml(meta);
   if ($('executionMetaMore')) $('executionMetaMore').innerHTML = executionMetaHtml(moreMeta);

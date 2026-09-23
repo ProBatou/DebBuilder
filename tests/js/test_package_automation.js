@@ -91,5 +91,16 @@ context.renderOpenPackage = () => { renders += 1; };
   await nextPoll;
   assert.equal(renders, 4, 'the replacement Validation continues to be polled');
 
+  assert.match(context.actionButtons(packageRow), /refresh-package-observation/, 'linked package exposes explicit observation refresh');
+  assert.doesNotMatch(context.actionButtons({...packageRow, recipe: ''}), /refresh-package-observation/, 'unlinked package hides observation refresh');
+  const refresh = context.refreshPackageObservation('demo');
+  assert.equal(posts[2].url, '/api/recipes/demo-recipe/observation/refresh');
+  assert.deepEqual(posts[2].body, {});
+  posts[2].resolve({ok: true, observation: {}});
+  while (!gets[3]) await Promise.resolve();
+  assert.equal(gets[3].url, '/api/packages/demo');
+  gets[3].resolve({package: {...packageRow, observation: {state: 'observed'}}});
+  await refresh;
+
   console.log('package automation JS tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

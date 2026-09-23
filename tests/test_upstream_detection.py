@@ -8,8 +8,9 @@ from unittest import mock
 from debbuilder import github_client, recipe_store, source_acquisition, upstream_archive, upstream_artifact
 from debbuilder.automation_identity import release_asset_identity
 from debbuilder.automation_ledger import AutomationLedger
-from debbuilder.recipe_schema import validate_recipe_metadata
+from debbuilder.recipe_schema import recipe_for_storage
 from debbuilder.upstream_detection import AutomationDetectionService, UpstreamDetectionError, detect_upstream
+from debbuilder.upstream_observation import UpstreamObservationService, UpstreamObservationStore
 
 
 COMMIT_A = "a1" * 20
@@ -26,7 +27,7 @@ def recipe(*, policy="build", mode="source_build", tracking="latest_release", re
     elif mode == "upstream_deb":
         artifact_config.update({"name_pattern": "demo_*_amd64.deb"})
     artifact_config.update(artifact)
-    return validate_recipe_metadata({
+    return recipe_for_storage({
         "schema_version": 5, "name": "demo", "active": True,
         "automation": {"enabled": True, "policy": policy},
         "package": {"name": "demo", "architecture": "amd64"},
@@ -150,10 +151,7 @@ class ExactDetectionTests(unittest.TestCase):
                 detect_upstream(configured)
         self.assertEqual(missing.exception.code, "release_asset_not_found")
 
-    def test_unsupported_build_version_and_stable_network_taxonomy(self):
-        with self.assertRaises(UpstreamDetectionError) as unsupported:
-            detect_upstream(recipe(version_source="build"))
-        self.assertEqual(unsupported.exception.classification, "unsupported_source")
+    def test_stable_network_taxonomy(self):
         for code, classification in (
             ("release_not_found", "source_not_found"),
             ("github_rate_limited", "rate_limited"),
@@ -206,13 +204,21 @@ class DetectionServiceTests(unittest.TestCase):
         self.recipes = self.root / "recipes"
         self.recipes.mkdir()
         self.ledger = AutomationLedger(self.root / "data")
-        self.service = AutomationDetectionService(self.recipes, self.ledger)
+        self.service = self.detection_service(self.ledger)
 
     def tearDown(self):
         self.temporary.cleanup()
 
     def save(self, configured):
         return recipe_store.save_recipe(self.recipes / "demo.json", configured)
+
+    def detection_service(self, ledger):
+        return AutomationDetectionService(
+            self.recipes, ledger,
+            observation_service=UpstreamObservationService(
+                UpstreamObservationStore(ledger.data_dir), resolver=detect_upstream,
+            ),
+        )
 
     @staticmethod
     def detector(identity=None, barrier=None):
@@ -236,7 +242,7 @@ class DetectionServiceTests(unittest.TestCase):
     def test_execution_policy_claims_once_and_survives_restart(self):
         self.save(recipe(policy="build"))
         first = self.service.check("demo", detector=self.detector())
-        second = AutomationDetectionService(self.recipes, AutomationLedger(self.root / "data")).check(
+        second = self.detection_service(AutomationLedger(self.root / "data")).check(
             "demo", detector=self.detector(),
         )
         self.assertEqual(first["classification"], "detected")
@@ -258,11 +264,18 @@ class DetectionServiceTests(unittest.TestCase):
 
     def test_concurrent_identical_checks_converge_on_one_claim(self):
         self.save(recipe(policy="build"))
-        barrier = threading.Barrier(2)
+        entered = threading.Event()
+        release = threading.Event()
+        def detector(_snapshot, token=""):
+            entered.set()
+            self.assertTrue(release.wait(5))
+            return {"identity": detected_identity(), "display_version": "1.2.3", "display_ref": "v1.2.3"}
         results = []
-        threads = [threading.Thread(target=lambda: results.append(self.service.check("demo", detector=self.detector(barrier=barrier)))) for _ in range(2)]
+        threads = [threading.Thread(target=lambda: results.append(self.service.check("demo", detector=detector))) for _ in range(2)]
         for thread in threads:
             thread.start()
+        self.assertTrue(entered.wait(5))
+        release.set()
         for thread in threads:
             thread.join(5)
         self.assertEqual(len(results), 2)
@@ -273,7 +286,7 @@ class DetectionServiceTests(unittest.TestCase):
         for mutation in ("edit", "disable", "policy"):
             with self.subTest(mutation=mutation):
                 data = self.root / f"data-{mutation}"
-                service = AutomationDetectionService(self.recipes, AutomationLedger(data))
+                service = self.detection_service(AutomationLedger(data))
                 configured = recipe(policy="build")
                 self.save(configured)
 
@@ -305,7 +318,7 @@ class DetectionServiceTests(unittest.TestCase):
                 return super().claim_current_recipe(*args, **kwargs)
 
         ledger = RacingLedger(self.root / "race-data")
-        result = AutomationDetectionService(self.recipes, ledger).check("demo", detector=self.detector())
+        result = self.detection_service(ledger).check("demo", detector=self.detector())
         self.assertEqual(result["classification"], "recipe_changed")
         self.assertEqual(ledger.read()["attempts"], {})
 

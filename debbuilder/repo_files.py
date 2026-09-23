@@ -17,19 +17,6 @@ PUBLIC_ROOT_FILES = {"repository.gpg", "install.sh"}
 PUBLIC_PREFIXES = ("dists/", "pool/")
 
 
-def resolve_public_repo_file(repo_root: Path, request_path: str) -> Path | None:
-    rel = request_path.lstrip("/")
-    if rel not in PUBLIC_ROOT_FILES and not rel.startswith(PUBLIC_PREFIXES):
-        return None
-    root = repo_root.resolve()
-    candidate = (root / rel).resolve()
-    try:
-        candidate.relative_to(root)
-    except ValueError:
-        return None
-    return candidate if candidate.is_file() else None
-
-
 @contextmanager
 def open_public_repo_file(repo_root: Path, request_path: str):
     """Open one allowlisted public file through a pinned, no-follow path walk."""

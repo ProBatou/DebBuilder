@@ -34,8 +34,7 @@ queued or running canonical stage is allowed to reach its normal terminal
 state. Manual Runs remain governed by the existing global post-Build settings.
 
 Validation and publication records belong to the Build Run that produced the
-artifact. There is no separate package-publication endpoint or parallel legacy
-execution model.
+artifact.
 
 ## Project layout
 
@@ -58,14 +57,11 @@ HTTP routing stays in `debbuilder/http_handler.py`; package projections,
 executions, automation, validation, and publication are separate services. The
 application module wires those boundaries together for the stdlib HTTP server.
 
-Recipe input is normalized to the nested Recipe v1 schema. A narrow
-`recipe_migrations.py` module translates only `build.timeout`,
-`install.config_policy`, and persisted `service.configured`, which still occur
-in current Recipes or Build Run snapshots. It also completes the archive source
-and asset-selection fields for persisted upstream-archive Recipes that already
-select a release asset. New code and API clients must emit the canonical shape.
-Build Run inventories are stored in per-run manifests rather than inline in
-`run.json`.
+Recipe input uses one canonical Recipe v5 contract. Persisted and imported
+Recipes must declare `schema_version: 5`; unversioned, older, and newer Recipe
+documents are rejected without rewriting them. New code and API clients must
+emit the canonical v5 shape. Build Run inventories are stored in per-run
+manifests rather than inline in `run.json`.
 
 ## Configuration
 
@@ -89,7 +85,22 @@ Main variables:
 - `DEBBUILDER_NTFY_TOKEN`
 - `GNUPGHOME`
 
-Secrets and local runtime state are stored under `DEBBUILDER_DATA_DIR` (the source-tree `data/` directory by default) and are not intended for Git. Packaged deployments use `/var/lib/debbuilder`; their non-secret defaults are installed from `packaging/debbuilder.env` into `/etc/debbuilder/debbuilder.env` without overwriting an existing administrator-owned file.
+Secrets and local runtime state are stored under `DEBBUILDER_DATA_DIR` (the
+source-tree `data/` directory by default) and are not intended for Git. Packaged
+deployments use `/var/lib/debbuilder`; their non-secret defaults are installed
+from `packaging/debbuilder.env` into `/etc/debbuilder/debbuilder.env` without
+overwriting an existing administrator-owned file. Persisted `settings.json` and
+`secrets.json` documents use the strict schema version `1`. Unversioned,
+partial, older, newer, malformed, or unknown-field documents are rejected
+during startup without write-back; a fresh installation with neither file
+uses the environment-derived defaults in memory. The secret
+store must be an owner-only (`0600`) regular file. A running v1 instance can
+accept an explicit resource-limits-only repair when that section is the sole
+invalid part of an otherwise canonical Settings v1 document; ordinary reads
+and startup remain strict and never salvage it. Secret mutation accepts the
+literal `"masked"` only as a preserve-existing sentinel, never as a stored
+secret value. Persisted OIDC authentication requires an OIDC client secret at
+startup; the separately provisioned session cookie secret cannot replace it.
 
 Build tools are resolved from the same effective `PATH` used to run build commands. Administrators can extend the DebBuilder service's `PATH` in `/etc/debbuilder/debbuilder.env`, while a Recipe can provide a build-specific `PATH` through its build environment. Tools found there do not need to be owned by a Debian package; manually added build dependencies remain Debian packages checked with `dpkg-query`.
 
@@ -106,11 +117,12 @@ trees. Unknown workspace entries are retained.
 Settings → Maintenance exposes `workspace_cleanup.enabled` (default `true`) and
 `workspace_cleanup.failed_workspaces_to_retain` (default `5`, integer 0–1000).
 These are application settings, also available through GET/POST `/api/settings`;
-existing settings files receive the defaults without a Recipe migration.
+POST accepts validated partial updates, while every saved Settings document is a
+complete canonical schema-v1 object.
 
 Build/dry-run completion and queued cancellation request cleanup from the
 application-owned maintenance worker; execution does not synchronously scan all
-historical Runs before dequeuing the next one. The same worker requests authorized
+Runs before dequeuing the next one. The same worker requests authorized
 disposable-workspace cleanup after startup and every five minutes, and refreshes
 the read-only storage inventory after each maintenance pass. Completed
 successful/prepared runs are eligible even if manual validation or publication
@@ -149,7 +161,7 @@ A publication becomes successful only after one exact database entry, one
 exported `Packages` entry, and its safely opened `pool/` file agree with the
 retained source artifact on distribution, component, package, version,
 architecture, size, and SHA-256. That bounded result is stored as a versioned
-publication proof. Historical success records without such a proof remain
+publication proof. Success records without such a proof remain
 unverified until explicit reconciliation succeeds. DebBuilder supports the
 standard repository layout under the configured root and rejects path
 redirections that prevent safe proof; administrator-managed reprepro signing

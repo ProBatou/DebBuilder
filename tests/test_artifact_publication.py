@@ -1,3 +1,5 @@
+from tests.lifecycle_helpers import clean_workspace
+from debbuilder import execution_projection
 import gzip
 import hashlib
 import shlex
@@ -6,12 +8,14 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from unittest import mock
 
-from debbuilder import artifact_publication, build_pipeline, storage, workspace_cleanup
+from debbuilder import artifact_publication, build_pipeline, execution_projection, storage, validation_service, workspace_cleanup
 from debbuilder.build_store import BuildStore
 from debbuilder.repository_lock import repository_lease
+from tests.validation_helpers import record_canonical_validation
 
 
 class RepreproRunner:
@@ -56,7 +60,7 @@ class ArtifactPublicationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             store = BuildStore(base / "builds")
-            recipe = {"name": "demo", "package": {"name": "demo", "architecture": "all", "maintainer": "Demo <demo@example.test>"}, "source": {"repository": "owner/demo"}}
+            recipe = {"schema_version": 5, "name": "demo", "package": {"name": "demo", "architecture": "all", "maintainer": "Demo <demo@example.test>"}, "source": {"repository": "owner/demo"}}
             run = store.create(recipe, mode="build", run_id="real-reprepro")
             package = base / "package"
             (package / "DEBIAN").mkdir(parents=True)
@@ -72,9 +76,9 @@ class ArtifactPublicationTests(unittest.TestCase):
             run.update({
                 "status": "success",
                 "artifact": {"path": str(artifact), "size": artifact.stat().st_size, "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(), "inspection": inspection},
-                "validations": [{"id": "validation", "artifact": str(artifact), "status": "success"}],
             })
             store.save(run)
+            record_canonical_validation(store, run, attempt_id="validation")
             repo = base / "repo"
             (repo / "conf").mkdir(parents=True)
             (repo / "conf/distributions").write_text("Suite: stable\nCodename: bookworm\nArchitectures: amd64 arm64\nComponents: main\n")
@@ -85,10 +89,14 @@ class ArtifactPublicationTests(unittest.TestCase):
             )
 
             self.assertEqual(result["status"], "success", result.get("error"))
-            self.assertEqual(result["proof"]["pool"]["sha256"], run["artifact"]["sha256"])
-            self.assertEqual(result["proof"]["database_architectures"], ["amd64", "arm64"])
+            self.assertEqual(result["proof"]["targets"][0]["pool"]["sha256"], run["artifact"]["sha256"])
+            self.assertEqual(
+                [target["database_architecture"] for target in result["proof"]["targets"]],
+                ["amd64", "arm64"],
+            )
             self.assertEqual(len(result["proof"]["targets"]), 2)
-            self.assertTrue((repo / result["proof"]["pool"]["path"]).is_file())
+            self.assertTrue((repo / result["proof"]["targets"][0]["pool"]["path"]).is_file())
+            self.assertTrue({"database_architecture", "database_architectures", "index", "pool"}.isdisjoint(result["proof"]))
 
     def test_publication_after_workspace_cleanup_uses_retained_artifact_and_holds_lease(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -96,7 +104,7 @@ class ArtifactPublicationTests(unittest.TestCase):
             repo, _ = self.make_repo(temporary)
             artifact = Path(run["artifact"]["path"])
             original = artifact.read_bytes()
-            workspace_cleanup.clean_workspace(store, run["id"])
+            clean_workspace(store, run["id"])
             runner = RepreproRunner()
             def locked_runner(*args, **kwargs):
                 with self.assertRaisesRegex(RuntimeError, "Run lock cannot be acquired"):
@@ -112,7 +120,7 @@ class ArtifactPublicationTests(unittest.TestCase):
 
     def make_run(self, root, run_id="run-one"):
         store = BuildStore(Path(root) / "builds")
-        recipe = {"name": "demo", "package": {"name": "demo", "architecture": "all", "maintainer": "Demo <demo@example.test>"}, "source": {"repository": "owner/demo"}}
+        recipe = {"schema_version": 5, "name": "demo", "package": {"name": "demo", "architecture": "all", "maintainer": "Demo <demo@example.test>"}, "source": {"repository": "owner/demo"}}
         run = store.create(recipe, mode="build", run_id=run_id)
         artifact = Path(run["workspace"]) / "artifacts/demo_2.0-1_all.deb"
         artifact.write_bytes(b"deb")
@@ -120,8 +128,8 @@ class ArtifactPublicationTests(unittest.TestCase):
         run["version"] = {"upstream": "2.0", "debian": "2.0-1"}
         run["artifact"] = {"path": str(artifact), "size": artifact.stat().st_size, "inspection": {"ok": True, "package": "demo", "version": "2.0-1", "architecture": "all"}}
         run["artifact"]["sha256"] = hashlib.sha256(artifact.read_bytes()).hexdigest()
-        run["validations"] = [{"id": "validation-one", "artifact": str(artifact), "status": "success"}]
         store.save(run)
+        record_canonical_validation(store, run, attempt_id="validation-one")
         return store, run
 
     def make_repo(self, root):
@@ -157,39 +165,18 @@ class ArtifactPublicationTests(unittest.TestCase):
             self.assertEqual(result["error"]["code"], "publication_confirmation_required")
             persisted = store.load(run["id"])
             self.assertEqual(persisted["status"], "success")
-            self.assertEqual(persisted["validations"][0]["status"], "success")
+            self.assertNotIn("validations", persisted)
+            self.assertNotIn("validations", persisted["artifact"])
             self.assertEqual(persisted["publications"][0]["status"], "failed")
 
-    def test_manifest_cancellation_overrides_a_stale_successful_run_row(self):
+    def test_canonical_cancellation_does_not_authorize_publication(self):
         with tempfile.TemporaryDirectory() as temporary:
             store, run = self.make_run(temporary)
-            attempt_id = run["validations"][0]["id"]
-            root = store.run_dir(run["id"]) / "manifests/validation-attempts" / attempt_id
-            root.mkdir(parents=True)
-            artifact = run["artifact"]
-            identity = {
-                "package": artifact["inspection"]["package"],
-                "version": artifact["inspection"]["version"],
-                "architecture": artifact["inspection"]["architecture"],
-                "size": artifact["size"],
-                "sha256": artifact["sha256"],
-            }
-            storage.save_json(root / "attempt.json", {
-                "contract_version": 1, "id": attempt_id, "build_run_id": run["id"],
-                "inputs": {"profile": "bookworm", "artifact": identity, "previous_artifact": None},
-                "selected_profile": {
-                    "name": "bookworm",
-                    "image": {"name": "debbuilder-validation:bookworm", "id": "sha256:" + "a" * 64, "digest": None},
-                },
-                "created_at": "2026-09-14T08:00:00+00:00",
-                "started_at": "2026-09-14T08:00:01+00:00",
-                "finished_at": "2026-09-14T08:00:02+00:00",
-                "status": "cancelled", "prepared_dependencies": None, "result": None,
-                "error": {"code": "validation_lifecycle_cancelled", "message": "Validation was cancelled"},
-            })
+            shutil.rmtree(store.run_dir(run["id"]) / "manifests/validation-attempts")
+            record_canonical_validation(store, run, attempt_id="cancelled", status="cancelled")
             readiness = artifact_publication.publication_readiness(store.load(run["id"]), store=store)
             self.assertFalse(readiness["ready"])
-            self.assertIn("validation_not_successful", readiness["reasons"])
+            self.assertIn("current_validation_required", readiness["reasons"])
 
     def test_publishes_validated_all_package_without_changing_distribution_config(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -200,7 +187,8 @@ class ArtifactPublicationTests(unittest.TestCase):
             with mock.patch("debbuilder.artifact_publication.deb_inspector.inspect_deb", return_value=inspection):
                 result = artifact_publication.publish_artifact(run["id"], store=store, repo_root=repo, distribution="bookworm", component="main", confirm="publish:demo:2.0-1", runner=runner)
             self.assertEqual(result["status"], "success")
-            self.assertEqual(result["published_version"], "2.0-1")
+            self.assertNotIn("published_version", result)
+            self.assertEqual(execution_projection.public_publication(result)["published_version"], "2.0-1")
             self.assertIn("all accepted", result["preflight"]["architecture_policy"])
             self.assertEqual((repo / "conf/distributions").read_text(), config)
             self.assertTrue(any(" includedeb " in command for command in runner.commands))
@@ -213,6 +201,8 @@ class ArtifactPublicationTests(unittest.TestCase):
             persisted = store.load(run["id"])["publications"][-1]
             self.assertEqual(persisted["status"], "success")
             self.assertEqual(persisted["proof"], result["proof"])
+            self.assertNotIn("published_version", persisted)
+            self.assertNotIn("publications", store.load(run["id"])["artifact"])
 
     def test_publication_running_state_is_visible_until_repository_completion(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -246,10 +236,10 @@ class ArtifactPublicationTests(unittest.TestCase):
                 )
                 thread.start()
                 self.assertTrue(entered.wait(1))
-                persisted = store.load(run["id"])
+                persisted = validation_service.project_run(store.load(run["id"]), store)
                 self.assertEqual(persisted["publications"][-1]["status"], "running")
-                self.assertEqual(build_pipeline.execution_summary(persisted)["lifecycle_status"], "publishing")
-                self.assertTrue(build_pipeline.execution_summary(persisted)["lifecycle_active"])
+                self.assertEqual(execution_projection.public_summary(persisted)["lifecycle_status"], "publishing")
+                self.assertTrue(execution_projection.public_summary(persisted)["lifecycle_active"])
                 release.set()
                 thread.join(timeout=2)
             self.assertFalse(thread.is_alive())
@@ -259,13 +249,331 @@ class ArtifactPublicationTests(unittest.TestCase):
     def test_unvalidated_artifact_is_not_published(self):
         with tempfile.TemporaryDirectory() as temporary:
             store, run = self.make_run(temporary)
-            run["validations"] = []
-            store.save(run)
+            shutil.rmtree(store.run_dir(run["id"]) / "manifests/validation-attempts")
             repo, _ = self.make_repo(temporary)
             runner = RepreproRunner()
-            result = artifact_publication.publish_artifact(run["id"], store=store, repo_root=repo, distribution="bookworm", component="main", confirm="publish:demo:2.0-1", runner=runner)
+            with mock.patch("debbuilder.artifact_publication.deb_inspector.inspect_deb", return_value=run["artifact"]["inspection"]):
+                result = artifact_publication.publish_artifact(run["id"], store=store, repo_root=repo, distribution="bookworm", component="main", confirm="publish:demo:2.0-1", runner=runner)
             self.assertEqual(result["error"]["code"], "artifact_not_ready")
+            self.assertIn("current_validation_required", result["error"]["details"]["reasons"])
             self.assertFalse(any(" includedeb " in command for command in runner.commands))
+
+    def test_missing_and_partial_canonical_evidence_do_not_authorize_insertion(self):
+        for evidence in ("missing", "partial"):
+            with self.subTest(evidence=evidence), tempfile.TemporaryDirectory() as temporary:
+                store, run = self.make_run(temporary)
+                shutil.rmtree(store.run_dir(run["id"]) / "manifests/validation-attempts")
+                run = store.load(run["id"])
+                if evidence == "partial":
+                    record_canonical_validation(
+                        store, run, attempt_id="preparation-only", lifecycle=False,
+                    )
+                repo, _ = self.make_repo(temporary)
+                runner = RepreproRunner()
+                with mock.patch("debbuilder.artifact_publication.deb_inspector.inspect_deb", return_value=run["artifact"]["inspection"]):
+                    result = artifact_publication.publish_artifact(
+                        run["id"], store=store, repo_root=repo, distribution="bookworm",
+                        component="main", confirm="publish:demo:2.0-1", runner=runner,
+                    )
+                self.assertEqual(result["error"]["code"], "artifact_not_ready")
+                expected = "validation_state_unverifiable" if evidence == "partial" else "current_validation_required"
+                self.assertEqual(result["error"]["details"]["reasons"], [expected])
+                self.assertFalse(any(" includedeb " in command for command in runner.commands))
+
+    def test_canonical_failure_cancellation_mismatch_and_active_attempt_do_not_authorize_insertion(self):
+        cases = ("failed", "cancelled", "mismatch", "active")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                store, run = self.make_run(temporary)
+                shutil.rmtree(store.run_dir(run["id"]) / "manifests/validation-attempts")
+                run = store.load(run["id"])
+                kwargs = {}
+                status = case
+                if case == "mismatch":
+                    status = "success"
+                    identity = {
+                        "package": "demo", "version": "2.0-1", "architecture": "all",
+                        "size": run["artifact"]["size"], "sha256": "b" * 64,
+                    }
+                    kwargs["artifact_identity"] = identity
+                elif case == "active":
+                    status = "running"
+                record_canonical_validation(
+                    store, run, attempt_id=f"canonical-{case}", status=status, **kwargs,
+                )
+                readiness = artifact_publication.publication_readiness(store.load(run["id"]), store=store)
+                self.assertFalse(readiness["ready"])
+                expected = "validation_in_progress" if case == "active" else "current_validation_required"
+                self.assertIn(expected, readiness["reasons"])
+
+    def test_corrupt_attempt_inventory_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store, run = self.make_run(temporary)
+            inventory = store.run_dir(run["id"]) / "manifests/validation-attempts"
+            (inventory / "unsafe-entry").write_text("not a directory")
+            readiness = artifact_publication.publication_readiness(store.load(run["id"]), store=store)
+            self.assertFalse(readiness["ready"])
+            self.assertEqual(readiness["reasons"], ["validation_state_unverifiable"])
+
+    def test_global_validation_recovery_blocker_and_unproved_network_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store, run = self.make_run(temporary)
+            blocked = artifact_publication.publication_readiness(
+                store.load(run["id"]),
+                store=store,
+                validation_recovery_blocker={"code": "validation_container_recovery_required"},
+            )
+            self.assertFalse(blocked["ready"])
+            self.assertEqual(blocked["reasons"], ["validation_state_unverifiable"])
+
+            result_path = store.run_dir(run["id"]) / "manifests/validation-attempts/validation-one/result.json"
+            lifecycle = storage.load_json(result_path, {})
+            lifecycle["execution"]["network_verified"] = False
+            storage.save_json(result_path, lifecycle)
+            unproved = artifact_publication.publication_readiness(store.load(run["id"]), store=store)
+            self.assertFalse(unproved["ready"])
+            self.assertEqual(unproved["reasons"], ["validation_state_unverifiable"])
+
+    def test_incomplete_or_mismatched_lifecycle_proof_never_authorizes_insertion(self):
+        mutations = {
+            "missing-cleanup": lambda lifecycle: lifecycle["execution"].pop("cleanup"),
+            "wrong-profile": lambda lifecycle: lifecycle["profile"].update({"name": "bookworm-node22"}),
+            "wrong-image": lambda lifecycle: lifecycle["profile"]["image"].update({"id": "sha256:" + "b" * 64}),
+        }
+        for case, mutate in mutations.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                store, run = self.make_run(temporary)
+                result_path = store.run_dir(run["id"]) / "manifests/validation-attempts/validation-one/result.json"
+                lifecycle = storage.load_json(result_path, {})
+                mutate(lifecycle)
+                storage.save_json(result_path, lifecycle)
+                readiness = artifact_publication.publication_readiness(store.load(run["id"]), store=store)
+                self.assertFalse(readiness["ready"])
+                self.assertEqual(readiness["reasons"], ["validation_state_unverifiable"])
+
+                repo, _ = self.make_repo(temporary)
+                runner = RepreproRunner()
+                with mock.patch(
+                    "debbuilder.artifact_publication.deb_inspector.inspect_deb",
+                    return_value=run["artifact"]["inspection"],
+                ):
+                    result = artifact_publication.publish_artifact(
+                        run["id"], store=store, repo_root=repo, distribution="bookworm",
+                        component="main", confirm="publish:demo:2.0-1", runner=runner,
+                    )
+                self.assertEqual(result["error"]["code"], "artifact_not_ready")
+                self.assertFalse(any(" includedeb " in command for command in runner.commands))
+
+    def test_dangling_attempt_inventory_symlink_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store, run = self.make_run(temporary)
+            inventory = store.run_dir(run["id"]) / "manifests/validation-attempts"
+            shutil.rmtree(inventory)
+            inventory.symlink_to(Path(temporary) / "missing-inventory", target_is_directory=True)
+            readiness = artifact_publication.publication_readiness(store.load(run["id"]), store=store)
+            self.assertFalse(readiness["ready"])
+            self.assertEqual(readiness["reasons"], ["validation_state_unverifiable"])
+
+    def test_earlier_canonical_success_survives_later_failure_but_not_an_active_attempt(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store, run = self.make_run(temporary)
+            record_canonical_validation(
+                store, run, attempt_id="later-failure", status="failed",
+                created_at="2026-09-14T09:00:00+00:00",
+            )
+            projected = validation_service.project_run(store.load(run["id"]), store)
+            self.assertEqual(projected["_validation_attempts"][-1]["status"], "failed")
+            self.assertTrue(projected["publication_insertion_eligibility"]["eligible"])
+            summary = execution_projection.public_summary(projected)
+            self.assertEqual(summary["validation_status"], "failed")
+            self.assertTrue(summary["publication_insertion_eligible"])
+            self.assertTrue(summary["allowed_actions"]["publish"])
+
+            record_canonical_validation(
+                store, run, attempt_id="active-attempt", status="running",
+                created_at="2026-09-14T10:00:00+00:00",
+            )
+            readiness = artifact_publication.publication_readiness(store.load(run["id"]), store=store)
+            self.assertFalse(readiness["ready"])
+            self.assertIn("validation_in_progress", readiness["reasons"])
+
+    def test_earlier_canonical_success_survives_later_cancellation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store, run = self.make_run(temporary)
+            record_canonical_validation(
+                store, run, attempt_id="later-cancellation", status="cancelled",
+                created_at="2026-09-14T09:00:00+00:00",
+            )
+            projected = validation_service.project_run(store.load(run["id"]), store)
+            self.assertEqual(projected["_validation_attempts"][-1]["status"], "cancelled")
+            self.assertTrue(projected["publication_insertion_eligibility"]["eligible"])
+
+    def test_missing_canonical_success_plus_canonical_failure_is_not_eligible(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store, run = self.make_run(temporary)
+            shutil.rmtree(store.run_dir(run["id"]) / "manifests/validation-attempts")
+            record_canonical_validation(
+                store, run, attempt_id="canonical-failure", status="failed",
+                created_at="2026-09-14T09:00:00+00:00",
+            )
+            readiness = artifact_publication.publication_readiness(store.load(run["id"]), store=store)
+            self.assertFalse(readiness["ready"])
+            self.assertIn("current_validation_required", readiness["reasons"])
+
+    def test_exact_present_without_canonical_validation_reconciles_without_insertion(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store, run = self.make_run(temporary)
+            repo, _ = self.make_repo(temporary)
+            self.populate_exact(repo, run)
+            shutil.rmtree(store.run_dir(run["id"]) / "manifests/validation-attempts")
+            runner = RepreproRunner()
+            runner.published = True
+            with mock.patch("debbuilder.artifact_publication.deb_inspector.inspect_deb", return_value=run["artifact"]["inspection"]):
+                result = artifact_publication.publish_artifact(
+                    run["id"], store=store, repo_root=repo, distribution="bookworm",
+                    component="main", confirm="publish:demo:2.0-1", runner=runner,
+                )
+            self.assertEqual(result["status"], "success")
+            self.assertFalse(result["readiness"]["ready"])
+            self.assertFalse(any(" includedeb " in command for command in runner.commands))
+
+    def test_missing_exact_contents_never_fall_through_from_reconciliation_to_insertion(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store, run = self.make_run(temporary)
+            repo, _ = self.make_repo(temporary)
+            shutil.rmtree(store.run_dir(run["id"]) / "manifests/validation-attempts")
+            runner = RepreproRunner()
+            runner.published = True
+            with mock.patch("debbuilder.artifact_publication.deb_inspector.inspect_deb", return_value=run["artifact"]["inspection"]):
+                result = artifact_publication.publish_artifact(
+                    run["id"], store=store, repo_root=repo, distribution="bookworm",
+                    component="main", confirm="publish:demo:2.0-1", runner=runner,
+                )
+            self.assertEqual(result["error"]["code"], "publication_proof_failed")
+            self.assertFalse(any(" includedeb " in command for command in runner.commands))
+
+    def test_manual_run_becomes_publishable_after_canonical_validation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store, run = self.make_run(temporary)
+            shutil.rmtree(store.run_dir(run["id"]) / "manifests/validation-attempts")
+            repo, _ = self.make_repo(temporary)
+            runner = RepreproRunner()
+            with mock.patch("debbuilder.artifact_publication.deb_inspector.inspect_deb", return_value=run["artifact"]["inspection"]):
+                denied = artifact_publication.publish_artifact(
+                    run["id"], store=store, repo_root=repo, distribution="bookworm",
+                    component="main", confirm="publish:demo:2.0-1", runner=runner,
+                )
+            self.assertIn("current_validation_required", denied["error"]["details"]["reasons"])
+            run = store.load(run["id"])
+            record_canonical_validation(
+                store, run, attempt_id="canonical-revalidation",
+                created_at="2026-09-14T09:00:00+00:00",
+            )
+            with mock.patch("debbuilder.artifact_publication.deb_inspector.inspect_deb", return_value=run["artifact"]["inspection"]):
+                published = artifact_publication.publish_artifact(
+                    run["id"], store=store, repo_root=repo, distribution="bookworm",
+                    component="main", confirm="publish:demo:2.0-1", runner=runner,
+                )
+            self.assertEqual(published["status"], "success", published.get("error"))
+
+    def test_publication_proof_and_exact_retry_survive_later_validation_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store, run = self.make_run(temporary)
+            repo, _ = self.make_repo(temporary)
+            runner = RepreproRunner()
+            with mock.patch("debbuilder.artifact_publication.deb_inspector.inspect_deb", return_value=run["artifact"]["inspection"]):
+                first = artifact_publication.publish_artifact(
+                    run["id"], store=store, repo_root=repo, distribution="bookworm",
+                    component="main", confirm="publish:demo:2.0-1", runner=runner,
+                )
+            self.assertEqual(first["status"], "success")
+            run = store.load(run["id"])
+            record_canonical_validation(
+                store, run, attempt_id="later-failure", status="failed",
+                created_at="2026-09-14T09:00:00+00:00",
+            )
+            persisted = store.load(run["id"])
+            projected = artifact_publication.publication_evidence_projection(
+                persisted, repo_root=repo, distribution="bookworm", component="main",
+            )
+            self.assertTrue(projected["already_published"])
+            self.assertTrue(projected["publication_reconciliation_available"])
+            for wrong in (
+                {"repo_root": Path(temporary) / "other-repo", "distribution": "bookworm", "component": "main"},
+                {"repo_root": repo, "distribution": "trixie", "component": "main"},
+                {"repo_root": repo, "distribution": "bookworm", "component": "contrib"},
+            ):
+                mismatched = artifact_publication.publication_evidence_projection(persisted, **wrong)
+                self.assertFalse(mismatched["already_published"])
+                self.assertFalse(mismatched["publication_reconciliation_available"])
+            with mock.patch("debbuilder.artifact_publication.deb_inspector.inspect_deb", return_value=run["artifact"]["inspection"]):
+                retry = artifact_publication.publish_artifact(
+                    run["id"], store=store, repo_root=repo, distribution="bookworm",
+                    component="main", confirm="publish:demo:2.0-1", runner=runner,
+                )
+            self.assertEqual(retry["status"], "success")
+            self.assertEqual(sum(" includedeb " in command for command in runner.commands), 1)
+
+    def test_proofless_success_never_projects_publication_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store, run = self.make_run(temporary)
+            repo, _ = self.make_repo(temporary)
+            run["publications"] = [{
+                "id": "proofless", "status": "success", "artifact": run["artifact"]["path"],
+                "package": "demo", "version": "2.0-1", "architecture": "all",
+                "repository": {"root": str(repo), "distribution": "bookworm", "component": "main"},
+                "proof": None,
+            }]
+
+            evidence = artifact_publication.publication_evidence_projection(
+                run, repo_root=repo, distribution="bookworm", component="main",
+            )
+            public = execution_projection.public_publication(run["publications"][0])
+
+            self.assertFalse(evidence["already_published"])
+            self.assertEqual(evidence["publication_proof_id"], "")
+            self.assertEqual(public["status"], "failed")
+            self.assertEqual(public["published_version"], "")
+            self.assertFalse(public["proof"]["available"])
+            self.assertEqual(public["error"]["code"], "publication_proof_invalid")
+
+    def test_malformed_cross_field_proof_never_projects_success(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store, run = self.make_run(temporary)
+            repo, _ = self.make_repo(temporary)
+            runner = RepreproRunner()
+            with mock.patch(
+                "debbuilder.artifact_publication.deb_inspector.inspect_deb",
+                return_value=run["artifact"]["inspection"],
+            ):
+                valid = artifact_publication.publish_artifact(
+                    run["id"], store=store, repo_root=repo, distribution="bookworm",
+                    component="main", confirm="publish:demo:2.0-1", runner=runner,
+                )
+            self.assertEqual(valid["status"], "success")
+
+            malformed = []
+            wrong_index = deepcopy(valid)
+            wrong_index["proof"]["targets"][0]["index"]["path"] = "pool/main/d/demo/Packages.gz"
+            malformed.append(wrong_index)
+            for root in ("relative/repository", "/tmp/../repository", "//tmp/repository"):
+                malformed_root = deepcopy(valid)
+                malformed_root["repository"]["root"] = root
+                malformed_root["proof"]["repository"]["root"] = root
+                malformed.append(malformed_root)
+            wrong_architecture = deepcopy(valid)
+            wrong_architecture["architecture"] = "amd64"
+            wrong_architecture["proof"]["architecture"] = "amd64"
+            wrong_architecture["proof"]["targets"][0]["database_architecture"] = "arm64"
+            wrong_architecture["proof"]["targets"][0]["index"]["path"] = (
+                "dists/bookworm/main/binary-arm64/Packages.gz"
+            )
+            malformed.append(wrong_architecture)
+
+            for attempt in malformed:
+                with self.subTest(attempt=attempt["proof"]):
+                    self.assertIsNone(artifact_publication.successful_publication_proof(attempt))
+                    self.assertEqual(execution_projection.public_publication(attempt)["status"], "failed")
 
     def test_reprepro_failure_and_stale_export_never_claim_success(self):
         class IncludeFailureRunner(RepreproRunner):
@@ -311,10 +619,14 @@ class ArtifactPublicationTests(unittest.TestCase):
             self.assertEqual(result["error"]["code"], "downgrade_refused")
             self.assertFalse(any(" includedeb " in command for command in runner.commands))
 
-    def test_reconciliation_requires_database_and_exported_index_and_preserves_history(self):
+    def test_reconciliation_reproves_proofless_success_and_preserves_history(self):
         with tempfile.TemporaryDirectory() as temporary:
             store, run = self.make_run(temporary)
-            run["publications"] = [{"id": "old-failure", "status": "failed", "error": {"code": "export_failed"}}]
+            run["publications"] = [{
+                "id": "old-proofless", "status": "success", "proof": None,
+                "artifact": run["artifact"]["path"], "package": "demo", "version": "2.0-1",
+                "architecture": "all",
+            }]
             store.save(run)
             repo, _ = self.make_repo(temporary)
             runner = RepreproRunner()
@@ -344,8 +656,10 @@ class ArtifactPublicationTests(unittest.TestCase):
             self.assertEqual(repeated["status"], "success")
             self.assertEqual(repeated["proof"]["source"]["sha256"], run["artifact"]["sha256"])
             persisted = store.load(run["id"])
-            self.assertEqual(persisted["publications"][0]["status"], "failed")
+            self.assertEqual(persisted["publications"][0]["status"], "success")
+            self.assertIsNone(artifact_publication.successful_publication_proof(persisted["publications"][0]))
             self.assertEqual(persisted["publications"][-1]["status"], "success")
+            self.assertIsNotNone(artifact_publication.successful_publication_proof(persisted["publications"][-1]))
             self.assertIn("Publication reconciliation", persisted["events"][-1]["message"])
 
     def test_fail_fast_busy_is_persisted_for_a_different_run(self):
@@ -420,7 +734,7 @@ class ArtifactPublicationTests(unittest.TestCase):
                 )
             self.assertEqual(result["status"], "success")
             self.assertEqual(result["proof"]["proof_version"], 1)
-            self.assertEqual(result["proof"]["index"]["sha256"], run["artifact"]["sha256"])
+            self.assertEqual(result["proof"]["targets"][0]["index"]["sha256"], run["artifact"]["sha256"])
             self.assertFalse(any(" includedeb " in command for command in runner.commands))
 
     def test_same_identity_with_different_content_is_a_conflict(self):
@@ -497,7 +811,10 @@ class ArtifactPublicationTests(unittest.TestCase):
                     )
                 self.assertEqual(result["status"], expected)
                 if expected == "success":
-                    self.assertEqual(result["proof"]["database_architectures"], ["amd64", "arm64"])
+                    self.assertEqual(
+                        [target["database_architecture"] for target in result["proof"]["targets"]],
+                        ["amd64", "arm64"],
+                    )
                     self.assertEqual(len(result["proof"]["targets"]), 2)
                 else:
                     self.assertEqual(result["error"]["code"], "publication_proof_failed")

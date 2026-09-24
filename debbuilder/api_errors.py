@@ -62,6 +62,7 @@ _MESSAGES = {
     "notification_failed": "The test notification failed",
     "missing_required_secret": "A required secret is missing",
     "publication_identity_conflict": "Published repository state conflicts with this artifact",
+    "post_build_directory_invalid_path": "A post-build directory path is invalid",
     "repository_mutation_busy": "The repository is busy with another mutation",
     "publication_failed": "Publication failed",
     "readonly_recipe": "The read-only Recipe cannot be changed",

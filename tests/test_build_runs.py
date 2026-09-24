@@ -451,6 +451,61 @@ class BuildStoreTests(unittest.TestCase):
             self.assertEqual(recorded["index"], 2)
             self.assertEqual(recorded["status"], "success")
 
+    def test_maintainerr_style_empty_directories_are_ensured_logged_staged_and_packaged(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = BuildStore(Path(temporary) / "builds")
+
+            def acquire(_recipe, workspace, token="", expected_identity=None):
+                source = Path(workspace) / "source"
+                (source / "package.json").write_text("{}")
+                (source / "packages/contracts/node_modules").mkdir(parents=True)
+                return {
+                    "repository": "Maintainerr/Maintainerr", "ref": "v3.29.0", "tag": "v3.29.0",
+                    "upstream_version": "3.29.0", "debian_version": "3.29.0-1",
+                    "source_directory": str(source),
+                }
+
+            available = lambda detected, manual, **_kwargs: {
+                "detected": detected, "manually_added": manual, "required": detected + manual,
+                "available": detected + manual, "missing": [], "checks": [], "installation_attempted": False,
+            }
+            configured = recipe()
+            configured["build"] = {
+                "commands": [
+                    f"{shlex.quote(sys.executable)} -c 'from pathlib import Path; Path(\"node_modules\").mkdir(); Path(\"apps/server/dist\").mkdir(parents=True); Path(\"apps/server/dist/app.js\").write_text(\"built\")'",
+                ],
+                "ensure_directories": [
+                    "packages/contracts/node_modules", "apps/server/node_modules",
+                ],
+                "output": {"mode": "paths", "paths": [
+                    "node_modules", "apps/server/dist", "apps/server/node_modules",
+                    "packages/contracts/node_modules",
+                ]},
+            }
+            run = build_pipeline.create_pipeline_run(configured, store=store, dry_run=False)
+            result = build_pipeline.execute_pipeline_run(
+                run["id"], store=store, acquire=acquire, dependency_check=available,
+            )
+
+            self.assertEqual(result["status"], "success")
+            self.assertNotIn("mkdir -p", configured["build"]["commands"])
+            ensured = result["build"]["ensure_directories"]
+            self.assertEqual(ensured["requested"], 2)
+            self.assertEqual(ensured["created"], 1)
+            self.assertEqual(ensured["already_existed"], 1)
+            log = store.log_text(run["id"])
+            self.assertIn("packages/contracts/node_modules (already existed)", log)
+            self.assertIn("apps/server/node_modules (created)", log)
+            staging = Path(result["workspace"]) / "staging/opt/demo"
+            self.assertTrue((staging / "packages/contracts/node_modules").is_dir())
+            self.assertTrue((staging / "apps/server/node_modules").is_dir())
+            inventory = {
+                row["path"].rstrip("/")
+                for row in store.artifact_files(run["id"], result["artifact"]["inspection"])
+            }
+            self.assertIn("./opt/demo/packages/contracts/node_modules", inventory)
+            self.assertIn("./opt/demo/apps/server/node_modules", inventory)
+
 
 if __name__ == "__main__":
     unittest.main()

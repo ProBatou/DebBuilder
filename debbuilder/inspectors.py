@@ -39,6 +39,9 @@ _RUN_ERROR_CODES = STABLE_ERROR_CODES | frozenset({
     "execution_interrupted", "execution_worker_error", "execution_worker_fatal_error",
     "execution_cancelled", "execution_cancellation_termination_failed",
     "missing_build_tools", "missing_build_dependencies",
+    "post_build_directory_invalid_path", "post_build_directory_escape",
+    "post_build_directory_symlink", "post_build_directory_not_directory",
+    "post_build_directory_creation_failed",
 })
 PUBLICATION_INSPECTION_STATUSES = frozenset({"not_run", "running", "success", "failed", "cancelled"})
 
@@ -101,6 +104,7 @@ def inspect_recipe(recipe: dict, *, source: str = "user", observation: dict | No
         "automation_blocked", "shutting_down",
     }, "not_observed")
     collections = (build["commands"], build["output"].get("paths", []),
+                   build.get("ensure_directories", []),
                    build["source_changes"], payload["include"], payload["exclude"],
                    install["directories"], install["config_files"])
     return {
@@ -128,6 +132,7 @@ def inspect_recipe(recipe: dict, *, source: str = "user", observation: dict | No
             "output_mode": _enum(build["output"]["mode"], OUTPUT_MODES),
             "output_path_count": _count(build["output"].get("paths", [])) if build["output"]["mode"] == "paths" else
                                  1 if build["output"]["mode"] == "path" else 0,
+            "ensure_directory_count": _count(build.get("ensure_directories", [])),
             "source_change_count": _count(build["source_changes"]),
             "inactivity_timeout_configured": build["inactivity_timeout"] is not None,
             "maximum_runtime_configured": build["maximum_runtime"] is not None,
@@ -189,6 +194,12 @@ def inspect_run(run: dict, *, validation: dict | None = None, validation_count: 
     stage = error.get("stage")
     stage = stage if stage in STEP_NAMES else None
     pub_repository = publication.get("repository") if isinstance(publication.get("repository"), dict) else {}
+    build_step = next((row for row in steps if row.get("name") == "build"), {})
+    build_details = build_step.get("details") if isinstance(build_step.get("details"), dict) else {}
+    ensured = build_details.get("ensure_directories") if isinstance(build_details.get("ensure_directories"), dict) else {}
+
+    def bounded_count(value) -> int:
+        return min(value, MAX_COLLECTION_COUNT) if type(value) is int and value >= 0 else 0
 
     def public_token(value):
         return value if isinstance(value, str) and _TOKEN.fullmatch(value) and not _SENSITIVE.search(value) else None
@@ -245,6 +256,13 @@ def inspect_run(run: dict, *, validation: dict | None = None, validation_count: 
             "recovery_status": _enum(recovery.get("status"), {"blocked", "resolved"}, "none"),
             "recovery_blocked": recovery.get("status") == "blocked",
             "containment_backend": _enum(recovery.get("backend"), {"systemd_cgroup", "process_group", "none", "unknown"}),
+        },
+        "build": {
+            "ensure_directories": {
+                "requested": bounded_count(ensured.get("requested")),
+                "created": bounded_count(ensured.get("created")),
+                "already_existed": bounded_count(ensured.get("already_existed")),
+            },
         },
         "error": {"code": code, "stage": stage},
     }

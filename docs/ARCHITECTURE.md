@@ -119,6 +119,20 @@ than shell command strings. DebBuilder detects Node.js, Python, Rust, and
 static projects, then presents detected dependencies and build actions for
 review through a Recipe.
 
+The three source-tree preparation mechanisms have distinct lifecycle ownership:
+
+- Build commands are actual project commands and run through the contained
+  command runner.
+- Source changes modify acquired source content before Build commands.
+- `build.ensure_directories` declaratively makes selected payload directories
+  available after successful Build commands and before output resolution.
+
+Ensured directories are explicit, relative to `workspace/source`, and must be
+covered by `build.output`. This does not make an ensured directory an output by
+itself. Ordinary selected outputs remain fail-closed: if the build did not
+produce one and it was not explicitly ensured, the Build fails rather than
+materializing an empty replacement.
+
 Python detection recognizes common `pyproject.toml`, setuptools, requirements,
 Pipenv, Poetry, and uv metadata without executing project files or translating
 PyPI names into Debian package names. Explicit PEP 517 projects receive a

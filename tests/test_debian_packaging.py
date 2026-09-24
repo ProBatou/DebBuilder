@@ -443,6 +443,29 @@ class DebianPackagingTests(unittest.TestCase):
         self.assertEqual(recipe["install"]["account"]["user"], "demo-app")
 
     @unittest.skipUnless(shutil.which("dpkg-deb"), "dpkg-deb unavailable")
+    def test_empty_selected_directory_is_staged_and_present_in_deb_inventory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = self.make_workspace(temporary)
+            empty = workspace / "source/apps/server/node_modules"
+            empty.mkdir(parents=True)
+            recipe = packaging_recipe(service=False)
+            recipe["install"]["config_files"] = []
+            staging = debian_packaging.prepare_staging(
+                recipe,
+                {"output": {"mode": "paths", "paths": [{"path": str(empty)}]}, "version": "1.0-1"},
+                workspace,
+            )
+            staged = workspace / "staging/opt/demo/apps/server/node_modules"
+            self.assertTrue(staged.is_dir())
+            self.assertEqual(staging["content_files"], [])
+
+            artifact = debian_packaging.build_deb(
+                recipe, staging, workspace, inspector=deb_inspector.inspect_deb,
+            )
+            paths = {row["path"].rstrip("/") for row in artifact["inspection"]["files"]}
+            self.assertIn("./opt/demo/apps/server/node_modules", paths)
+
+    @unittest.skipUnless(shutil.which("dpkg-deb"), "dpkg-deb unavailable")
     def test_builds_and_inspects_real_deb_in_artifacts(self):
         with tempfile.TemporaryDirectory() as temporary:
             workspace = self.make_workspace(temporary)

@@ -123,6 +123,9 @@ class ExecutionProjectionTests(unittest.TestCase):
                 "environment": {"TOKEN": "step-secret-marker", "MODE": "release"},
                 "output": {"mode": "path", "configured_path": "dist", "path": "/private/dist"},
                 "future_backend": "step-secret-marker",
+            }, "ensure_directories": {
+                "requested": 2, "created": 1, "already_existed": 1,
+                "entries": [{"path": "private/step-secret-marker", "status": "created"}],
             }},
             "future_backend": "step-secret-marker",
         })
@@ -179,6 +182,9 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(build["details"]["plan"]["configured_working_directory"], "src")
         self.assertEqual(build["details"]["plan"]["environment_keys"], ["TOKEN", "MODE"])
         self.assertEqual(build["details"]["plan"]["command_count"], 1)
+        self.assertEqual(build["details"]["ensure_directories"], {
+            "requested": 2, "created": 1, "already_existed": 1,
+        })
         self.assertEqual(
             build["summary"],
             "Build completed in [redacted-path] via [redacted-url]",

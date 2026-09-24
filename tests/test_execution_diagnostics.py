@@ -109,6 +109,17 @@ class ExecutionDiagnosticTests(unittest.TestCase):
         self.assertEqual(rows["Destination"], "/etc/demo.env")
         self.assertEqual(mapping["recipe_step"], "install")
 
+    def test_post_build_directory_failure_has_relative_location_and_kind(self):
+        diagnostic = self.failed_run("post_build_directory_symlink", "Directory failed", details={
+            "directory": "apps/server/node_modules", "actual_kind": "symlink",
+        })
+        where = {row["label"]: row["value"] for row in diagnostic["where"]}
+        facts = {row["label"]: row["value"] for row in diagnostic["facts"]}
+        self.assertEqual(diagnostic["title"], "Post-build directory preparation failed")
+        self.assertEqual(where["Configured path"], "apps/server/node_modules")
+        self.assertEqual(facts["Observed"], "symlink")
+        self.assertNotIn("/runs/", str(diagnostic))
+
     def test_validation_failure_uses_profile_check_and_failed_command(self):
         run = self.store.create(recipe(), mode="build")
         artifact = Path(run["workspace"]) / "artifacts/demo.deb"

@@ -38,7 +38,14 @@ def _copy_regular_tree(source: Path, destination: Path, *, allowed_root: Path | 
     if source.is_symlink() or not source.exists():
         raise PackagingError("invalid_install_content", "Resolved build output is missing or is a symbolic link")
     allowed_root = (allowed_root or source).resolve()
-    entries = [source] if source.is_file() else sorted(source.rglob("*"))
+    source_mode = source.lstat().st_mode
+    if stat.S_ISDIR(source_mode):
+        destination.mkdir(parents=True, exist_ok=True)
+        entries = sorted(source.rglob("*"))
+    elif stat.S_ISREG(source_mode):
+        entries = [source]
+    else:
+        raise PackagingError("unsupported_install_entry", "Resolved build output is an unsupported special entry")
     for entry in entries:
         relative = Path(entry.name) if source.is_file() else entry.relative_to(source)
         target = destination / relative

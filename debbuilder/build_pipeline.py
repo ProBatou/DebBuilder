@@ -490,9 +490,17 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
                 def command_output(index, item):
                     for line in str(item.get("text") or "").splitlines():
                         store.append_log_line(run["id"], f"Build command {index} {item.get('stream', 'output')}: {line}")
+                def directory_available(item, summary):
+                    build_step.setdefault("details", {})["ensure_directories"] = summary
+                    store.append_event(
+                        run,
+                        f"Post-build directory available: {item['path']} ({item['status'].replace('_', ' ')})",
+                    )
+                    _cancellation_checkpoint(control, run, store, "build")
                 build = build_executor.execute_build(
                     canonical, detection, source["source_directory"], dry_run=dry_run,
                     on_result=command_completed, on_output=command_output,
+                    on_directory_result=directory_available,
                     cancellation_event=control.event,
                     on_cancel=lambda: _observe_cancellation(control, run, store, "build"),
                 )

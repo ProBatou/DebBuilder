@@ -59,7 +59,7 @@ def build_support_bundle(*, diagnostics: dict, recipe_inspection: dict | None = 
                           fields={"schema_version", "counts_truncated", "identity", "source", "build", "artifact", "installation", "service", "automation", "observation"})
     if run_inspection is not None:
         _check_projection(run_inspection, kind="run", version=RUN_INSPECTION_VERSION,
-                          fields={"schema_version", "identity", "lifecycle", "artifact", "validation", "publication", "execution", "error"})
+                          fields={"schema_version", "identity", "lifecycle", "artifact", "validation", "publication", "execution", "build", "error"})
 
     names = ["manifest.json", "system-diagnostics.json"]
     if recipe_inspection is not None:

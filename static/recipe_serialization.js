@@ -234,6 +234,7 @@ function collectWorkflow() {
       extra_dependencies: [...window.recipeExtraDependencies],
       source_changes: window.recipeSourceChanges.map(change => ({...change})),
       commands: lines(value('buildCommands')),
+      ensure_directories: lines(value('buildEnsureDirectories')),
       environment: environment(value('buildEnvironment')),
       working_directory: value('buildWorkingDirectory') || '.',
       inactivity_timeout: value('buildInactivityTimeout') === '' ? null : Number(value('buildInactivityTimeout')),
@@ -332,7 +333,7 @@ function renderWorkflow(wf) {
     window.recipeExtraDependencies = [...(build.extra_dependencies || [])]; window.recipeSourceChanges = (build.source_changes || []).map(change => ({...change}));
     renderDependencyChips(); renderSourceChanges(); renderBuildCommands(build.commands || []); if (typeof renderArchivePayload === 'function') renderArchivePayload();
     if (typeof renderDependencyCheck === 'function') renderDependencyCheck();
-    setValue('buildWorkingDirectory', build.working_directory || '.'); setValue('buildInactivityTimeout', window.recipeAdvancedFields.inactivity_timeout); setValue('buildMaximumRuntime', window.recipeAdvancedFields.maximum_runtime); setValue('buildEnvironment', environmentText(build.environment)); renderBuildOutput();
+    setValue('buildWorkingDirectory', build.working_directory || '.'); setValue('buildInactivityTimeout', window.recipeAdvancedFields.inactivity_timeout); setValue('buildMaximumRuntime', window.recipeAdvancedFields.maximum_runtime); setValue('buildEnsureDirectories', (build.ensure_directories || []).join('\n')); setValue('buildEnvironment', environmentText(build.environment)); renderBuildOutput();
     setValue('installDestination', install.destination || ''); setValue('installContentSource', install.content?.source || 'build_output'); setValue('installDirectoryMode', install.directory_mode || '0755'); setValue('installFileMode', install.file_mode || '0644');
     setValue('packageArchitecture', packageData.architecture || 'amd64'); setValue('packageSection', packageData.section || 'misc'); setValue('packagePriority', packageData.priority || 'optional'); setValue('packageMaintainer', packageData.maintainer || ''); setValue('packageDescription', packageData.description || packageData.name); setValue('packageRuntimeDependencies', (packageData.runtime_dependencies || []).join(', '));
     setValue('installOwnerUser', owner.user || packageData.name); setValue('installOwnerGroup', owner.group || packageData.name); setValue('installAccountUser', account.user || owner.user || packageData.name); setValue('installAccountGroup', account.group || owner.group || packageData.name); setValue('installDirectories', installDirectoriesText(install.directories)); if (typeof renderAccountProvisioning === 'function') renderAccountProvisioning(account); window.recipeInstallMappings = (install.config_files || []).map(row => normalizeInstallMapping(row)); renderInstallMappings();

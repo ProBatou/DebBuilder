@@ -84,6 +84,7 @@ SCHEMAS = {
                                                "expression": S}, extra=True)}, extra=True),
         "automation": _ref("AutomationPolicy"),
         "build": _object({"commands": {"type": "array", "items": S},
+                          "ensure_directories": STRINGS,
                           "environment": {"type": "object", "additionalProperties": S},
                           "output": _object({"mode": {"type": "string", "enum": sorted(OUTPUT_MODES)},
                                              "path": S, "paths": STRINGS}, extra=True),
@@ -242,7 +243,8 @@ SCHEMAS.update({
         "build": _inspection_object({
             "detected_project": _nullable(_enum_schema({"nodejs", "python", "rust", "static"})),
             "command_count": _INSPECTION_COUNT, "output_mode": _enum_schema(OUTPUT_MODES),
-            "output_path_count": _INSPECTION_COUNT, "source_change_count": _INSPECTION_COUNT,
+            "output_path_count": _INSPECTION_COUNT, "ensure_directory_count": _INSPECTION_COUNT,
+            "source_change_count": _INSPECTION_COUNT,
             "inactivity_timeout_configured": B, "maximum_runtime_configured": B,
         }),
         "artifact": _inspection_object({
@@ -324,6 +326,13 @@ SCHEMAS.update({
             "cancellable": B, "recovery_status": _enum_schema({"none", "blocked", "resolved"}),
             "recovery_blocked": B,
             "containment_backend": _enum_schema({"systemd_cgroup", "process_group", "none", "unknown"}),
+        }),
+        "build": _inspection_object({
+            "ensure_directories": _inspection_object({
+                "requested": _INSPECTION_COUNT,
+                "created": _INSPECTION_COUNT,
+                "already_existed": _INSPECTION_COUNT,
+            }),
         }),
         "error": _inspection_object({
             "code": _nullable({"type": "string", "pattern": "^[a-z][a-z0-9_]{0,127}$"}),
@@ -466,9 +475,9 @@ OPERATION_DOCS = {
     "automation.retry": _doc(202, "AutomationActionResponse", "AutomationRetryInput", errors={400: ("invalid_recipe_id", "invalid_automation_retry_request"), 404: ("recipe_not_found", "automation_attempt_not_found"), 409: ("automation_disabled", "automation_retry_not_allowed", "automation_retry_stale")}),
     "validation.cancel": _doc(200, "ValidationCancellationResponse", "EmptyRequest", also=(202,), errors={400: ("invalid_validation_cancellation_request", "invalid_validation_identity"), 404: ("build_run_not_found",), 409: ("validation_recovery_required",)}),
     "executions.cancel": _doc(200, "ExecutionCancellationResponse", "EmptyRequest", also=(202,), errors={400: ("invalid_cancellation_request", "invalid_execution_id"), 404: ("build_run_not_found",), 409: ("execution_not_cancellable",), 500: ("execution_cancellation_failed",), 503: ("execution_manager_unavailable",)}),
-    "recipes.validate": _doc(200, "RecipeValidationResponse", "RecipeInput", errors={422: ("invalid_recipe_json", "unknown_field", "unsupported_recipe_schema", "unsupported_version_source", "invalid_automation_policy")}),
-    "recipes.import": _doc(200, "RecipeImportResponse", "RecipeImportInput", errors={403: ("readonly_recipe",), 409: ("recipe_exists", "builtin_recipe_reserved"), 422: ("invalid_recipe_json", "unsupported_recipe_schema", "unsupported_version_source", "unknown_field")}),
-    "executions.run": _doc(202, "RunAdmissionResponse", "RunInput", errors={400: ("invalid_request",), 409: ("recipe_disabled",), 422: ("unsupported_recipe_schema", "unsupported_version_source", "unknown_field"), 429: ("execution_queue_full",), 500: ("execution_enqueue_failed",), 503: ("execution_manager_unavailable", "github_unavailable")}),
+    "recipes.validate": _doc(200, "RecipeValidationResponse", "RecipeInput", errors={422: ("invalid_recipe_json", "unknown_field", "unsupported_recipe_schema", "unsupported_version_source", "invalid_automation_policy", "post_build_directory_invalid_path")}),
+    "recipes.import": _doc(200, "RecipeImportResponse", "RecipeImportInput", errors={403: ("readonly_recipe",), 409: ("recipe_exists", "builtin_recipe_reserved"), 422: ("invalid_recipe_json", "unsupported_recipe_schema", "unsupported_version_source", "unknown_field", "post_build_directory_invalid_path")}),
+    "executions.run": _doc(202, "RunAdmissionResponse", "RunInput", errors={400: ("invalid_request",), 409: ("recipe_disabled",), 422: ("unsupported_recipe_schema", "unsupported_version_source", "unknown_field", "post_build_directory_invalid_path"), 429: ("execution_queue_full",), 500: ("execution_enqueue_failed",), 503: ("execution_manager_unavailable", "github_unavailable")}),
     "archives.inspect": _doc(200, "ArchiveInspectionResponse", "ArchiveInspectInput", errors={422: ("invalid_recipe_json", "ambiguous_archive_source", "ambiguous_release_asset", "release_asset_not_found", "github_unavailable")}),
     "validation.start": _doc(202, "ValidationResponse", "ValidationStartInput", errors={400: ("invalid_validation_request",), 404: ("build_run_not_found",), 409: ("artifact_not_available",), 429: ("validation_queue_full",), 503: ("validation_manager_unavailable",)}),
     "publication.publish": _doc(200, "PublicationResponse", "PublicationInput", errors={400: ("publication_confirmation_required", "build_run_not_found", "artifact_not_available", "publication_identity_conflict"), 409: ("repository_mutation_busy", "publication_identity_conflict"), 422: ("publication_proof_failed", "reprepro_include_failed")}),
@@ -478,7 +487,7 @@ OPERATION_DOCS = {
     "executions.logs.delete_many": _doc(200, "DeleteLogsResponse", "DeleteLogsInput", errors={409: ("execution_active",)}),
     "packages.create": _doc(200, "PackageMutationResponse", "PackageCreateInput", errors={400: ("invalid_request",)}),
     "packages.update": _doc(200, "PackageMutationResponse", "PackageInput", errors={400: ("invalid_package_id",), 404: ("not_found",)}),
-    "workflows.save": _doc(200, "WorkflowSaveResponse", "WorkflowSaveInput", errors={403: ("forbidden",), 409: ("builtin_recipe_managed_field", "builtin_recipe_reserved"), 422: ("invalid_recipe_json", "recipe_identity_mismatch", "unsupported_version_source", "unknown_field")}),
+    "workflows.save": _doc(200, "WorkflowSaveResponse", "WorkflowSaveInput", errors={403: ("forbidden",), 409: ("builtin_recipe_managed_field", "builtin_recipe_reserved"), 422: ("invalid_recipe_json", "recipe_identity_mismatch", "unsupported_version_source", "unknown_field", "post_build_directory_invalid_path")}),
     "workflows.delete": _doc(200, "DeleteResponse", errors={403: ("forbidden", "readonly_recipe"), 404: ("recipe_not_found",)}),
     "executions.logs.delete": _doc(200, "ExecutionLogDeleteResponse", errors={404: ("build_run_not_found",), 409: ("execution_active",)}),
     "packages.delete": _doc(200, "DeleteResponse", errors={400: ("invalid_request",)}),

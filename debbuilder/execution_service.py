@@ -177,6 +177,11 @@ def execution_diagnostic(run: dict) -> dict | None:
         where += filter(None, [_fact("Configured path", output.get("configured_path"))])
         facts.append(_fact("Observed", output.get("kind") or "missing"))
         next_action = "Update the expected output path or make the build command create it."
+    elif code.startswith("post_build_directory_"):
+        title = "Post-build directory preparation failed"
+        where += filter(None, [_fact("Configured path", details.get("directory"))])
+        facts += filter(None, [_fact("Observed", details.get("actual_kind"))])
+        next_action = "Use a safe relative directory covered by Build output and remove any conflicting file or symbolic link."
     elif stage == "source_changes":
         failed = details.get("failed") if isinstance(details.get("failed"), dict) else details
         title = "Source change could not be applied"

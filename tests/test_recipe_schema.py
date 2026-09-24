@@ -106,7 +106,63 @@ class RecipeSchemaTests(unittest.TestCase):
         self.assertEqual(recipe["package"]["version_revision"], "1")
         self.assertEqual(recipe["build"]["inactivity_timeout"], 300)
         self.assertIsNone(recipe["build"]["maximum_runtime"])
+        self.assertEqual(recipe["build"]["ensure_directories"], [])
         self.assertEqual(recipe["install"]["destination"], "/opt/demo")
+
+    def test_post_build_directories_round_trip_without_rewriting_empty_default(self):
+        old = recipe_document_for_storage(current(build={"output": {"mode": "source"}}))
+        self.assertNotIn("ensure_directories", old["build"])
+        self.assertEqual(validate_recipe_metadata(old)["build"]["ensure_directories"], [])
+        self.assertEqual(recipe_document_for_storage(old), old)
+
+        configured = recipe_document_for_storage(current(build={
+            "output": {"mode": "paths", "paths": ["apps/server", "packages/contracts/node_modules"]},
+            "ensure_directories": ["apps/server/node_modules", "packages/contracts/node_modules"],
+        }))
+        self.assertEqual(configured["build"]["ensure_directories"], [
+            "apps/server/node_modules", "packages/contracts/node_modules",
+        ])
+        self.assertEqual(recipe_document_for_storage(configured), configured)
+
+    def test_post_build_directory_paths_are_strict_and_unique(self):
+        invalid = (
+            "", ".", "/absolute", "../escape", "foo/../../escape", "foo/./bar",
+            "foo//bar", "foo/", "foo\\bar", "foo\x00bar",
+        )
+        for value in invalid:
+            with self.subTest(value=value), self.assertRaises(RecipeDocumentError) as raised:
+                recipe_document_for_storage(current(build={
+                    "output": {"mode": "source"}, "ensure_directories": [value],
+                }))
+            self.assertEqual(raised.exception.code, "post_build_directory_invalid_path")
+
+        for values in (["safe", "safe"], [42]):
+            with self.subTest(values=values), self.assertRaises(RecipeDocumentError) as raised:
+                recipe_document_for_storage(current(build={
+                    "output": {"mode": "source"}, "ensure_directories": values,
+                }))
+            self.assertEqual(raised.exception.code, "post_build_directory_invalid_path")
+
+    def test_post_build_directories_must_be_covered_by_output(self):
+        valid = (
+            ({"mode": "source"}, "anything/safe"),
+            ({"mode": "path", "path": "apps/server"}, "apps/server/node_modules"),
+            ({"mode": "paths", "paths": ["dist", "apps/server"]}, "apps/server/node_modules"),
+            ({"mode": "paths", "paths": ["apps/server/node_modules"]}, "apps/server/node_modules"),
+        )
+        for output, directory in valid:
+            with self.subTest(output=output, directory=directory):
+                recipe = validate_recipe_metadata(current(build={
+                    "output": output, "ensure_directories": [directory],
+                }))
+                self.assertEqual(recipe["build"]["ensure_directories"], [directory])
+
+        with self.assertRaises(RecipeDocumentError) as raised:
+            validate_recipe_metadata(current(build={
+                "output": {"mode": "path", "path": "apps/server/dist"},
+                "ensure_directories": ["apps/server/node_modules"],
+            }))
+        self.assertEqual(raised.exception.code, "post_build_directory_invalid_path")
 
     def test_archive_payload_and_source_modes_are_canonical(self):
         source_archive = recipe_document_for_storage(current(

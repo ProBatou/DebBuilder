@@ -86,7 +86,7 @@ const roundTrip = {
   artifact: {mode: 'source_build'},
   build: {
     source_changes: [{operation: 'create_file', path: 'config.ini', content: 'enabled=true\n'}],
-    extra_dependencies: [], commands: [], environment: {}, output: {mode: 'source'},
+    extra_dependencies: [], commands: [], ensure_directories: ['apps/server/node_modules', 'packages/contracts/node_modules'], environment: {}, output: {mode: 'source'},
     inactivity_timeout: null, maximum_runtime: null,
   },
   install: {
@@ -108,6 +108,8 @@ assert.equal(collected.package.version_revision, '1+b1');
 assert.equal(collected.package.description, roundTrip.package.description);
 assert.deepEqual(JSON.parse(JSON.stringify(collected.package.runtime_dependencies)), []);
 assert.deepEqual(JSON.parse(JSON.stringify(collected.build.source_changes)), roundTrip.build.source_changes);
+assert.deepEqual(JSON.parse(JSON.stringify(collected.build.ensure_directories)), roundTrip.build.ensure_directories);
+assert.equal(nodes.buildEnsureDirectories.value, 'apps/server/node_modules\npackages/contracts/node_modules');
 assert.deepEqual(JSON.parse(JSON.stringify(collected.install.directories)), roundTrip.install.directories);
 assert.deepEqual(JSON.parse(JSON.stringify(collected.install.config_files)), []);
 assert.equal(collected.build.inactivity_timeout, null);

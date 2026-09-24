@@ -126,12 +126,21 @@ jobs:
         env:
           RELEASE_TAG: ${{ steps.release_tag.outputs.tag }}
           STORAGE_DRIVER: vfs
+          PODMAN_SHORT_ROOT: /tmp/dbb-root-${{ github.run_id }}-${{ github.run_attempt }}
           PODMAN_SHORT_RUNROOT: /tmp/dbb-run-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           wrapper_dir="$RUNNER_TEMP/debbuilder-podman-wrapper"
           podman_diag_log="$RUNNER_TEMP/debbuilder-podman.stderr.log"
+          if [[ ! "$PODMAN_SHORT_ROOT" =~ ^/tmp/dbb-root-[0-9]+-[0-9]+$ ]]; then
+            echo "invalid workflow-owned Podman root: $PODMAN_SHORT_ROOT" >&2
+            exit 1
+          fi
           if [[ ! "$PODMAN_SHORT_RUNROOT" =~ ^/tmp/dbb-run-[0-9]+-[0-9]+$ ]]; then
             echo "invalid workflow-owned Podman runroot: $PODMAN_SHORT_RUNROOT" >&2
+            exit 1
+          fi
+          if ((${#PODMAN_SHORT_ROOT} >= 50)); then
+            echo "workflow-owned Podman root is not shorter than 50 characters: $PODMAN_SHORT_ROOT" >&2
             exit 1
           fi
           if ((${#PODMAN_SHORT_RUNROOT} >= 50)); then
@@ -139,13 +148,15 @@ jobs:
             exit 1
           fi
           mkdir -p -- "$wrapper_dir"
-          mkdir -p -- "$PODMAN_SHORT_RUNROOT"
+          mkdir -p -- "$PODMAN_SHORT_ROOT" "$PODMAN_SHORT_RUNROOT"
+          echo "workflow-owned Podman root prepared: $PODMAN_SHORT_ROOT (length ${#PODMAN_SHORT_ROOT})"
           echo "workflow-owned Podman runroot prepared: $PODMAN_SHORT_RUNROOT (length ${#PODMAN_SHORT_RUNROOT})"
           cat > "$wrapper_dir/podman" <<'PODMAN_WRAPPER'
           #!/usr/bin/env bash
           set -euo pipefail
 
           : "${PODMAN_DIAG_LOG:?PODMAN_DIAG_LOG must be set}"
+          : "${PODMAN_SHORT_ROOT:?PODMAN_SHORT_ROOT must be set}"
           : "${PODMAN_SHORT_RUNROOT:?PODMAN_SHORT_RUNROOT must be set}"
           root=""
           runroot=""
@@ -163,9 +174,11 @@ jobs:
                   exit 125
                 fi
                 root="${args[$((index + 1))]}"
+                args[$((index + 1))]="$PODMAN_SHORT_ROOT"
                 ;;
               --root=*)
                 root="${args[$index]#--root=}"
+                args[$index]="--root=$PODMAN_SHORT_ROOT"
                 ;;
               --runroot)
                 if ((index + 1 >= ${#args[@]})); then
@@ -183,8 +196,9 @@ jobs:
           done
 
           if [[ -n "$root" ]]; then
-            mkdir -p -- "$root"
-            log_diag "podman wrapper: root directory prepared unchanged: $root (length ${#root})"
+            mkdir -p -- "$PODMAN_SHORT_ROOT"
+            log_diag "podman wrapper: canonical root requested: $root (length ${#root})"
+            log_diag "podman wrapper: mapped root: $PODMAN_SHORT_ROOT (length ${#PODMAN_SHORT_ROOT})"
           fi
           if [[ -n "$runroot" ]]; then
             mkdir -p -- "$PODMAN_SHORT_RUNROOT"
@@ -207,13 +221,20 @@ jobs:
             --output-dir "$GITHUB_WORKSPACE/release-assets" \
             > release-build.json
           builder_status=$?
-          rm -rf -- "$PODMAN_SHORT_RUNROOT"
-          cleanup_status=$?
+          cleanup_status=0
+          if [[ "$PODMAN_SHORT_ROOT" =~ ^/tmp/dbb-root-[0-9]+-[0-9]+$ ]] && \
+             [[ "$PODMAN_SHORT_RUNROOT" =~ ^/tmp/dbb-run-[0-9]+-[0-9]+$ ]]; then
+            sudo rm -rf -- "$PODMAN_SHORT_ROOT" "$PODMAN_SHORT_RUNROOT"
+            cleanup_status=$?
+          else
+            echo "refusing to clean unvalidated workflow-owned Podman storage paths" >&2
+            cleanup_status=1
+          fi
           set -e
           if [[ "$builder_status" -ne 0 ]]; then
             echo "canonical builder exit status: $builder_status" >&2
             if [[ "$cleanup_status" -ne 0 ]]; then
-              echo "workflow-owned Podman runroot cleanup also failed with status: $cleanup_status" >&2
+              echo "workflow-owned Podman storage cleanup also failed with status: $cleanup_status" >&2
             fi
             echo "Podman stderr (final 12000 bytes):" >&2
             if [[ -s "$podman_diag_log" ]]; then
@@ -225,9 +246,10 @@ jobs:
             exit "$builder_status"
           fi
           if [[ "$cleanup_status" -ne 0 ]]; then
-            echo "canonical builder succeeded, but workflow-owned Podman runroot cleanup failed with status: $cleanup_status" >&2
+            echo "canonical builder succeeded, but workflow-owned Podman storage cleanup failed with status: $cleanup_status" >&2
             exit "$cleanup_status"
           fi
+          echo "workflow-owned Podman root and runroot cleanup: success"
           echo "Podman wrapper diagnostics:"
           tail -c 12000 "$podman_diag_log"
           echo

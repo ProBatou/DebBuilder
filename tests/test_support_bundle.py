@@ -8,8 +8,10 @@ import urllib.request
 import zipfile
 from unittest import TestCase, mock
 
-from debbuilder import __version__, app
+from debbuilder import __version__, app, inspectors
+from debbuilder.build_models import new_run
 from debbuilder.openapi import openapi_document
+from debbuilder.recipe_schema import recipe_document_for_storage
 from debbuilder.support_bundle import (
     MAX_BUNDLE_BYTES, MAX_ENTRY_BYTES, MAX_UNCOMPRESSED_BYTES,
     SupportBundleError, build_support_bundle,
@@ -37,6 +39,49 @@ def run():
 
 
 class SupportBundleBuilderTests(TestCase):
+    def test_sensitive_source_fields_never_enter_any_zip_entry(self):
+        sentinels = (
+            "ghp_SUPER_SECRET", "oidc-client-secret", "cookie-secret", "notification-token",
+            "password-123", "Authorization: Bearer sensitive", "SENSITIVE_ENV=value",
+            "command --token=secret", "maintainer-script-secret", "stderr-secret",
+            "Traceback private", "/var/lib/debbuilder/private/data",
+            "/tmp/workspace-secret/data", "https://user:password@example.invalid",
+        )
+        authored = recipe_document_for_storage({
+            "schema_version": 5, "name": "support-demo",
+            "package": {"description": sentinels[0], "maintainer": sentinels[1]},
+            "source": {"repository": "owner/project"},
+            "build": {"commands": [sentinels[7]],
+                      "environment": {"TOKEN": sentinels[6], "AUTH": sentinels[5]}},
+            "install": {"maintainer_scripts": {"postinst": sentinels[8]}},
+        })
+        source_run = new_run("support-run", "support-demo", "build", sentinels[12], "a" * 64)
+        source_run["steps"][0]["summary"] = sentinels[9]
+        source_run["events"] = [{"message": text} for text in sentinels]
+        source_run["error"] = {"code": "build_failed", "message": sentinels[10], "traceback": sentinels[10]}
+        source_run["artifact"] = {"path": sentinels[11], "name": sentinels[3], "size": 99,
+                                  "inspection": {"package": "support-demo", "version": sentinels[4]}}
+        source_run["publications"] = [{"status": "failed", "error": {"message": sentinels[13]}}]
+        projection_recipe = inspectors.inspect_recipe(authored, observation={
+            "last_attempt": {"classification": "detected", "display_ref": sentinels[2]},
+            "last_success": {"display_version": sentinels[13]},
+        })
+        projection_run = inspectors.inspect_run(source_run, validation={
+            "status": "failed", "stderr": sentinels[9], "recovery_blocker": {"message": sentinels[11]},
+        }, validation_count=1)
+        payload = build_support_bundle(diagnostics=diagnostics(),
+                                       recipe_inspection=projection_recipe,
+                                       run_inspection=projection_run)
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            contents = b"\n".join(archive.read(name) for name in archive.namelist())
+            names = "\n".join(archive.namelist()).encode()
+        for sentinel in sentinels:
+            with self.subTest(sentinel=sentinel):
+                encoded = sentinel.encode()
+                self.assertNotIn(encoded, payload)
+                self.assertNotIn(encoded, contents)
+                self.assertNotIn(encoded, names)
+
     def test_all_selection_combinations_are_exact_and_deterministic(self):
         for selected_recipe, selected_run in ((None, None), (recipe(), None), (None, run()), (recipe(), run())):
             with self.subTest(recipe=selected_recipe is not None, run=selected_run is not None):
@@ -199,3 +244,20 @@ class SupportBundleHttpTests(AdminApiCase):
         self.assertEqual(operation["x-debbuilder-effect"], "read_only")
         self.assertEqual(set(operation["responses"]["200"]["content"]), {"application/zip"})
         self.assertEqual({row["name"] for row in operation["parameters"]}, {"recipe_id", "run_id"})
+
+    def test_download_has_no_persistent_or_external_side_effects(self):
+        def snapshot():
+            return {str(path.relative_to(app.DATA)): (path.stat().st_size, path.stat().st_mtime_ns)
+                    for path in app.DATA.rglob("*") if path.is_file()}
+
+        before = snapshot()
+        with mock.patch.object(app.recipe_store, "save_recipe", side_effect=AssertionError("Recipe write")), \
+             mock.patch.object(app.BuildStore, "save", side_effect=AssertionError("Run write")), \
+             mock.patch.object(app.upstream_detection, "detect_upstream", side_effect=AssertionError("upstream refresh")), \
+             mock.patch.object(app.validation_oci.PodmanRuntime, "run", side_effect=AssertionError("OCI")), \
+             mock.patch.object(app.artifact_publication, "publish_artifact", side_effect=AssertionError("publication")), \
+             mock.patch.object(app, "enqueue_recipe_run", side_effect=AssertionError("build")):
+            with self._request_bundle("?recipe_id=webapp-recipe&run_id=20260822-031400") as response:
+                self.assertEqual(response.status, 200)
+                self.assertTrue(response.read().startswith(b"PK"))
+        self.assertEqual(snapshot(), before)

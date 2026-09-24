@@ -79,7 +79,22 @@ _MESSAGES = {
     "validation_failed": "Validation failed",
 }
 
-STABLE_ERROR_CODES = frozenset(_MESSAGES)
+# Typed subsystem codes that already cross the HTTP boundary. They remain in
+# the inventory without replacing the current status-based safe message.
+DOMAIN_ERROR_CODES = frozenset({
+    "artifact_not_available", "automation_attempt_not_found", "automation_managed",
+    "automation_retry_not_allowed",
+    "automation_retry_stale", "execution_enqueue_failed", "execution_queue_full",
+    "invalid_automation_configuration", "invalid_automation_retry_request",
+    "invalid_validation_request", "publication_confirmation_required",
+    "publication_proof_failed", "reprepro_include_failed",
+    "recipe_changed_during_detection", "recipe_inactive",
+    "automation_scheduler_unavailable", "validation_attempt_not_found",
+    "validation_manager_unavailable", "validation_queue_full",
+    "validation_recovery_required",
+})
+
+STABLE_ERROR_CODES = frozenset(_MESSAGES) | DOMAIN_ERROR_CODES
 
 _STATUS_MESSAGES = {
     400: "The request is invalid",

@@ -1,0 +1,5638 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "DebBuilder API",
+    "version": "1.0.0",
+    "description": "Authenticated admin API. Success bodies retain their existing shapes; non-2xx JSON uses ApiError. HTTP methods outside this named registry and the public APT listener are outside this contract."
+  },
+  "paths": {
+    "/api/status": {
+      "get": {
+        "operationId": "system.status",
+        "summary": "Get application status",
+        "tags": [
+          "system"
+        ],
+        "x-debbuilder-effect": "read_only",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "500": {
+            "description": "HTTP 500 admin API error. Documented codes: internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "internal_error"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable"
+            ]
+          }
+        },
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
+    "/api/openapi.json": {
+      "get": {
+        "operationId": "system.openapi",
+        "summary": "Get the OpenAPI contract",
+        "tags": [
+          "system"
+        ],
+        "x-debbuilder-effect": "read_only",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenApiDocument"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "500": {
+            "description": "HTTP 500 admin API error. Documented codes: internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "internal_error"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable"
+            ]
+          }
+        },
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
+    "/api/auth/status": {
+      "get": {
+        "operationId": "auth.status",
+        "summary": "Get authentication status",
+        "tags": [
+          "authentication"
+        ],
+        "x-debbuilder-effect": "read_only",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthStatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "500": {
+            "description": "HTTP 500 admin API error. Documented codes: internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "internal_error"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable"
+            ]
+          }
+        },
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
+    "/api/dashboard": {
+      "get": {
+        "operationId": "dashboard.get",
+        "summary": "Get dashboard summary",
+        "tags": [
+          "dashboard"
+        ],
+        "x-debbuilder-effect": "read_only",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "500": {
+            "description": "HTTP 500 admin API error. Documented codes: internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "internal_error"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable"
+            ]
+          }
+        },
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
+    "/api/packages": {
+      "get": {
+        "operationId": "packages.list",
+        "summary": "List packages",
+        "tags": [
+          "packages"
+        ],
+        "x-debbuilder-effect": "read_only",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PackagesResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "500": {
+            "description": "HTTP 500 admin API error. Documented codes: internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "internal_error"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable"
+            ]
+          }
+        },
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "packages.create",
+        "summary": "Create a package",
+        "tags": [
+          "packages"
+        ],
+        "x-debbuilder-effect": "durable_mutation",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PackageMutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400 admin API error. Documented codes: invalid_request, invalid_json, internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_request",
+              "invalid_json",
+              "internal_error"
+            ]
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable, application_shutting_down.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable",
+              "application_shutting_down"
+            ]
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "description": "JSON body; an omitted body is parsed as {} by the current server.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PackageCreateInput"
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
+    "/api/packages/{name}": {
+      "get": {
+        "operationId": "packages.get",
+        "summary": "Get a package",
+        "tags": [
+          "packages"
+        ],
+        "x-debbuilder-effect": "read_only",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PackageResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400 admin API error. Documented codes: invalid_package_id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_package_id"
+            ]
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "404": {
+            "description": "HTTP 404 admin API error. Documented codes: not_found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "not_found"
+            ]
+          },
+          "500": {
+            "description": "HTTP 500 admin API error. Documented codes: internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "internal_error"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable"
+            ]
+          }
+        },
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "packages.update",
+        "summary": "Update a package",
+        "tags": [
+          "packages"
+        ],
+        "x-debbuilder-effect": "durable_mutation",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PackageMutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400 admin API error. Documented codes: invalid_request, invalid_json, internal_error, invalid_package_id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_request",
+              "invalid_json",
+              "internal_error",
+              "invalid_package_id"
+            ]
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "404": {
+            "description": "HTTP 404 admin API error. Documented codes: not_found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "not_found"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable, application_shutting_down.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable",
+              "application_shutting_down"
+            ]
+          }
+        },
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "JSON body; an omitted body is parsed as {} by the current server.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PackageInput"
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "packages.delete",
+        "summary": "Delete a package",
+        "tags": [
+          "packages"
+        ],
+        "x-debbuilder-effect": "durable_mutation",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400 admin API error. Documented codes: invalid_request, invalid_json, internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_request",
+              "invalid_json",
+              "internal_error"
+            ]
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable, application_shutting_down.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable",
+              "application_shutting_down"
+            ]
+          }
+        },
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
+    "/api/recipes": {
+      "get": {
+        "operationId": "recipes.list",
+        "summary": "List recipes",
+        "tags": [
+          "recipes"
+        ],
+        "x-debbuilder-effect": "read_only",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecipesResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "500": {
+            "description": "HTTP 500 admin API error. Documented codes: internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "internal_error"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable"
+            ]
+          }
+        },
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
+    "/api/recipes/{recipe_id}/automation": {
+      "get": {
+        "operationId": "automation.get",
+        "summary": "Get recipe automation status",
+        "tags": [
+          "automation"
+        ],
+        "x-debbuilder-effect": "read_only",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutomationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400 admin API error. Documented codes: invalid_recipe_id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_recipe_id"
+            ]
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "404": {
+            "description": "HTTP 404 admin API error. Documented codes: recipe_not_found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "recipe_not_found"
+            ]
+          },
+          "422": {
+            "description": "HTTP 422 admin API error. Documented codes: invalid_automation_configuration.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_automation_configuration"
+            ]
+          },
+          "500": {
+            "description": "HTTP 500 admin API error. Documented codes: internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "internal_error"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable"
+            ]
+          }
+        },
+        "parameters": [
+          {
+            "name": "recipe_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
+    "/api/executions": {
+      "get": {
+        "operationId": "executions.list",
+        "summary": "List executions",
+        "tags": [
+          "executions"
+        ],
+        "x-debbuilder-effect": "read_only",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "500": {
+            "description": "HTTP 500 admin API error. Documented codes: internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "internal_error"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable"
+            ]
+          }
+        },
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
+    "/api/executions/{run_id}": {
+      "get": {
+        "operationId": "executions.get",
+        "summary": "Get an execution",
+        "tags": [
+          "executions"
+        ],
+        "x-debbuilder-effect": "read_only",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400 admin API error. Documented codes: invalid_execution_id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_execution_id"
+            ]
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "404": {
+            "description": "HTTP 404 admin API error. Documented codes: build_run_not_found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "build_run_not_found"
+            ]
+          },
+          "500": {
+            "description": "HTTP 500 admin API error. Documented codes: internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "internal_error"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable"
+            ]
+          }
+        },
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
+    "/api/executions/{run_id}/logs": {
+      "get": {
+        "operationId": "executions.logs.get",
+        "summary": "Get execution logs",
+        "tags": [
+          "executions"
+        ],
+        "x-debbuilder-effect": "read_only",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionLogResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400 admin API error. Documented codes: invalid_execution_id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_execution_id"
+            ]
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "404": {
+            "description": "HTTP 404 admin API error. Documented codes: build_run_not_found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "build_run_not_found"
+            ]
+          },
+          "500": {
+            "description": "HTTP 500 admin API error. Documented codes: internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "internal_error"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable"
+            ]
+          }
+        },
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 0
+            },
+            "description": "Log offset; negative values are clamped to zero."
+          },
+          {
+            "name": "verbosity",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "compact",
+                "normal",
+                "verbose",
+                "raw"
+              ],
+              "default": "normal"
+            },
+            "description": "Unknown values fall back to normal in the current runtime."
+          }
+        ],
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "executions.logs.delete",
+        "summary": "Delete execution logs",
+        "tags": [
+          "executions"
+        ],
+        "x-debbuilder-effect": "durable_mutation",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionLogDeleteResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400 admin API error. Documented codes: invalid_request, invalid_json, internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_request",
+              "invalid_json",
+              "internal_error"
+            ]
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "404": {
+            "description": "HTTP 404 admin API error. Documented codes: build_run_not_found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "build_run_not_found"
+            ]
+          },
+          "409": {
+            "description": "HTTP 409 admin API error. Documented codes: execution_active.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "execution_active"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable, application_shutting_down.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable",
+              "application_shutting_down"
+            ]
+          }
+        },
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
+    "/api/executions/{run_id}/validations/{attempt_id}": {
+      "get": {
+        "operationId": "validation.get",
+        "summary": "Get a validation attempt",
+        "tags": [
+          "validation"
+        ],
+        "x-debbuilder-effect": "read_only",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400 admin API error. Documented codes: invalid_validation_identity.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_validation_identity"
+            ]
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "404": {
+            "description": "HTTP 404 admin API error. Documented codes: build_run_not_found, validation_attempt_not_found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "build_run_not_found",
+              "validation_attempt_not_found"
+            ]
+          },
+          "500": {
+            "description": "HTTP 500 admin API error. Documented codes: internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "internal_error"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable"
+            ]
+          }
+        },
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "attempt_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
+    "/api/settings": {
+      "get": {
+        "operationId": "settings.get",
+        "summary": "Get settings",
+        "tags": [
+          "settings"
+        ],
+        "x-debbuilder-effect": "read_only",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "500": {
+            "description": "HTTP 500 admin API error. Documented codes: internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "internal_error"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable"
+            ]
+          }
+        },
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "settings.update",
+        "summary": "Update settings",
+        "tags": [
+          "settings"
+        ],
+        "x-debbuilder-effect": "durable_mutation",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsMutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400 admin API error. Documented codes: invalid_request, invalid_json, internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_request",
+              "invalid_json",
+              "internal_error"
+            ]
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "422": {
+            "description": "HTTP 422 admin API error. Documented codes: unknown_settings_field, invalid_resource_limit, missing_required_secret, invalid_secrets_json.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "unknown_settings_field",
+              "invalid_resource_limit",
+              "missing_required_secret",
+              "invalid_secrets_json"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable, application_shutting_down.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable",
+              "application_shutting_down"
+            ]
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "description": "JSON body; an omitted body is parsed as {} by the current server.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SettingsInput"
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
+    "/api/storage": {
+      "get": {
+        "operationId": "storage.get",
+        "summary": "Get storage inventory",
+        "tags": [
+          "storage"
+        ],
+        "x-debbuilder-effect": "read_only",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StorageResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "500": {
+            "description": "HTTP 500 admin API error. Documented codes: internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "internal_error"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable"
+            ]
+          }
+        },
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
+    "/api/workflows": {
+      "get": {
+        "operationId": "workflows.list",
+        "summary": "List workflows",
+        "tags": [
+          "workflows"
+        ],
+        "x-debbuilder-effect": "read_only",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "500": {
+            "description": "HTTP 500 admin API error. Documented codes: internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "internal_error"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable"
+            ]
+          }
+        },
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
+    "/api/workflows/{workflow_id}": {
+      "get": {
+        "operationId": "workflows.get",
+        "summary": "Get a workflow",
+        "tags": [
+          "workflows"
+        ],
+        "x-debbuilder-effect": "read_only",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Recipe"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400 admin API error. Documented codes: invalid_workflow_id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_workflow_id"
+            ]
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "404": {
+            "description": "HTTP 404 admin API error. Documented codes: recipe_not_found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "recipe_not_found"
+            ]
+          },
+          "500": {
+            "description": "HTTP 500 admin API error. Documented codes: internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "internal_error"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable"
+            ]
+          }
+        },
+        "parameters": [
+          {
+            "name": "workflow_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "workflows.save",
+        "summary": "Save a workflow",
+        "tags": [
+          "workflows"
+        ],
+        "x-debbuilder-effect": "durable_mutation",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowSaveResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400 admin API error. Documented codes: invalid_request, invalid_json, internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_request",
+              "invalid_json",
+              "internal_error"
+            ]
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "403": {
+            "description": "HTTP 403 admin API error. Documented codes: forbidden.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "forbidden"
+            ]
+          },
+          "409": {
+            "description": "HTTP 409 admin API error. Documented codes: builtin_recipe_managed_field, builtin_recipe_reserved.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "builtin_recipe_managed_field",
+              "builtin_recipe_reserved"
+            ]
+          },
+          "422": {
+            "description": "HTTP 422 admin API error. Documented codes: invalid_recipe_json, recipe_identity_mismatch, unknown_field.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_recipe_json",
+              "recipe_identity_mismatch",
+              "unknown_field"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable, application_shutting_down.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable",
+              "application_shutting_down"
+            ]
+          }
+        },
+        "parameters": [
+          {
+            "name": "workflow_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "JSON body; an omitted body is parsed as {} by the current server.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowSaveInput"
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "workflows.delete",
+        "summary": "Delete a workflow",
+        "tags": [
+          "workflows"
+        ],
+        "x-debbuilder-effect": "durable_mutation",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400 admin API error. Documented codes: invalid_request, invalid_json, internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_request",
+              "invalid_json",
+              "internal_error"
+            ]
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "403": {
+            "description": "HTTP 403 admin API error. Documented codes: forbidden, readonly_recipe.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "forbidden",
+              "readonly_recipe"
+            ]
+          },
+          "404": {
+            "description": "HTTP 404 admin API error. Documented codes: recipe_not_found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "recipe_not_found"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable, application_shutting_down.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable",
+              "application_shutting_down"
+            ]
+          }
+        },
+        "parameters": [
+          {
+            "name": "workflow_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
+    "/api/recipes/{recipe_id}/observation/refresh": {
+      "post": {
+        "operationId": "observations.refresh",
+        "summary": "Refresh upstream observation",
+        "tags": [
+          "observations"
+        ],
+        "x-debbuilder-effect": "durable_mutation",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObservationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400 admin API error. Documented codes: invalid_request, invalid_json, internal_error, invalid_observation_refresh_request, invalid_recipe_id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_request",
+              "invalid_json",
+              "internal_error",
+              "invalid_observation_refresh_request",
+              "invalid_recipe_id"
+            ]
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "404": {
+            "description": "HTTP 404 admin API error. Documented codes: recipe_not_found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "recipe_not_found"
+            ]
+          },
+          "409": {
+            "description": "HTTP 409 admin API error. Documented codes: recipe_changed_during_detection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "recipe_changed_during_detection"
+            ]
+          },
+          "502": {
+            "description": "HTTP 502 admin API error. Documented codes: upstream_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "upstream_unavailable"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable, application_shutting_down.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable",
+              "application_shutting_down"
+            ]
+          }
+        },
+        "parameters": [
+          {
+            "name": "recipe_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "JSON body; an omitted body is parsed as {} by the current server.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmptyRequest"
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
+    "/api/recipes/{recipe_id}/automation/check": {
+      "post": {
+        "operationId": "automation.check",
+        "summary": "Check recipe automation now",
+        "tags": [
+          "automation"
+        ],
+        "x-debbuilder-effect": "durable_mutation",
+        "responses": {
+          "202": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutomationActionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400 admin API error. Documented codes: invalid_request, invalid_json, internal_error, invalid_automation_check_request, invalid_recipe_id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_request",
+              "invalid_json",
+              "internal_error",
+              "invalid_automation_check_request",
+              "invalid_recipe_id"
+            ]
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "403": {
+            "description": "HTTP 403 admin API error. Documented codes: automation_managed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "automation_managed"
+            ]
+          },
+          "404": {
+            "description": "HTTP 404 admin API error. Documented codes: recipe_not_found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "recipe_not_found"
+            ]
+          },
+          "409": {
+            "description": "HTTP 409 admin API error. Documented codes: automation_disabled, recipe_inactive.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "automation_disabled",
+              "recipe_inactive"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable, application_shutting_down, automation_scheduler_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable",
+              "application_shutting_down",
+              "automation_scheduler_unavailable"
+            ]
+          }
+        },
+        "parameters": [
+          {
+            "name": "recipe_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "JSON body; an omitted body is parsed as {} by the current server.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmptyRequest"
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
+    "/api/recipes/{recipe_id}/automation/retry": {
+      "post": {
+        "operationId": "automation.retry",
+        "summary": "Retry recipe automation",
+        "tags": [
+          "automation"
+        ],
+        "x-debbuilder-effect": "durable_mutation",
+        "responses": {
+          "202": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutomationActionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400 admin API error. Documented codes: invalid_request, invalid_json, internal_error, invalid_recipe_id, invalid_automation_retry_request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_request",
+              "invalid_json",
+              "internal_error",
+              "invalid_recipe_id",
+              "invalid_automation_retry_request"
+            ]
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "404": {
+            "description": "HTTP 404 admin API error. Documented codes: recipe_not_found, automation_attempt_not_found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "recipe_not_found",
+              "automation_attempt_not_found"
+            ]
+          },
+          "409": {
+            "description": "HTTP 409 admin API error. Documented codes: automation_disabled, automation_retry_not_allowed, automation_retry_stale.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "automation_disabled",
+              "automation_retry_not_allowed",
+              "automation_retry_stale"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable, application_shutting_down.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable",
+              "application_shutting_down"
+            ]
+          }
+        },
+        "parameters": [
+          {
+            "name": "recipe_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "JSON body; an omitted body is parsed as {} by the current server.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AutomationRetryInput"
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
+    "/api/executions/{run_id}/validations/{attempt_id}/cancel": {
+      "post": {
+        "operationId": "validation.cancel",
+        "summary": "Cancel a validation attempt",
+        "tags": [
+          "validation"
+        ],
+        "x-debbuilder-effect": "durable_mutation",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationCancellationResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationCancellationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400 admin API error. Documented codes: invalid_request, invalid_json, internal_error, invalid_validation_cancellation_request, invalid_validation_identity.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_request",
+              "invalid_json",
+              "internal_error",
+              "invalid_validation_cancellation_request",
+              "invalid_validation_identity"
+            ]
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "404": {
+            "description": "HTTP 404 admin API error. Documented codes: build_run_not_found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "build_run_not_found"
+            ]
+          },
+          "409": {
+            "description": "HTTP 409 admin API error. Documented codes: validation_recovery_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "validation_recovery_required"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable, application_shutting_down.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable",
+              "application_shutting_down"
+            ]
+          }
+        },
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "attempt_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "JSON body; an omitted body is parsed as {} by the current server.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmptyRequest"
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
+    "/api/executions/{run_id}/cancel": {
+      "post": {
+        "operationId": "executions.cancel",
+        "summary": "Cancel an execution",
+        "tags": [
+          "executions"
+        ],
+        "x-debbuilder-effect": "durable_mutation",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionCancellationResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionCancellationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400 admin API error. Documented codes: invalid_request, invalid_json, internal_error, invalid_cancellation_request, invalid_execution_id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_request",
+              "invalid_json",
+              "internal_error",
+              "invalid_cancellation_request",
+              "invalid_execution_id"
+            ]
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "404": {
+            "description": "HTTP 404 admin API error. Documented codes: build_run_not_found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "build_run_not_found"
+            ]
+          },
+          "409": {
+            "description": "HTTP 409 admin API error. Documented codes: execution_not_cancellable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "execution_not_cancellable"
+            ]
+          },
+          "500": {
+            "description": "HTTP 500 admin API error. Documented codes: execution_cancellation_failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "execution_cancellation_failed"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable, application_shutting_down, execution_manager_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable",
+              "application_shutting_down",
+              "execution_manager_unavailable"
+            ]
+          }
+        },
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "JSON body; an omitted body is parsed as {} by the current server.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmptyRequest"
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
+    "/api/recipes/validate": {
+      "post": {
+        "operationId": "recipes.validate",
+        "summary": "Validate recipe JSON",
+        "tags": [
+          "recipes"
+        ],
+        "x-debbuilder-effect": "ephemeral_action",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecipeValidationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400 admin API error. Documented codes: invalid_request, invalid_json, internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_request",
+              "invalid_json",
+              "internal_error"
+            ]
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "422": {
+            "description": "HTTP 422 admin API error. Documented codes: invalid_recipe_json, unknown_field, unsupported_recipe_schema, invalid_automation_policy.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_recipe_json",
+              "unknown_field",
+              "unsupported_recipe_schema",
+              "invalid_automation_policy"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable"
+            ]
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "description": "JSON body; an omitted body is parsed as {} by the current server.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecipeInput"
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
+    "/api/recipes/import": {
+      "post": {
+        "operationId": "recipes.import",
+        "summary": "Import a recipe",
+        "tags": [
+          "recipes"
+        ],
+        "x-debbuilder-effect": "durable_mutation",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecipeImportResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400 admin API error. Documented codes: invalid_request, invalid_json, internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_request",
+              "invalid_json",
+              "internal_error"
+            ]
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "403": {
+            "description": "HTTP 403 admin API error. Documented codes: readonly_recipe.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "readonly_recipe"
+            ]
+          },
+          "409": {
+            "description": "HTTP 409 admin API error. Documented codes: recipe_exists, builtin_recipe_reserved.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "recipe_exists",
+              "builtin_recipe_reserved"
+            ]
+          },
+          "422": {
+            "description": "HTTP 422 admin API error. Documented codes: invalid_recipe_json, unsupported_recipe_schema, unknown_field.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_recipe_json",
+              "unsupported_recipe_schema",
+              "unknown_field"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable, application_shutting_down.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable",
+              "application_shutting_down"
+            ]
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "description": "JSON body; an omitted body is parsed as {} by the current server.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecipeImportInput"
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
+    "/api/run": {
+      "post": {
+        "operationId": "executions.run",
+        "summary": "Start a recipe run",
+        "tags": [
+          "executions"
+        ],
+        "x-debbuilder-effect": "durable_mutation",
+        "responses": {
+          "202": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunAdmissionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400 admin API error. Documented codes: invalid_request, invalid_json, internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_request",
+              "invalid_json",
+              "internal_error"
+            ]
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "409": {
+            "description": "HTTP 409 admin API error. Documented codes: recipe_disabled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "recipe_disabled"
+            ]
+          },
+          "422": {
+            "description": "HTTP 422 admin API error. Documented codes: unsupported_recipe_schema, unknown_field.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "unsupported_recipe_schema",
+              "unknown_field"
+            ]
+          },
+          "429": {
+            "description": "HTTP 429 admin API error. Documented codes: execution_queue_full.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "execution_queue_full"
+            ]
+          },
+          "500": {
+            "description": "HTTP 500 admin API error. Documented codes: execution_enqueue_failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "execution_enqueue_failed"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable, application_shutting_down, execution_manager_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable",
+              "application_shutting_down",
+              "execution_manager_unavailable"
+            ]
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "description": "JSON body; an omitted body is parsed as {} by the current server.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunInput"
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
+    "/api/upstream-archive/inspect": {
+      "post": {
+        "operationId": "archives.inspect",
+        "summary": "Inspect an upstream archive",
+        "tags": [
+          "archives"
+        ],
+        "x-debbuilder-effect": "ephemeral_action",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArchiveInspectionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400 admin API error. Documented codes: invalid_request, invalid_json, internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_request",
+              "invalid_json",
+              "internal_error"
+            ]
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "422": {
+            "description": "HTTP 422 admin API error. Documented codes: invalid_recipe_json, ambiguous_archive_source, release_asset_not_found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_recipe_json",
+              "ambiguous_archive_source",
+              "release_asset_not_found"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable"
+            ]
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "description": "JSON body; an omitted body is parsed as {} by the current server.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArchiveInspectInput"
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
+    "/api/executions/{run_id}/validate": {
+      "post": {
+        "operationId": "validation.start",
+        "summary": "Start artifact validation",
+        "tags": [
+          "validation"
+        ],
+        "x-debbuilder-effect": "durable_mutation",
+        "responses": {
+          "202": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400 admin API error. Documented codes: invalid_request, invalid_json, internal_error, invalid_validation_request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_request",
+              "invalid_json",
+              "internal_error",
+              "invalid_validation_request"
+            ]
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "404": {
+            "description": "HTTP 404 admin API error. Documented codes: build_run_not_found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "build_run_not_found"
+            ]
+          },
+          "409": {
+            "description": "HTTP 409 admin API error. Documented codes: artifact_not_available.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "artifact_not_available"
+            ]
+          },
+          "429": {
+            "description": "HTTP 429 admin API error. Documented codes: validation_queue_full.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "validation_queue_full"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable, application_shutting_down, validation_manager_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable",
+              "application_shutting_down",
+              "validation_manager_unavailable"
+            ]
+          }
+        },
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "JSON body; an omitted body is parsed as {} by the current server.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ValidationStartInput"
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
+    "/api/executions/{run_id}/publish": {
+      "post": {
+        "operationId": "publication.publish",
+        "summary": "Publish a build artifact",
+        "tags": [
+          "publication"
+        ],
+        "x-debbuilder-effect": "durable_mutation",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400 admin API error. Documented codes: invalid_request, invalid_json, internal_error, publication_confirmation_required, build_run_not_found, artifact_not_available, publication_identity_conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_request",
+              "invalid_json",
+              "internal_error",
+              "publication_confirmation_required",
+              "build_run_not_found",
+              "artifact_not_available",
+              "publication_identity_conflict"
+            ]
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "409": {
+            "description": "HTTP 409 admin API error. Documented codes: repository_mutation_busy, publication_identity_conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "repository_mutation_busy",
+              "publication_identity_conflict"
+            ]
+          },
+          "422": {
+            "description": "HTTP 422 admin API error. Documented codes: publication_proof_failed, reprepro_include_failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "publication_proof_failed",
+              "reprepro_include_failed"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable, application_shutting_down.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable",
+              "application_shutting_down"
+            ]
+          }
+        },
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "JSON body; an omitted body is parsed as {} by the current server.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublicationInput"
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
+    "/api/executions/{run_id}/reconcile-publication": {
+      "post": {
+        "operationId": "publication.reconcile",
+        "summary": "Reconcile artifact publication",
+        "tags": [
+          "publication"
+        ],
+        "x-debbuilder-effect": "durable_mutation",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400 admin API error. Documented codes: invalid_request, invalid_json, internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_request",
+              "invalid_json",
+              "internal_error"
+            ]
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "409": {
+            "description": "HTTP 409 admin API error. Documented codes: repository_mutation_busy, publication_identity_conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "repository_mutation_busy",
+              "publication_identity_conflict"
+            ]
+          },
+          "422": {
+            "description": "HTTP 422 admin API error. Documented codes: publication_proof_failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "publication_proof_failed"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable, application_shutting_down.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable",
+              "application_shutting_down"
+            ]
+          }
+        },
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "JSON body; an omitted body is parsed as {} by the current server.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IgnoredRequest"
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
+    "/api/notifications/test": {
+      "post": {
+        "operationId": "notifications.test",
+        "summary": "Send a test notification",
+        "tags": [
+          "notifications"
+        ],
+        "x-debbuilder-effect": "durable_mutation",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400 admin API error. Documented codes: invalid_request, invalid_json, internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_request",
+              "invalid_json",
+              "internal_error"
+            ]
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "502": {
+            "description": "HTTP 502 admin API error. Documented codes: notification_failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "notification_failed"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable, application_shutting_down.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable",
+              "application_shutting_down"
+            ]
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "description": "JSON body; an omitted body is parsed as {} by the current server.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IgnoredRequest"
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
+    "/api/executions/delete-logs": {
+      "post": {
+        "operationId": "executions.logs.delete_many",
+        "summary": "Delete execution logs",
+        "tags": [
+          "executions"
+        ],
+        "x-debbuilder-effect": "durable_mutation",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteLogsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400 admin API error. Documented codes: invalid_request, invalid_json, internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_request",
+              "invalid_json",
+              "internal_error"
+            ]
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "409": {
+            "description": "HTTP 409 admin API error. Documented codes: execution_active.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "execution_active"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable, application_shutting_down.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable",
+              "application_shutting_down"
+            ]
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "description": "JSON body; an omitted body is parsed as {} by the current server.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteLogsInput"
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ProxyIdentity": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Forwarded-User",
+        "description": "Trusted reverse proxy identity in header mode. The header name can be configured with DEBBUILDER_AUTH_HEADER. Never expose this header directly to untrusted clients."
+      },
+      "OidcSession": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "debbuilder_session",
+        "description": "Interactive OIDC session cookie established by the separate browser login flow."
+      }
+    },
+    "schemas": {
+      "ApiError": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "const": false
+          },
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_]{0,127}$",
+                "maxLength": 128
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 240
+              },
+              "details": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "pattern": "^\\$",
+                    "maxLength": 240
+                  },
+                  "classification": {
+                    "type": "string",
+                    "maxLength": 128
+                  },
+                  "stage": {
+                    "type": "string",
+                    "maxLength": 128
+                  },
+                  "line": {
+                    "type": "integer"
+                  },
+                  "column": {
+                    "type": "integer"
+                  },
+                  "sources": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "source": {
+                          "type": "string"
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "archive_format": {
+                          "type": "string"
+                        },
+                        "payload_kind": {
+                          "type": "string"
+                        },
+                        "size": {
+                          "type": "integer"
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "maxItems": 50
+                  }
+                },
+                "additionalProperties": false,
+                "description": "Only allowlisted, bounded diagnostic fields are exposed."
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "message",
+              "details"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "ok",
+          "error"
+        ]
+      },
+      "Recipe": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": 5
+          },
+          "name": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9_.+-]+$"
+          },
+          "active": {
+            "type": "boolean"
+          },
+          "package": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "architecture": {
+                "type": "string",
+                "enum": [
+                  "all",
+                  "amd64",
+                  "arm64",
+                  "armhf"
+                ]
+              },
+              "maintainer": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "runtime_dependencies": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": true
+          },
+          "source": {
+            "type": "object",
+            "properties": {
+              "provider": {
+                "type": "string"
+              },
+              "repository": {
+                "type": "string"
+              },
+              "tracking": {
+                "type": "string"
+              },
+              "version": {
+                "type": "object",
+                "properties": {
+                  "source": {
+                    "type": "string",
+                    "enum": [
+                      "regex",
+                      "release_name",
+                      "tag"
+                    ]
+                  },
+                  "expression": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": true
+              }
+            },
+            "additionalProperties": true
+          },
+          "automation": {
+            "$ref": "#/components/schemas/AutomationPolicy"
+          },
+          "build": {
+            "type": "object",
+            "properties": {
+              "commands": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "environment": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "output": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "path",
+                      "paths",
+                      "source"
+                    ]
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "paths": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "additionalProperties": true
+              },
+              "source_changes": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "operation": {
+                      "type": "string",
+                      "enum": [
+                        "create_file",
+                        "insert_after",
+                        "insert_before",
+                        "remove",
+                        "remove_file",
+                        "replace"
+                      ]
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "search": {
+                      "type": "string"
+                    },
+                    "content": {
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": true
+                }
+              }
+            },
+            "additionalProperties": true
+          },
+          "install": {
+            "type": "object",
+            "properties": {
+              "destination": {
+                "type": "string"
+              },
+              "config_files": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": true
+                }
+              },
+              "directories": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": true
+                }
+              }
+            },
+            "additionalProperties": true
+          },
+          "service": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "name": {
+                "type": "string"
+              },
+              "command": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          },
+          "resource_limits": {
+            "type": "object",
+            "description": "Resource policy validated by resource_limits.py."
+          },
+          "artifact": {
+            "type": "object",
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "source_build",
+                  "upstream_deb",
+                  "upstream_archive"
+                ]
+              },
+              "archive_source": {
+                "type": "string",
+                "enum": [
+                  "auto",
+                  "github_source",
+                  "release_asset"
+                ]
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true,
+        "required": [
+          "schema_version",
+          "name"
+        ],
+        "description": "Authored Recipe v5. The complete nested business rules are enforced by recipe_schema.py; this schema documents stable public fields without claiming to replace that validator."
+      },
+      "AutomationPolicy": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "policy": {
+            "type": "string",
+            "enum": [
+              "build",
+              "build_validate",
+              "detect",
+              "full",
+              "manual",
+              "test"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "RecipeInput": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/Recipe"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "recipe": {
+                "$ref": "#/components/schemas/Recipe"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "recipe"
+            ]
+          }
+        ],
+        "description": "Recipe directly or wrapped in a recipe property."
+      },
+      "RecipeImportInput": {
+        "type": "object",
+        "properties": {
+          "recipe": {
+            "$ref": "#/components/schemas/Recipe"
+          },
+          "replace": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "recipe"
+        ]
+      },
+      "RunInput": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/Recipe"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "workflow": {
+                "$ref": "#/components/schemas/Recipe"
+              },
+              "dry_run": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "workflow"
+            ]
+          }
+        ]
+      },
+      "WorkflowSaveInput": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/Recipe"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "workflow": {
+                "$ref": "#/components/schemas/Recipe"
+              },
+              "previous_id": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "workflow"
+            ]
+          }
+        ]
+      },
+      "ArchiveInspectInput": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/Recipe"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "workflow": {
+                "$ref": "#/components/schemas/Recipe"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "workflow"
+            ]
+          }
+        ]
+      },
+      "EmptyRequest": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false,
+        "description": "An omitted JSON body is also accepted and treated as {}."
+      },
+      "IgnoredRequest": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": true,
+        "description": "The handler currently ignores request fields; use {}."
+      },
+      "AutomationRetryInput": {
+        "type": "object",
+        "properties": {
+          "generation": {
+            "type": "integer"
+          },
+          "revision": {
+            "type": "string",
+            "maxLength": 200
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "generation",
+          "revision"
+        ]
+      },
+      "ValidationStartInput": {
+        "type": "object",
+        "properties": {
+          "profile": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "previous_artifact": {
+            "type": "string",
+            "maxLength": 4096
+          }
+        },
+        "additionalProperties": false
+      },
+      "PublicationInput": {
+        "type": "object",
+        "properties": {
+          "confirm": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "confirm"
+        ]
+      },
+      "SettingsInput": {
+        "type": "object",
+        "properties": {
+          "general": {
+            "type": "object",
+            "properties": {
+              "app_name": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "apt": {
+            "type": "object",
+            "properties": {
+              "repository": {
+                "type": "string"
+              },
+              "distribution": {
+                "type": "string"
+              },
+              "component": {
+                "type": "string"
+              },
+              "architecture": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "notifications": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string"
+              },
+              "server_url": {
+                "type": "string"
+              },
+              "topic": {
+                "type": "string"
+              },
+              "token": {
+                "type": "string",
+                "writeOnly": true
+              }
+            },
+            "additionalProperties": false
+          },
+          "automation": {
+            "type": "object",
+            "properties": {
+              "auto_validate_after_successful_build": {
+                "type": "boolean"
+              },
+              "auto_publish_after_successful_validation": {
+                "type": "boolean"
+              },
+              "upstream_checks_enabled": {
+                "type": "boolean"
+              },
+              "upstream_check_interval_seconds": {
+                "type": "integer"
+              },
+              "upstream_check_concurrency": {
+                "type": "integer"
+              }
+            },
+            "additionalProperties": false
+          },
+          "resource_limits": {
+            "type": "object",
+            "description": "Resource policy; validated by resource_limits.py."
+          },
+          "workspace_cleanup": {
+            "type": "object",
+            "description": "Retention policy; validated by workspace_cleanup.py."
+          },
+          "security": {
+            "type": "object",
+            "properties": {
+              "auth_mode": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "header",
+                  "oidc"
+                ]
+              },
+              "oidc_issuer": {
+                "type": "string"
+              },
+              "oidc_client_id": {
+                "type": "string"
+              },
+              "oidc_redirect_uri": {
+                "type": "string"
+              },
+              "oidc_client_secret": {
+                "type": "string",
+                "writeOnly": true
+              }
+            },
+            "additionalProperties": false
+          },
+          "github": {
+            "type": "object",
+            "properties": {
+              "token": {
+                "type": "string",
+                "writeOnly": true
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false,
+        "description": "Partial settings update; secret replacements are write-only and never returned."
+      },
+      "PackageInput": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "recipe": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "apt_version": {
+            "type": "string"
+          },
+          "upstream_version": {
+            "type": "string"
+          },
+          "architecture": {
+            "type": "string",
+            "enum": [
+              "all",
+              "amd64",
+              "arm64",
+              "armhf"
+            ]
+          },
+          "source": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string"
+              },
+              "repository": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true,
+        "description": "Package override fields are normalized by package_service.py."
+      },
+      "PackageCreateInput": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/PackageInput"
+          },
+          {
+            "required": [
+              "name"
+            ]
+          }
+        ]
+      },
+      "DeleteLogsInput": {
+        "type": "object",
+        "properties": {
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "all": {
+            "type": "boolean"
+          },
+          "dry_run": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ExecutionLogDeletion": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "deleted": {
+            "const": "log_history"
+          },
+          "removed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "already_deleted": {
+            "type": "boolean"
+          },
+          "deleted_at": {
+            "type": "string"
+          },
+          "history_deleted": {
+            "const": true
+          },
+          "visible": {
+            "const": false
+          }
+        },
+        "additionalProperties": true,
+        "required": [
+          "id",
+          "history_deleted",
+          "visible"
+        ]
+      },
+      "Package": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "recipe": {
+            "type": "string"
+          },
+          "version": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true,
+        "required": [
+          "name"
+        ],
+        "description": "Projection of Recipe, Run and APT repository state."
+      },
+      "Execution": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "recipe_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "cancelled",
+              "cancelling",
+              "failed",
+              "pending",
+              "prepared",
+              "queued",
+              "running",
+              "success"
+            ]
+          },
+          "lifecycle_status": {
+            "type": "string",
+            "enum": [
+              "build_failed",
+              "building",
+              "cancelled",
+              "cancelling",
+              "pending",
+              "prepared",
+              "publication_failed",
+              "published",
+              "publishing",
+              "queued",
+              "ready_to_publish",
+              "validating",
+              "validation_cancelled",
+              "validation_failed",
+              "validation_needed"
+            ]
+          },
+          "validation_status": {
+            "type": "string",
+            "enum": [
+              "not_run",
+              "cancelled",
+              "cancelling",
+              "failed",
+              "queued",
+              "running",
+              "success"
+            ]
+          },
+          "publication_status": {
+            "type": "string",
+            "enum": [
+              "not_run",
+              "running",
+              "success",
+              "failed"
+            ]
+          },
+          "lifecycle_active": {
+            "type": "boolean"
+          },
+          "version": {
+            "type": "object",
+            "properties": {
+              "upstream": {
+                "type": "string"
+              },
+              "debian": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "allowed_actions": {
+            "type": "object",
+            "properties": {
+              "validate": {
+                "type": "boolean"
+              },
+              "publish": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": true,
+        "required": [
+          "id",
+          "status",
+          "lifecycle_status"
+        ],
+        "description": "Public Build Run lifecycle projection; some fields depend on available evidence."
+      },
+      "Validation": {
+        "type": "object",
+        "properties": {
+          "attempt_id": {
+            "type": "string"
+          },
+          "build_run_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "cancelled",
+              "cancelling",
+              "failed",
+              "queued",
+              "running",
+              "success"
+            ]
+          },
+          "phase": {
+            "type": "string"
+          },
+          "cancellable": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": true,
+        "description": "Public validation attempt projection."
+      },
+      "Publication": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "const": "success"
+          },
+          "build_run_id": {
+            "type": "string"
+          },
+          "package": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true,
+        "required": [
+          "status"
+        ],
+        "description": "Public publication attempt projection on successful HTTP responses."
+      },
+      "Automation": {
+        "type": "object",
+        "properties": {
+          "recipe_id": {
+            "type": "string"
+          },
+          "recipe_active": {
+            "type": "boolean"
+          },
+          "automation": {
+            "$ref": "#/components/schemas/AutomationPolicy"
+          },
+          "eligible": {
+            "type": "boolean"
+          },
+          "state": {
+            "type": "string"
+          },
+          "stage": {
+            "type": "string"
+          },
+          "result": {
+            "type": "string"
+          },
+          "can_check_now": {
+            "type": "boolean"
+          },
+          "can_retry": {
+            "type": "boolean"
+          },
+          "generation": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "revision": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true,
+        "required": [
+          "recipe_id",
+          "automation",
+          "state"
+        ],
+        "description": "Current Recipe automation status and scheduler evidence."
+      },
+      "AutomationAction": {
+        "type": "object",
+        "properties": {
+          "accepted": {
+            "type": "boolean"
+          },
+          "created": {
+            "type": "boolean"
+          },
+          "generation": {
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/components/schemas/Automation"
+          }
+        },
+        "additionalProperties": true,
+        "required": [
+          "status"
+        ],
+        "description": "Scheduler acceptance plus the updated Recipe automation status."
+      },
+      "Settings": {
+        "type": "object",
+        "properties": {
+          "general": {
+            "type": "object",
+            "properties": {
+              "app_name": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "apt": {
+            "type": "object",
+            "properties": {
+              "repository": {
+                "type": "string"
+              },
+              "distribution": {
+                "type": "string"
+              },
+              "component": {
+                "type": "string"
+              },
+              "architecture": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "github": {
+            "type": "object",
+            "properties": {
+              "token_configured": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false
+          },
+          "notifications": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string"
+              },
+              "server_url": {
+                "type": "string"
+              },
+              "topic": {
+                "type": "string"
+              },
+              "token_configured": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false
+          },
+          "automation": {
+            "type": "object",
+            "properties": {
+              "upstream_checks_enabled": {
+                "type": "boolean"
+              },
+              "upstream_check_interval_seconds": {
+                "type": "integer"
+              }
+            },
+            "additionalProperties": false
+          },
+          "security": {
+            "type": "object",
+            "properties": {
+              "auth_mode": {
+                "type": "string"
+              },
+              "oidc_client_secret_configured": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false
+          },
+          "resource_limits_status": {
+            "type": "object",
+            "properties": {
+              "valid": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": true,
+        "description": "Redacted operator settings view; secret values are omitted."
+      },
+      "Storage": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true,
+        "description": "Cached storage inventory; GET does not collect or mutate it."
+      },
+      "ExecutionLog": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "size": {
+            "type": "integer"
+          },
+          "complete": {
+            "type": "boolean"
+          },
+          "verbosity": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "text",
+          "offset",
+          "size"
+        ]
+      },
+      "Observation": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": true,
+        "description": "Bounded upstream observation result."
+      },
+      "ArchiveInspection": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": true,
+        "description": "Selected archive inventory and payload summary."
+      },
+      "Cancellation": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "cancelled",
+              "cancelling"
+            ]
+          }
+        },
+        "additionalProperties": true
+      },
+      "Notification": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": true,
+        "description": "Test notification result."
+      },
+      "DeleteLogsResult": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "count": {
+                "type": "integer"
+              },
+              "ids": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "count",
+              "ids"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "deleted": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ExecutionLogDeletion"
+                }
+              },
+              "errors": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "id",
+                    "error"
+                  ]
+                }
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "deleted",
+              "errors"
+            ]
+          }
+        ],
+        "description": "Deletion report or dry-run preview."
+      },
+      "StatusResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "auth_mode": {
+            "type": "string"
+          },
+          "repo_default": {
+            "type": "string"
+          },
+          "suite_default": {
+            "type": "string"
+          },
+          "component_default": {
+            "type": "string"
+          },
+          "arch_default": {
+            "type": "string"
+          },
+          "notification_type": {
+            "type": "string"
+          },
+          "workflow_dirs": {
+            "type": "object",
+            "properties": {
+              "examples": {
+                "type": "string"
+              },
+              "user": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "ok",
+          "auth_mode",
+          "workflow_dirs"
+        ]
+      },
+      "AuthStatusResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "auth_mode": {
+            "type": "string"
+          },
+          "user": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "ok",
+          "auth_mode",
+          "user"
+        ]
+      },
+      "DashboardResponse": {
+        "type": "object",
+        "properties": {
+          "dashboard": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "dashboard"
+        ]
+      },
+      "PackagesResponse": {
+        "type": "object",
+        "properties": {
+          "packages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Package"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "packages"
+        ]
+      },
+      "PackageResponse": {
+        "type": "object",
+        "properties": {
+          "package": {
+            "$ref": "#/components/schemas/Package"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "package"
+        ]
+      },
+      "PackageMutationResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "package": {
+            "$ref": "#/components/schemas/Package"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "ok",
+          "package"
+        ]
+      },
+      "RecipesResponse": {
+        "type": "object",
+        "properties": {
+          "recipes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {},
+              "additionalProperties": true
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "recipes"
+        ]
+      },
+      "AutomationResponse": {
+        "type": "object",
+        "properties": {
+          "automation": {
+            "$ref": "#/components/schemas/Automation"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "automation"
+        ]
+      },
+      "AutomationActionResponse": {
+        "type": "object",
+        "properties": {
+          "automation": {
+            "$ref": "#/components/schemas/AutomationAction"
+          },
+          "ok": {
+            "const": true
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "automation"
+        ]
+      },
+      "ExecutionsResponse": {
+        "type": "object",
+        "properties": {
+          "executions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Execution"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "executions"
+        ]
+      },
+      "ExecutionResponse": {
+        "type": "object",
+        "properties": {
+          "execution": {
+            "$ref": "#/components/schemas/Execution"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "execution"
+        ]
+      },
+      "ExecutionLogResponse": {
+        "type": "object",
+        "properties": {
+          "log": {
+            "$ref": "#/components/schemas/ExecutionLog"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "log"
+        ]
+      },
+      "ValidationResponse": {
+        "type": "object",
+        "properties": {
+          "validation": {
+            "$ref": "#/components/schemas/Validation"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "validation"
+        ]
+      },
+      "ValidationCancellationResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "accepted": {
+            "type": "boolean"
+          },
+          "validation": {
+            "$ref": "#/components/schemas/Validation"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "ok",
+          "accepted",
+          "validation"
+        ]
+      },
+      "SettingsResponse": {
+        "type": "object",
+        "properties": {
+          "settings": {
+            "$ref": "#/components/schemas/Settings"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "settings"
+        ]
+      },
+      "SettingsMutationResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "settings": {
+            "$ref": "#/components/schemas/Settings"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "ok",
+          "settings"
+        ]
+      },
+      "StorageResponse": {
+        "type": "object",
+        "properties": {
+          "storage": {
+            "$ref": "#/components/schemas/Storage"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "storage"
+        ]
+      },
+      "WorkflowListResponse": {
+        "type": "object",
+        "properties": {
+          "workflows": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {},
+              "additionalProperties": true
+            }
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {},
+              "additionalProperties": true
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "workflows",
+          "errors"
+        ]
+      },
+      "ObservationResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "observation": {
+            "$ref": "#/components/schemas/Observation"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "ok",
+          "observation"
+        ]
+      },
+      "RecipeValidationResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "recipe": {
+            "$ref": "#/components/schemas/Recipe"
+          },
+          "id": {
+            "type": "string"
+          },
+          "collision": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": true
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "ok",
+          "recipe",
+          "id",
+          "collision"
+        ]
+      },
+      "RecipeImportResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "id": {
+            "type": "string"
+          },
+          "recipe": {
+            "$ref": "#/components/schemas/Recipe"
+          },
+          "created": {
+            "type": "boolean"
+          },
+          "replaced": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "ok",
+          "id",
+          "recipe",
+          "created",
+          "replaced"
+        ]
+      },
+      "RunAdmissionResponse": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "status": {
+            "const": "queued"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "run_id",
+          "status"
+        ]
+      },
+      "ArchiveInspectionResponse": {
+        "type": "object",
+        "properties": {
+          "inspection": {
+            "$ref": "#/components/schemas/ArchiveInspection"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "inspection"
+        ]
+      },
+      "PublicationResponse": {
+        "type": "object",
+        "properties": {
+          "publication": {
+            "$ref": "#/components/schemas/Publication"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "publication"
+        ]
+      },
+      "NotificationResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "notification": {
+            "$ref": "#/components/schemas/Notification"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "ok",
+          "notification"
+        ]
+      },
+      "ExecutionCancellationResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "cancellation": {
+            "$ref": "#/components/schemas/Cancellation"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "ok",
+          "cancellation"
+        ]
+      },
+      "DeleteLogsResponse": {
+        "$ref": "#/components/schemas/DeleteLogsResult"
+      },
+      "WorkflowSaveResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "id": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "ok",
+          "id",
+          "path"
+        ]
+      },
+      "DeleteResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "id": {
+            "type": "string"
+          },
+          "deleted_from_repository": {
+            "type": "boolean"
+          },
+          "deleted_from_repo": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "ok",
+          "id"
+        ]
+      },
+      "ExecutionLogDeleteResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "deletion": {
+            "$ref": "#/components/schemas/ExecutionLogDeletion"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "ok",
+          "deletion"
+        ]
+      },
+      "OpenApiDocument": {
+        "type": "object",
+        "properties": {
+          "openapi": {
+            "type": "string"
+          },
+          "info": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": true
+          },
+          "paths": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": true
+          },
+          "components": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "openapi",
+          "info",
+          "paths",
+          "components"
+        ],
+        "description": "This OpenAPI 3.1 document."
+      }
+    }
+  },
+  "x-debbuilder-auth-modes": {
+    "none": "Configured local mode requires no credential.",
+    "header": "Configured trusted proxy identity header is required.",
+    "oidc": "Configured OIDC browser session cookie is required; API failures are JSON rather than redirects."
+  }
+}

@@ -86,6 +86,7 @@ D = RouteEffect.DURABLE_MUTATION
 
 ADMIN_API_ROUTES: tuple[ApiRoute, ...] = (
     _route("GET", "/api/status", "system.status", "_get_status", R, "system", "Get application status"),
+    _route("GET", "/api/openapi.json", "system.openapi", "_get_openapi", R, "system", "Get the OpenAPI contract"),
     _route("GET", "/api/auth/status", "auth.status", "_get_auth_status", R, "authentication", "Get authentication status"),
     _route("GET", "/api/dashboard", "dashboard.get", "_get_dashboard", R, "dashboard", "Get dashboard summary"),
     _route("GET", "/api/packages", "packages.list", "_get_packages", R, "packages", "List packages"),

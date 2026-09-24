@@ -55,8 +55,10 @@ operations. Its immutable descriptors define each method, path template,
 stable operation identifier, handler identity, authentication boundary, and
 read/mutation effect. `debbuilder/http_handler.py` uses that inventory for
 runtime dispatch while keeping response handling and subsystem calls in the
-existing HTTP layer. Future API-description generation can consume the same
-inventory; no generated or served API description is available yet. The
+existing HTTP layer. `debbuilder/openapi.py` projects those descriptors into
+OpenAPI 3.1. It declares only representation details absent from the registry:
+request and success schemas, query parameters, success statuses, and relevant
+error codes. Tests require exact operation parity with the registry. The
 separate public APT listener and legacy wildcard admin `HEAD` handling are not
 named API operations and remain outside the registry.
 
@@ -72,9 +74,12 @@ operator-facing summaries rather than raw debugging or exception output, and
 `details` contains only explicitly selected structured context. Internal
 exceptions are logged server-side and exposed as `internal_error`. Successful
 response bodies, browser authentication redirects, static-file responses, and
-the separate public APT listener do not use this error envelope. The route
-registry identifies `ApiError` as the error schema for future API-description
-generation; no OpenAPI endpoint is available yet.
+the separate public APT listener do not use this error envelope. OpenAPI uses
+one reusable `ApiError` schema and checks every documented error code against
+the canonical code inventory in `debbuilder/api_errors.py`. The committed
+`openapi.json` is generated offline from these sources and served at the
+authenticated read-only `GET /api/openapi.json` route. See [API contract](API.md)
+for generation and validation commands.
 
 ## Build model
 

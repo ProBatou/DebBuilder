@@ -75,6 +75,7 @@ def _route(
         effect=effect,
         tags=(tag,),
         summary=summary,
+        error_schemas=("ApiError",),
     )
 
 

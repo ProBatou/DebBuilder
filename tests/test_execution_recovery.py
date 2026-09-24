@@ -966,7 +966,7 @@ class RecoveryAdmissionApiTests(AdminApiCase):
             )
             self.assertEqual(status, 503)
             self.assertEqual(response["error"]["code"], BLOCKER_CODE)
-            self.assertNotIn("details", response["error"])
+            self.assertEqual(response["error"]["details"], {})
         self.assertEqual(set(path.name for path in store.root.iterdir()), before)
         status, response = self.request("GET", f"/api/executions/{stale['id']}")
         self.assertEqual(status, 200)

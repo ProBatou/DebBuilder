@@ -25,6 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from . import apt_repo, artifact_publication, artifact_validation, auth_service, automation_orchestrator, automation_scheduler, automation_service, automation_status, build_pipeline, builtin_recipe, command_containment, deb_inspector, dependency_preparation, execution_projection, execution_recovery, execution_service, maintenance, notifications, package_service, recipe_store, resource_limits, settings_service, storage, storage_inventory, storage_pruning, upstream_archive, upstream_detection, upstream_observation, validation_oci, validation_service, workspace_cleanup
+from .api_errors import canonical_error_payload
 from .automation_ledger import AutomationLedger
 from .upstream_detection import AutomationDetectionService
 from .build_models import utc_now
@@ -158,6 +159,9 @@ def sanitize_id(value: str) -> str:
 
 
 def json_response(handler: BaseHTTPRequestHandler, data, status=200):
+    path = urllib.parse.urlparse(handler.path).path
+    if status >= 400 and path.startswith("/api/"):
+        data = canonical_error_payload(data, status, path)
     body = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json; charset=utf-8")

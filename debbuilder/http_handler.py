@@ -6,6 +6,7 @@ business operations remain independently testable.
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import time
 import urllib.parse
@@ -13,9 +14,13 @@ from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
 from . import __version__
+from .api_errors import ApiError
 from .api_routes import ADMIN_API_ROUTES, RouteEffect, match_route, validate_routes
 from .execution_projection import public_error
 from .lifecycle import MutationGateClosed
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def create_handler(api):
@@ -141,7 +146,11 @@ def create_handler(api):
             matched = match_route("GET", parsed.path)
             if matched is None:
                 return False
-            getattr(self, matched.route.handler)(matched.path_variables, parsed)
+            try:
+                getattr(self, matched.route.handler)(matched.path_variables, parsed)
+            except Exception:
+                LOGGER.exception("Unexpected admin API GET failure")
+                api.json_response(self, ApiError("internal_error", "An internal error occurred"), 500)
             return True
 
         def _get_status(self, _variables, _parsed):
@@ -284,19 +293,20 @@ def create_handler(api):
                     "details": {},
                 }}, 503)
             except json.JSONDecodeError as exc:
-                if self.path in {"/api/recipes/validate", "/api/recipes/import"}:
-                    api.json_response(self, {"ok": False, "error": {"code": "invalid_json", "message": f"JSON syntax error at line {exc.lineno}, column {exc.colno}", "path": "$"}}, 400)
-                else:
-                    api.json_response(self, {"error": str(exc)}, 400)
+                api.json_response(self, ApiError(
+                    "invalid_json",
+                    "The request body is not valid JSON",
+                    {"line": exc.lineno, "column": exc.colno, "path": "$"},
+                ), 400)
             except api.SettingsDocumentError as exc:
                 api.json_response(self, {"error": exc.as_dict()}, 422)
             except api.resource_limits.ResourceLimitError as exc:
                 api.json_response(self, {"error": exc.as_dict()}, 422)
-            except Exception as exc:
-                if self.path in {"/api/recipes/validate", "/api/recipes/import"}:
-                    api.json_response(self, {"ok": False, "error": {"code": "invalid_request", "message": str(exc), "path": "$"}}, 400)
-                else:
-                    api.json_response(self, {"error": str(exc)}, 400)
+            except ValueError:
+                api.json_response(self, ApiError("invalid_request", "The request is invalid"), 400)
+            except Exception:
+                LOGGER.exception("Unexpected admin API POST failure")
+                api.json_response(self, ApiError("internal_error", "An internal error occurred"), 400)
 
         def _post(self, data: dict):
             parsed = urlparse(self.path)
@@ -565,8 +575,11 @@ def create_handler(api):
                     "message": str(exc),
                     "details": {},
                 }}, 503)
-            except Exception as exc:
-                api.json_response(self, {"error": str(exc)}, 400)
+            except ValueError:
+                api.json_response(self, ApiError("invalid_request", "The request is invalid"), 400)
+            except Exception:
+                LOGGER.exception("Unexpected admin API DELETE failure")
+                api.json_response(self, ApiError("internal_error", "An internal error occurred"), 400)
 
         def _delete_workflow(self, variables, _parsed):
             workflow_id = variables["workflow_id"]

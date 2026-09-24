@@ -60,6 +60,22 @@ inventory; no generated or served API description is available yet. The
 separate public APT listener and legacy wildcard admin `HEAD` handling are not
 named API operations and remain outside the registry.
 
+All non-success JSON responses from the admin API use one machine-readable
+envelope:
+
+```json
+{"ok": false, "error": {"code": "stable_code", "message": "Safe message", "details": {}}}
+```
+
+The lowercase error code is the stable client contract. Messages are bounded
+operator-facing summaries rather than raw debugging or exception output, and
+`details` contains only explicitly selected structured context. Internal
+exceptions are logged server-side and exposed as `internal_error`. Successful
+response bodies, browser authentication redirects, static-file responses, and
+the separate public APT listener do not use this error envelope. The route
+registry identifies `ApiError` as the error schema for future API-description
+generation; no OpenAPI endpoint is available yet.
+
 ## Build model
 
 Builds run in per-Run workspaces and use structured argument vectors rather

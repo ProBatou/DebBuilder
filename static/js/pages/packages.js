@@ -339,7 +339,7 @@ async function deletePackageUi(name) {
   if (!confirmed) return;
   const response = await fetch('/api/packages/' + encodeURIComponent(name), {method: 'DELETE'});
   const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || response.statusText);
+  if (!response.ok) throw new Error(payload.error?.message || response.statusText);
   closePackageDrawer();
   await loadPackages();
   showToast(`Package ${name} deleted from DebBuilder.`, {type: 'success'});
@@ -406,9 +406,14 @@ async function publishPackage(name) {
     confirmLabel: 'Publish to APT',
   });
   if (!confirmed) return;
-  const response = await postLifecycleJson(`/api/executions/${encodeURIComponent(runId)}/publish`, {confirm: confirmation});
-  showToast(`Publication: ${response.publication.status}${response.publication.error ? ` — ${response.publication.error.message}` : ''}`, {type: response.publication.error ? 'error' : 'success'});
-  await loadPackages();
+  try {
+    const response = await postLifecycleJson(`/api/executions/${encodeURIComponent(runId)}/publish`, {confirm: confirmation});
+    showToast(`Publication: ${response.publication.status}`, {type: 'success'});
+  } catch (error) {
+    showToast(`Publication: failed — ${error.message}`, {type: 'error'});
+  } finally {
+    await loadPackages();
+  }
 }
 
 async function buildPackage(name, dryRun = true) {

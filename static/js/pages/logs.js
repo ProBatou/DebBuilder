@@ -249,7 +249,7 @@ async function loadExecutionLog(id, {reset = false} = {}) {
   }
   const response = await fetch(`/api/executions/${encodeURIComponent(id)}/logs?verbosity=${encodeURIComponent(adminState.logVerbosity)}&after=${adminState.logOffset}`);
   const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || response.statusText);
+  if (!response.ok) throw new Error(payload.error?.message || response.statusText);
   const log = payload.log || {};
   if (log.text) {
     const displayedText = adminState.logVerbosity === 'raw'
@@ -313,7 +313,7 @@ async function deleteExecutionLog(id) {
   if (!confirmed) return false;
   const response = await fetch(`/api/executions/${encodeURIComponent(id)}/logs`, {method: 'DELETE'});
   const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || response.statusText);
+  if (!response.ok) throw new Error(payload.error?.message || response.statusText);
   if (payload.deletion?.history_deleted !== true || payload.deletion?.visible !== false) {
     throw new Error('The backend did not confirm execution-history deletion');
   }
@@ -372,8 +372,7 @@ function resumeLiveLog() {
 async function postLifecycleJson(url, body) {
   const response = await fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
   const payload = await response.json();
-  const recordedLifecycleFailure = response.status === 422 && (payload.validation || payload.publication);
-  if (!response.ok && !recordedLifecycleFailure) {
+  if (!response.ok) {
     const error = payload.error;
     throw new Error(error?.message || error || response.statusText);
   }

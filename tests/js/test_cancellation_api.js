@@ -42,18 +42,18 @@ function jsonResponse(status, payload, statusText = '') {
   assert.equal(result.outcome, 'cancelling');
   assert.equal(result.payload.requested_at, 'now');
 
-  response = jsonResponse(409, {error: {code: 'execution_not_cancellable', message: 'already terminal'}});
+  response = jsonResponse(409, {ok: false, error: {code: 'execution_not_cancellable', message: 'already terminal', details: {}}});
   result = await context.cancelExecutionRequest('race');
   assert.equal(result.outcome, 'not_cancellable');
   assert.equal(result.httpStatus, 409);
 
-  response = jsonResponse(503, {error: {code: 'execution_manager_unavailable', message: 'manager down'}});
+  response = jsonResponse(503, {ok: false, error: {code: 'execution_manager_unavailable', message: 'manager down', details: {}}});
   await assert.rejects(
     () => context.cancelExecutionRequest('active'),
     error => error.message === 'manager down' && error.status === 503 && error.code === 'execution_manager_unavailable',
   );
 
-  response = jsonResponse(409, {error: {code: 'different_conflict', message: 'real conflict'}});
+  response = jsonResponse(409, {ok: false, error: {code: 'different_conflict', message: 'real conflict', details: {}}});
   await assert.rejects(
     () => context.cancelExecutionRequest('active'),
     error => error.message === 'real conflict' && error.status === 409 && error.code === 'different_conflict',

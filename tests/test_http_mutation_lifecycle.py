@@ -85,7 +85,7 @@ class HttpMutationLifecycleTests(AdminApiCase):
                     "POST", "/api/executions/20260822-031400/publish", {},
                 )
             self.assertEqual(status, 409)
-            self.assertEqual(payload["publication"]["error"]["code"], code)
+            self.assert_api_error(payload, code=code)
 
     def test_queued_cancellation_releases_http_lease_after_bounded_request(self):
         gate = MutationGate()

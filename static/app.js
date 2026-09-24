@@ -440,7 +440,7 @@ async function deleteCurrentRecipe() {
     const deleteId = id;
     const response = await fetch('/api/workflows/' + encodeURIComponent(deleteId), {method:'DELETE'});
     const data = await response.json();
-    if (!response.ok) throw new Error(data.error || response.statusText);
+    if (!response.ok) throw new Error(data.error?.message || response.statusText);
     currentRecipeId = '';
     await refreshWorkflows();
     if ($('workflowSelect')?.value) await loadSelectedWorkflow();

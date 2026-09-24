@@ -17,6 +17,19 @@ from debbuilder.build_store import BuildStore
 
 
 class AdminApiCase(unittest.TestCase):
+    def assert_api_error(self, payload, *, code=None):
+        self.assertEqual(set(payload), {"ok", "error"})
+        self.assertIs(payload["ok"], False)
+        self.assertEqual(set(payload["error"]), {"code", "message", "details"})
+        self.assertIsInstance(payload["error"]["code"], str)
+        self.assertTrue(payload["error"]["code"])
+        self.assertIsInstance(payload["error"]["message"], str)
+        self.assertTrue(payload["error"]["message"])
+        self.assertIsInstance(payload["error"]["details"], dict)
+        if code is not None:
+            self.assertEqual(payload["error"]["code"], code)
+        return payload["error"]
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         base = Path(self.tmp.name)

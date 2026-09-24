@@ -105,7 +105,7 @@ function renderTestRunModal(execution, logText = '') {
 async function loadTestRunModalLog(runId) {
   const response = await fetch(`/api/executions/${encodeURIComponent(runId)}/logs?verbosity=normal&after=0`);
   const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || response.statusText);
+  if (!response.ok) throw new Error(payload.error?.message || response.statusText);
   return payload.log?.text || '';
 }
 

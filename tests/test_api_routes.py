@@ -78,6 +78,7 @@ class ApiRouteRegistryTests(unittest.TestCase):
             for route in ADMIN_API_ROUTES
             if route.method == "GET"
         ))
+        self.assertTrue(all(route.error_schemas == ("ApiError",) for route in ADMIN_API_ROUTES))
 
     def test_all_registered_routes_keep_the_configured_admin_auth_boundary(self):
         self.assertTrue(all(

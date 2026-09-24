@@ -145,7 +145,10 @@ context.openExecution = async () => { reopenCount += 1; };
   assert.equal(nodes.btnDeleteExecutionLog.disabled, true);
   await assert.rejects(() => context.deleteExecutionLog(active.id), /active execution cannot be deleted/);
   context.adminState.executionAction = null;
-  context.fetch = async () => ({ok: false, status: 409, json: async () => ({error: 'Execution is active'})});
+  context.fetch = async () => ({ok: false, status: 409, json: async () => ({
+    ok: false,
+    error: {code: 'execution_active', message: 'Execution is active', details: {}},
+  })});
   const beforeRejectedDelete = toasts.length;
   await assert.rejects(() => context.deleteExecutionLog(active.id), /Execution is active/);
   assert.equal(context.adminState.selectedExecution.id, active.id);

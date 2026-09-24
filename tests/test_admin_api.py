@@ -224,7 +224,7 @@ class AdminApiTests(AdminApiCase):
             self.assertEqual(invalid_response.exception.code, 422)
             error = json.loads(invalid_response.exception.read())["error"]
             self.assertEqual(error["code"], "invalid_automation_policy")
-            self.assertEqual(error["path"], "$.automation.policy")
+            self.assertEqual(error["details"]["path"], "$.automation.policy")
         finally:
             server.APPLICATION_AUTOMATION_SCHEDULER = previous
 
@@ -331,7 +331,7 @@ class AdminApiTests(AdminApiCase):
         self.assertEqual(raised.exception.code, 422)
         error = json.loads(raised.exception.read())["error"]
         self.assertEqual(error["code"], "invalid_resource_limit")
-        self.assertEqual(error["path"], "$.resource_limits.tasks_max")
+        self.assertEqual(error["details"]["path"], "$.resource_limits.tasks_max")
 
     def test_get_package_list_seeded_from_inventory_and_recipe_association(self):
         status, data = self.request("GET", "/api/packages")
@@ -829,7 +829,7 @@ class AdminApiTests(AdminApiCase):
             with self.subTest(payload=payload), self.assertRaises(urllib.error.HTTPError) as raised:
                 self.request("POST", "/api/settings", payload)
             self.assertEqual(raised.exception.code, 422)
-            self.assertEqual(json.loads(raised.exception.read())["error"]["path"], path)
+            self.assertEqual(json.loads(raised.exception.read())["error"]["details"]["path"], path)
             self.assertFalse(settings_path.exists())
 
         with self.assertRaises(urllib.error.HTTPError):
@@ -849,7 +849,7 @@ class AdminApiTests(AdminApiCase):
         with self.assertRaises(urllib.error.HTTPError) as error:
             self.request("DELETE", "/api/executions/busy-run/logs")
         self.assertEqual(error.exception.code, 409)
-        self.assertEqual(json.loads(error.exception.read())["code"], "execution_active")
+        self.assertEqual(json.loads(error.exception.read())["error"]["code"], "execution_active")
         self.assertTrue(source.exists())
         self.assertTrue(artifact.exists())
         self.assertEqual(
@@ -1033,7 +1033,7 @@ class AdminApiTests(AdminApiCase):
         self.assertEqual(raised.exception.code, 422)
         error = json.loads(raised.exception.read())["error"]
         self.assertEqual(error["code"], "missing_required_secret")
-        self.assertEqual(error["path"], "$.security.oidc_client_secret")
+        self.assertEqual(error["details"]["path"], "$.security.oidc_client_secret")
         self.assertFalse((server.DATA / "settings.json").exists())
         self.assertFalse((server.DATA / "secrets.json").exists())
 
@@ -1058,7 +1058,7 @@ class AdminApiTests(AdminApiCase):
                 })
 
         self.assertEqual(raised.exception.code, 422)
-        self.assertEqual(json.loads(raised.exception.read())["error"]["path"], "$.security.oidc_client_secret")
+        self.assertEqual(json.loads(raised.exception.read())["error"]["details"]["path"], "$.security.oidc_client_secret")
         self.assertEqual(settings_path.read_bytes(), settings_before)
         self.assertEqual(secret_path.read_bytes(), secrets_before)
         self.assertEqual(json.loads(secret_path.read_text())["github"]["token"], "gholdvalue123456789012345678901")
@@ -1154,7 +1154,7 @@ class AdminApiTests(AdminApiCase):
         self.assertEqual(raised.exception.code, 422)
         error = json.loads(raised.exception.read())["error"]
         self.assertEqual(error["code"], "invalid_secrets_json")
-        self.assertEqual(error["path"], "$")
+        self.assertEqual(error["details"]["path"], "$")
         self.assertEqual(settings_path.read_bytes(), settings_before)
         self.assertEqual(secret_path.read_bytes(), secrets_before)
 
@@ -1224,7 +1224,7 @@ class AdminApiTests(AdminApiCase):
         self.assertEqual(raised.exception.code, 400)
         syntax_error = json.loads(raised.exception.read().decode())["error"]
         self.assertEqual(syntax_error["code"], "invalid_json")
-        self.assertIn("line 1", syntax_error["message"])
+        self.assertEqual(syntax_error["details"]["line"], 1)
 
     def test_all_recipe_authoring_and_run_apis_reject_build_version_source(self):
         before_runs = {path.name for path in (server.DATA / "builds").iterdir()}
@@ -1256,7 +1256,7 @@ class AdminApiTests(AdminApiCase):
             error = json.loads(raised.exception.read().decode())["error"]
             self.assertEqual(error["code"], "unsupported_version_source")
             if path != "/api/run":
-                self.assertEqual(error["path"], "$.source.version.source")
+                self.assertEqual(error["details"]["path"], "$.source.version.source")
 
         self.assertFalse((server.USER_WORKFLOWS / "unsupported-version-1.json").exists())
         self.assertFalse((server.USER_WORKFLOWS / "unsupported-workflow.json").exists())
@@ -1293,7 +1293,7 @@ class AdminApiTests(AdminApiCase):
             error = json.loads(raised.exception.read().decode())["error"]
             self.assertEqual(error["code"], "unknown_field")
             if path != "/api/run":
-                self.assertEqual(error.get("path"), "$.service.configured")
+                self.assertEqual(error["details"].get("path"), "$.service.configured")
 
         self.assertFalse((server.USER_WORKFLOWS / "derived-service-1.json").exists())
         self.assertFalse((server.USER_WORKFLOWS / "derived-service-workflow.json").exists())
@@ -1389,7 +1389,7 @@ class AdminApiTests(AdminApiCase):
         self.assertEqual(raised.exception.code, 422)
         error = json.loads(raised.exception.read().decode())["error"]
         self.assertEqual(error["code"], "recipe_identity_mismatch")
-        self.assertEqual(error["path"], "$.name")
+        self.assertEqual(error["details"]["path"], "$.name")
         self.assertFalse((server.USER_WORKFLOWS / "alias.json").exists())
         self.assertEqual(builtin_path.read_bytes(), original)
 
@@ -1437,7 +1437,7 @@ class AdminApiTests(AdminApiCase):
         self.assertEqual(raised.exception.code, 409)
         error = json.loads(raised.exception.read().decode())["error"]
         self.assertEqual(error["code"], "builtin_recipe_managed_field")
-        self.assertEqual(error["path"], "$.source.repository")
+        self.assertEqual(error["details"]["path"], "$.source.repository")
         self.assertEqual((server.USER_WORKFLOWS / "debbuilder.json").read_bytes(), original)
 
         status, validation = self.request("POST", "/api/recipes/validate", {"recipe": viewed})
@@ -1487,7 +1487,6 @@ class AdminApiTests(AdminApiCase):
         finally:
             connection.close()
         self.assertEqual(error["code"], "invalid_request")
-        self.assertIn("body too large", error["message"])
 
     def test_user_recipe_can_be_deleted_without_repository_or_system_deletion(self):
         workflow = {"schema_version":5,"name":"temporary","package":{"name":"temporary"},"source":{"repository":"example/temporary","tracking":"latest_release"},"active":True}
@@ -1639,7 +1638,7 @@ class AdminApiTests(AdminApiCase):
             self.assertEqual(raised.exception.code, 422)
             error = json.loads(raised.exception.read())["error"]
             self.assertEqual(error["code"], "unsupported_recipe_schema")
-            self.assertEqual(error["path"], "$.schema_version")
+            self.assertEqual(error["details"]["path"], "$.schema_version")
 
     def test_readonly_recipe_cannot_be_deleted(self):
         with self.assertRaises(urllib.error.HTTPError) as ctx:
@@ -1829,7 +1828,7 @@ class AdminApiTests(AdminApiCase):
             self.assertEqual(invalid.exception.code, 400)
             invalid_error = json.loads(invalid.exception.read())["error"]
             self.assertEqual(invalid_error["code"], "invalid_validation_identity")
-            self.assertNotIn("details", invalid_error)
+            self.assertEqual(invalid_error["details"], {})
             self.assertEqual(attempt_path.read_bytes(), before)
             status, cancelled = self.request("POST", validation["cancel_url"], {})
             self.assertEqual(status, 200)
@@ -1844,7 +1843,7 @@ class AdminApiTests(AdminApiCase):
         with self.assertRaises(urllib.error.HTTPError) as raised:
             self.request("POST", f"/api/executions/{run['id']}/validate", {"unexpected": True})
         self.assertEqual(raised.exception.code, 400)
-        self.assertNotIn("details", json.loads(raised.exception.read())["error"])
+        self.assertEqual(json.loads(raised.exception.read())["error"]["details"], {})
         root = store.run_dir(run["id"]) / "manifests/validation-attempts"
         self.assertEqual(list(root.iterdir()) if root.exists() else [], [])
 

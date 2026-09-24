@@ -394,8 +394,7 @@ class CancellationApiTests(AdminApiCase):
             status, response = self.error_response(f"/api/executions/{run['id']}/cancel", {})
             self.assertEqual(status, 409)
             self.assertEqual(response["error"]["code"], "execution_not_cancellable")
-            self.assertNotIn("details", response["error"])
-            self.assertIn("status running", response["error"]["message"])
+            self.assertEqual(response["error"]["details"], {})
             self.assertFalse(active_cancellation_control(manager).event.is_set())
         finally:
             release.set()
@@ -453,14 +452,12 @@ class CancellationApiTests(AdminApiCase):
                 status, response = self.error_response(f"/api/executions/{run['id']}/cancel", {})
                 self.assertEqual(status, 409)
                 self.assertEqual(response["error"]["code"], "execution_not_cancellable")
-                self.assertNotIn("details", response["error"])
-                self.assertIn(f"status {terminal}", response["error"]["message"])
+                self.assertEqual(response["error"]["details"], {})
 
         pending = self.create_run("pending-not-owned")
         status, response = self.error_response(f"/api/executions/{pending['id']}/cancel", {})
         self.assertEqual(status, 409)
-        self.assertNotIn("details", response["error"])
-        self.assertIn("status pending", response["error"]["message"])
+        self.assertEqual(response["error"]["details"], {})
         status, response = self.error_response("/api/executions/missing-run/cancel", {})
         self.assertEqual((status, response["error"]["code"]), (404, "build_run_not_found"))
         status, response = self.error_response("/api/executions/..%2Funsafe/cancel", {})
@@ -485,7 +482,7 @@ class CancellationApiTests(AdminApiCase):
         server.AUTH_MODE = "header"
         status, response = self.error_response(f"/api/executions/{pending['id']}/cancel", {})
         self.assertEqual(status, 401)
-        self.assertEqual(response["error"], "unauthorized")
+        self.assert_api_error(response, code="authentication_required")
         status, response = self.error_response(
             f"/api/executions/{pending['id']}/cancel", {},
             headers={"X-Forwarded-User": "operator"},

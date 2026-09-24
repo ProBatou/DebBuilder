@@ -50,7 +50,7 @@ async function recipeJsonRequest(url, body) {
     const detail = payload.error;
     const error = new Error(typeof detail === 'object' ? detail.message : (detail || response.statusText));
     error.code = detail?.code || 'request_failed';
-    error.path = detail?.path || '$';
+    error.path = detail?.details?.path || '$';
     error.status = response.status;
     throw error;
   }

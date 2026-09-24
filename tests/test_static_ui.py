@@ -13,6 +13,7 @@ class StaticUiTests(unittest.TestCase):
         "static/js/pages/dashboard.js",
         "static/js/pages/packages.js",
         "static/js/pages/logs.js",
+        "static/js/pages/system.js",
         "static/js/recipe/source_changes.js",
         "static/js/recipe/stepper.js",
         "static/js/admin.js",
@@ -24,6 +25,34 @@ class StaticUiTests(unittest.TestCase):
 
     def styles(self):
         return "\n".join(self.read(path) for path in self.STYLESHEETS)
+
+    def test_system_surface_uses_existing_contracts_and_safe_rendering(self):
+        html = self.read("static/index.html")
+        script = self.read("static/js/pages/system.js")
+        admin = self.read("static/js/admin.js")
+        self.assertIn('data-view="system"', html)
+        self.assertIn('id="view-system"', html)
+        self.assertIn("if (name === 'system') loadSystemDiagnostics();", admin)
+        self.assertIn("getJson('/api/system/diagnostics')", script)
+        self.assertIn('id="btnRefreshDiagnostics"', html)
+        self.assertIn('href="/api/openapi.json"', html)
+        self.assertIn('id="btnSystemSupportBundle"', html)
+        self.assertIn('id="btnRecipeSupportBundle"', html)
+        self.assertIn('id="btnRunSupportBundle"', html)
+        self.assertIn('/api/support-bundle', script)
+        self.assertIn('response.blob()', script)
+        self.assertIn('payload.error?.message', script)
+        self.assertIn('id="btnInspectRecipe"', html)
+        self.assertIn('id="btnInspectRun"', html)
+        self.assertIn('/inspect`', script)
+        for status in ('ok', 'warning', 'failed', 'unknown'):
+            self.assertIn(f"{status}:", script)
+        self.assertIn('SYSTEM_DETAIL_FIELDS', script)
+        self.assertNotIn('Object.entries(', script)
+        self.assertNotIn('innerHTML', script)
+        self.assertNotIn('localStorage', script)
+        self.assertNotIn('sessionStorage', script)
+        self.assertNotIn('console.', script)
 
     def assert_versioned_asset(self, html, path):
         self.assertRegex(html, rf'{re.escape(path)}\?v=[0-9]+(?:-[0-9]+)*')
@@ -499,7 +528,7 @@ class StaticUiTests(unittest.TestCase):
         settings = self.read("static/settings.js")
         serialization = self.read("static/recipe_serialization.js")
         css = self.styles()
-        self.assertEqual(html.count('<span class="nav-icon" aria-hidden="true"><svg'), 5)
+        self.assertEqual(html.count('<span class="nav-icon" aria-hidden="true"><svg'), 6)
         for emoji in ("📊", "📦", "🧱", "📋", "⚙️"):
             self.assertNotIn(emoji, html)
         self.assertNotIn('id="dashboardHealthState"', html)

@@ -6,7 +6,7 @@
   <title>DebBuilder</title>
   <link rel="stylesheet" href="/style.css?v=20260906-2" />
   <link rel="stylesheet" href="/css/components.css?v=20260916-1" />
-  <link rel="stylesheet" href="/css/pages.css?v=20260923-1" />
+  <link rel="stylesheet" href="/css/pages.css?v=20260924-1" />
 </head>
 <body>
   <header class="mobile-topbar" aria-label="Mobile navigation">
@@ -25,6 +25,7 @@
         <button class="nav-link" data-view="packages" title="Packages"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Zm0 2.3L7 8l5 2.7L17 8l-5-2.7Zm-6 4.4v5.6l5 2.8v-5.7L6 9.7Zm7 8.4 5-2.8V9.7l-5 2.7v5.7Z"/></svg></span><span class="nav-label">Packages</span></button>
         <button class="nav-link" data-view="recipes" title="Recipes"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Zm0 2v6h6V5H5Zm8 0v6h6V5h-6ZM5 13v6h6v-6H5Zm8 0v6h6v-6h-6Z"/></svg></span><span class="nav-label">Recipes</span></button>
         <button class="nav-link" data-view="logs" title="Logs"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 3h12a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Zm1 5v2h10V8H7Zm0 4v2h10v-2H7Zm0 4v2h7v-2H7Z"/></svg></span><span class="nav-label">Logs</span></button>
+        <button class="nav-link" data-view="system" title="System"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm-1 4h2v2h-2V6Zm0 4h2v8h-2v-8Z"/></svg></span><span class="nav-label">System</span></button>
         <button class="nav-link" data-view="settings" title="Settings"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M10.9 2h2.2l.5 2.1c.6.2 1.1.4 1.6.7L17 3.7l1.6 1.6-1.1 1.8c.3.5.5 1 .7 1.6l2.1.5v2.2l-2.1.5c-.2.6-.4 1.1-.7 1.6l1.1 1.8-1.6 1.6-1.8-1.1c-.5.3-1 .5-1.6.7l-.5 2.1h-2.2l-.5-2.1a7 7 0 0 1-1.6-.7L7 16.9l-1.6-1.6 1.1-1.8a7 7 0 0 1-.7-1.6l-2.1-.5V9.2l2.1-.5c.2-.6.4-1.1.7-1.6L5.4 5.3 7 3.7l1.8 1.1c.5-.3 1-.5 1.6-.7l.5-2.1ZM12 8a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z"/></svg></span><span class="nav-label">Settings</span></button>
       </nav>
       <div class="status" id="status" role="button" tabindex="0" title="Click to copy command">loading…</div>
@@ -54,7 +55,7 @@
           <section class="recipe-main recipe-blank-main">
             <div class="recipe-toolbar recipe-simple-toolbar toolbar">
               <label class="recipe-picker field"><span>Recipe <span id="recipeManagedBadge" class="settings-badge neutral" hidden>Built-in</span></span><select id="workflowSelect"></select></label>
-              <div class="recipe-action-group recipe-data-actions"><button class="btn btn--ghost" id="btnNewRecipe">+ New</button><button class="btn btn--ghost" id="btnRecipeJson">JSON</button><button class="btn btn--ghost" id="btnImportRecipe">Import</button><button class="btn btn--ghost" id="btnRuns">Runs</button></div>
+              <div class="recipe-action-group recipe-data-actions"><button class="btn btn--ghost" id="btnNewRecipe">+ New</button><button class="btn btn--ghost" id="btnRecipeJson">JSON</button><button class="btn btn--ghost" id="btnImportRecipe">Import</button><button class="btn btn--ghost" id="btnRuns">Runs</button><button class="btn btn--ghost" id="btnInspectRecipe" type="button">Inspect</button><button class="btn btn--ghost" id="btnRecipeSupportBundle" type="button">Download support bundle</button></div>
               <div class="recipe-action-group recipe-run-actions"><button class="btn btn--warning" id="btnDryRun">Test</button><button class="btn btn--primary" id="btnBuildReal">Build</button></div>
               <button class="btn btn--danger recipe-delete-action" id="btnDeleteRecipeTop">Delete</button>
               <input id="workflowName" type="hidden" />
@@ -285,7 +286,17 @@
 
       <section class="view page" id="view-logs">
         <div class="page-head page-header"><div><h2>Logs</h2><p>Executions linked to packages when available.</p></div></div>
-        <div class="logs-layout"><section class="card logs-list-card"><div class="section-title section-header"><div><h3>Executions</h3><p>Search and select a run.</p></div></div><div class="log-filters"><label class="field"><span>Search</span><input id="logSearch" type="search" placeholder="Package, recipe or run…" /></label><label class="field"><span>Status</span><select id="logStatus"><option value="all">All statuses</option><option value="success">Success</option><option value="running">Running</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option></select></label></div><div id="executionList" class="list data-list compact-list" role="listbox">Loading…</div></section><section class="card logs-detail-card"><div class="log-detail-head"><div><span class="eyebrow">Selected run</span><h3>Execution detail</h3></div><div class="log-detail-actions"><label class="field"><span>Verbosity</span><select id="logVerbosity"><option value="compact">Compact</option><option value="normal" selected>Normal</option><option value="verbose">Verbose</option><option value="raw">Raw</option></select></label><button type="button" class="btn btn--warning" id="btnCancelExecution" hidden>Cancel</button><button type="button" class="btn btn-primary" id="btnRevalidateExecution" hidden>Revalidate</button><button type="button" class="btn btn--success" id="btnPublishExecution" hidden>Publish</button><button type="button" class="btn btn--danger" id="btnDeleteExecutionLog" disabled>Delete log/history</button><button id="btnCloseLogDetail" class="btn btn--ghost mobile-only">Back to runs</button></div></div><section id="executionDiagnostic" class="execution-diagnostic" aria-live="polite" hidden></section><div class="log-context-panel"><div id="executionMeta" class="execution-meta muted">Select an execution.</div><section id="executionCancellationSummary" class="execution-cancellation-summary" aria-live="polite" hidden></section><details id="executionMoreDetails" class="execution-more" hidden><summary>More metadata</summary><div id="executionMetaMore" class="execution-meta execution-meta-more muted"></div></details><div id="executionSteps" class="steps"></div></div><div class="log-terminal"><pre id="executionDetail" class="logbox">No log selected.</pre><button type="button" id="btnLogLiveBadge" class="log-live-badge" hidden>● Live</button></div></section></div>
+        <div class="logs-layout"><section class="card logs-list-card"><div class="section-title section-header"><div><h3>Executions</h3><p>Search and select a run.</p></div></div><div class="log-filters"><label class="field"><span>Search</span><input id="logSearch" type="search" placeholder="Package, recipe or run…" /></label><label class="field"><span>Status</span><select id="logStatus"><option value="all">All statuses</option><option value="success">Success</option><option value="running">Running</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option></select></label></div><div id="executionList" class="list data-list compact-list" role="listbox">Loading…</div></section><section class="card logs-detail-card"><div class="log-detail-head"><div><span class="eyebrow">Selected run</span><h3>Execution detail</h3></div><div class="log-detail-actions"><label class="field"><span>Verbosity</span><select id="logVerbosity"><option value="compact">Compact</option><option value="normal" selected>Normal</option><option value="verbose">Verbose</option><option value="raw">Raw</option></select></label><button type="button" class="btn btn--ghost" id="btnInspectRun" disabled>Inspect</button><button type="button" class="btn btn--ghost" id="btnRunSupportBundle" disabled>Download support bundle</button><button type="button" class="btn btn--warning" id="btnCancelExecution" hidden>Cancel</button><button type="button" class="btn btn-primary" id="btnRevalidateExecution" hidden>Revalidate</button><button type="button" class="btn btn--success" id="btnPublishExecution" hidden>Publish</button><button type="button" class="btn btn--danger" id="btnDeleteExecutionLog" disabled>Delete log/history</button><button id="btnCloseLogDetail" class="btn btn--ghost mobile-only">Back to runs</button></div></div><section id="executionDiagnostic" class="execution-diagnostic" aria-live="polite" hidden></section><div class="log-context-panel"><div id="executionMeta" class="execution-meta muted">Select an execution.</div><section id="executionCancellationSummary" class="execution-cancellation-summary" aria-live="polite" hidden></section><details id="executionMoreDetails" class="execution-more" hidden><summary>More metadata</summary><div id="executionMetaMore" class="execution-meta execution-meta-more muted"></div></details><div id="executionSteps" class="steps"></div></div><div class="log-terminal"><pre id="executionDetail" class="logbox">No log selected.</pre><button type="button" id="btnLogLiveBadge" class="log-live-badge" hidden>● Live</button></div></section></div>
+      </section>
+
+      <section class="view page" id="view-system">
+        <div class="page-head page-header"><div><h2>Developer / System</h2><p>Read-only runtime facts and bounded diagnostics.</p></div><div class="page-header-actions"><button type="button" class="btn btn--ghost" id="btnRefreshDiagnostics">Refresh</button><button type="button" class="btn btn--primary" id="btnSystemSupportBundle">Download support bundle</button></div></div>
+        <p id="systemFeedback" class="muted" role="status" aria-live="polite">Open System to load diagnostics.</p>
+        <div id="systemContent" hidden>
+          <section class="card system-card"><div class="section-title section-header"><div><h3>Runtime</h3><p>Safe facts reported by system diagnostics.</p></div><span id="systemOverallStatus" class="settings-badge neutral"></span></div><dl id="systemRuntime" class="system-facts"></dl></section>
+          <section class="card system-card"><div class="section-title section-header"><div><h3>Diagnostics</h3><p>Nine bounded checks; status is reported by the API.</p></div></div><div id="systemChecks" class="system-checks"></div><p class="system-legend">OK: confirmed · Warning: degraded or incomplete · Failed: confirmed problem · Unknown: not verified or cannot be confirmed safely.</p></section>
+          <section class="card system-card"><div class="section-title section-header"><div><h3>API contract</h3><p>Machine-readable OpenAPI 3.1 for the authenticated admin API.</p></div></div><a href="/api/openapi.json" target="_blank" rel="noopener noreferrer">View openapi.json</a></section>
+        </div>
       </section>
 
       <section class="view page" id="view-settings">
@@ -351,6 +362,7 @@
       <div class="app-dialog-actions"><button type="button" class="btn btn--ghost" id="appDialogCancel">Cancel</button><button type="submit" class="btn btn--primary" id="appDialogConfirm">Confirm</button></div>
     </form>
   </dialog>
+  <dialog id="systemInspectorDialog" class="app-dialog system-inspector-dialog" aria-labelledby="systemInspectorTitle"><div class="system-inspector-head"><h2 id="systemInspectorTitle">Inspection</h2><button type="button" class="btn btn--ghost" id="btnCloseSystemInspector">Close</button></div><p id="systemInspectorFeedback" role="status" aria-live="polite"></p><div id="systemInspectorContent"></div></dialog>
 
 
   <script src="/ui_core.js?v=20260916-1"></script>
@@ -363,10 +375,11 @@
   <script src="/js/recipe/automation.js?v=20260916-1"></script>
   <script src="/js/pages/dashboard.js?v=20260905-2"></script>
   <script src="/js/pages/packages.js?v=20260921-1"></script>
-  <script src="/js/pages/logs.js?v=20260923-1"></script>
+  <script src="/js/pages/logs.js?v=20260924-1"></script>
+  <script src="/js/pages/system.js?v=20260924-1"></script>
   <script src="/js/recipe/source_changes.js?v=20260904-1"></script>
   <script src="/js/recipe/stepper.js?v=20260905-2"></script>
   <script src="/js/recipe/json_editor.js?v=20260905-1"></script>
-  <script src="/js/admin.js?v=20260923-1"></script>
+  <script src="/js/admin.js?v=20260924-1"></script>
 </body>
 </html>

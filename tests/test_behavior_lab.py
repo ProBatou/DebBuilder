@@ -1,4 +1,5 @@
 import json
+import io
 import shutil
 import signal
 import socket
@@ -6,6 +7,7 @@ import subprocess
 import sys
 import time
 import unittest
+import zipfile
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -175,6 +177,26 @@ class BehaviorLabTests(unittest.TestCase):
         run_id = self.submit(url, "build-failure")
         failed = self.wait_for(lambda: self.api(url, f"/api/executions/{run_id}")["execution"] if self.api(url, f"/api/executions/{run_id}")["execution"]["status"] == "failed" else None)
         self.assertEqual(failed["error"]["stage"], "build")
+
+    def test_developer_endpoints_remain_read_only_in_behavior_lab(self):
+        _process, url, runtime = self.start_lab("prepared-test")
+        before = {str(path.relative_to(runtime)): (path.stat().st_size, path.stat().st_mtime_ns)
+                  for path in runtime.rglob("*") if path.is_file()}
+        diagnostics = self.api(url, "/api/system/diagnostics")
+        recipe = self.api(url, "/api/recipes/debbuilder/inspect")["inspection"]
+        run = self.api(url, "/api/executions/ui-01-prepared/inspect")["inspection"]
+        with urlopen(f"{url}/api/support-bundle?recipe_id=debbuilder&run_id=ui-01-prepared", timeout=5) as response:
+            self.assertEqual(response.headers.get_content_type(), "application/zip")
+            archive_bytes = response.read()
+        with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
+            self.assertEqual(archive.namelist(), ["manifest.json", "system-diagnostics.json",
+                                                   "recipe-inspection.json", "run-inspection.json"])
+            self.assertEqual(json.loads(archive.read("system-diagnostics.json")), diagnostics)
+            self.assertEqual(json.loads(archive.read("recipe-inspection.json")), recipe)
+            self.assertEqual(json.loads(archive.read("run-inspection.json")), run)
+        after = {str(path.relative_to(runtime)): (path.stat().st_size, path.stat().st_mtime_ns)
+                 for path in runtime.rglob("*") if path.is_file()}
+        self.assertEqual(after, before)
 
     def test_two_instances_have_distinct_ports_and_mutable_state(self):
         _first, first_url, first_runtime = self.start_lab()

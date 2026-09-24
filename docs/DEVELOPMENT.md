@@ -50,6 +50,12 @@ with optional `recipe_id` and/or `run_id` query parameters. The ZIP contains
 only the existing safe projections and a versioned manifest, not raw records
 or logs. See [API contract](API.md) for limits and error behavior.
 
+In the admin UI, open **System** in the existing sidebar for runtime facts,
+the nine diagnostics, manual Refresh, a global support-bundle download and
+the raw OpenAPI link. The selected Recipe toolbar and Run detail actions offer
+read-only **Inspect** dialogs and contextual support-bundle downloads. These
+views intentionally omit logs, authored commands, secrets and raw records.
+
 ## Checks
 
 The broad local checks are:

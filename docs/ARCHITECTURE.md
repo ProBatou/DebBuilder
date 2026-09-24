@@ -106,6 +106,12 @@ resolves optional explicit Recipe/Run selections through the app facade before
 calling the builder; it never acquires a mutation lease. ZIP metadata and
 filenames are fixed and construction failures expose only a canonical error.
 
+The `static/js/pages/system.js` consumer renders fixed, allowlisted diagnostic
+and inspector fields with DOM text nodes. It uses the existing view navigation,
+cards, badges, dialog and API error helpers. The browser downloads the ZIP as
+an opaque blob; only the server assembles it. Recipe and Run inspection fetches
+occur on operator action, not during dashboard startup or background polling.
+
 ## Build model
 
 Builds run in per-Run workspaces and use structured argument vectors rather

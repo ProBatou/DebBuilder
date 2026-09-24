@@ -42,6 +42,7 @@ function switchView(name) {
   if (name === 'logs') loadExecutions();
   if (name === 'settings') loadSettings();
   if (name === 'dashboard') loadDashboard();
+  if (name === 'system') loadSystemDiagnostics();
 }
 
 function isMobileViewport() {

@@ -378,6 +378,99 @@ test('Dashboard loads its canonical package and lifecycle projections', async ({
   await capture(page, testInfo, 'dashboard');
 });
 
+test('System shows diagnostics, distinguishes degraded states, and downloads the server ZIP', async ({page}) => {
+  await openView(page, 'system');
+  await expect(page.locator('#systemChecks .system-check')).toHaveCount(9);
+  await expectNoHorizontalOverflow(page);
+  await expect(page.locator('#systemRuntime')).toContainText('DebBuilder version');
+  await expect(page.locator('#systemRuntime')).toContainText('Recipe schema');
+  await expect(page.locator('#systemRuntime')).toContainText('Python version');
+  await expect(page.locator('#systemOverallStatus')).toContainText(/OK|Warning|Failed|Unknown/);
+  await expect(page.locator('#view-system a[href="/api/openapi.json"]')).toHaveAttribute('target', '_blank');
+  const original = await (await page.request.get('/api/system/diagnostics')).json();
+  const mocked = {...original, status: 'warning', checks: original.checks.map((check, index) => ({
+    ...check,
+    status: index === 0 ? 'warning' : index === 1 ? 'unknown' : index === 2 ? 'failed' : 'ok',
+    message: index === 0 ? '<img src=x onerror=alert(1)>' : check.message,
+    details: index === 0 ? {...check.details, unexpected_secret: 'DO_NOT_RENDER'} : check.details,
+  }))};
+  await page.route('**/api/system/diagnostics', route => route.fulfill({contentType: 'application/json', body: JSON.stringify(mocked)}));
+  await page.locator('#btnRefreshDiagnostics').click();
+  await expect(page.locator('#systemOverallStatus')).toContainText('Warning');
+  await expect(page.locator('#systemChecks .system-status--warning')).toHaveCount(1);
+  await expect(page.locator('#systemChecks .system-status--unknown')).toHaveCount(1);
+  await expect(page.locator('#systemChecks .system-status--failed')).toHaveCount(1);
+  await expect(page.locator('#systemChecks .system-status--ok')).toHaveCount(6);
+  await expect(page.locator('#systemChecks')).toContainText('<img src=x onerror=alert(1)>');
+  await expect(page.locator('#systemChecks img')).toHaveCount(0);
+  await expect(page.locator('#systemChecks')).not.toContainText('DO_NOT_RENDER');
+  await page.unroute('**/api/system/diagnostics');
+  const downloadPromise = page.waitForEvent('download');
+  await page.locator('#btnSystemSupportBundle').click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toBe('debbuilder-support.zip');
+  await expect(page.locator('#btnSystemSupportBundle')).toBeEnabled();
+});
+
+test('Recipe and Run inspectors load on demand and contextual support downloads use selected IDs', async ({page}) => {
+  const requests = [];
+  page.on('request', request => { if (request.url().includes('/inspect')) requests.push(request.url()); });
+  await openView(page, 'recipes');
+  await page.locator('#workflowSelect').selectOption('seerr');
+  await expect(page.locator('#recipeTitle')).toHaveText('seerr');
+  expect(requests).toHaveLength(0);
+  await page.locator('#btnInspectRecipe').click();
+  await expect(page.locator('#systemInspectorDialog')).toBeVisible();
+  await expect(page.locator('#systemInspectorContent')).toContainText('Source summary');
+  await expect(page.locator('#systemInspectorContent')).toContainText('Build command count');
+  await expectNoHorizontalOverflow(page);
+  await expect(page.locator('#systemInspectorContent')).not.toContainText('build.environment');
+  expect(requests.some(url => url.includes('/api/recipes/seerr/inspect'))).toBe(true);
+  await page.locator('#btnCloseSystemInspector').click();
+  const recipeDownload = page.waitForEvent('download');
+  const recipeRequest = page.waitForRequest(request => request.url().includes('/api/support-bundle?recipe_id=seerr'));
+  await page.locator('#btnRecipeSupportBundle').click();
+  await recipeRequest;
+  expect((await recipeDownload).suggestedFilename()).toBe('debbuilder-support.zip');
+
+  await openView(page, 'logs');
+  await page.locator('#executionList [data-execution-id="ui-06-ready-to-publish"]').click();
+  await expect(page.locator('#btnInspectRun')).toBeEnabled();
+  await page.locator('#btnInspectRun').click();
+  await expect(page.locator('#systemInspectorContent')).toContainText('Recipe fingerprint SHA-256');
+  await expect(page.locator('#systemInspectorContent')).toContainText('Recovery and containment');
+  await expectNoHorizontalOverflow(page);
+  expect(requests.some(url => url.includes('/api/executions/ui-06-ready-to-publish/inspect'))).toBe(true);
+  await page.locator('#btnCloseSystemInspector').click();
+  const runDownload = page.waitForEvent('download');
+  const runRequest = page.waitForRequest(request => request.url().includes('/api/support-bundle?run_id=ui-06-ready-to-publish'));
+  await page.locator('#btnRunSupportBundle').click();
+  await runRequest;
+  expect((await runDownload).suggestedFilename()).toBe('debbuilder-support.zip');
+});
+
+test('System and support errors show canonical messages without rendering response markup', async ({page}) => {
+  await page.route('**/api/system/diagnostics', route => route.fulfill({
+    status: 503, contentType: 'application/json',
+    body: JSON.stringify({ok: false, error: {code: 'settings_unavailable', message: '<safe settings unavailable>', details: {}}}),
+  }));
+  await openView(page, 'system');
+  await expect(page.locator('#systemFeedback')).toHaveText('<safe settings unavailable>');
+  await expect(page.locator('#view-system safe')).toHaveCount(0);
+  await page.unroute('**/api/system/diagnostics');
+  await page.locator('#btnRefreshDiagnostics').click();
+  await expect(page.locator('#systemChecks .system-check')).toHaveCount(9);
+  await page.route('**/api/support-bundle', route => route.fulfill({
+    status: 409, contentType: 'application/json',
+    body: JSON.stringify({ok: false, error: {code: 'run_inspection_unavailable', message: '<bundle unavailable>', details: {}}}),
+  }));
+  await page.locator('#btnSystemSupportBundle').click();
+  await expect(page.locator('.toast-message')).toContainText('<bundle unavailable>');
+  await expect(page.locator('.toast-message bundle')).toHaveCount(0);
+  await expect(page.locator('#btnSystemSupportBundle')).toBeEnabled();
+  page.uiErrors = page.uiErrors.filter(message => !message.includes('status of 503') && !message.includes('status of 409'));
+});
+
 test('Packages supports search, status filtering, and details', async ({page}, testInfo) => {
   await openView(page, 'packages');
   await expect(page.locator('#packageList .package-table-row')).toHaveCount(8);

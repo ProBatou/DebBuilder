@@ -192,6 +192,8 @@ function updateExecutionActionButtons(execution) {
   const validateButton = $('btnRevalidateExecution');
   const publishButton = $('btnPublishExecution');
   const deleteButton = $('btnDeleteExecutionLog');
+  const inspectButton = $('btnInspectRun');
+  const supportButton = $('btnRunSupportBundle');
   const cancelButton = $('btnCancelExecution');
   const cancellationState = executionCancellationState(execution?.id);
   const validationCancellation = validationCancellationState(execution?.id);
@@ -215,6 +217,8 @@ function updateExecutionActionButtons(execution) {
     cancelButton.textContent = validationActive ? (validationCancelling ? 'Cancelling validation…' : 'Cancel validation') : cancelling ? 'Cancelling…' : 'Cancel';
   }
   if (deleteButton) deleteButton.disabled = !execution || executionIsLive(execution) || validationPending || publicationPending;
+  if (inspectButton) inspectButton.disabled = !execution;
+  if (supportButton) supportButton.disabled = !execution;
 }
 
 function renderExecutionCancellation(execution) {

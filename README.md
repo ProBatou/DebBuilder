@@ -205,6 +205,11 @@ for file in $(find static -name '*.js' -type f); do node --check "$file"; done
 git diff --check
 ```
 
+The admin sidebar's **System** view provides read-only diagnostics, a bounded
+support-bundle download, and the raw OpenAPI contract. Selected Recipes and
+Runs also offer read-only inspection and contextual bundle downloads; see
+[the API documentation](docs/API.md) for scope and excluded data.
+
 Browser tests use Playwright: `npm install`, `npx playwright install chromium`,
 then `npm run test:ui`. Development scenarios and contributor rules are in the
 [development guide](docs/DEVELOPMENT.md).

@@ -369,6 +369,29 @@
 }
 
 /* Recipes */
+/* Compact read-only System surface and inspector, using existing card/dialog tokens. */
+.system-card { margin-bottom: var(--space-3); }
+.system-checks { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: var(--space-3); }
+.system-check { min-width: 0; }
+.system-check-head, .system-inspector-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
+.system-check-head h4 { margin: 0; font-size: var(--text-section-title); }
+.system-check p { margin-block: var(--space-2); }
+.system-facts { display: grid; gap: var(--space-1); margin: var(--space-2) 0 0; }
+.system-fact { display: flex; justify-content: space-between; gap: var(--space-3); min-width: 0; padding-block: 3px; }
+.system-fact dt { color: var(--text-muted); }
+.system-fact dd { margin: 0; max-width: 62%; overflow-wrap: anywhere; text-align: right; }
+.system-status { display: inline-flex; flex: 0 0 auto; border-radius: var(--radius-pill); border: 1px solid currentColor; padding: 3px 9px; font-weight: 700; }
+.system-status--ok { color: var(--success); }
+.system-status--warning { color: var(--warning); }
+.system-status--failed { color: var(--danger); }
+.system-status--unknown { color: var(--info); }
+.system-legend { margin-top: var(--space-3); }
+.system-inspector-dialog { width: min(720px, calc(100vw - 24px)); max-height: min(86dvh, 900px); overflow: auto; }
+.system-inspector-head { margin-bottom: var(--space-3); }
+.system-inspection-section { margin-top: var(--space-2); }
+.system-inspection-section h3 { font-size: var(--text-section-title); }
+.system-steps { margin-bottom: 0; padding-left: 22px; }
+
 #view-recipes { --recipe-stepper-height: 42px; height: auto; overflow: visible; }
 .recipe-page-header { margin-bottom: var(--space-3); }
 

@@ -109,3 +109,15 @@ There are no arbitrary entry names or filesystem traversal. Only the existing
 sanitized diagnostics and inspectors are serialized: no raw Settings, Secrets,
 Recipes, Runs, logs, command output, OCI data or repository files. Treat the
 download as operator data nevertheless and share it deliberately.
+
+## Operator UI consumers
+
+The existing admin sidebar has one **System** view. It displays the runtime
+fields and nine checks from `/api/system/diagnostics`, with an explicit legend
+for OK, Warning, Failed and Unknown; Refresh makes a new on-demand request.
+The page downloads the server-generated support ZIP and links to the raw
+`/api/openapi.json` contract. The Recipes toolbar and selected Run actions
+open the respective `/inspect` projections on demand and can download a
+bundle scoped to that one selected ID. The UI neither inspects ZIP contents
+nor reconstructs diagnostics from raw Recipe/Run DTOs. No logs, authored
+commands, secrets, private paths or raw records are shown in these views.

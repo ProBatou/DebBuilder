@@ -1,0 +1,19 @@
+{
+  "profiles": {
+    "bookworm": {
+      "digest": "sha256:871edf6fb764805c7e149a600080adb66e692952a1655ef1fb2ca883b9c6f1a7",
+      "input_sha256": "802f278a4fddc3841b50066dc3a9acb462c3c071e52a2bbd1d99e4e9dc396449",
+      "inputs": [
+        "validation/Dockerfile"
+      ]
+    },
+    "bookworm-node22": {
+      "digest": "sha256:e6e9e2381e3385c6bb17b9ea1859e47e1a02978ae207594eb206232e96f90bc7",
+      "input_sha256": "415b1b1f2d475fe4246d4372b0318e13639e5644bda8c7b9e8f559b239b634c4",
+      "inputs": [
+        "validation/Dockerfile.node22"
+      ]
+    }
+  },
+  "schema_version": 1
+}

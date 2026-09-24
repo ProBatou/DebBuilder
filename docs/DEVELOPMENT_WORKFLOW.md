@@ -123,21 +123,3 @@ implementation requirement for the current task.
 Persisted formats must evolve deliberately. Version durable schemas and fail
 clearly on unsupported or corrupt formats. Any future format transition needs
 an explicit contract before implementation.
-
-## Prompt convention for Codex work
-
-When ChatGPT prepares a ready-to-paste Codex implementation or audit prompt
-for Baptiste, it should state outside the prompt: the recommended model,
-reasoning level, whether to use the same or a new session, and a short reason.
-This is guidance, not a rigid technical requirement; choose the cheapest model
-appropriate to the risk and complexity. As a general guide:
-
-- **Luna** — tiny, mechanical, administrative, or simple documentation work.
-- **Terra** — localized implementation, UI work, or moderate isolated changes.
-- **Sol** — serious backend, multi-file, runtime, architecture, or complex
-  debugging work.
-- **Astra** — exceptional, very difficult investigation only.
-
-For long-running work, preserving a useful existing session may be preferable
-to starting a new one. A complete ready-to-paste prompt uses one outer Markdown
-fence; nested fences are allowed only when safely contained by that outer fence.

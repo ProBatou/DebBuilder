@@ -212,7 +212,7 @@ def reconcile_builtin_recipe(
         if existing_management is None:
             raise BuiltinRecipeError(
                 "builtin_recipe_adoption_failed",
-                "Existing reserved Recipe is not an application-managed v5 definition",
+                "Existing reserved Recipe is not an application-managed definition",
                 path="$.management",
             )
 

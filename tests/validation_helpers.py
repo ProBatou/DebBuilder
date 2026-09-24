@@ -22,6 +22,7 @@ def prepare_admitted_for_test(
     profile_name="bookworm",
     repositories=None,
     test_ca_certificate=None,
+    image_override=None,
 ):
     """Exercise preparation with an attempt created by ValidationManager."""
     run = store.load(run_id)
@@ -41,12 +42,18 @@ def prepare_admitted_for_test(
         store, execute=lambda *_args: None, registry_root=registry_root,
         workspace_root=Path(run["workspace"]).parent.parent,
     )
-    with store.locked_run(run_id):
-        admitted = manager._admit_locked(
-            run_id, store.load(run_id), profile_name=profile_name,
-            previous_artifact=str(previous_artifact or ""), automatic=False,
-            publish_after_success=False,
-        )
+    # Legacy real-OCI fixture deliberately injects its locally built image.
+    # Production admission always uses the release digest manifest.
+    from unittest import mock
+    from debbuilder.validation_oci import PodmanRuntime
+    local_image = image_override or PodmanRuntime(Path(run["workspace"])).inspect_image(resolve_profile(profile_name)["image"])
+    with mock.patch("debbuilder.validation_service.admitted_image", return_value=local_image):
+        with store.locked_run(run_id):
+            admitted = manager._admit_locked(
+                run_id, store.load(run_id), profile_name=profile_name,
+                previous_artifact=str(previous_artifact or ""), automatic=False,
+                publish_after_success=False,
+            )
     snapshot = (
         Path(run["workspace"]) / "validation" / admitted["id"] / "preparation-previous.deb"
         if previous_artifact else None

@@ -1,0 +1,19 @@
+{
+  "images": [
+    {
+      "architecture": "amd64",
+      "digest": "sha256:871edf6fb764805c7e149a600080adb66e692952a1655ef1fb2ca883b9c6f1a7",
+      "oci_architecture": "amd64",
+      "profile": "bookworm",
+      "repository": "ghcr.io/probatou/debbuilder-validation-bookworm"
+    },
+    {
+      "architecture": "amd64",
+      "digest": "sha256:e6e9e2381e3385c6bb17b9ea1859e47e1a02978ae207594eb206232e96f90bc7",
+      "oci_architecture": "amd64",
+      "profile": "bookworm-node22",
+      "repository": "ghcr.io/probatou/debbuilder-validation-node22"
+    }
+  ],
+  "schema_version": 1
+}

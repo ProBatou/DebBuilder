@@ -8,6 +8,7 @@ from pathlib import Path
 
 from . import storage
 from .resource_limits import ResourceLimitError
+from .runtime import native_debian_architecture
 from .settings_store import (
     SECRET_PRESERVE_SENTINEL,
     SessionSecretError,
@@ -45,7 +46,7 @@ def defaults_from_environment(
         repo_default,
         suite_default,
         component_default,
-        "amd64",
+        native_debian_architecture(),
         public_url,
         security={
             "auth_mode": auth_mode,
@@ -148,7 +149,7 @@ def _mutation_plan(payload: dict, current: dict, existing_secrets: dict) -> tupl
     return new_settings, canonical_secrets, canonical_secrets != existing_secrets
 
 
-def update_settings(data_dir: Path, payload: dict, defaults: dict) -> None:
+def update_settings(data_dir: Path, payload: dict, defaults: dict, *, before_save=None) -> None:
     """Serialize the complete current-v1 mutation, including resource-only repair."""
     with storage.locked_path(settings_path(data_dir)):
         try:
@@ -167,6 +168,8 @@ def update_settings(data_dir: Path, payload: dict, defaults: dict) -> None:
         new_settings, new_secrets, secrets_changed = _mutation_plan(
             payload, current, existing_secrets,
         )
+        if before_save is not None:
+            before_save(current, new_settings)
         if secrets_changed:
             save_secrets(data_dir, new_secrets)
         save_settings(data_dir, new_settings)

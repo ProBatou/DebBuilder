@@ -13,6 +13,7 @@ from urllib.parse import parse_qsl, urlparse
 from . import storage
 from .workspace_cleanup import DEFAULT_POLICY, validate_policy
 from .resource_limits import FIELDS, ResourceLimitError, empty_policy, normalize_policy
+from .runtime import native_debian_architecture
 
 _SECRET_WORDS = re.compile(r"(?i)(token|secret|password|passwd|apikey|api_key|client_secret)")
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -263,7 +264,19 @@ def _validate_url(value: str, field: str, *, allow_empty: bool = False, path: st
 
 
 def _validate_repo_url(value: str, *, path: str = "$.apt.repository") -> str:
-    return _validate_url(value, "repository", path=path)
+    if value == "":
+        return ""
+    if not re.fullmatch(r"https?://[A-Za-z0-9.-]+(?::[0-9]{1,5})?(?:/[A-Za-z0-9._~/-]*)?", value):
+        raise SettingsDocumentError("invalid_settings_field", "repository must be a safe HTTP(S) base URL", path=path)
+    parsed = urlparse(value)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise SettingsDocumentError("invalid_settings_field", "repository port is invalid", path=path) from exc
+    if (not parsed.hostname or parsed.hostname.startswith(".") or parsed.hostname.endswith(".")
+            or ".." in parsed.hostname or port == 0 or any(part in {".", ".."} for part in parsed.path.split("/"))):
+        raise SettingsDocumentError("invalid_settings_field", "repository URL is invalid", path=path)
+    return value.rstrip("/")
 
 
 def _validate_name(value: str, field: str, *, path: str = "$") -> str:
@@ -432,7 +445,7 @@ def validate_settings_document(value: dict) -> dict:
     apt = _object(value["apt"], "$.apt")
     _require_exact_fields(apt, {"repository", "distribution", "component", "architecture"}, "$.apt")
     architecture = _validate_name(_string(apt["architecture"], "$.apt.architecture"), "architecture", path="$.apt.architecture")
-    if architecture not in _ARCHES:
+    if architecture not in _ARCHES and architecture != native_debian_architecture():
         raise SettingsDocumentError(
             "invalid_settings_field", "Unsupported architecture", path="$.apt.architecture",
         )
@@ -526,7 +539,7 @@ def validate_settings(payload: dict, current: dict) -> dict:
                 result["apt"][field] = _validate_name(_string(apt[field], f"$.apt.{field}"), field, path=f"$.apt.{field}")
         if "architecture" in apt:
             architecture = _validate_name(_string(apt["architecture"], "$.apt.architecture"), "architecture", path="$.apt.architecture")
-            if architecture not in _ARCHES:
+            if architecture not in _ARCHES and architecture != native_debian_architecture():
                 raise SettingsDocumentError(
                     "invalid_settings_field", "Unsupported architecture", path="$.apt.architecture",
                 )

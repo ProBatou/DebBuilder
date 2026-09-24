@@ -1211,7 +1211,7 @@ def _probe_capability() -> ContainmentCapability:
     if not _cgroup2_is_unified():
         return ContainmentCapability("process_group", False, "a unified cgroup v2 mount is required")
     connection = None
-    read_fd = write_fd = -1
+    read_fd = write_fd = gate_read = gate_write = -1
     probe_run = "containment-capability-probe"
     command_id = os.urandom(16).hex()
     unit_name = command_unit_name(probe_run, command_id)
@@ -1232,18 +1232,22 @@ def _probe_capability() -> ContainmentCapability:
         lease_fd = _acquire_namespace_lease(exclusive=False)
         connection = _SystemdConnection()
         read_fd, write_fd = os.pipe()
+        gate_read, gate_write = os.pipe()
         # Use the same required property set and FD transport as real commands.
         start_attempted = True
         connection.start_transient(
             unit_name,
-            arguments=["/usr/bin/sleep", "0.5"],
-            executable="/usr/bin/sleep",
+            arguments=["/usr/bin/cat"],
+            executable="/usr/bin/cat",
             cwd=Path("/"),
             environment={"PATH": "/usr/bin:/bin"},
             stdout_fd=write_fd,
             stderr_fd=write_fd,
+            stdin_fd=gate_read,
             description=unit_description(probe_run, command_id),
         )
+        os.close(gate_read)
+        gate_read = -1
         deadline = time.monotonic() + OPERATION_TIMEOUT
         snapshot = None
         while time.monotonic() < deadline:
@@ -1259,10 +1263,12 @@ def _probe_capability() -> ContainmentCapability:
         matched = _snapshot_matches_intent(snapshot, metadata)
         if matched.status is not VerificationStatus.MATCH:
             raise ContainmentError(matched.reason)
+        if snapshot.command_complete:
+            raise ContainmentError("transient-service probe exited before verification")
         if snapshot.control_group != control_group:
             raise ContainmentError("transient-service probe did not enter the expected cgroup")
         events = CGROUP_ROOT / control_group.removeprefix("/") / "cgroup.events"
-        if not events.is_file() or "populated " not in events.read_text(encoding="ascii"):
+        if not events.is_file() or "populated 1" not in events.read_text(encoding="ascii").splitlines():
             raise ContainmentError("transient-service cgroup lifecycle is not inspectable")
         recovered = reconcile_probe()
         cleanup_gone = recovered.gone
@@ -1286,7 +1292,7 @@ def _probe_capability() -> ContainmentCapability:
             return ContainmentCapability("unresolved", False, reason)
         return ContainmentCapability("process_group", False, str(exc))
     finally:
-        for fd in (write_fd, read_fd):
+        for fd in (write_fd, read_fd, gate_read, gate_write):
             if fd >= 0:
                 try:
                     os.close(fd)
@@ -1356,7 +1362,7 @@ def resource_limit_capability(policy: dict, *, workspace: str | Path, refresh: b
             "reason": base.reason[:500],
         }
     connection = None
-    read_fd = write_fd = -1
+    read_fd = write_fd = gate_read = gate_write = -1
     probe_run = "resource-limit-capability-probe"
     command_id = os.urandom(16).hex()
     unit_name = command_unit_name(probe_run, command_id)
@@ -1378,19 +1384,23 @@ def resource_limit_capability(policy: dict, *, workspace: str | Path, refresh: b
         lease_fd = _acquire_namespace_lease(exclusive=False)
         connection = _SystemdConnection()
         read_fd, write_fd = os.pipe()
+        gate_read, gate_write = os.pipe()
         start_attempted = True
         connection.start_transient(
             unit_name,
-            arguments=["/usr/bin/sleep", "0.3"],
-            executable="/usr/bin/sleep",
+            arguments=["/usr/bin/cat"],
+            executable="/usr/bin/cat",
             cwd=workspace,
             environment={"PATH": "/usr/bin:/bin"},
             stdout_fd=write_fd,
             stderr_fd=write_fd,
+            stdin_fd=gate_read,
             description=unit_description(probe_run, command_id),
             resource_policy=canonical,
             resource_workspace=workspace,
         )
+        os.close(gate_read)
+        gate_read = -1
         deadline = time.monotonic() + OPERATION_TIMEOUT
         verification = VerificationResult(VerificationStatus.NOT_RUNNING, "resource probe was not observable")
         while time.monotonic() < deadline:
@@ -1408,6 +1418,8 @@ def resource_limit_capability(policy: dict, *, workspace: str | Path, refresh: b
             time.sleep(POLL_INTERVAL)
         if verification.status is not VerificationStatus.MATCH:
             raise ContainmentError(verification.reason)
+        if snapshot is None or snapshot.command_complete:
+            raise ContainmentError("resource probe exited before verification")
         recovered = reconcile_probe()
         cleanup_gone = recovered.gone
         if not cleanup_gone:
@@ -1441,7 +1453,7 @@ def resource_limit_capability(policy: dict, *, workspace: str | Path, refresh: b
             "reason": reason[:500],
         }
     finally:
-        for fd in (write_fd, read_fd):
+        for fd in (write_fd, read_fd, gate_read, gate_write):
             if fd >= 0:
                 try:
                     os.close(fd)
@@ -1478,13 +1490,21 @@ def _wait_for_unit_disappearance(
             verification = VerificationResult(VerificationStatus.NOT_RUNNING, "transient unit does not exist")
         else:
             verification = authorize_snapshot(snapshot)
-        # During unload systemd can briefly expose an inactive, empty unit
-        # object with Transient=no. No further signal is sent in this phase.
+        # Unit and Service properties are separate D-Bus reads. During unload,
+        # the Unit fields may still describe the previously authenticated unit
+        # while its Service fields are already empty. Neither an inactive
+        # empty unit nor this mixed read authorizes another action; exact unit
+        # and cgroup absence are still required below.
         unloading_stub = bool(
             snapshot is not None
-            and snapshot.active_state == "inactive"
+            and last is not None
+            and last.unit_name == unit_name
+            and snapshot.unit_name == unit_name
             and not snapshot.control_group
-            and not snapshot.transient
+            and (
+                snapshot.active_state == "inactive"
+                or (snapshot.service_type == "" and snapshot.main_pid == 0)
+            )
         )
         if (
             verification.status in {VerificationStatus.MISMATCH, VerificationStatus.UNVERIFIABLE}

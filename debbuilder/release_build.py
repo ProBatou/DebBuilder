@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from .recipe_schema import validate_recipe_metadata
 from .runtime import RuntimeConfig
 from .source_acquisition import SourceError, version_from_resolution
 from .systemd_unit import generate_unit
+from .validation_images import MANIFEST_NAME, load_manifest, ValidationImageError
 
 
 PACKAGED_ENVIRONMENT_FILE = "/etc/debbuilder/debbuilder.env"
@@ -154,7 +156,46 @@ def _dependency_names(value: str) -> set[str]:
     return names
 
 
-def _extract_and_verify(plan: dict, staging: dict, artifact: dict, workspace: Path) -> dict:
+def _prove_public_images(images: dict, workspace: Path) -> None:
+    """Require anonymous registry access and local Podman digest/arch proof."""
+    authfile = workspace / "empty-registry-auth.json"
+    authfile.write_text("{}\n", encoding="utf-8")
+    authfile.chmod(0o600)
+    podman = ["podman", "--root", str(workspace / "public-image-store"), "--runroot", str(workspace / "public-image-run")]
+    try:
+        for row in images["images"]:
+            reference = f"{row['repository']}@{row['digest']}"
+            try:
+                pull = subprocess.run(
+                    [*podman, "pull", "--quiet", "--authfile", str(authfile), reference],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=600, check=False,
+                    env={**os.environ, "REGISTRY_AUTH_FILE": str(authfile)},
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise ReleaseBuildError("release_validation_image_unproven", "Anonymous Validation image pull failed") from exc
+            if pull.returncode != 0:
+                raise ReleaseBuildError("release_validation_image_unproven", f"Public Validation image could not be proved: {row['profile']}/{row['architecture']}")
+            try:
+                inspected = subprocess.run(
+                    [*podman, "image", "inspect", reference], capture_output=True, text=True,
+                    timeout=30, check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise ReleaseBuildError("release_validation_image_unproven", "Anonymous Validation image inspection failed") from exc
+            try:
+                parsed = json.loads(inspected.stdout)
+                exact = inspected.returncode == 0 and isinstance(parsed, list) and len(parsed) == 1 and isinstance(parsed[0], dict)
+                exact = exact and re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", str(parsed[0]["Id"]).lower()) is not None
+                exact = exact and reference in parsed[0]["RepoDigests"] and parsed[0]["Architecture"] == row["oci_architecture"]
+            except (ValueError, TypeError, KeyError):
+                exact = False
+            if not exact:
+                raise ReleaseBuildError("release_validation_image_unproven", f"Public Validation image failed local digest or architecture proof: {row['profile']}/{row['architecture']}")
+    finally:
+        authfile.unlink(missing_ok=True)
+
+
+def _extract_and_verify(plan: dict, staging: dict, artifact: dict, workspace: Path, expected_images: dict) -> dict:
     recipe = plan["recipe"]
     inspection = artifact["inspection"]
     expected_metadata = {
@@ -225,6 +266,19 @@ def _extract_and_verify(plan: dict, staging: dict, artifact: dict, workspace: Pa
     )
     if not postinst_path.is_file() or expected_install not in postinst_path.read_text():
         raise ReleaseBuildError("release_environment_install_missing", "Packaged postinst does not install its environment file")
+    bootstrap_path = extract_root / "opt/debbuilder/bootstrap_local.py"
+    packaged_images = extract_root / "opt/debbuilder/debbuilder" / MANIFEST_NAME
+    try:
+        if load_manifest(packaged_images, complete=True) != expected_images:
+            raise ReleaseBuildError("release_validation_images_mismatch", "Packaged Validation image manifest changed during build")
+    except ValidationImageError as exc:
+        raise ReleaseBuildError(exc.code, str(exc)) from exc
+    preflight = "/usr/bin/python3 /opt/debbuilder/bootstrap_local.py --environment-file /etc/debbuilder/debbuilder.env"
+    postinst = postinst_path.read_text()
+    if not bootstrap_path.is_file() or postinst.count(preflight) != 1 or "systemctl daemon-reload" not in postinst or not (
+        postinst.index(expected_install) < postinst.index(preflight) < postinst.index("systemctl daemon-reload")
+    ):
+        raise ReleaseBuildError("release_bootstrap_preflight_missing", "Packaged repository preflight must run before service restart")
     runtime = RuntimeConfig.from_environment(Path(recipe["install"]["destination"]), _environment_values(template_path))
     if runtime.data != Path("/var/lib/debbuilder"):
         raise ReleaseBuildError(
@@ -245,7 +299,8 @@ def _extract_and_verify(plan: dict, staging: dict, artifact: dict, workspace: Pa
 
 def build_release_artifacts(
     *, tag: str, source_root: str | Path, output_directory: str | Path,
-    temporary_parent: str | Path | None = None,
+    temporary_parent: str | Path | None = None, validation_images: str | Path | None = None,
+    _allow_test_image_fixture: bool = False,
 ) -> dict:
     """Build checked Release assets without touching DebBuilder runtime state."""
     plan = release_plan(tag)
@@ -253,13 +308,31 @@ def build_release_artifacts(
     if not source.is_dir():
         raise ReleaseBuildError("invalid_release_source", f"Release source is not a directory: {source}")
     output = _safe_output_directory(output_directory)
+    if validation_images is None:
+        raise ReleaseBuildError("release_validation_images_missing", "Release build requires verified immutable Validation image descriptors")
+    try:
+        images = load_manifest(validation_images, complete=True)
+    except ValidationImageError as exc:
+        raise ReleaseBuildError(exc.code, str(exc)) from exc
     temporary_parent_path = _safe_temporary_parent(temporary_parent)
 
     with tempfile.TemporaryDirectory(prefix="debbuilder-release-build-", dir=temporary_parent_path) as temporary:
         workspace = Path(temporary)
         for name in ("source", "staging", "artifacts", "logs"):
             (workspace / name).mkdir()
+        if not _allow_test_image_fixture:
+            _prove_public_images(images, workspace)
         _copy_source_inputs(plan, source, workspace / "source")
+        image_target = workspace / "source" / "debbuilder" / MANIFEST_NAME
+        if image_target.exists() and not _allow_test_image_fixture:
+            try:
+                source_images = load_manifest(image_target, complete=True)
+            except ValidationImageError as exc:
+                raise ReleaseBuildError(exc.code, str(exc)) from exc
+            if source_images != images:
+                raise ReleaseBuildError("release_validation_images_conflict", "Source Validation image manifest differs from verified descriptors")
+        else:
+            image_target.write_text(json.dumps(images, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
         detection = project_detection.detect_project(workspace / "source", working_directory=plan["recipe"]["build"]["working_directory"])
         build = build_executor.execute_build(plan["recipe"], detection, workspace / "source", dry_run=False)
         staging = debian_packaging.prepare_staging(
@@ -271,7 +344,7 @@ def build_release_artifacts(
         )
         if artifact["name"] != plan["filename"] or Path(artifact["path"]).parent != workspace / "artifacts":
             raise ReleaseBuildError("release_artifact_mismatch", "Packaging returned an unexpected artifact path")
-        checks = _extract_and_verify(plan, staging, artifact, workspace)
+        checks = _extract_and_verify(plan, staging, artifact, workspace, images)
 
         with tempfile.TemporaryDirectory(prefix=".debbuilder-release-assets-", dir=output.parent) as publish_temporary:
             publish = Path(publish_temporary)
@@ -302,13 +375,15 @@ def build_release_artifacts(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tag", required=True, help="Release tag, for example v0.2.2")
+    parser.add_argument("--tag", required=True, help="Release tag, for example vX.Y.Z")
     parser.add_argument("--source-root", default=".", help="Checked-out tagged source tree")
     parser.add_argument("--output-dir", default="release-assets", help="New directory for the .deb and SHA256SUMS")
+    parser.add_argument("--validation-images", required=True, help="Verified GHCR digest manifest from the release image step")
     arguments = parser.parse_args(argv)
     try:
         result = build_release_artifacts(
             tag=arguments.tag, source_root=arguments.source_root, output_directory=arguments.output_dir,
+            validation_images=arguments.validation_images,
         )
     except (ReleaseBuildError, debian_packaging.PackagingError, build_executor.BuildError, project_detection.DetectionError, OSError, ValueError) as exc:
         parser.exit(1, f"release build failed: {exc}\n")

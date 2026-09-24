@@ -277,11 +277,10 @@ def serve(selected: Scenario, *, host: str = "127.0.0.1", port: int = 8765) -> N
             canonical_recipe = None
         configure_environment(runtime, host=host, port=port)
         from debbuilder import app
-        from server import Handler
         state = selected.setup(app, runtime) if selected.setup else ScenarioState()
         state.canonical_recipe = canonical_recipe
 
-        class BehaviorLabHandler(Handler):
+        class BehaviorLabHandler(app.Handler):
             def _canonical_run(self, data: object) -> bool:
                 if not selected.allow_run or not state.canonical_recipe or not isinstance(data, dict):
                     return False

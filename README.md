@@ -1,238 +1,202 @@
 # DebBuilder
 
-DebBuilder is a self-hosted console for building, validating, and publishing Debian packages from GitHub sources into a personal APT repository.
+[![Latest release](https://img.shields.io/github/v/release/ProBatou/DebBuilder?display_name=tag)](https://github.com/ProBatou/DebBuilder/releases/latest)
+
+DebBuilder is a self-hosted web console for turning GitHub-hosted projects into
+Debian packages, validating their install lifecycle, and publishing them to a
+signed personal APT repository.
 
 The [roadmap](docs/ROADMAP.md) tracks the active v1 release audit and the
 post-v1 work. The v1 release is still in progress.
 
-## Current features
+## What it does
 
-- GitHub release, tag, source-archive, and official release-asset acquisition;
-- Node.js, Python, Rust, and static project detection;
-- declarative source modifications and source builds;
-- upstream Debian artifact validation;
-- FHS-aware Debian package generation with per-file ownership and modes;
-- service-account, persistent-directory, and advanced systemd unit generation;
-- Podman-based validation profiles and toolchains;
-- `reprepro` publication and reconciliation;
-- Build Run-derived package state and history;
-- runtime/user JSON Recipes;
-- OIDC/header/disabled authentication modes and notifications.
+DebBuilder keeps package creation, validation, publication, and history in one
+place. A Recipe describes an upstream source and its Debian packaging policy;
+each execution creates a Build Run with pinned source identity and retained
+artifacts.
 
-The canonical lifecycle is:
+## Features
 
-```text
-Recipe → Build Run → OCI validation → APT publication
-```
+- GitHub release, tag, source-archive, and official release-asset acquisition
+- Node.js, Python, Rust, and static-project detection
+- declarative source changes, build commands, Debian metadata, file ownership,
+  persistent directories, and systemd units
+- Podman-based install, upgrade, restart, removal, and purge validation
+- signed `reprepro` publication with exact package reconciliation
+- manual and automated Recipe lifecycles, Run history, OIDC/reverse-proxy
+  authentication modes, and notifications
 
-Enabled Recipe automation uses that same lifecycle. `detect` records only the
-exact upstream identity; `test` creates one dry Run; `build` stops after one
-successful Build; `build_validate` continues through canonical Validation; and
-`full` continues through canonical Publication. The policy and upstream
-identity are captured in the immutable Run admission metadata, so later policy
-upgrades never extend an admitted lifecycle and upstream movement never changes
-its input. Disabling automation, deactivating the Recipe, or lowering its policy
-before a not-yet-admitted downstream stage prevents that new stage; an already
-queued or running canonical stage is allowed to reach its normal terminal
-state. Manual Runs remain governed by the existing global post-Build settings.
-
-Validation and publication records belong to the Build Run that produced the
-artifact.
-
-## Project layout
+## How it works
 
 ```text
-debbuilder/          Python backend package
-static/              Browser UI
-static/js/pages/     Vanilla JavaScript page controllers
-static/js/recipe/    Recipe-specific browser behavior
-static/css/          Page-specific styles loaded after the shared stylesheet
-tests/               Unit and static UI tests
-examples/            Public examples
-examples/recipes/    Source-controlled sample Recipes
-data/workflows/      Runtime/user Recipes (ignored by Git)
-data/                Local runtime data (ignored by Git except structural .gitkeep files)
-server.py            Entrypoint
+Recipe -> Build -> Validation -> Publication
 ```
 
-Backend runtime paths and environment parsing live in `debbuilder/runtime.py`.
-HTTP routing stays in `debbuilder/http_handler.py`; package projections,
-executions, automation, validation, and publication are separate services. The
-application module wires those boundaries together for the stdlib HTTP server.
+1. A **Recipe** selects an upstream source and defines how to build and package
+   it.
+2. **Build** resolves an exact upstream identity and produces a Debian package
+   in an isolated Run workspace.
+3. **Validation** exercises the package lifecycle in a disposable Podman
+   container with networking disabled.
+4. **Publication** adds the verified artifact to the signed APT repository.
 
-Recipe input uses one canonical Recipe v5 contract. Persisted and imported
-Recipes must declare `schema_version: 5`; unversioned, older, and newer Recipe
-documents are rejected without rewriting them. New code and API clients must
-emit the canonical v5 shape. Build Run inventories are stored in per-run
-manifests rather than inline in `run.json`.
+Automation uses the same lifecycle and never changes the policy or upstream
+identity already admitted for a Run. See [Architecture](docs/ARCHITECTURE.md)
+for the deeper model.
+
+## Installation
+
+> **Release status:** The steps below describe the qualified v1 installation
+> contract. v1 is not published yet; the badge above always reports the latest
+> public release.
+
+The currently qualified installation target is Debian 13 on amd64, with
+systemd and cgroup v2. The host needs network access for normal APT dependency
+installation, GitHub source acquisition, and the first pull of each selected
+Validation image.
+
+When the v1 package is published, download its Debian package and `SHA256SUMS`
+from [GitHub Releases](https://github.com/ProBatou/DebBuilder/releases), verify
+the checksum, then install the local package with APT:
+
+```bash
+sha256sum --check SHA256SUMS
+sudo apt install ./debbuilder_<version>_all.deb
+```
+
+On a new Debian installation, run `sudo apt update` first if package indexes
+have not been downloaded. Do not use raw `dpkg -i` as the normal installation
+path: APT installs DebBuilder's declared runtime dependencies automatically.
+
+The qualified v1 package performs all mandatory local bootstrap. It installs
+and enables the systemd service, initializes `reprepro`, generates the
+repository signing key, exports the public key, and creates the repository
+landing page and client installer. No manual repository or GPG setup is
+required.
+
+Its declared runtime dependencies are `python3`, `python3-dbus`, `reprepro`,
+`gnupg`, `gpgv`, `podman`, `kmod`, and `ca-certificates`; APT installs them as
+package dependencies rather than as manual bootstrap steps.
+
+## Access
+
+DebBuilder starts two independently configurable loopback listeners:
+
+| Surface | Default | Purpose |
+| --- | --- | --- |
+| Admin UI and API | `http://127.0.0.1:8099` | Trusted administration, Recipes, Runs, settings |
+| Public APT repository | `http://127.0.0.1:8081` | Repository metadata, packages, public key, client installer |
+
+Use an SSH tunnel locally or place one or both listeners behind an appropriate
+reverse proxy. If the admin surface is exposed beyond localhost, protect it
+with access control such as OIDC, a trusted reverse-proxy identity header, or a
+VPN. The repository surface is intentionally public and contains no admin
+routes. DebBuilder does not route these surfaces by hostname.
+
+## First use
+
+1. Open the admin listener and review **Settings**, especially the public APT
+   repository URL and authentication policy.
+2. Create or import a Recipe and use **Test** to review its proposed package.
+3. Run **Build**, then **Validation**.
+4. Publish the validated artifact.
+5. Open the public repository landing page and use its generated `install.sh`
+   command on an APT client.
+
+## APT repository
+
+Packaged installations default to suite `Luminous` and component `main`. The
+public URL is intentionally unset at first: the local signed repository is
+ready, but client instructions are enabled only after the administrator sets a
+client-reachable URL in Settings or `DEBBUILDER_REPO_URL`.
+
+Once configured, the repository listener serves:
+
+- `/` — repository landing page
+- `/install.sh` — generated client configuration script
+- `/repository.gpg` — public repository signing key
+- `/dists/*` and `/pool/*` — signed APT metadata and packages
+
+The private signing key stays outside the public repository root. The generated
+installer verifies the expected public-key fingerprint, creates a dedicated
+keyring and deb822 source, and runs `apt-get update`. See
+[APT repository operations](docs/APT_REPOSITORY.md).
+
+## Validation
+
+DebBuilder does **not** need GitHub Container Registry (GHCR) to start. GHCR is
+used only when a Validation profile's image is missing locally. Official
+Validation images currently live at:
+
+- `ghcr.io/probatou/debbuilder-validation-bookworm`
+- `ghcr.io/probatou/debbuilder-validation-node22`
+
+The release package contains immutable repository-and-digest descriptors. On
+first use, DebBuilder pulls the exact digest if it is absent; a verified local
+copy can be reused. The package install/upgrade/restart/remove/purge lifecycle
+then runs in a disposable container with networking disabled. The manifest in
+the installed release package—not a mutable tag—is the runtime authority.
+
+The qualified Validation image matrix is currently amd64-only. See
+[Validation](docs/VALIDATION.md) for lifecycle and trust details.
 
 ## Configuration
 
-Copy `.env.example` and adapt it for your instance:
+Packaged defaults are installed at `/etc/debbuilder/debbuilder.env` without
+overwriting an administrator-owned file. Persistent state, Run history,
+repository data, settings, secrets, and the private signing home live under
+`/var/lib/debbuilder` by default.
+
+Important environment settings include:
+
+- `DEBBUILDER_HOST` / `DEBBUILDER_PORT`
+- `DEBBUILDER_REPOSITORY_HOST` / `DEBBUILDER_REPOSITORY_PORT`
+- `DEBBUILDER_REPO_URL`, `DEBBUILDER_SUITE`, and `DEBBUILDER_COMPONENT`
+- `DEBBUILDER_DATA_DIR` and `DEBBUILDER_REPO_ROOT`
+- `DEBBUILDER_AUTH_MODE`, `DEBBUILDER_OIDC_*`, and `DEBBUILDER_NTFY_TOKEN`
+
+See [.env.example](.env.example) for source-development defaults and
+[Operations](docs/OPERATIONS.md) for persistence, cleanup, recovery, and
+containment behavior.
+
+## Security model
+
+DebBuilder is an administrative tool for trusted operators. Build Recipes can
+run upstream code as root on the host, and Validation uses privileged
+containers; command containment limits accidents and cleanup scope but is not
+a security sandbox. Only trusted administrators should edit Recipes or access
+the admin API.
+
+The two HTTP listeners separate the trusted admin surface from intentionally
+public APT assets. Private GPG material and application secrets are never
+served by the public listener. Please report vulnerabilities as described in
+[SECURITY.md](SECURITY.md).
+
+## Documentation
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Operations](docs/OPERATIONS.md)
+- [APT repository operations](docs/APT_REPOSITORY.md)
+- [Validation](docs/VALIDATION.md)
+- [Release process](docs/RELEASE_PROCESS.md)
+- [Development guide](docs/DEVELOPMENT.md)
+- [Roadmap](https://github.com/ProBatou/DebBuilder/blob/main/docs/ROADMAP.md)
+
+## Development and tests
+
+For a source checkout, copy `.env.example` to `.env`, load it into the process
+environment, and start the server:
 
 ```bash
 cp .env.example .env
-```
-
-Main variables:
-
-- `DEBBUILDER_HOST`
-- `DEBBUILDER_PORT`
-- `DEBBUILDER_DATA_DIR`
-- `DEBBUILDER_REPO_ROOT`
-- `DEBBUILDER_REPO_URL`
-- `DEBBUILDER_SUITE`
-- `DEBBUILDER_COMPONENT`
-- `DEBBUILDER_AUTH_MODE`
-- `DEBBUILDER_OIDC_*`
-- `DEBBUILDER_NTFY_TOKEN`
-- `GNUPGHOME`
-
-Secrets and local runtime state are stored under `DEBBUILDER_DATA_DIR` (the
-source-tree `data/` directory by default) and are not intended for Git. Packaged
-deployments use `/var/lib/debbuilder`; their non-secret defaults are installed
-from `packaging/debbuilder.env` into `/etc/debbuilder/debbuilder.env` without
-overwriting an existing administrator-owned file. Persisted `settings.json` and
-`secrets.json` documents use the strict schema version `1`. Unversioned,
-partial, older, newer, malformed, or unknown-field documents are rejected
-during startup without write-back; a fresh installation with neither file
-uses the environment-derived defaults in memory. The secret
-store must be an owner-only (`0600`) regular file. A running v1 instance can
-accept an explicit resource-limits-only repair when that section is the sole
-invalid part of an otherwise canonical Settings v1 document; ordinary reads
-and startup remain strict and never salvage it. Secret mutation accepts the
-literal `"masked"` only as a preserve-existing sentinel, never as a stored
-secret value. Persisted OIDC authentication requires an OIDC client secret at
-startup; the separately provisioned session cookie secret cannot replace it.
-
-Build tools are resolved from the same effective `PATH` used to run build commands. Administrators can extend the DebBuilder service's `PATH` in `/etc/debbuilder/debbuilder.env`, while a Recipe can provide a build-specific `PATH` through its build environment. Tools found there do not need to be owned by a Debian package; manually added build dependencies remain Debian packages checked with `dpkg-query`.
-
-## Execution history and workspace retention
-
-A Run directory contains both persistent history and disposable build data.
-Automatic cleanup only removes the fixed entries `source/` (including compiler
-outputs), `staging/`, `downloads/` and `source.tar.gz`. It keeps `run.json`, the
-Recipe snapshot, logs, manifests, final `.deb` artifacts and validation records
-(including the previous artifact copied for upgrade validation). Validation and
-publication use the retained artifact and metadata, not the source or staging
-trees. Unknown workspace entries are retained.
-
-Settings → Maintenance exposes `workspace_cleanup.enabled` (default `true`) and
-`workspace_cleanup.failed_workspaces_to_retain` (default `5`, integer 0–1000).
-These are application settings, also available through GET/POST `/api/settings`;
-POST accepts validated partial updates, while every saved Settings document is a
-complete canonical schema-v1 object.
-
-Build/dry-run completion and queued cancellation request cleanup from the
-application-owned maintenance worker; execution does not synchronously scan all
-Runs before dequeuing the next one. The same worker requests authorized
-disposable-workspace cleanup after startup and every five minutes, and refreshes
-the read-only storage inventory after each maintenance pass. Completed
-successful/prepared runs are eligible even if manual validation or publication
-will happen later. The five most recent failed/cancelled workspaces are kept
-globally across all Recipes, ordered by the latest lifecycle completion time;
-older failures are cleaned. Failed dry-runs follow the same rule. Already cleaned
-workspaces do not consume retention slots. There is no age limit or automatic
-deletion of final artifacts/history in this policy.
-
-GET `/api/storage` returns only the maintenance worker's cached snapshot; it does
-not walk or mutate the filesystem. Settings → Maintenance shows compact totals
-for managed data, Runs, disposable workspace data, final artifacts and the APT
-repository. Partial, stale, collecting and error states are explicit. Repository
-storage nested under the data root is counted once in the managed total.
-
-“Delete log/history” and “Clear execution history” remove completed execution
-history and detailed output, and also reclaim disposable workspace data even
-when automatic cleanup is disabled. Recipes, managed Packages and APT contents
-are unaffected. A separate `.execution-history-deleted.json` tombstone keeps the
-Run absent from Logs despite later metadata rewrites/restarts. List APIs omit
-deleted history, detail/log APIs return 404, and repeated deletion is idempotent.
-DELETE returns the `workspace_cleanup` result alongside the history deletion.
-Active, recovery-blocked or leased executions return HTTP 409
-(`execution_active`); clear-all
-excludes them and reports per-execution failures if a state changes after its
-preview. Deletion never cancels a build, validation or publication.
-
-APT publication and exact reconciliation additionally use a fail-fast,
-repository-root-scoped filesystem lease. The canonical acquisition order is
-application `MutationGate`, then Run workspace lock, then repository lease; a
-Run lock cannot be acquired while the repository lease is held. The lease pins
-the repository directory and is inherited by the `reprepro` child, so a second
-thread or process cannot enter a publication while that child is alive.
-
-A publication becomes successful only after one exact database entry, one
-exported `Packages` entry, and its safely opened `pool/` file agree with the
-retained source artifact on distribution, component, package, version,
-architecture, size, and SHA-256. That bounded result is stored as a versioned
-publication proof. Success records without such a proof remain
-unverified until explicit reconciliation succeeds. DebBuilder supports the
-standard repository layout under the configured root and rejects path
-redirections that prevent safe proof; administrator-managed reprepro signing
-and hook configuration remains trusted configuration, not a sandbox boundary.
-Public APT downloads remain lock-free and stream a pinned, no-follow file
-descriptor rather than holding the mutation lease for a client connection.
-
-Build, validation, publication, reconciliation and cleanup share a per-Run
-filesystem lock, including across server processes. Cleanup takes this lock
-without waiting and re-reads canonical metadata before deleting. It opens the
-builds root and Run using directory descriptors with symlink following disabled,
-rejects traversal, mismatched Run/workspace identities, unsafe metadata and
-top-level symlink/mounted targets, and uses descriptor-relative, symlink-safe
-recursive deletion. Nested symlinks are unlinked without visiting their targets.
-An artifact recorded inside a disposable tree blocks cleanup. Missing disposable
-entries are safe to retry; `.workspace-cleanup.json` records successful removal.
-Cleanup errors are reported and retried by subsequent sweeps without changing
-the build/lifecycle result. Before removal, Linux `/proc` is checked for processes
-whose working directory, executable or open descriptors use the Run workspace;
-such a Run is kept even if its metadata says failed. Inaccessible process data
-also defers cleanup. A Run with unresolved recovery is preserved even when its
-top-level status looks terminal, and any unresolved global startup-recovery
-blocker disables all destructive cleanup while leaving storage observation
-available. Runs still marked active after a crash are preserved until their state
-is resolved. On Linux hosts with a reachable system systemd manager
-and unified cgroup v2, each Run command is spawned directly by PID 1 in a unique
-transient service. DebBuilder receives stdout/stderr through command-scoped file
-descriptors and terminates the complete service cgroup on cancellation or
-timeout. Capability probing is behavioral; unavailable strong containment uses
-the explicitly weaker dedicated-process-group fallback. The strong backend uses
-Debian's `python3-dbus`, which packaged deployment Recipes should declare in
-their `package.runtime_dependencies`; its absence safely selects the fallback.
-This containment prevents accidental orphan leakage, but root build code can
-escape it and it is not a security sandbox.
-
-At server startup, persisted `pending`, `queued`, `running`, and `cancelling`
-Runs are reconciled before the execution worker opens admission. Interrupted
-Runs are marked failed only after workload absence is authoritative. If an old
-workload cannot be safely identified or proven absent, DebBuilder remains
-available for browsing and history inspection but returns a deterministic 503
-for new Build/Test submissions until a later startup can resolve the blocker.
-Current-boot process-group fallback records remain blocked because escaped
-descendants cannot be excluded; a host reboot provides an authoritative boot
-boundary.
-
-## Python projects
-
-Python detection recognizes `pyproject.toml`, `setup.py`, `setup.cfg`, `requirements.txt`, `requirements-*.txt`, `Pipfile`, `poetry.lock`, and `uv.lock`. It parses declared build-system, interpreter, dependency, and entry-point metadata without executing project files and without translating PyPI names into Debian package names.
-
-Projects with an explicit PEP 517 build system receive `python3 -m build` as a reviewable proposal. Source applications such as DebBuilder have no compilation step: the selected runtime files are packaged directly. A lone helper `.py` file is not a strong Python marker.
-
-## Packaged service privileges
-
-The current package runs `debbuilder.service` as root. Real builds write isolated workspaces, OCI validation starts privileged systemd containers through Podman, and APT publication needs access to reprepro and its signing keyring. A dedicated unprivileged service account would require a separately designed rootless-Podman setup (including subordinate IDs and runtime directories) or privileged helpers; the package does not pretend that such a boundary already exists.
-
-## Run locally
-
-```bash
+set -a
+. ./.env
+set +a
 python3 server.py
 ```
 
-Then open:
-
-```text
-http://127.0.0.1:8099
-```
-
-## Tests
+Run the core checks with:
 
 ```bash
 python3 -m py_compile server.py debbuilder/*.py
@@ -241,72 +205,11 @@ for file in $(find static -name '*.js' -type f); do node --check "$file"; done
 git diff --check
 ```
 
-### Visual UI tests
+Browser tests use Playwright: `npm install`, `npx playwright install chromium`,
+then `npm run test:ui`. Development scenarios and contributor rules are in the
+[development guide](docs/DEVELOPMENT.md).
 
-The Playwright workflow starts the real DebBuilder server on a free loopback
-port with a fresh temporary `DEBBUILDER_DATA_DIR` and repository directory. It
-loads the existing Recipe fixtures plus deterministic showcase Build Runs, and
-removes that isolated runtime after the tests.
+## Version and release status
 
-```bash
-npm install
-npx playwright install chromium
-npm run test:ui
-```
-
-Desktop and mobile captures are written to `.ui-artifacts/desktop/` and
-`.ui-artifacts/mobile/`. The local HTML report and failure traces are kept below
-`.ui-artifacts/` as well; the whole directory is ignored by Git.
-
-### DEV Behavior Lab
-
-List the available isolated DEV scenarios:
-
-```bash
-python3 -m tests.ui.behavior_lab --list-scenarios
-```
-
-Launch the static UI showcase on a LAN-accessible DEV port:
-
-```bash
-python3 -m tests.ui.behavior_lab --scenario showcase --host 0.0.0.0 --port 8765
-```
-
-The default bind is the safer `127.0.0.1`; when using `0.0.0.0`, open the Repo
-VM hostname/IP from another machine. The Lab uses disposable temporary data and
-repository directories, and removes them when stopped. Press Ctrl-C to stop the
-Behavior Lab.
-
-- `showcase` — static Runs, packages, and Recipes for UI review.
-- `cancellation-running` — a live local process tree that can be cancelled.
-- `queued-cancellable` — a Run queued behind a local blocker; cancel it before start.
-- `build-failure` — a harmless failing command with stdout and stderr.
-- `prepared-test` — static prepared Test and staging-preview state.
-- `graceful-shutdown` — active and queued Runs; Ctrl-C exercises normal shutdown.
-- `recovery` — an old-boot interrupted Run is terminalized at startup.
-- `recovery-blocked` — unresolved recovery keeps admission fail-closed.
-
-## Repository access command
-
-The sidebar displays an install command derived from `DEBBUILDER_REPO_URL`:
-
-```bash
-curl -fsSL https://repo.example.invalid/install.sh | sudo bash
-```
-
-Clicking the command copies it to the clipboard.
-
-## Safety notes
-
-DebBuilder is meant to be self-hosted and operated by trusted administrators.
-
-- A real build requires an explicit Build action and confirmation; Test creates
-  a distinct dry-run Build Run.
-- Build commands execute only through the central runner with `shell=False` and
-  a confined Build Run workspace.
-- Administrative API routes can be protected with OIDC or a trusted reverse-proxy header.
-- Public APT files under `/dists/*`, `/pool/*`, `/repository.gpg` and `/install.sh` stay accessible without authentication.
-
-## Version
-
-The current release is DebBuilder 0.1.11.
+The badge at the top of this page reads the latest public release directly from
+GitHub. The repository is preparing for v1, but v1 has not been released.

@@ -49,7 +49,7 @@ class PublicRepositoryFileTests(unittest.TestCase):
             target = root / "pool/main/d/demo.deb"
             target.parent.mkdir(parents=True)
             target.write_bytes(b"package payload")
-            httpd = ThreadingHTTPServer(("127.0.0.1", 0), server_entrypoint.Handler)
+            httpd = ThreadingHTTPServer(("127.0.0.1", 0), server_entrypoint.RepositoryHandler)
             thread = threading.Thread(target=httpd.serve_forever)
             thread.start()
             try:

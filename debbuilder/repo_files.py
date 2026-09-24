@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .repository_lock import RepositoryLockError, pinned_directory, safe_relative_path
 
-PUBLIC_ROOT_FILES = {"repository.gpg", "install.sh"}
+PUBLIC_ROOT_FILES = {"index.html", "repository.gpg", "install.sh"}
 PUBLIC_PREFIXES = ("dists/", "pool/")
 
 
@@ -58,8 +58,14 @@ def open_public_repo_file(repo_root: Path, request_path: str):
 
 
 def content_type(path: Path) -> str:
-    if path.name in {"InRelease", "Release", "Release.gpg", "Packages"}:
+    if path.name == "index.html":
+        return "text/html; charset=utf-8"
+    if path.name == "install.sh":
         return "text/plain; charset=utf-8"
+    if path.name in {"InRelease", "Release", "Packages"}:
+        return "text/plain; charset=utf-8"
+    if path.name == "Release.gpg":
+        return "application/pgp-signature"
     if path.suffix == ".gz":
         return "application/gzip"
     if path.suffix == ".deb":

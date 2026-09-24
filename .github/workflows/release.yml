@@ -18,6 +18,8 @@ jobs:
   build:
     name: Build and check official Debian asset
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       tag: ${{ steps.release_tag.outputs.tag }}
       deb_name: ${{ steps.release_result.outputs.deb_name }}
@@ -43,7 +45,7 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Check out the exact release tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: refs/tags/${{ steps.release_tag.outputs.tag }}
           fetch-depth: 0
@@ -88,6 +90,13 @@ jobs:
       - name: Verify packaging tools
         run: dpkg-deb --version
 
+      - name: Verify qualified Validation image inputs and descriptors
+        run: |
+          python3 -m tests.release_validation_inputs \
+            --repository-root "$GITHUB_WORKSPACE" \
+            --lock "$GITHUB_WORKSPACE/validation/validation_images.lock.json" \
+            --manifest "$GITHUB_WORKSPACE/debbuilder/validation_images.json"
+
       - name: Run release and packaging tests
         run: |
           python3 -m py_compile server.py debbuilder/*.py
@@ -95,11 +104,17 @@ jobs:
             tests.test_builtin_recipe \
             tests.test_debian_packaging \
             tests.test_release_build \
+            tests.test_release_validation_inputs \
             tests.test_runtime_storage \
             tests.test_source_acquisition \
             tests.test_systemd_unit
 
-      - name: Build and inspect official assets
+      - name: Install OCI verification tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman
+
+      - name: Anonymously verify accepted descriptors and build official assets
         id: release_result
         shell: bash
         env:
@@ -108,6 +123,7 @@ jobs:
           python3 -m debbuilder.release_build \
             --tag "$RELEASE_TAG" \
             --source-root "$GITHUB_WORKSPACE" \
+            --validation-images "$GITHUB_WORKSPACE/debbuilder/validation_images.json" \
             --output-dir "$GITHUB_WORKSPACE/release-assets" \
             > release-build.json
           (
@@ -128,7 +144,7 @@ jobs:
           PY
 
       - name: Preserve checked assets for Release creation
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: debbuilder-release-${{ steps.release_tag.outputs.tag }}
           path: release-assets/
@@ -144,7 +160,7 @@ jobs:
 
     steps:
       - name: Download checked assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: debbuilder-release-${{ needs.build.outputs.tag }}
           path: release-assets

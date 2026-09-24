@@ -583,6 +583,11 @@ def _validate_artifact_locked(
         selected_profile = resolve_profile(profile)
     except ValueError as exc:
         raise ValidationError("validation_profile_unknown", str(exc)) from exc
+    # The admitted/prepared image is immutable for this attempt. The current
+    # profile definition may have changed since admission.
+    prepared_image = prepared_dependencies.get("image") if isinstance(prepared_dependencies, dict) else None
+    if isinstance(prepared_image, dict) and isinstance(prepared_image.get("name"), str):
+        selected_profile = {**selected_profile, "image": prepared_image["name"]}
     started = time.monotonic()
     result = {
         "id": validation_id, "build_run_id": run_id, "artifact": str(artifact), "previous_artifact": "",

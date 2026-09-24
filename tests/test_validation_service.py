@@ -27,7 +27,7 @@ class ValidationServiceTests(unittest.TestCase):
             Path(self.run["artifact"]["path"]), "validation-demo", "1.0-1", "all", "", "", 10, "b" * 64,
         )
         self.patches = [
-            mock.patch("debbuilder.validation_service.PodmanRuntime.inspect_image", return_value=IMAGE),
+            mock.patch("debbuilder.validation_service.admitted_image", return_value=IMAGE),
             mock.patch("debbuilder.validation_service.dependency_preparation.inspect_artifact", return_value=self.current),
         ]
         for patcher in self.patches:

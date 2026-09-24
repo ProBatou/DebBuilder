@@ -127,6 +127,8 @@ class DebianPackagingTests(unittest.TestCase):
             self.assertIn("addgroup --system demo-app", result["maintainer_scripts"]["postinst"])
             self.assertIn("echo configured", result["maintainer_scripts"]["postinst"])
             self.assertIn("systemctl restart demo.service", result["maintainer_scripts"]["postinst"])
+            self.assertNotIn("systemctl restart demo.service || true", result["maintainer_scripts"]["postinst"])
+            self.assertIn("if [ -d /run/systemd/system ]; then systemctl daemon-reload; fi", result["maintainer_scripts"]["postinst"])
             self.assertLess(result["maintainer_scripts"]["postinst"].index("adduser --system"), result["maintainer_scripts"]["postinst"].index("echo configured"))
             self.assertLess(result["maintainer_scripts"]["postinst"].index("echo configured"), result["maintainer_scripts"]["postinst"].index("systemctl restart demo.service"))
             self.assertIn("User=demo-service", result["systemd"]["content"])

@@ -196,7 +196,7 @@ function renderSettingsPage(){
 
         <section class="settings-section settings-card card editable-settings-card apt-settings-card">
         <header class="settings-section-head section-header"><div><h3>APT repository</h3><p class="muted">Default configuration used by recipes without explicit repository settings.</p></div></header>
-        <div class="settings-form-grid settings-grid-one">${fieldInput('settingRepoUrl','Repository URL',apt.repository,'type="url" required')}</div>
+        <div class="settings-form-grid settings-grid-one">${fieldInput('settingRepoUrl','Public repository URL',apt.repository,'type="url"')}</div>
         <div class="settings-form-grid settings-grid-three">
           ${fieldInput('settingSuite','Distribution / suite',apt.distribution,'required pattern="[A-Za-z0-9._-]+"')}
           ${fieldInput('settingComponent','Component',apt.component,'required pattern="[A-Za-z0-9._-]+"')}

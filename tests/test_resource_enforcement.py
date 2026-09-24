@@ -352,6 +352,26 @@ class RealResourceEnforcementTests(unittest.TestCase):
         self.assertTrue(all(clear_observations))
         return result
 
+    def test_finite_command_uses_verified_memory_tasks_and_cpu_cgroup(self):
+        policy = {
+            "memory_max_bytes": 128 * 1024 * 1024,
+            "tasks_max": 32,
+            "cpu_quota_percent": 50,
+        }
+        command = (
+            "python3 -c 'from pathlib import Path; "
+            "p=Path(\"/sys/fs/cgroup\")/Path(\"/proc/self/cgroup\").read_text().strip().split(\":\")[-1].lstrip(\"/\"); "
+            "print((p/\"memory.max\").read_text().strip()); "
+            "print((p/\"pids.max\").read_text().strip()); "
+            "print((p/\"cpu.max\").read_text().strip())'"
+        )
+        result = self.execute(command, policy)
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual(result["stdout"].splitlines(), [str(policy["memory_max_bytes"]), "32", "50000 100000"])
+        self.assertEqual(result["resource_control"]["verification"], "verified")
+        self.assertEqual(result["resource_control"]["requested"], {**empty_policy(), **policy})
+        self.assertIsNone(result["resource_control"]["outcome"])
+
     def test_memory_oom_is_classified_and_cleaned(self):
         result = self.execute(
             "python3 -c 'x=bytearray(256*1024*1024)'",

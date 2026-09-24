@@ -1811,7 +1811,7 @@ class AdminApiTests(AdminApiCase):
 
         image = {"name": "debbuilder-validation:bookworm", "id": "sha256:" + "a" * 64, "digest": None}
         with mock.patch.object(self.httpd.validation_manager, "execute", side_effect=execute), \
-                mock.patch("debbuilder.validation_service.PodmanRuntime.inspect_image", return_value=image), \
+                mock.patch("debbuilder.validation_service.admitted_image", return_value=image), \
                 mock.patch("debbuilder.validation_service.dependency_preparation.inspect_artifact", return_value=metadata):
             status, admitted = self.request("POST", f"/api/executions/{run['id']}/validate", {})
             self.assertEqual(status, 202)

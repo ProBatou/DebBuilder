@@ -84,12 +84,13 @@ class OwnedOciSystemdBackend:
                     "validation_container_overlap",
                     "Dependency preparation absence was not proved before lifecycle creation",
                 )
-            image = self.runtime.inspect_image(self.image)
-            if image != self.expected_image:
+            image = self.runtime.inspect_image(self.expected_image["id"])
+            if image["id"] != self.expected_image["id"]:
                 raise OciOwnershipError(
                     "validation_image_identity_mismatch",
                     "Selected lifecycle image no longer matches dependency preparation",
                 )
+            image = self.expected_image
             identity = new_identity(
                 run_id=self.run_id,
                 attempt_id=self.attempt_id,

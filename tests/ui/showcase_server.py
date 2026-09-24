@@ -1,6 +1,5 @@
 """Serve the seeded browser showcase without background upstream requests."""
 from debbuilder import app
-from server import Handler
 
 
 def fixture_scheduler(http_server):
@@ -12,4 +11,4 @@ def fixture_scheduler(http_server):
 
 
 if __name__ == "__main__":
-    raise SystemExit(app.serve_application(Handler, automation_scheduler_factory=fixture_scheduler))
+    raise SystemExit(app.serve_application(app.Handler, automation_scheduler_factory=fixture_scheduler))

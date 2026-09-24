@@ -395,7 +395,9 @@ class RecipeStartupTests(unittest.TestCase):
 
         self.assertEqual(snapshot, reconciliation.recipe)
         self.assertEqual(snapshot["management"]["builtin_id"], "debbuilder")
-        self.assertEqual(snapshot["package"]["runtime_dependencies"], ["python3", "python3-dbus"])
+        self.assertEqual(snapshot["package"]["runtime_dependencies"], [
+            "python3", "python3-dbus", "reprepro", "gnupg", "gpgv", "podman", "kmod", "ca-certificates",
+        ])
 
     def test_empty_data_root_seeds_v5_and_admits_new_edited_recipe_for_test_and_build(self):
         self.assertEqual(list(self.workflows.iterdir()), [])

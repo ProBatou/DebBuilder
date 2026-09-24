@@ -1,6 +1,7 @@
 from tests.lifecycle_helpers import cleanup_blockers
 import unittest
 import os
+import select
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -259,6 +260,57 @@ class ResourceLimitPolicyTests(unittest.TestCase):
             "IOAccounting", "IOReadBandwidthMax", "IOWriteBandwidthMax",
         ])
 
+    def test_post_stop_partial_unload_requires_exact_unit_and_cgroup_absence(self):
+        metadata = containment.starting_metadata("probe-unload", "a" * 32)
+        group = containment.expected_control_group(metadata["unit_name"])
+        live = UnitSnapshot(
+            unit_name=metadata["unit_name"], description=containment.unit_description("probe-unload", "a" * 32),
+            transient=True, invocation_id="b" * 32, control_group=group,
+            active_state="active", sub_state="running", service_type="exec",
+            exit_type="cgroup", kill_mode="control-group", result="success",
+            main_pid=123, exec_main_code=0, exec_main_status=0,
+        )
+        partial = UnitSnapshot(**{
+            **live.__dict__, "active_state": "inactive", "sub_state": "dead",
+            "control_group": "", "service_type": "", "invocation_id": "",
+        })
+
+        class Connection:
+            def __init__(self, snapshots):
+                self.snapshots = iter(snapshots)
+
+            def snapshot(self, _unit):
+                return next(self.snapshots, None)
+
+        def wait(snapshots, cgroup_absent):
+            with mock.patch.object(containment, "_cgroup_is_absent", return_value=cgroup_absent) as absent, mock.patch.object(
+                containment, "OPERATION_TIMEOUT", 0.02,
+            ):
+                result = containment._wait_for_unit_disappearance(
+                    Connection(snapshots), unit_name=metadata["unit_name"], control_group=group,
+                    authorize_snapshot=lambda snapshot: containment._snapshot_matches_ownership(snapshot, metadata),
+                    last_snapshot=live, on_wait=lambda _delay: None,
+                )
+            return result, absent
+
+        result, absent = wait([partial, None], True)
+        self.assertTrue(result.gone, result.error)
+        absent.assert_called_with(group)
+        mixed = UnitSnapshot(**{
+            **partial.__dict__, "active_state": "active", "sub_state": "running", "main_pid": 0,
+        })
+        result, absent = wait([mixed, None], True)
+        self.assertTrue(result.gone, result.error)
+        absent.assert_called_with(group)
+        wrong = UnitSnapshot(**{**mixed.__dict__, "unit_name": "unrelated.service"})
+        result, absent = wait([wrong, None], True)
+        self.assertFalse(result.gone)
+        self.assertIn("identity changed", result.error)
+        absent.assert_not_called()
+        result, absent = wait([partial, None], False)
+        self.assertFalse(result.gone)
+        absent.assert_called_with(group)
+
     def test_base_probe_cleanup_failure_latches_process_wide_blocker(self):
         command_id = "a" * 32
         unit_name = containment.command_unit_name("containment-capability-probe", command_id)
@@ -321,14 +373,20 @@ class ResourceLimitPolicyTests(unittest.TestCase):
             def __init__(self):
                 self.stopped = False
                 self.stop_calls = []
+                self.probe_arguments = None
+                self.gate_readable_before_stop = None
 
-            def start_transient(self, *_args, **_kwargs):
+            def start_transient(self, *_args, **kwargs):
+                self.probe_arguments = kwargs["arguments"]
+                self.stdin_fd = os.dup(kwargs["stdin_fd"])
                 return None
 
             def snapshot(self, _unit):
                 return None if self.stopped else observed
 
             def stop(self, unit):
+                self.gate_readable_before_stop = bool(select.select([self.stdin_fd], [], [], 0)[0])
+                os.close(self.stdin_fd)
                 self.stop_calls.append(unit)
                 self.stopped = True
 
@@ -358,6 +416,8 @@ class ResourceLimitPolicyTests(unittest.TestCase):
                 finally:
                     os.close(owner_fd)
         self.assertTrue(capability.available, capability.reason)
+        self.assertEqual(connection.probe_arguments, ["/usr/bin/cat"])
+        self.assertFalse(connection.gate_readable_before_stop)
         self.assertEqual(connection.stop_calls, [unit_name])
         self.assertEqual(blocker, "")
 
@@ -434,14 +494,20 @@ class ResourceLimitPolicyTests(unittest.TestCase):
             def __init__(self):
                 self.stopped = False
                 self.stop_calls = []
+                self.probe_arguments = None
+                self.gate_readable_before_stop = None
 
-            def start_transient(self, *_args, **_kwargs):
+            def start_transient(self, *_args, **kwargs):
+                self.probe_arguments = kwargs["arguments"]
+                self.stdin_fd = os.dup(kwargs["stdin_fd"])
                 return None
 
             def snapshot(self, _unit):
                 return None if self.stopped else observed
 
             def stop(self, unit):
+                self.gate_readable_before_stop = bool(select.select([self.stdin_fd], [], [], 0)[0])
+                os.close(self.stdin_fd)
                 self.stop_calls.append(unit)
                 self.stopped = True
 
@@ -469,6 +535,8 @@ class ResourceLimitPolicyTests(unittest.TestCase):
                 finally:
                     os.close(owner_fd)
         self.assertTrue(capability["available"], capability["reason"])
+        self.assertEqual(connection.probe_arguments, ["/usr/bin/cat"])
+        self.assertFalse(connection.gate_readable_before_stop)
         self.assertEqual(connection.stop_calls, [unit_name])
         self.assertEqual(blocker, "")
 

@@ -34,7 +34,7 @@ from .http_handler import create_handler
 from .lifecycle import MutationGate, MutationGateClosed
 from .recipe_schema import RecipeDocumentError, recipe_document_for_storage, require_safe_name, validate_recipe_metadata
 from .settings_store import SettingsDocumentError, SessionSecretError, cookie_secret, github_token, load_settings, oidc_client_secret, prepare_cookie_secret, resource_repair_security
-from .runtime import RuntimeConfig
+from .runtime import RuntimeConfig, listeners_overlap
 
 ROOT = Path(__file__).resolve().parents[1]
 LOGGER = logging.getLogger(__name__)
@@ -56,6 +56,7 @@ OIDC_ISSUER = RUNTIME.oidc_issuer
 OIDC_CLIENT_ID = RUNTIME.oidc_client_id
 OIDC_REDIRECT_URI = RUNTIME.oidc_redirect_uri
 SESSIONS: dict[str, dict] = {}
+PUBLIC_REPOSITORY_ACTIVE = False
 
 PUBLIC_REPO_PREFIXES = ("/dists/", "/pool/")
 PUBLIC_REPO_FILES = {"/repository.gpg", "/install.sh"}
@@ -1710,7 +1711,18 @@ def settings_view() -> dict:
 
 
 def update_settings(payload: dict) -> dict:
-    settings_service.update_settings(DATA, payload, settings_defaults())
+    def refresh_repository(current, updated):
+        if not PUBLIC_REPOSITORY_ACTIVE or current["apt"] == updated["apt"]:
+            return
+        from .local_repository_bootstrap import bootstrap_repository
+        bootstrap_repository(
+            repository_root=RUNTIME.repository_root, data_root=DATA,
+            suite=updated["apt"]["distribution"], component=updated["apt"]["component"],
+            gpg_home=Path(os.environ.get("GNUPGHOME") or DATA / ".gnupg"),
+            public_url=updated["apt"]["repository"],
+        )
+
+    settings_service.update_settings(DATA, payload, settings_defaults(), before_save=refresh_repository)
     request_maintenance(refresh=True)
     return settings_view()
 
@@ -1826,6 +1838,8 @@ def serve_application(
     handler_class,
     *,
     server_factory=ThreadingHTTPServer,
+    repository_handler_class=None,
+    repository_server_factory=None,
     manager_factory=create_execution_manager,
     maintenance_factory=create_maintenance_service,
     automation_scheduler_factory=None,
@@ -1833,9 +1847,13 @@ def serve_application(
     shutdown_timeout=DEFAULT_SHUTDOWN_TIMEOUT,
 ) -> int:
     """Own startup, serving, and shutdown under one diagnostic target."""
-    global APPLICATION_AUTOMATION_ORCHESTRATOR, APPLICATION_AUTOMATION_SCHEDULER, APPLICATION_MAINTENANCE_SERVICE, APPLICATION_MUTATION_GATE, APPLICATION_VALIDATION_MANAGER
+    global APPLICATION_AUTOMATION_ORCHESTRATOR, APPLICATION_AUTOMATION_SCHEDULER, APPLICATION_MAINTENANCE_SERVICE, APPLICATION_MUTATION_GATE, APPLICATION_VALIDATION_MANAGER, PUBLIC_REPOSITORY_ACTIVE
     graceful_timeout = _graceful_shutdown_timeout(shutdown_timeout)
     http_server = None
+    repository_server = None
+    repository_thread = None
+    repository_stop = threading.Event()
+    repository_failure = []
     manager = None
     validation_manager = None
     maintenance_service = None
@@ -1905,6 +1923,7 @@ def serve_application(
                     should_stop_server = serving_started and not cleanup_started.is_set()
                     selected_server = http_server
                 if should_stop_server and selected_server is not None:
+                    repository_stop.set()
                     try:
                         selected_server.shutdown()
                     except BaseException as exc:
@@ -1923,9 +1942,17 @@ def serve_application(
 
         prepare_application_directories()
         check_shutdown_requested()
+        if repository_handler_class is not None and listeners_overlap(
+            RUNTIME.host, RUNTIME.port, RUNTIME.repository_host, RUNTIME.repository_port
+        ):
+            raise ValueError("Admin and repository listeners cannot bind the same host and port")
         manager = manager_factory()
         check_shutdown_requested()
         http_server = server_factory((RUNTIME.host, RUNTIME.port), handler_class)
+        if repository_handler_class is not None:
+            factory = repository_server_factory or server_factory
+            repository_server = factory((RUNTIME.repository_host, RUNTIME.repository_port), repository_handler_class)
+            repository_server.timeout = 0.2
         http_server.mutation_gate = mutation_gate
         http_server.cleanup_authorization = workspace_cleanup.CleanupAuthorization()
         http_server.storage_inventory = create_storage_inventory()
@@ -1951,6 +1978,25 @@ def serve_application(
         check_shutdown_requested()
         maintenance_service.request(cleanup=True)
         print(f"DebBuilder Repo UI listening on http://{RUNTIME.host}:{RUNTIME.port}")
+        if repository_server is not None:
+            print(f"DebBuilder public APT repository listening on http://{RUNTIME.repository_host}:{RUNTIME.repository_port}")
+            def serve_repository():
+                try:
+                    while not repository_stop.is_set():
+                        repository_server.handle_request()
+                except BaseException as exc:
+                    repository_failure.append(exc)
+                    repository_stop.set()
+                    with lifecycle_condition:
+                        while not serving_started and not cleanup_started.is_set():
+                            lifecycle_condition.wait()
+                        should_stop_admin = serving_started and not cleanup_started.is_set()
+                    if should_stop_admin:
+                        http_server.shutdown()
+
+            repository_thread = threading.Thread(target=serve_repository, name="public-repository-listener", daemon=False)
+            repository_thread.start()
+            PUBLIC_REPOSITORY_ACTIVE = True
         with lifecycle_condition:
             check_shutdown_requested()
             serving_started = True
@@ -1959,6 +2005,9 @@ def serve_application(
             http_server.serve_forever()
         except BaseException as exc:
             primary_failure = exc
+        if repository_failure and primary_failure is None:
+            primary_failure = RuntimeError("Public repository listener failed")
+            primary_failure.__cause__ = repository_failure[0]
     except _LifecycleShutdownRequested:
         pass
     except BaseException as exc:
@@ -1971,6 +2020,7 @@ def serve_application(
                 cleanup_failures.append(("automation scheduler admission shutdown", exc))
         mutation_gate.begin_shutdown()
         graceful_deadline = time.monotonic() + graceful_timeout
+        repository_stop.set()
         cleanup_started.set()
         with lifecycle_condition:
             lifecycle_condition.notify_all()
@@ -2073,6 +2123,16 @@ def serve_application(
                 http_server.server_close()
             except BaseException as exc:
                 cleanup_failures.append(("HTTP server close", exc))
+        if repository_thread is not None:
+            repository_thread.join(_remaining_shutdown_time(graceful_deadline))
+            if repository_thread.is_alive():
+                repository_thread.join()
+                cleanup_failures.append(("repository listener shutdown", TimeoutError("Repository listener stopped after deadline")))
+        if repository_server is not None:
+            try:
+                repository_server.server_close()
+            except BaseException as exc:
+                cleanup_failures.append(("repository HTTP server close", exc))
         if signal_coordinator is not None and signal_coordinator.is_alive():
             signal_coordinator.join(_remaining_shutdown_time(graceful_deadline))
             if signal_coordinator.is_alive():
@@ -2094,6 +2154,7 @@ def serve_application(
                 except OSError as exc:
                     cleanup_failures.append(("signal wakeup pipe close", exc))
         APPLICATION_MUTATION_GATE = previous_mutation_gate
+        PUBLIC_REPOSITORY_ACTIVE = False
         APPLICATION_MAINTENANCE_SERVICE = previous_maintenance_service
         APPLICATION_AUTOMATION_SCHEDULER = previous_automation_scheduler
         APPLICATION_AUTOMATION_ORCHESTRATOR = previous_automation_orchestrator

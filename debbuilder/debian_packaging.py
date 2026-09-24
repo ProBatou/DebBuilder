@@ -278,7 +278,7 @@ def _configured_scripts(recipe: dict, generated: dict[str, list[str]]) -> dict[s
         if not parts and not custom.strip():
             continue
         body = ["#!/bin/sh", "set -e"]
-        service_start = next((index for index, line in enumerate(parts) if line.startswith("systemctl daemon-reload")), len(parts))
+        service_start = next((index for index, line in enumerate(parts) if "systemctl daemon-reload" in line), len(parts))
         if name == "postinst" and custom and service_start < len(parts):
             body += [*parts[:service_start], "", "# Recipe-provided actions", custom, "", *parts[service_start:]]
         else:
@@ -453,9 +453,9 @@ def prepare_staging(recipe: dict, build_result: dict, workspace: str | Path, *, 
         unit_target.write_text(unit_text)
         unit_target.chmod(0o644)
         unit_path = "/" + unit_target.relative_to(staging).as_posix()
-        postinst.append("systemctl daemon-reload || true")
+        postinst.append("if [ -d /run/systemd/system ]; then systemctl daemon-reload; fi")
         if service["enabled"]:
-            postinst += [f"systemctl enable {service['name']} || true", f"systemctl restart {service['name']} || true"]
+            postinst += [f"if [ -d /run/systemd/system ]; then systemctl enable {service['name']}; systemctl restart {service['name']}; fi"]
             generated.setdefault("prerm", []).append(f"if [ \"$1\" = remove ]; then systemctl stop {service['name']} || true; fi")
         generated.setdefault("postrm", []).append("systemctl daemon-reload || true")
 

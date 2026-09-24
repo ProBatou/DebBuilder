@@ -1,3 +1,4 @@
+import os
 import signal
 import tempfile
 import threading
@@ -695,9 +696,12 @@ class ServerLifecycleTests(unittest.TestCase):
         with mock.patch("debbuilder.app.serve_application", return_value=7) as serve:
             self.assertEqual(app.main(), 7)
             serve.assert_called_once_with(app.Handler)
-        with mock.patch("debbuilder.app.serve_application", return_value=9) as serve:
+        with mock.patch("debbuilder.app.serve_application", return_value=9) as serve, \
+                mock.patch.object(server_entrypoint, "bootstrap_repository") as bootstrap, \
+                mock.patch.dict(os.environ, {}, clear=False):
             self.assertEqual(server_entrypoint.main(), 9)
-            serve.assert_called_once_with(server_entrypoint.Handler)
+            bootstrap.assert_called_once()
+            serve.assert_called_once_with(app.Handler, repository_handler_class=server_entrypoint.RepositoryHandler)
 
 
 if __name__ == "__main__":

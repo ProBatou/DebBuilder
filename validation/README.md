@@ -1,4 +1,25 @@
-# Debian validation image
+# Debian validation images
+
+Normal installed Validation uses release-owned public GHCR images by exact
+`repository@sha256:...` reference. The release build places
+`debbuilder/validation_images.json` inside the `.deb` only after the qualified
+input lock still matches the effective Dockerfile inputs and each existing
+amd64 descriptor has been anonymously pulled and checked for its digest and
+OCI architecture. A normal application release does not rebuild or push these
+images. DebBuilder pulls a missing exact image on the first Validation request.
+A registry outage fails that request and can be retried; it does not stop the
+service. An existing exact image is reused.
+The exact digest is recorded at admission; the verified local image ID is
+recorded before container creation. A later manifest change cannot alter the
+admitted attempt.
+
+The release-owned image repositories are
+`ghcr.io/probatou/debbuilder-validation-bookworm` and
+`ghcr.io/probatou/debbuilder-validation-node22`. The qualified image matrix
+currently covers amd64. Unsupported profile architectures affect Validation
+only; the DebBuilder package remains `Architecture: all`.
+
+The commands below are for local image development and controlled tests.
 
 Build the disposable Debian/systemd test image with either supported runtime:
 
@@ -9,8 +30,9 @@ podman build -t debbuilder-validation:bookworm -f validation/Dockerfile validati
 ```
 
 Validation profiles provide a curated baseline of Debian runtime packages for
-offline lifecycle tests. The Bookworm profile includes `python3` and
-`python3-dbus`, which satisfy the managed DebBuilder package. Validation uses
+offline lifecycle tests. Both profiles include the managed DebBuilder package's
+declared runtime dependencies, including `podman` and `kmod`.
+Validation uses
 `dpkg --install` inside a network-disabled container; it does not fetch
 arbitrary packages declared in `Depends`. A package requiring capabilities
 outside a profile must use or add an explicitly reviewed validation profile.
@@ -30,12 +52,14 @@ build checks `node --version` and installs a local Debian context package named
 lets an actual `dpkg --install` satisfy `Depends: nodejs` while the separate
 upstream engine constraint is still checked against the real runtime.
 
-The image built for the 2026-09-03 validation was 265,468,342 bytes, image ID
-`b8cf192d78dd118509bb92174122ae03b2f010ba2217c58793befbd884cad1fe`,
-and local digest
-`sha256:2127aa66bf250e9f5c80711c0d9b6135da21c3e066fcf8e62f2f41c639bc048a`.
-Rebuilding from the pinned Dockerfile is the reproducible source of truth; the
-resulting local digest can vary if Debian package repositories change.
+The resulting local digest can vary if Debian package repositories change.
+Bookworm's `debian:bookworm` base and both images' APT inputs are currently
+unpinned. Therefore an effective Dockerfile input change stops the normal
+application release. The changed profile must be built, tested, and published
+in a separate qualification step, which updates its exact descriptor and
+`validation/validation_images.lock.json` before the application release is
+retried. A future reproducible image-build effort can pin the remaining inputs
+separately. The Node base is pinned to an amd64 platform digest.
 
 DebBuilder mounts only the selected Build Run workspace read-only at `/validation`.
 The container has no network, is privileged so systemd can run, and is forcibly

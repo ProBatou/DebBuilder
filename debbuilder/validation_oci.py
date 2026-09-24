@@ -253,7 +253,7 @@ class IdentityRegistry:
 
 
 class PodmanRuntime:
-    """Structured Podman boundary with cancellation reserved for workload calls."""
+    """Structured Podman boundary with cancellable workload and image pulls."""
 
     def __init__(self, workspace: str | Path, *, runner=run_command, cancellation_event=None, on_result=None):
         self.workspace = Path(workspace).resolve()
@@ -267,6 +267,7 @@ class PodmanRuntime:
         *,
         timeout: float,
         workload: bool = False,
+        cancellable_control: bool = False,
         output_limit: int | None = None,
     ) -> dict:
         effective_arguments = list(arguments)
@@ -282,7 +283,7 @@ class PodmanRuntime:
             "workspace": self.workspace, "working_directory": ".", "environment": {"LC_ALL": "C"},
             "timeout": timeout, "inactivity_timeout": timeout,
         }
-        if workload:
+        if workload or cancellable_control:
             kwargs["cancellation_event"] = self.cancellation_event
         if workload:
             result = self.runner(command, **kwargs)
@@ -730,7 +731,7 @@ class OwnedContainer:
                 f"{self.identity['role']} container requires network mode {expected_network}",
             )
         arguments = [
-            "podman", "create", "--cgroups", "split", "--name", self.identity["name"], "--network", network,
+            "podman", "create", "--pull", "never", "--cgroups", "split", "--name", self.identity["name"], "--network", network,
         ]
         if lifecycle:
             arguments += ["--systemd", "always"]

@@ -1,6 +1,8 @@
 import json
 import os
+import shutil
 import stat
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -16,6 +18,29 @@ from debbuilder.settings_store import default_settings, load_secrets, load_setti
 
 
 class RuntimeConfigTests(unittest.TestCase):
+    def test_network_default_is_loopback_and_explicit_host_wins(self):
+        root = Path("/opt/demo")
+        self.assertEqual(RuntimeConfig.from_environment(root, {}).host, "127.0.0.1")
+        self.assertEqual(
+            RuntimeConfig.from_environment(root, {"DEBBUILDER_HOST": "0.0.0.0"}).host,
+            "0.0.0.0",
+        )
+
+    def test_documented_local_startup_exports_example_environment(self):
+        root = Path(__file__).resolve().parents[1]
+        readme = (root / "README.md").read_text()
+        self.assertIn("set -a\n. ./.env\nset +a\npython3 server.py", readme)
+        with tempfile.TemporaryDirectory() as temporary:
+            shutil.copyfile(root / ".env.example", Path(temporary) / ".env")
+            environment = os.environ.copy()
+            environment["DEBBUILDER_HOST"] = "0.0.0.0"
+            environment["PYTHONPATH"] = str(root)
+            result = subprocess.run(
+                ["bash", "-e", "-c", "set -a\n. ./.env\nset +a\npython3 -c 'import os; from pathlib import Path; from debbuilder.runtime import RuntimeConfig; print(RuntimeConfig.from_environment(Path.cwd(), os.environ).host)'"],
+                cwd=temporary, env=environment, check=True, capture_output=True, text=True,
+            )
+        self.assertEqual(result.stdout.strip(), "127.0.0.1")
+
     def test_all_runtime_paths_and_network_defaults_come_from_one_environment(self):
         config = RuntimeConfig.from_environment(Path("/opt/demo"), {
             "DEBBUILDER_DATA_DIR": "/srv/debbuilder/data",

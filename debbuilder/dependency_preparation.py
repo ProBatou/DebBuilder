@@ -40,6 +40,7 @@ from .validation_oci import (
     verify_resource_enforcement,
 )
 from .validation_profiles import resolve_profile
+from .validation_images import provision_admitted_image
 
 
 METADATA_TMPFS_BYTES = 256 * 1024 * 1024
@@ -867,8 +868,23 @@ def prepare_runtime_dependencies(
                 resource_policy=run["resource_limits"]["effective"],
             ):
                 runtime = PodmanRuntime(workspace, runner=runner, cancellation_event=event)
-                profile = resolve_profile(profile_name)
-                image = runtime.inspect_image(profile["image"])
+                resolve_profile(profile_name)
+                image = attempt["selected_profile"]["image"]
+                if image["id"] is None:
+                    resolved = provision_admitted_image(runtime, profile_name, image)
+                    with storage.locked_path(attempt_path):
+                        latest = normalize_validation_attempt(_load_recovery_json(attempt_path, 256 * 1024))
+                        if event.is_set() or latest["status"] == "cancelling":
+                            raise ExecutionCancelled()
+                        if latest["status"] != "running" or latest["selected_profile"]["image"] != image:
+                            raise DependencyPreparationError("validation_admission_identity_changed", "Admitted Validation image changed during provisioning")
+                        latest["selected_profile"]["image"] = resolved
+                        attempt = normalize_validation_attempt(latest)
+                        _persist(attempt_path, attempt)
+                        image = resolved
+                observed_image = runtime.inspect_image(image["id"])
+                if observed_image["id"] != image["id"]:
+                    raise DependencyPreparationError("validation_admission_identity_changed", "Admitted Validation image is no longer available by immutable ID")
                 current = inspect_artifact(current_artifact, workspace=workspace, runner=runner, cancellation_event=event)
                 previous = inspect_artifact(previous_artifact, workspace=workspace, runner=runner, cancellation_event=event) if previous_artifact else None
                 if previous is not None:

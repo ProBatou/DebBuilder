@@ -34,6 +34,7 @@ from .validation_automation import (
 )
 from .validation_oci import OciOwnershipError, PodmanRuntime
 from .validation_profiles import resolve_profile
+from .validation_images import admitted_image
 
 
 LOGGER = logging.getLogger(__name__)
@@ -923,7 +924,7 @@ class ValidationManager:
             raise ValidationAdmissionError("artifact_outside_workspace", "Artifact must belong to the selected Build Run", status=409) from exc
         recipe = validate_recipe_metadata(json.loads((workspace / "recipe.json").read_text()))
         profile = resolve_profile(profile_name)
-        image = PodmanRuntime(self.workspace_root, runner=self.runner).inspect_image(profile["image"])
+        image = admitted_image(profile_name)
         current = dependency_preparation.inspect_artifact(artifact, workspace=workspace, runner=self.runner)
         attempt_id = self.store.allocate_run_id()
         root = attempt_root(self.store, run_id, attempt_id)

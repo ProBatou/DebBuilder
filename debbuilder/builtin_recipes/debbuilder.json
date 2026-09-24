@@ -9,7 +9,7 @@
   "management": {
     "owner": "application",
     "builtin_id": "debbuilder",
-    "definition_version": 5,
+    "definition_version": 7,
     "operator_overrides": {}
   },
   "resource_limits": {
@@ -22,7 +22,7 @@
   "runtime_apt_repositories": [],
   "package": {
     "name": "debbuilder",
-    "version_revision": "2",
+    "version_revision": "1",
     "architecture": "all",
     "section": "misc",
     "priority": "optional",
@@ -30,7 +30,13 @@
     "description": "debbuilder",
     "runtime_dependencies": [
       "python3",
-      "python3-dbus"
+      "python3-dbus",
+      "reprepro",
+      "gnupg",
+      "gpgv",
+      "podman",
+      "kmod",
+      "ca-certificates"
     ]
   },
   "source": {
@@ -71,6 +77,7 @@
       "mode": "paths",
       "paths": [
         "debbuilder",
+        "bootstrap_local.py",
         "server.py",
         "static"
       ]
@@ -106,7 +113,7 @@
     ],
     "maintainer_scripts": {
       "preinst": "install -d -m 0751 -o root -g root /var/lib/debbuilder\ninstall -d -m 0750 -o root -g root /var/lib/debbuilder/workflows /var/lib/debbuilder/builds\ninstall -d -m 0751 -o root -g root /var/lib/debbuilder/repository\ninstall -d -m 0700 -o root -g root /var/lib/debbuilder/.gnupg",
-      "postinst": "",
+      "postinst": "PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 /opt/debbuilder/bootstrap_local.py --environment-file /etc/debbuilder/debbuilder.env",
       "prerm": "",
       "postrm": ""
     }
@@ -131,7 +138,7 @@
     "timeout_start_sec": "",
     "timeout_stop_sec": "20s",
     "kill_signal": "SIGTERM",
-    "exec_start_pre": [],
+    "exec_start_pre": ["/usr/bin/python3 /opt/debbuilder/bootstrap_local.py"],
     "exec_start_post": [],
     "exec_stop": [],
     "standard_output": "",

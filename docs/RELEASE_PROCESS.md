@@ -10,8 +10,9 @@ From the source revision being released, run:
 
 ```sh
 python3 -m debbuilder.release_build \
-  --tag v0.5.0 \
+  --tag vX.Y.Z \
   --source-root . \
+  --validation-images /path/to/validated-image-manifest.json \
   --output-dir release-assets
 ```
 
@@ -26,19 +27,44 @@ under `/opt/debbuilder` and `/var/lib/debbuilder` are refused as output targets.
 
 ## GitHub workflow boundary
 
-The Release workflow checks out the exact tag, runs the packaging-focused test
-suite, builds and inspects the `.deb`, verifies its checksum, and passes the two
-assets to a separate least-privilege publication job. That job creates a draft,
-verifies both remote asset names, and only then makes the Release public and
-latest. Package filenames and expected metadata are derived from the canonical
-Recipe rather than repeated in workflow shell.
+The Release workflow checks out the exact tag with persisted Git credentials
+disabled. Its build job has read-only repository access. Validation OCI images
+are independently qualified immutable inputs: the workflow verifies each
+profile's effective version-controlled input fingerprint against
+`validation/validation_images.lock.json`, verifies that the lock and checked-in
+descriptor manifest agree, then anonymously pulls and inspects every exact
+repository digest before package construction. A normal application release
+does not build or push OCI images and does not require package-write access.
 
-GitHub-hosted CI intentionally does not perform DebBuilder's full installation
-lifecycle validation. That validator installs packages in a disposable,
+If an effective image input changes, the release fails before asset
+publication. The changed image must be qualified and published separately;
+that qualification updates both the exact descriptor and its input lock before
+the normal application release is retried. Documentation files sharing the
+Validation directory are not fingerprinted unless an image build actually
+consumes them.
+
+The build job runs the packaging-focused test suite, builds and inspects the
+`.deb`, verifies its checksum, and passes only the checked `.deb` and
+`SHA256SUMS` to a separate publication job. That job alone receives repository
+contents-write permission. It creates a draft Release, verifies both remote
+asset names, and only then makes the Release public and latest. Package
+filenames and expected metadata are derived from the canonical Recipe rather
+than repeated in workflow shell.
+
+GitHub-hosted CI intentionally does not perform the complete installed-package
+lifecycle gate. That gate installs packages in a disposable,
 network-disabled, privileged Podman/systemd environment; reproducing it inside
-a hosted runner would add privilege and nested-runtime fragility. Full
-lifecycle validation remains the separate DEV/runtime capability documented in
-[`validation/README.md`](../validation/README.md). The portable Release gate
-still validates the Recipe, generates the package, inspects Debian metadata and
-contents, extracts and compares the systemd unit with the canonical Recipe,
-proves the packaged runtime data path, and verifies SHA-256.
+a hosted runner would add nested-runtime fragility. Full package lifecycle
+qualification remains a separate release gate. The portable workflow still
+validates the Recipe, verifies the qualified Validation inputs and existing
+immutable images, generates the package, inspects Debian metadata and
+contents, compares the systemd unit with the
+canonical Recipe, proves the packaged runtime and image descriptors, and
+verifies SHA-256.
+
+Replace `vX.Y.Z` with the prepared release tag. The tag must match the single
+application release version in `debbuilder.__version__`; package version,
+artifact name, checksums, and GitHub Release metadata are then derived by the
+release tooling. The qualified image manifest remains an explicit immutable
+input. A tag and GitHub Release do not exist until the final release gates pass
+and publication is explicitly authorized.

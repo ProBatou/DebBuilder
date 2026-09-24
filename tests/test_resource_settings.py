@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest import mock
 
 from debbuilder.resource_limits import ResourceLimitError, empty_policy
-from debbuilder.settings_service import update_settings, validate_app_settings_storage
+from debbuilder.settings_service import defaults_from_environment, update_settings, validate_app_settings_storage
 from debbuilder.settings_store import (
     SETTINGS_SCHEMA_VERSION,
     SettingsDocumentError,
@@ -31,6 +31,18 @@ class ResourceSettingsTests(unittest.TestCase):
             self.assertFalse((root / "settings.json").exists())
         self.assertEqual(loaded["schema_version"], SETTINGS_SCHEMA_VERSION)
         self.assertEqual(loaded["resource_limits"], empty_policy())
+
+    def test_native_architecture_outside_common_list_is_valid_for_defaults_and_updates(self):
+        with mock.patch("debbuilder.settings_service.native_debian_architecture", return_value="riscv64"), \
+                mock.patch("debbuilder.settings_store.native_debian_architecture", return_value="riscv64"):
+            defaults = defaults_from_environment(
+                repo_default="http://localhost/debian", suite_default="stable", component_default="main",
+                auth_mode="none", oidc_issuer="", oidc_client_id="", oidc_redirect_uri="",
+            )
+            self.assertEqual(defaults["apt"]["architecture"], "riscv64")
+            with tempfile.TemporaryDirectory() as temporary:
+                self.assertEqual(load_settings(Path(temporary), defaults)["apt"]["architecture"], "riscv64")
+            self.assertEqual(validate_settings({"apt": {"architecture": "riscv64"}}, defaults)["apt"]["architecture"], "riscv64")
 
     def test_startup_storage_validation_is_read_only_on_fresh_install(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -885,6 +885,127 @@
         ]
       }
     },
+    "/api/recipes/{recipe_id}/inspect": {
+      "get": {
+        "operationId": "recipes.inspect",
+        "summary": "Inspect one Recipe safely",
+        "tags": [
+          "recipes"
+        ],
+        "x-debbuilder-effect": "read_only",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecipeInspectionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400 admin API error. Documented codes: invalid_recipe_id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_recipe_id"
+            ]
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "404": {
+            "description": "HTTP 404 admin API error. Documented codes: recipe_not_found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "recipe_not_found"
+            ]
+          },
+          "409": {
+            "description": "HTTP 409 admin API error. Documented codes: recipe_inspection_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "recipe_inspection_unavailable"
+            ]
+          },
+          "500": {
+            "description": "HTTP 500 admin API error. Documented codes: internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "internal_error"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable"
+            ]
+          }
+        },
+        "parameters": [
+          {
+            "name": "recipe_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
     "/api/recipes/{recipe_id}/automation": {
       "get": {
         "operationId": "automation.get",
@@ -1133,6 +1254,127 @@
             },
             "x-debbuilder-error-codes": [
               "build_run_not_found"
+            ]
+          },
+          "500": {
+            "description": "HTTP 500 admin API error. Documented codes: internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "internal_error"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable"
+            ]
+          }
+        },
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
+    "/api/executions/{run_id}/inspect": {
+      "get": {
+        "operationId": "executions.inspect",
+        "summary": "Inspect one Run safely",
+        "tags": [
+          "executions"
+        ],
+        "x-debbuilder-effect": "read_only",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunInspectionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400 admin API error. Documented codes: invalid_execution_id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_execution_id"
+            ]
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "404": {
+            "description": "HTTP 404 admin API error. Documented codes: build_run_not_found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "build_run_not_found"
+            ]
+          },
+          "409": {
+            "description": "HTTP 409 admin API error. Documented codes: run_inspection_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "run_inspection_unavailable"
             ]
           },
           "500": {
@@ -5164,6 +5406,951 @@
           }
         ],
         "description": "Deletion report or dry-run preview."
+      },
+      "RecipeInspection": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": 1
+          },
+          "counts_truncated": {
+            "type": "boolean"
+          },
+          "identity": {
+            "type": "object",
+            "properties": {
+              "recipe_id": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_.+-]{1,128}$",
+                    "maxLength": 128
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "active": {
+                "type": "boolean"
+              },
+              "recipe_schema_version": {
+                "const": 5
+              },
+              "source": {
+                "type": "string",
+                "enum": [
+                  "builtin",
+                  "example",
+                  "user"
+                ]
+              },
+              "managed": {
+                "type": "boolean"
+              },
+              "package": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9+.-]{0,127}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "architecture": {
+                "type": "string",
+                "enum": [
+                  "all",
+                  "amd64",
+                  "arm64",
+                  "armhf"
+                ]
+              },
+              "revision": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9.+~]+$",
+                    "maxLength": 128
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "recipe_id",
+              "active",
+              "recipe_schema_version",
+              "source",
+              "managed",
+              "package",
+              "architecture",
+              "revision"
+            ]
+          },
+          "source": {
+            "type": "object",
+            "properties": {
+              "provider": {
+                "type": "string",
+                "enum": [
+                  "github"
+                ]
+              },
+              "repository_configured": {
+                "type": "boolean"
+              },
+              "tracking": {
+                "type": "string",
+                "enum": [
+                  "latest_release",
+                  "manual",
+                  "tag"
+                ]
+              },
+              "ref_configured": {
+                "type": "boolean"
+              },
+              "version_source": {
+                "type": "string",
+                "enum": [
+                  "regex",
+                  "release_name",
+                  "tag"
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "provider",
+              "repository_configured",
+              "tracking",
+              "ref_configured",
+              "version_source"
+            ]
+          },
+          "build": {
+            "type": "object",
+            "properties": {
+              "detected_project": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "nodejs",
+                      "python",
+                      "rust",
+                      "static"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "command_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "output_mode": {
+                "type": "string",
+                "enum": [
+                  "path",
+                  "paths",
+                  "source"
+                ]
+              },
+              "output_path_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "source_change_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "inactivity_timeout_configured": {
+                "type": "boolean"
+              },
+              "maximum_runtime_configured": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "detected_project",
+              "command_count",
+              "output_mode",
+              "output_path_count",
+              "source_change_count",
+              "inactivity_timeout_configured",
+              "maximum_runtime_configured"
+            ]
+          },
+          "artifact": {
+            "type": "object",
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "source_build",
+                  "upstream_archive",
+                  "upstream_deb"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "archive",
+                  "deb",
+                  "tar.gz",
+                  "tar.xz",
+                  "tgz",
+                  "zip"
+                ]
+              },
+              "architecture": {
+                "type": "string",
+                "enum": [
+                  "all",
+                  "amd64",
+                  "arm64",
+                  "armhf"
+                ]
+              },
+              "archive_source": {
+                "type": "string",
+                "enum": [
+                  "auto",
+                  "github_source",
+                  "release_asset"
+                ]
+              },
+              "asset_selection": {
+                "type": "string",
+                "enum": [
+                  "exact",
+                  "pattern"
+                ]
+              },
+              "archive_format": {
+                "type": "string",
+                "enum": [
+                  "tar.gz",
+                  "zip"
+                ]
+              },
+              "payload_mode": {
+                "type": "string",
+                "enum": [
+                  "entire_archive",
+                  "paths"
+                ]
+              },
+              "include_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "exclude_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "mode",
+              "type",
+              "architecture",
+              "archive_source",
+              "asset_selection",
+              "archive_format",
+              "payload_mode",
+              "include_count",
+              "exclude_count"
+            ]
+          },
+          "installation": {
+            "type": "object",
+            "properties": {
+              "content_source": {
+                "type": "string",
+                "enum": [
+                  "build_output",
+                  "configured_files"
+                ]
+              },
+              "destination_configured": {
+                "type": "boolean"
+              },
+              "account_provisioning": {
+                "type": "boolean"
+              },
+              "directory_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "config_mapping_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "maintainer_scripts_present": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "content_source",
+              "destination_configured",
+              "account_provisioning",
+              "directory_count",
+              "config_mapping_count",
+              "maintainer_scripts_present"
+            ]
+          },
+          "service": {
+            "type": "object",
+            "properties": {
+              "configured": {
+                "type": "boolean"
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "dbus",
+                  "exec",
+                  "forking",
+                  "none",
+                  "notify",
+                  "oneshot",
+                  "simple"
+                ]
+              },
+              "restart": {
+                "type": "string",
+                "enum": [
+                  "",
+                  "always",
+                  "no",
+                  "none",
+                  "on-abnormal",
+                  "on-abort",
+                  "on-failure",
+                  "on-success",
+                  "on-watchdog"
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "configured",
+              "enabled",
+              "type",
+              "restart"
+            ]
+          },
+          "automation": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "policy": {
+                "type": "string",
+                "enum": [
+                  "build",
+                  "build_validate",
+                  "detect",
+                  "full",
+                  "manual",
+                  "test"
+                ]
+              },
+              "eligible": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "enabled",
+              "policy",
+              "eligible"
+            ]
+          },
+          "observation": {
+            "type": "object",
+            "properties": {
+              "classification": {
+                "type": "string",
+                "enum": [
+                  "ambiguous_asset",
+                  "automation_blocked",
+                  "capacity_exhausted",
+                  "detected",
+                  "explicit_asset_not_found",
+                  "incomplete_identity",
+                  "invalid_configuration",
+                  "manual_action_required",
+                  "no_change",
+                  "not_observed",
+                  "rate_limited",
+                  "recipe_changed",
+                  "shutting_down",
+                  "source_not_found",
+                  "unsupported_source",
+                  "upstream_unavailable"
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "classification"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "counts_truncated",
+          "identity",
+          "source",
+          "build",
+          "artifact",
+          "installation",
+          "service",
+          "automation",
+          "observation"
+        ]
+      },
+      "RecipeInspectionResponse": {
+        "type": "object",
+        "properties": {
+          "inspection": {
+            "$ref": "#/components/schemas/RecipeInspection"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "inspection"
+        ]
+      },
+      "RunInspection": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": 1
+          },
+          "identity": {
+            "type": "object",
+            "properties": {
+              "run_id": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_.+-]{1,128}$",
+                    "maxLength": 128
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "recipe_id": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_.+-]{1,128}$",
+                    "maxLength": 128
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "run_schema_version": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "build",
+                  "dry_run",
+                  "unknown"
+                ]
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "cancelled",
+                  "cancelling",
+                  "failed",
+                  "pending",
+                  "prepared",
+                  "queued",
+                  "running",
+                  "success"
+                ]
+              },
+              "terminal": {
+                "type": "boolean"
+              },
+              "recipe_sha256": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "run_id",
+              "recipe_id",
+              "run_schema_version",
+              "mode",
+              "status",
+              "terminal",
+              "recipe_sha256"
+            ]
+          },
+          "lifecycle": {
+            "type": "object",
+            "properties": {
+              "created_at": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time",
+                    "maxLength": 64
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "started_at": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time",
+                    "maxLength": 64
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "finished_at": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time",
+                    "maxLength": 64
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "current_stage": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "artifact",
+                      "build",
+                      "debian_metadata",
+                      "dependencies",
+                      "detection",
+                      "package",
+                      "source",
+                      "source_changes",
+                      "staging",
+                      "systemd"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "steps": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "enum": [
+                        "artifact",
+                        "build",
+                        "debian_metadata",
+                        "dependencies",
+                        "detection",
+                        "package",
+                        "source",
+                        "source_changes",
+                        "staging",
+                        "systemd"
+                      ]
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "cancelled",
+                        "failed",
+                        "pending",
+                        "running",
+                        "skipped",
+                        "success"
+                      ]
+                    },
+                    "started_at": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "format": "date-time",
+                          "maxLength": 64
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "finished_at": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "format": "date-time",
+                          "maxLength": 64
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "id",
+                    "status",
+                    "started_at",
+                    "finished_at"
+                  ]
+                },
+                "maxItems": 10
+              },
+              "step_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10
+              },
+              "steps_truncated": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "created_at",
+              "started_at",
+              "finished_at",
+              "current_stage",
+              "steps",
+              "step_count",
+              "steps_truncated"
+            ]
+          },
+          "artifact": {
+            "type": "object",
+            "properties": {
+              "available": {
+                "type": "boolean"
+              },
+              "package": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9+.-]{0,127}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "architecture": {
+                "type": "string",
+                "enum": [
+                  "all",
+                  "amd64",
+                  "arm64",
+                  "armhf",
+                  "unknown"
+                ]
+              },
+              "size": {
+                "oneOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "sha256": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "available",
+              "package",
+              "architecture",
+              "size",
+              "sha256"
+            ]
+          },
+          "validation": {
+            "type": "object",
+            "properties": {
+              "attempt_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 512
+              },
+              "inventory_truncated": {
+                "type": "boolean"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "cancelled",
+                  "cancelling",
+                  "failed",
+                  "not_run",
+                  "queued",
+                  "running",
+                  "success",
+                  "unknown"
+                ]
+              },
+              "attempt_id": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_.+-]{1,128}$",
+                    "maxLength": 128
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "recovery_blocked": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "attempt_count",
+              "inventory_truncated",
+              "status",
+              "attempt_id",
+              "recovery_blocked"
+            ]
+          },
+          "publication": {
+            "type": "object",
+            "properties": {
+              "attempt_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "history_truncated": {
+                "type": "boolean"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "cancelled",
+                  "failed",
+                  "not_run",
+                  "running",
+                  "success",
+                  "unknown"
+                ]
+              },
+              "published": {
+                "type": "boolean"
+              },
+              "proof_available": {
+                "type": "boolean"
+              },
+              "suite": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9+.-]{0,63}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "component": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9+.-]{0,63}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "attempt_count",
+              "history_truncated",
+              "status",
+              "published",
+              "proof_available",
+              "suite",
+              "component"
+            ]
+          },
+          "execution": {
+            "type": "object",
+            "properties": {
+              "cancellable": {
+                "type": "boolean"
+              },
+              "recovery_status": {
+                "type": "string",
+                "enum": [
+                  "blocked",
+                  "none",
+                  "resolved"
+                ]
+              },
+              "recovery_blocked": {
+                "type": "boolean"
+              },
+              "containment_backend": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "process_group",
+                  "systemd_cgroup",
+                  "unknown"
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "cancellable",
+              "recovery_status",
+              "recovery_blocked",
+              "containment_backend"
+            ]
+          },
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_]{0,127}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "stage": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "artifact",
+                      "build",
+                      "debian_metadata",
+                      "dependencies",
+                      "detection",
+                      "package",
+                      "source",
+                      "source_changes",
+                      "staging",
+                      "systemd"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "stage"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "identity",
+          "lifecycle",
+          "artifact",
+          "validation",
+          "publication",
+          "execution",
+          "error"
+        ]
+      },
+      "RunInspectionResponse": {
+        "type": "object",
+        "properties": {
+          "inspection": {
+            "$ref": "#/components/schemas/RunInspection"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "inspection"
+        ]
       },
       "SystemDiagnosticDetails": {
         "type": "object",

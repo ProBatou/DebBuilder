@@ -68,6 +68,8 @@ _MESSAGES = {
     "recipe_exists": "The Recipe already exists",
     "recipe_identity_mismatch": "The Recipe identity does not match the request path",
     "recipe_not_found": "The Recipe was not found",
+    "recipe_inspection_unavailable": "The Recipe cannot be inspected safely",
+    "run_inspection_unavailable": "The Run cannot be inspected safely",
     "release_asset_not_found": "No release asset matches the Recipe",
     "request_failed": "The request could not be completed",
     "settings_unavailable": "Application settings are unavailable",

@@ -90,6 +90,15 @@ and admission/scheduler state reuse existing projections. Repository file reads
 are size-limited and do not mutate or reconcile state. The resulting snapshot
 is a bounded read-only operator view, not a continuous health monitor.
 
+`debbuilder/inspectors.py` owns two independent, versioned allowlist
+projections for a single Recipe or Run. The app facade resolves a bounded
+document through the existing Recipe/Build stores, consults only persisted
+observation and one Validation attempt, then delegates to these pure Python
+services. The inspectors do not return the existing broad UI DTO or a raw
+durable record. Publication status reuses the canonical proof projector;
+automation eligibility reuses the Recipe rule. No inspector triggers
+upstream discovery, Validation, publication, recovery or repair.
+
 ## Build model
 
 Builds run in per-Run workspaces and use structured argument vectors rather

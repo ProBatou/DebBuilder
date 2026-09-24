@@ -13,12 +13,16 @@ from dataclasses import dataclass
 from . import __version__
 from .api_errors import STABLE_ERROR_CODES
 from .api_routes import ADMIN_API_ROUTES, AuthenticationPolicy, RouteEffect
-from .build_models import RUN_STATUSES
+from .build_models import RUN_STATUSES, STEP_NAMES, STEP_STATUSES
+from .inspectors import PUBLICATION_INSPECTION_STATUSES, RECIPE_INSPECTION_VERSION, RUN_INSPECTION_VERSION
 from .package_store import derive_lifecycle_status
 from .recipe_schema import (
-    ARCHIVE_SOURCES, AUTOMATION_POLICIES, OUTPUT_MODES, SAFE_ARCH,
-    SCHEMA_VERSION, SOURCE_CHANGE_TYPES, VERSION_SOURCES,
+    ARCHIVE_ASSET_SELECTIONS, ARCHIVE_SOURCES, ARTIFACT_MODES, AUTOMATION_POLICIES,
+    OUTPUT_MODES, RESTART_POLICIES, SAFE_ARCH, SCHEMA_VERSION, SERVICE_TYPES,
+    SOURCE_ARCHIVE_FORMATS, SOURCE_CHANGE_TYPES, VERSION_SOURCES,
 )
+from .archive_payload import PAYLOAD_MODES
+from .validation_contracts import VALIDATION_STATUSES
 from .system_diagnostics import CHECK_IDS, SCHEMA_VERSION_DIAGNOSTICS, STATUSES
 from .validation_service import ACTIVE_STATUSES as ACTIVE_VALIDATION_STATUSES
 from .validation_service import TERMINAL_STATUSES as TERMINAL_VALIDATION_STATUSES
@@ -202,6 +206,134 @@ def _wrapped(field: str, name: str, *, ok: bool = False) -> dict:
     return _object(properties, (field,))
 
 
+def _inspection_object(properties: dict) -> dict:
+    return _object(properties, tuple(properties))
+
+
+def _nullable(schema: dict) -> dict:
+    return {"oneOf": [schema, {"type": "null"}]}
+
+
+def _enum_schema(values) -> dict:
+    return {"type": "string", "enum": sorted(values)}
+
+
+_INSPECTION_ID = {"type": "string", "pattern": "^[A-Za-z0-9_.+-]{1,128}$", "maxLength": 128}
+_INSPECTION_TIME = _nullable({"type": "string", "format": "date-time", "maxLength": 64})
+_INSPECTION_COUNT = {"type": "integer", "minimum": 0, "maximum": 10000}
+
+
+SCHEMAS.update({
+    "RecipeInspection": _inspection_object({
+        "schema_version": {"const": RECIPE_INSPECTION_VERSION},
+        "counts_truncated": B,
+        "identity": _inspection_object({
+            "recipe_id": _nullable(_INSPECTION_ID), "active": B, "recipe_schema_version": {"const": SCHEMA_VERSION},
+            "source": _enum_schema({"user", "example", "builtin"}), "managed": B,
+            "package": _nullable({"type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]{0,127}$"}),
+            "architecture": _enum_schema(SAFE_ARCH),
+            "revision": _nullable({"type": "string", "pattern": "^[A-Za-z0-9.+~]+$", "maxLength": 128}),
+        }),
+        "source": _inspection_object({
+            "provider": _enum_schema({"github"}), "repository_configured": B,
+            "tracking": _enum_schema({"latest_release", "tag", "manual"}),
+            "ref_configured": B, "version_source": _enum_schema(VERSION_SOURCES),
+        }),
+        "build": _inspection_object({
+            "detected_project": _nullable(_enum_schema({"nodejs", "python", "rust", "static"})),
+            "command_count": _INSPECTION_COUNT, "output_mode": _enum_schema(OUTPUT_MODES),
+            "output_path_count": _INSPECTION_COUNT, "source_change_count": _INSPECTION_COUNT,
+            "inactivity_timeout_configured": B, "maximum_runtime_configured": B,
+        }),
+        "artifact": _inspection_object({
+            "mode": _enum_schema(ARTIFACT_MODES),
+            "type": _enum_schema({"deb", "archive", "tar.gz", "tgz", "tar.xz", "zip"}),
+            "architecture": _enum_schema(SAFE_ARCH),
+            "archive_source": _enum_schema(ARCHIVE_SOURCES),
+            "asset_selection": _enum_schema(ARCHIVE_ASSET_SELECTIONS),
+            "archive_format": _enum_schema(SOURCE_ARCHIVE_FORMATS),
+            "payload_mode": _enum_schema(PAYLOAD_MODES),
+            "include_count": _INSPECTION_COUNT, "exclude_count": _INSPECTION_COUNT,
+        }),
+        "installation": _inspection_object({
+            "content_source": _enum_schema({"build_output", "configured_files"}),
+            "destination_configured": B, "account_provisioning": B,
+            "directory_count": _INSPECTION_COUNT, "config_mapping_count": _INSPECTION_COUNT,
+            "maintainer_scripts_present": B,
+        }),
+        "service": _inspection_object({
+            "configured": B, "enabled": B,
+            "type": _enum_schema({*SERVICE_TYPES, "none"}),
+            "restart": _enum_schema({*RESTART_POLICIES, "none"}),
+        }),
+        "automation": _inspection_object({
+            "enabled": B, "policy": _enum_schema(AUTOMATION_POLICIES), "eligible": B,
+        }),
+        "observation": _inspection_object({
+            "classification": _enum_schema({
+                "not_observed", "detected", "no_change", "rate_limited", "upstream_unavailable",
+                "source_not_found", "explicit_asset_not_found", "ambiguous_asset",
+                "unsupported_source", "incomplete_identity", "invalid_configuration",
+                "manual_action_required", "recipe_changed", "capacity_exhausted",
+                "automation_blocked", "shutting_down",
+            }),
+        }),
+    }),
+    "RecipeInspectionResponse": _inspection_object({"inspection": _ref("RecipeInspection")}),
+    "RunInspection": _inspection_object({
+        "schema_version": {"const": RUN_INSPECTION_VERSION},
+        "identity": _inspection_object({
+            "run_id": _nullable(_INSPECTION_ID), "recipe_id": _nullable(_INSPECTION_ID),
+            "run_schema_version": {"type": "integer", "minimum": 1},
+            "mode": _enum_schema({"build", "dry_run", "unknown"}),
+            "status": _enum_schema(RUN_STATUSES), "terminal": B,
+            "recipe_sha256": _nullable({"type": "string", "pattern": "^[0-9a-f]{64}$"}),
+        }),
+        "lifecycle": _inspection_object({
+            "created_at": _INSPECTION_TIME, "started_at": _INSPECTION_TIME,
+            "finished_at": _INSPECTION_TIME,
+            "current_stage": _nullable(_enum_schema(STEP_NAMES)),
+            "steps": {"type": "array", "items": _inspection_object({
+                "id": _enum_schema(STEP_NAMES), "status": _enum_schema(STEP_STATUSES),
+                "started_at": _INSPECTION_TIME, "finished_at": _INSPECTION_TIME,
+            }), "maxItems": len(STEP_NAMES)},
+            "step_count": {"type": "integer", "minimum": 0, "maximum": len(STEP_NAMES)},
+            "steps_truncated": B,
+        }),
+        "artifact": _inspection_object({
+            "available": B,
+            "package": _nullable({"type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]{0,127}$"}),
+            "architecture": _enum_schema({*SAFE_ARCH, "unknown"}),
+            "size": _nullable({"type": "integer", "minimum": 0, "maximum": 2**53 - 1}),
+            "sha256": _nullable({"type": "string", "pattern": "^[0-9a-f]{64}$"}),
+        }),
+        "validation": _inspection_object({
+            "attempt_count": {"type": "integer", "minimum": 0, "maximum": 512},
+            "inventory_truncated": B,
+            "status": _enum_schema({*VALIDATION_STATUSES, "not_run", "unknown"}),
+            "attempt_id": _nullable(_INSPECTION_ID), "recovery_blocked": B,
+        }),
+        "publication": _inspection_object({
+            "attempt_count": _INSPECTION_COUNT, "history_truncated": B,
+            "status": _enum_schema({*PUBLICATION_INSPECTION_STATUSES, "unknown"}),
+            "published": B, "proof_available": B,
+            "suite": _nullable({"type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]{0,63}$"}),
+            "component": _nullable({"type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]{0,63}$"}),
+        }),
+        "execution": _inspection_object({
+            "cancellable": B, "recovery_status": _enum_schema({"none", "blocked", "resolved"}),
+            "recovery_blocked": B,
+            "containment_backend": _enum_schema({"systemd_cgroup", "process_group", "none", "unknown"}),
+        }),
+        "error": _inspection_object({
+            "code": _nullable({"type": "string", "pattern": "^[a-z][a-z0-9_]{0,127}$"}),
+            "stage": _nullable(_enum_schema(STEP_NAMES)),
+        }),
+    }),
+    "RunInspectionResponse": _inspection_object({"inspection": _ref("RunInspection")}),
+})
+
+
 SCHEMAS.update({
     "SystemDiagnosticDetails": _object({
         "version": {"type": "string", "maxLength": 64},
@@ -302,9 +434,17 @@ OPERATION_DOCS = {
     "packages.list": _doc(200, "PackagesResponse"),
     "packages.get": _doc(200, "PackageResponse", errors={400: ("invalid_package_id",), 404: ("not_found",)}),
     "recipes.list": _doc(200, "RecipesResponse"),
+    "recipes.inspect": _doc(200, "RecipeInspectionResponse", errors={
+        400: ("invalid_recipe_id",), 404: ("recipe_not_found",),
+        409: ("recipe_inspection_unavailable",),
+    }),
     "automation.get": _doc(200, "AutomationResponse", errors={400: ("invalid_recipe_id",), 404: ("recipe_not_found",), 422: ("invalid_automation_configuration",)}),
     "executions.list": _doc(200, "ExecutionsResponse"),
     "executions.get": _doc(200, "ExecutionResponse", errors={400: ("invalid_execution_id",), 404: ("build_run_not_found",)}),
+    "executions.inspect": _doc(200, "RunInspectionResponse", errors={
+        400: ("invalid_execution_id",), 404: ("build_run_not_found",),
+        409: ("run_inspection_unavailable",),
+    }),
     "executions.logs.get": _doc(200, "ExecutionLogResponse", query=("after", "verbosity"), errors={400: ("invalid_execution_id",), 404: ("build_run_not_found",)}),
     "validation.get": _doc(200, "ValidationResponse", errors={400: ("invalid_validation_identity",), 404: ("build_run_not_found", "validation_attempt_not_found")}),
     "settings.get": _doc(200, "SettingsResponse"),

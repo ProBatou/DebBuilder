@@ -16,6 +16,7 @@ import os
 import re
 import secrets
 import signal
+import stat
 import sys
 import time
 import threading
@@ -25,7 +26,7 @@ from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import apt_repo, artifact_publication, artifact_validation, auth_service, automation_orchestrator, automation_scheduler, automation_service, automation_status, build_pipeline, builtin_recipe, command_containment, deb_inspector, dependency_preparation, execution_projection, execution_recovery, execution_service, maintenance, notifications, package_service, recipe_store, resource_limits, settings_service, storage, storage_inventory, storage_pruning, system_diagnostics, upstream_archive, upstream_detection, upstream_observation, validation_oci, validation_service, workspace_cleanup
+from . import apt_repo, artifact_publication, artifact_validation, auth_service, automation_orchestrator, automation_scheduler, automation_service, automation_status, build_pipeline, builtin_recipe, command_containment, deb_inspector, dependency_preparation, execution_projection, execution_recovery, execution_service, inspectors, maintenance, notifications, package_service, recipe_store, resource_limits, settings_service, storage, storage_inventory, storage_pruning, system_diagnostics, upstream_archive, upstream_detection, upstream_observation, validation_oci, validation_service, workspace_cleanup
 from .api_errors import canonical_error_payload
 from .automation_ledger import AutomationLedger
 from .upstream_detection import AutomationDetectionService
@@ -1405,6 +1406,109 @@ def workflow_path(wid: str, for_write: bool = False) -> Path | None:
         require_safe_name,
         for_write=for_write,
     )
+
+
+class InspectionReadError(RuntimeError):
+    """Safe, typed failure while reading a persisted inspector input."""
+
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
+def _inspection_file_bound(path: Path, maximum: int, code: str) -> None:
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise InspectionReadError(code) from exc
+    if not stat.S_ISREG(info.st_mode) or info.st_size > maximum:
+        raise InspectionReadError(code)
+
+
+def get_recipe_inspection(recipe_id: str) -> dict | None:
+    """Read one bounded canonical Recipe and project its safe operator view."""
+    from .recipe_schema import require_safe_name
+    require_safe_name(recipe_id, "Recipe ID")
+    path = workflow_path(recipe_id)
+    if path is None:
+        return None
+    _inspection_file_bound(path, inspectors.MAX_RECIPE_BYTES, "recipe_inspection_unavailable")
+    try:
+        recipe = recipe_store.load_recipe(path)
+        if recipe["name"] != recipe_id:
+            raise ValueError("Recipe identity mismatch")
+        observation = upstream_observation.UpstreamObservationStore(DATA).projection(
+            recipe_id, canonical_recipe_sha256(recipe),
+        )
+        source = "user" if path.parent == USER_WORKFLOWS else "example"
+        return inspectors.inspect_recipe(recipe, source=source, observation=observation)
+    except (OSError, ValueError, KeyError, TypeError, recipe_store.RecipeStoreError) as exc:
+        raise InspectionReadError("recipe_inspection_unavailable") from exc
+
+
+def _latest_validation_inspection(store: BuildStore, run_id: str) -> tuple[dict | None, int, bool]:
+    """Count bounded directory entries; load only one canonical attempt record."""
+    root = store.run_dir(run_id) / "manifests" / "validation-attempts"
+    parent = root.parent
+    if parent.exists() or parent.is_symlink():
+        _inspection_directory_bound(parent, "run_inspection_unavailable")
+    if not root.exists() and not root.is_symlink():
+        return None, 0, False
+    if root.is_symlink() or not root.is_dir():
+        raise InspectionReadError("run_inspection_unavailable")
+    count = 0
+    latest = None
+    try:
+        with os.scandir(root) as entries:
+            for entry in entries:
+                count += 1
+                if count > inspectors.MAX_VALIDATION_ATTEMPTS:
+                    return None, inspectors.MAX_VALIDATION_ATTEMPTS, True
+                if not entry.is_dir(follow_symlinks=False):
+                    raise InspectionReadError("run_inspection_unavailable")
+                require_safe_name(entry.name, "Validation attempt ID")
+                if latest is None or entry.name > latest:
+                    latest = entry.name
+        attempt = validation_service.load_attempt(store, run_id, latest) if latest else None
+        return attempt, count, False
+    except (OSError, ValueError, validation_service.ValidationAdmissionError) as exc:
+        raise InspectionReadError("run_inspection_unavailable") from exc
+
+
+def _inspection_directory_bound(path: Path, code: str) -> None:
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise InspectionReadError(code) from exc
+    if not stat.S_ISDIR(info.st_mode):
+        raise InspectionReadError(code)
+
+
+def get_run_inspection(run_id: str, manager=None) -> dict | None:
+    """Read one bounded Run, not its logs, commands, or full attempt history."""
+    require_safe_name(run_id, "Build Run ID")
+    store = BuildStore(DATA / "builds")
+    run_directory = store.run_dir(run_id)
+    run_path = run_directory / "run.json"
+    if not run_directory.exists() and not run_directory.is_symlink():
+        return None
+    _inspection_directory_bound(run_directory, "run_inspection_unavailable")
+    if not run_path.exists() and not run_path.is_symlink():
+        return None
+    _inspection_file_bound(run_path, inspectors.MAX_RUN_BYTES, "run_inspection_unavailable")
+    try:
+        run = store.load(run_id)
+        if run is None or run.get("id") != run_id:
+            raise ValueError("Run identity mismatch")
+        attempt, count, truncated = _latest_validation_inspection(store, run_id)
+        cancellation_owned = bool(manager is not None and (
+            run_id == manager.active_run_id or run_id in manager.queued_run_ids
+        ))
+        return inspectors.inspect_run(run, validation=attempt, validation_count=count,
+                                      validation_inventory_truncated=truncated,
+                                      cancellation_owned=cancellation_owned)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise InspectionReadError("run_inspection_unavailable") from exc
 
 
 def delete_workflow(wid: str) -> None:

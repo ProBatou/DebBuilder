@@ -190,6 +190,19 @@ def create_handler(api):
         def _get_recipes(self, _variables, _parsed):
             api.json_response(self, {"recipes": api.list_recipes()})
 
+        def _get_recipe_inspection(self, variables, _parsed):
+            try:
+                inspection = api.get_recipe_inspection(variables["recipe_id"])
+            except ValueError:
+                api.json_response(self, ApiError("invalid_recipe_id", "The Recipe identifier is invalid"), 400)
+                return
+            except api.InspectionReadError:
+                api.json_response(self, ApiError("recipe_inspection_unavailable", "The Recipe cannot be inspected safely"), 409)
+                return
+            api.json_response(self, {"inspection": inspection} if inspection is not None else
+                              ApiError("recipe_not_found", "The Recipe was not found"),
+                              200 if inspection is not None else 404)
+
         def _get_automation(self, variables, _parsed):
             try:
                 api.json_response(self, {"automation": api.get_automation_status(variables["recipe_id"])})
@@ -211,6 +224,21 @@ def create_handler(api):
                 api.json_response(self, {"error": str(exc)}, 400)
                 return
             api.json_response(self, {"execution": execution} if execution else {"error": "not found"}, 200 if execution else 404)
+
+        def _get_run_inspection(self, variables, _parsed):
+            try:
+                inspection = api.get_run_inspection(
+                    variables["run_id"], manager=getattr(self.server, "execution_manager", None),
+                )
+            except ValueError:
+                api.json_response(self, ApiError("invalid_execution_id", "The execution identifier is invalid"), 400)
+                return
+            except api.InspectionReadError:
+                api.json_response(self, ApiError("run_inspection_unavailable", "The Run cannot be inspected safely"), 409)
+                return
+            api.json_response(self, {"inspection": inspection} if inspection is not None else
+                              ApiError("build_run_not_found", "Build Run was not found"),
+                              200 if inspection is not None else 404)
 
         def _get_execution_log(self, variables, parsed):
             run_id = variables["run_id"]

@@ -59,3 +59,33 @@ repair, container, image pull, network probe, or repository publication occurs.
 This is an on-demand explanation of prerequisites and current admission, not
 historical monitoring or alerting. A future support bundle can call the same
 Python service, but this endpoint neither creates nor exports a bundle.
+
+## Recipe and Run inspectors
+
+`GET /api/recipes/{recipe_id}/inspect` and
+`GET /api/executions/{run_id}/inspect` are authenticated, read-only operator
+projections. Both responses wrap an `inspection` at schema version 1. They
+explain one selected Recipe or Run, unlike the existing resource GETs that
+return richer UI DTOs. The inspectors intentionally omit raw Recipe snapshots,
+commands, build environment, maintainer scripts, source-change content, logs,
+stderr, tracebacks, private paths and credentials.
+
+Recipe inspection summarizes identity, source selection, build/artifact and
+installation shape, service, automation eligibility and the last *locally
+stored* observation classification. It does not refresh upstream state.
+Repository/ref strings and observation display text are omitted because they
+can contain operator-authored or upstream-controlled data. Run inspection
+summarizes its fixed pipeline steps, artifact identity, one selected Validation
+attempt, publication proof state, recovery and a classified error code. It
+does not load logs, OCI output or the complete Validation attempt history.
+
+One Recipe is limited to 1 MiB and one Run document to 8 MiB for this view.
+Validation inventory is capped at 512 directory entries; only the most
+recently allocated attempt ID is loaded. Counts and truncation flags make
+omitted history explicit. `cancellable` is true only when the current process
+manager still owns the queued or active Run at snapshot time.
+Unsafe or unreadable persisted inputs return canonical HTTP 409 errors;
+invalid IDs return 400 and absent resources return 404. The corresponding
+Python services are `inspect_recipe(...)` and `inspect_run(...)` in
+`debbuilder/inspectors.py`, so a future support bundle can reuse the same
+allowlists without HTTP. No bundle is implemented yet.

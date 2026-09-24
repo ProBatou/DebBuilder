@@ -39,6 +39,12 @@ in `debbuilder/system_diagnostics.py`; see [API contract](API.md) for status
 semantics and limitations. The endpoint does not repair local state or replace
 monitoring.
 
+For a selected Recipe or Run, use the authenticated `/inspect` subresource
+instead of parsing the richer GET DTO when a stable, sanitized operator summary
+is needed. The Python projections in `debbuilder/inspectors.py` are directly
+testable without a running HTTP server; they never initiate build or upstream
+work. Their exact response schemas are generated into `openapi.json`.
+
 ## Checks
 
 The broad local checks are:

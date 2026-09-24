@@ -22,9 +22,11 @@ EXPECTED_ROUTES = {
     ("GET", "/api/packages", "packages.list"),
     ("GET", "/api/packages/{name}", "packages.get"),
     ("GET", "/api/recipes", "recipes.list"),
+    ("GET", "/api/recipes/{recipe_id}/inspect", "recipes.inspect"),
     ("GET", "/api/recipes/{recipe_id}/automation", "automation.get"),
     ("GET", "/api/executions", "executions.list"),
     ("GET", "/api/executions/{run_id}", "executions.get"),
+    ("GET", "/api/executions/{run_id}/inspect", "executions.inspect"),
     ("GET", "/api/executions/{run_id}/logs", "executions.logs.get"),
     ("GET", "/api/executions/{run_id}/validations/{attempt_id}", "validation.get"),
     ("GET", "/api/settings", "settings.get"),
@@ -66,7 +68,7 @@ class ApiRouteRegistryTests(unittest.TestCase):
             method: sum(route.method == method for route in ADMIN_API_ROUTES)
             for method in ("GET", "POST", "DELETE")
         }
-        self.assertEqual(by_method, {"GET": 17, "POST": 18, "DELETE": 3})
+        self.assertEqual(by_method, {"GET": 19, "POST": 18, "DELETE": 3})
         self.assertEqual(
             sum(route.effect is RouteEffect.DURABLE_MUTATION for route in ADMIN_API_ROUTES),
             19,

@@ -56,6 +56,7 @@ jobs:
         env:
           RELEASE_EVENT_NAME: ${{ github.event_name }}
           RELEASE_TAG: ${{ steps.release_tag.outputs.tag }}
+          V1_RELEASE_COMMIT: af22d06a59a8ab83f99faee16ea31da4dd49fbbe
         run: |
           tag_commit="$(git rev-parse --verify "${RELEASE_TAG}^{commit}")"
           head_commit="$(git rev-parse --verify HEAD)"
@@ -70,6 +71,11 @@ jobs:
               exit 1
             fi
           fi
+          if [[ "$RELEASE_TAG" == "v1.0.0" && "$tag_commit" != "$V1_RELEASE_COMMIT" ]]; then
+            echo "v1.0.0 must remain fixed at $V1_RELEASE_COMMIT" >&2
+            exit 1
+          fi
+          echo "Verified $RELEASE_TAG checkout at $tag_commit"
 
       - name: Verify tag, application version, and canonical Recipe
         env:
@@ -114,18 +120,118 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y podman
 
+      - name: Diagnose anonymous OCI access and select release mode
+        id: oci_release_mode
+        shell: bash
+        env:
+          BOOKWORM_DESCRIPTOR: ghcr.io/probatou/debbuilder-validation-bookworm@sha256:871edf6fb764805c7e149a600080adb66e692952a1655ef1fb2ca883b9c6f1a7
+        run: |
+          set -euo pipefail
+          probe_root="$(mktemp -d)"
+          cleanup() {
+            sudo chown -R "$(id -u):$(id -g)" "$probe_root" >/dev/null 2>&1 || true
+            rm -rf -- "$probe_root"
+          }
+          trap cleanup EXIT
+
+          bounded_stderr() {
+            local label="$1"
+            local path="$2"
+            echo "$label stderr (last 12000 bytes):"
+            if [[ -s "$path" ]]; then
+              tail -c 12000 "$path"
+              echo
+            else
+              echo "<empty>"
+            fi
+          }
+
+          echo "podman version: $(podman --version)"
+          mkdir -p "$probe_root/rootless-root" "$probe_root/rootless-run"
+          printf '{}\n' > "$probe_root/rootless-auth.json"
+          chmod 600 "$probe_root/rootless-auth.json"
+          set +e
+          rootless_info="$(podman \
+            --root "$probe_root/rootless-root" \
+            --runroot "$probe_root/rootless-run" \
+            info --format 'rootless={{.Host.Security.Rootless}} storage_driver={{.Store.GraphDriverName}}' 2>&1)"
+          rootless_info_status=$?
+          set -e
+          echo "rootless mode: info_exit=$rootless_info_status $rootless_info"
+          set +e
+          podman \
+            --root "$probe_root/rootless-root" \
+            --runroot "$probe_root/rootless-run" \
+            pull --quiet \
+            --authfile "$probe_root/rootless-auth.json" \
+            "$BOOKWORM_DESCRIPTOR" \
+            > "$probe_root/rootless.stdout" \
+            2> "$probe_root/rootless.stderr"
+          rootless_status=$?
+          set -e
+          echo "rootless exact pull exit status: $rootless_status"
+          if [[ "$rootless_status" -eq 0 ]]; then
+            bounded_stderr "rootless" "$probe_root/rootless.stderr"
+            echo "selected release mode: rootless"
+            echo "mode=rootless" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          bounded_stderr "rootless" "$probe_root/rootless.stderr"
+
+          mkdir -p "$probe_root/rootful-root" "$probe_root/rootful-run"
+          printf '{}\n' > "$probe_root/rootful-auth.json"
+          chmod 600 "$probe_root/rootful-auth.json"
+          set +e
+          rootful_info="$(sudo podman \
+            --root "$probe_root/rootful-root" \
+            --runroot "$probe_root/rootful-run" \
+            info --format 'rootless={{.Host.Security.Rootless}} storage_driver={{.Store.GraphDriverName}}' 2>&1)"
+          rootful_info_status=$?
+          set -e
+          echo "rootful mode: info_exit=$rootful_info_status $rootful_info"
+          set +e
+          sudo podman \
+            --root "$probe_root/rootful-root" \
+            --runroot "$probe_root/rootful-run" \
+            pull --quiet \
+            --authfile "$probe_root/rootful-auth.json" \
+            "$BOOKWORM_DESCRIPTOR" \
+            > "$probe_root/rootful.stdout" \
+            2> "$probe_root/rootful.stderr"
+          rootful_status=$?
+          set -e
+          echo "rootful exact pull exit status: $rootful_status"
+          bounded_stderr "rootful" "$probe_root/rootful.stderr"
+          if [[ "$rootful_status" -ne 0 ]]; then
+            echo "Both anonymous exact-digest probes failed; refusing the release build" >&2
+            exit 1
+          fi
+          echo "selected release mode: rootful"
+          echo "mode=rootful" >> "$GITHUB_OUTPUT"
+
       - name: Anonymously verify accepted descriptors and build official assets
         id: release_result
         shell: bash
         env:
           RELEASE_TAG: ${{ steps.release_tag.outputs.tag }}
+          RELEASE_MODE: ${{ steps.oci_release_mode.outputs.mode }}
         run: |
-          python3 -m debbuilder.release_build \
-            --tag "$RELEASE_TAG" \
-            --source-root "$GITHUB_WORKSPACE" \
-            --validation-images "$GITHUB_WORKSPACE/debbuilder/validation_images.json" \
-            --output-dir "$GITHUB_WORKSPACE/release-assets" \
-            > release-build.json
+          release_command=(
+            python3 -m debbuilder.release_build
+            --tag "$RELEASE_TAG"
+            --source-root "$GITHUB_WORKSPACE"
+            --validation-images "$GITHUB_WORKSPACE/debbuilder/validation_images.json"
+            --output-dir "$GITHUB_WORKSPACE/release-assets"
+          )
+          if [[ "$RELEASE_MODE" == "rootful" ]]; then
+            sudo -E "${release_command[@]}" > release-build.json
+            sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/release-assets"
+          elif [[ "$RELEASE_MODE" == "rootless" ]]; then
+            "${release_command[@]}" > release-build.json
+          else
+            echo "Unknown release mode: $RELEASE_MODE" >&2
+            exit 1
+          fi
           (
             cd release-assets
             sha256sum --check --strict SHA256SUMS

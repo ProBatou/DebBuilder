@@ -21,14 +21,64 @@ Version needs are metadata, not package-version constraints.
 Relocatable ELF objects (`ET_REL`) have linkage `not_applicable` when they have
 no dynamic segment.
 
-The approved future automatic Debian resolver scope is Bookworm/amd64.
-`planned_resolution_capability()` reports that scope separately from the ELF
-inspection data. It does not perform resolution, and no result obtained from
-the Trixie host may be used as a Bookworm package dependency.
+`planned_resolution_capability()` preserves the #30B observation contract. It
+does not perform resolution. #30C adds the separate
+`debbuilder.elf_dependency_resolution.resolve_elf_dependencies()` engine for
+Bookworm/amd64 only; another target returns `unsupported` with no proposal.
+
+The #30C caller supplies the **final** staging tree, installed absolute paths
+and their #30B inspection results, plus a prepared Bookworm/amd64 environment.
+The staging tree must include `DEBIAN/control`. The production adapter accepts
+only an existing, running `OwnedContainer` with the admitted Bookworm/amd64
+image digest and the existing `dependency-preparation` role. Its read-only
+mounts include the staging tree at `/debbuilder-staging`, a small work
+directory with `debian/control` at `/debbuilder-elf-work`, and #27's
+`bounded_process.py` at `/debbuilder-input/bounded_process.py`. The adapter
+uses the existing Podman lifecycle and cleanup; it does not create a second
+container manager. No host dpkg database enters the resolver's result.
+
+The admitted Validation image does **not** currently contain `dpkg-shlibdeps`
+(`dpkg-dev`). A preparation step must supply this tool and its Bookworm
+dependencies through #27's explicit, trusted APT preparation boundary before
+resolution. The engine checks this precondition and fails with
+`resolver_environment_incomplete` when it is absent. It never downloads
+packages during resolution. #30D must wire that preparation and the final
+staging mounts before using proposals in the build flow.
+
+For each dynamic ELF, the engine runs `dpkg-shlibdeps -v -O -S<staging>
+-e<installed-file>` inside the target environment. The work directory holds
+`debian/control`, as required by `dpkg-shlibdeps`. Its bounded output supplies
+the Debian `shlibs:Depends` relations; debug evidence identifies the selected
+library and its `symbols` or `shlibs` metadata. `dpkg-query -S` verifies
+package ownership inside the same environment. Debian's version comparison
+retains the strongest `>=` constraint when proposals overlap. Only simple
+Debian package relations emitted by this tool are accepted; unexpected output,
+missing metadata, conflicting paths or package ownership fail closed. The
+interpreter is checked against a package already in the proposed dependencies;
+no separate dependency is guessed for the loader.
+
+A `DT_NEEDED` library is bundled only if the final staging tree contains a
+matching regular ELF reachable through the requester's static RPATH/RUNPATH
+and `$ORIGIN`, with a matching SONAME. Payload-local symlinks are followed with
+a bounded chain; their targets must remain in the staged payload. Its own
+`DT_NEEDED` entries are inspected recursively. The traversal is limited to 16
+levels, 128 ELF files and 512
+requirements; cycles are tracked. This models only demonstrable private paths,
+not `dlopen()`, calculated plugin names, arbitrary runtime variables or the
+full dynamic linker. Missing or ambiguous libraries fail closed.
+
+The versioned result contains an aggregate Depends proposal and per
+requirement provenance: installed-path requester, SONAME, selected installed
+or target-container library path, status (`bundled` or `resolved_external`),
+Debian package, relation and metadata source. Errors carry an `unresolved`
+requirement when an external lookup fails. Paths in the staging tree are
+install-relative; no host staging path is returned. The result is a proposal,
+not a change to Recipe, `package.runtime_dependencies` or `DEBIAN/control`.
 
 The boundaries remain distinct:
 
 1. #30B: `readelf` observes ELF metadata.
-2. #30C: Debian metadata and `dpkg-shlibdeps` resolve package relationships.
-3. #27: existing APT installation and offline lifecycle validation check the
+2. #30C: Debian metadata and `dpkg-shlibdeps` produce a bounded Depends proposal.
+3. #30D: Recipe and package-control integration can consume that proposal.
+4. #27: existing APT installation and offline lifecycle validation check the
    final `.deb`.

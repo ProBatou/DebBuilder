@@ -23,18 +23,17 @@ specific dependency is stated:
 | Issue | Status | Outcome / roadmap role |
 | --- | --- | --- |
 | [#20 System diagnostics, support bundle and documented API](https://github.com/ProBatou/DebBuilder/issues/20) | **Completed** | Stable operator/API contracts. #22 and #23 can build on it; #24 can consume the established API/diagnostic surface. |
-| [#25 Generic Git repositories and direct archive URLs](https://github.com/ProBatou/DebBuilder/issues/25) | **Deferred after audit** | The source abstraction was audited, but implementation is intentionally postponed while real usage remains GitHub-only. Revisit when a concrete non-GitHub source need appears. It no longer blocks #24. |
-| [#30 Runtime shared-library dependencies for prebuilt binaries](https://github.com/ProBatou/DebBuilder/issues/30) | **In progress — audit/prototype** | Safe ELF inspection and explainable Debian `Depends` proposals for prebuilt binaries. Must settle before #24 so the dependency UX reflects real backend capability. |
-| [#31 Explicit empty output directories](https://github.com/ProBatou/DebBuilder/issues/31) | **In progress — audit/design** | Declarative post-build directory preparation with fail-closed path handling. Must settle before #24 so the output UX models this lifecycle explicitly. |
+| [#25 Generic Git repositories and direct archive URLs](https://github.com/ProBatou/DebBuilder/issues/25) | **Deferred** | The source abstraction was audited, but implementation is intentionally postponed while real usage remains GitHub-only. Revisit when a concrete non-GitHub source need appears. It no longer blocks #24. |
+| [#30 Runtime shared-library dependencies for prebuilt binaries](https://github.com/ProBatou/DebBuilder/issues/30) | **In progress** | Safe ELF inspection and explainable Debian `Depends` proposals for prebuilt binaries. Must settle before #24 so the dependency UX reflects real backend capability. |
+| [#31 Explicit empty output directories](https://github.com/ProBatou/DebBuilder/issues/31) | **Completed** | Declarative post-build directory preparation with fail-closed path handling, empty-directory staging and operator diagnostics is implemented. |
 
-#30 and #31 are currently being audited in parallel. Their implementation
-should remain independent; if both later touch Recipe schema/serialization,
-integrate one cleanly before rebasing/resyncing the other.
+#31 is complete. #30 remains in progress and is the only outstanding hard gate
+for #24.
 
 ## UI/UX redesign
 
 - [#24 Interface redesign and frontend architecture review](https://github.com/ProBatou/DebBuilder/issues/24)
-  waits for **#30 and #31**. #20 is already complete. #25 has been deliberately
+  waits for **#30 only**. #20 and #31 are already complete. #25 has been deliberately
   deferred and is no longer a prerequisite: the redesign may target the real
   current GitHub source workflow and leave room for future source providers
   without implementing them speculatively. #21, #22 and #23 are not
@@ -83,7 +82,7 @@ flowchart TD
     I23["#23 credentials/webhooks"]
     I25["#25 generic sources — deferred"]
     I30["#30 binary runtime deps — in progress"]
-    I31["#31 empty output dirs — in progress"]
+    I31["#31 empty output dirs — completed"]
     I24["#24 UI/UX redesign"]
     I33["#33 payload idea"]
     I34["#34 container idea"]
@@ -91,11 +90,10 @@ flowchart TD
     I12 --> I20
     I20 --> I22 & I23
     I30 --> I24
-    I31 --> I24
 ```
 
 Arrows are current hard implementation gates. #12 and #20 are completed
-historical foundations. #25 remains available as future source-expansion work
+historical foundations, and #31 is now complete. #25 remains available as future source-expansion work
 but is deliberately not a hard gate for #24. #21, #22 and #23 do not block the
 redesign. Coordination relationships are described above and are deliberately
 absent from the hard-dependency graph.

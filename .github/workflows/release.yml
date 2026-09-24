@@ -127,12 +127,79 @@ jobs:
           RELEASE_TAG: ${{ steps.release_tag.outputs.tag }}
           STORAGE_DRIVER: vfs
         run: |
+          wrapper_dir="$RUNNER_TEMP/debbuilder-podman-wrapper"
+          podman_diag_log="$RUNNER_TEMP/debbuilder-podman.stderr.log"
+          mkdir -p -- "$wrapper_dir"
+          cat > "$wrapper_dir/podman" <<'PODMAN_WRAPPER'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          : "${PODMAN_DIAG_LOG:?PODMAN_DIAG_LOG must be set}"
+          root=""
+          runroot=""
+          args=("$@")
+
+          for ((index = 0; index < ${#args[@]}; index++)); do
+            case "${args[$index]}" in
+              --root)
+                if ((index + 1 >= ${#args[@]})); then
+                  echo "podman wrapper: --root requires a path" >&2
+                  exit 125
+                fi
+                root="${args[$((index + 1))]}"
+                ;;
+              --root=*)
+                root="${args[$index]#--root=}"
+                ;;
+              --runroot)
+                if ((index + 1 >= ${#args[@]})); then
+                  echo "podman wrapper: --runroot requires a path" >&2
+                  exit 125
+                fi
+                runroot="${args[$((index + 1))]}"
+                ;;
+              --runroot=*)
+                runroot="${args[$index]#--runroot=}"
+                ;;
+            esac
+          done
+
+          if [[ -n "$root" ]]; then
+            mkdir -p -- "$root"
+            echo "podman wrapper: root directory prepared: $root" >&2
+          fi
+          if [[ -n "$runroot" ]]; then
+            mkdir -p -- "$runroot"
+            echo "podman wrapper: runroot directory prepared: $runroot" >&2
+          fi
+          echo "podman wrapper: invoking /usr/bin/podman" >&2
+          exec /usr/bin/podman "${args[@]}" \
+            2> >(tee -a "$PODMAN_DIAG_LOG" >&2)
+          PODMAN_WRAPPER
+          chmod 700 "$wrapper_dir/podman"
+          : > "$podman_diag_log"
+
+          set +e
+          PATH="$wrapper_dir:$PATH" PODMAN_DIAG_LOG="$podman_diag_log" \
           python3 -m debbuilder.release_build \
             --tag "$RELEASE_TAG" \
             --source-root "$GITHUB_WORKSPACE" \
             --validation-images "$GITHUB_WORKSPACE/debbuilder/validation_images.json" \
             --output-dir "$GITHUB_WORKSPACE/release-assets" \
             > release-build.json
+          builder_status=$?
+          set -e
+          if [[ "$builder_status" -ne 0 ]]; then
+            echo "canonical builder exit status: $builder_status" >&2
+            echo "Podman stderr (final 12000 bytes):" >&2
+            if [[ -s "$podman_diag_log" ]]; then
+              tail -c 12000 "$podman_diag_log" >&2
+              echo >&2
+            else
+              echo "<empty>" >&2
+            fi
+            exit "$builder_status"
+          fi
           (
             cd release-assets
             sha256sum --check --strict SHA256SUMS

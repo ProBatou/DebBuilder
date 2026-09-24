@@ -88,6 +88,12 @@ class OpenApiContractTests(TestCase):
             operations(document)[("POST", "/api/executions/{run_id}/cancel")]["responses"]["409"]["x-debbuilder-error-codes"],
             ["execution_not_cancellable"],
         )
+        self.assertIn("ambiguous_release_asset", operations(document)[
+            ("POST", "/api/upstream-archive/inspect")]["responses"]["422"]["x-debbuilder-error-codes"])
+        self.assertIn("unsupported_version_source", operations(document)[
+            ("POST", "/api/recipes/validate")]["responses"]["422"]["x-debbuilder-error-codes"])
+        self.assertIn("github_unavailable", operations(document)[
+            ("POST", "/api/recipes/{recipe_id}/observation/refresh")]["responses"]["502"]["x-debbuilder-error-codes"])
 
     def test_schema_references_and_key_request_contracts_are_valid(self):
         document = openapi_document()

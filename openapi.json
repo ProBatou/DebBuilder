@@ -1968,7 +1968,7 @@
             ]
           },
           "422": {
-            "description": "HTTP 422 admin API error. Documented codes: invalid_recipe_json, recipe_identity_mismatch, unknown_field.",
+            "description": "HTTP 422 admin API error. Documented codes: invalid_recipe_json, recipe_identity_mismatch, unsupported_version_source, unknown_field.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1979,6 +1979,7 @@
             "x-debbuilder-error-codes": [
               "invalid_recipe_json",
               "recipe_identity_mismatch",
+              "unsupported_version_source",
               "unknown_field"
             ]
           },
@@ -2217,7 +2218,7 @@
             ]
           },
           "502": {
-            "description": "HTTP 502 admin API error. Documented codes: upstream_unavailable.",
+            "description": "HTTP 502 admin API error. Documented codes: upstream_unavailable, github_unavailable.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2226,11 +2227,12 @@
               }
             },
             "x-debbuilder-error-codes": [
-              "upstream_unavailable"
+              "upstream_unavailable",
+              "github_unavailable"
             ]
           },
           "503": {
-            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable, application_shutting_down.",
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable, application_shutting_down, github_unavailable.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2241,7 +2243,8 @@
             "x-debbuilder-error-codes": [
               "authentication_unavailable",
               "settings_unavailable",
-              "application_shutting_down"
+              "application_shutting_down",
+              "github_unavailable"
             ]
           }
         },
@@ -2883,7 +2886,7 @@
             ]
           },
           "422": {
-            "description": "HTTP 422 admin API error. Documented codes: invalid_recipe_json, unknown_field, unsupported_recipe_schema, invalid_automation_policy.",
+            "description": "HTTP 422 admin API error. Documented codes: invalid_recipe_json, unknown_field, unsupported_recipe_schema, unsupported_version_source, invalid_automation_policy.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2895,6 +2898,7 @@
               "invalid_recipe_json",
               "unknown_field",
               "unsupported_recipe_schema",
+              "unsupported_version_source",
               "invalid_automation_policy"
             ]
           },
@@ -3010,7 +3014,7 @@
             ]
           },
           "422": {
-            "description": "HTTP 422 admin API error. Documented codes: invalid_recipe_json, unsupported_recipe_schema, unknown_field.",
+            "description": "HTTP 422 admin API error. Documented codes: invalid_recipe_json, unsupported_recipe_schema, unsupported_version_source, unknown_field.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3021,6 +3025,7 @@
             "x-debbuilder-error-codes": [
               "invalid_recipe_json",
               "unsupported_recipe_schema",
+              "unsupported_version_source",
               "unknown_field"
             ]
           },
@@ -3123,7 +3128,7 @@
             ]
           },
           "422": {
-            "description": "HTTP 422 admin API error. Documented codes: unsupported_recipe_schema, unknown_field.",
+            "description": "HTTP 422 admin API error. Documented codes: unsupported_recipe_schema, unsupported_version_source, unknown_field.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3133,6 +3138,7 @@
             },
             "x-debbuilder-error-codes": [
               "unsupported_recipe_schema",
+              "unsupported_version_source",
               "unknown_field"
             ]
           },
@@ -3163,7 +3169,7 @@
             ]
           },
           "503": {
-            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable, application_shutting_down, execution_manager_unavailable.",
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable, application_shutting_down, execution_manager_unavailable, github_unavailable.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3175,7 +3181,8 @@
               "authentication_unavailable",
               "settings_unavailable",
               "application_shutting_down",
-              "execution_manager_unavailable"
+              "execution_manager_unavailable",
+              "github_unavailable"
             ]
           }
         },
@@ -3249,7 +3256,7 @@
             ]
           },
           "422": {
-            "description": "HTTP 422 admin API error. Documented codes: invalid_recipe_json, ambiguous_archive_source, release_asset_not_found.",
+            "description": "HTTP 422 admin API error. Documented codes: invalid_recipe_json, ambiguous_archive_source, ambiguous_release_asset, release_asset_not_found, github_unavailable.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3260,7 +3267,9 @@
             "x-debbuilder-error-codes": [
               "invalid_recipe_json",
               "ambiguous_archive_source",
-              "release_asset_not_found"
+              "ambiguous_release_asset",
+              "release_asset_not_found",
+              "github_unavailable"
             ]
           },
           "503": {

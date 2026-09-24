@@ -19,6 +19,7 @@ from .recipe_schema import (
     ARCHIVE_SOURCES, AUTOMATION_POLICIES, OUTPUT_MODES, SAFE_ARCH,
     SCHEMA_VERSION, SOURCE_CHANGE_TYPES, VERSION_SOURCES,
 )
+from .system_diagnostics import CHECK_IDS, SCHEMA_VERSION_DIAGNOSTICS, STATUSES
 from .validation_service import ACTIVE_STATUSES as ACTIVE_VALIDATION_STATUSES
 from .validation_service import TERMINAL_STATUSES as TERMINAL_VALIDATION_STATUSES
 
@@ -202,6 +203,33 @@ def _wrapped(field: str, name: str, *, ok: bool = False) -> dict:
 
 
 SCHEMAS.update({
+    "SystemDiagnosticDetails": _object({
+        "version": {"type": "string", "maxLength": 64},
+        "recipe_schema_version": I, "run_schema_version": I,
+        "python_version": {"type": "string", "maxLength": 32},
+        "debian_architecture": {"type": "string", "maxLength": 32},
+        "auth_mode": {"type": "string", "enum": ["none", "header", "oidc"]},
+        "listener_active": B, "configuration_valid": B,
+        "signed_release_present": B, "public_key_present": B,
+        "signing_fingerprint": {"type": "string", "pattern": "^(?:[0-9A-F]{40}|[0-9A-F]{64})$"},
+        "podman_installed": B, "runtime_verified": B, "admission_blocked": B,
+        "open": B, "recovery_blocked": B,
+        "backend": {"type": "string", "enum": ["systemd", "systemd_cgroup", "process_group", "unresolved", "unknown"]},
+        "available": B, "running": B, "checks_enabled": B,
+    }, description="Allowlisted scalar fields only. Fields vary by check; no paths, commands, exception text, or secrets."),
+    "SystemDiagnosticCheck": _object({
+        "id": {"type": "string", "enum": list(CHECK_IDS)},
+        "status": {"type": "string", "enum": list(STATUSES)},
+        "message": {"type": "string", "maxLength": 120},
+        "details": _ref("SystemDiagnosticDetails"),
+    }, ("id", "status", "message", "details")),
+    "SystemDiagnosticsResponse": _object({
+        "schema_version": {"const": SCHEMA_VERSION_DIAGNOSTICS},
+        "status": {"type": "string", "enum": ["ok", "warning", "failed"]},
+        "checks": {"type": "array", "items": _ref("SystemDiagnosticCheck"),
+                   "minItems": len(CHECK_IDS), "maxItems": len(CHECK_IDS)},
+    }, ("schema_version", "status", "checks"),
+        description="Global failed if any check failed, otherwise warning if any warning/unknown, otherwise ok. Individual probe failures return unknown and HTTP 200."),
     "StatusResponse": _object({"ok": {"const": True}, "auth_mode": S,
                                "repo_default": S, "suite_default": S, "component_default": S,
                                "arch_default": S, "notification_type": S,
@@ -267,6 +295,7 @@ def _doc(status: int, response: str, request: str | None = None, *,
 # summaries, auth policy and effects are deliberately absent: the registry owns them.
 OPERATION_DOCS = {
     "system.status": _doc(200, "StatusResponse"),
+    "system.diagnostics": _doc(200, "SystemDiagnosticsResponse"),
     "system.openapi": _doc(200, "OpenApiDocument"),
     "auth.status": _doc(200, "AuthStatusResponse"),
     "dashboard.get": _doc(200, "DashboardResponse"),

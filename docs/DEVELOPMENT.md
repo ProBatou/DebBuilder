@@ -32,6 +32,13 @@ The admin UI defaults to `http://127.0.0.1:8099`; the public repository
 listener defaults to `http://127.0.0.1:8081`. Use temporary data and repository
 directories when running development instances in parallel.
 
+For an on-demand, authenticated, read-only snapshot of startup prerequisites
+and admission state, request `GET /api/system/diagnostics` on the admin
+listener. Its canonical check inventory and transport-independent builder live
+in `debbuilder/system_diagnostics.py`; see [API contract](API.md) for status
+semantics and limitations. The endpoint does not repair local state or replace
+monitoring.
+
 ## Checks
 
 The broad local checks are:

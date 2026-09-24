@@ -21,10 +21,11 @@ import time
 import threading
 import urllib.parse
 import urllib.request
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import apt_repo, artifact_publication, artifact_validation, auth_service, automation_orchestrator, automation_scheduler, automation_service, automation_status, build_pipeline, builtin_recipe, command_containment, deb_inspector, dependency_preparation, execution_projection, execution_recovery, execution_service, maintenance, notifications, package_service, recipe_store, resource_limits, settings_service, storage, storage_inventory, storage_pruning, upstream_archive, upstream_detection, upstream_observation, validation_oci, validation_service, workspace_cleanup
+from . import apt_repo, artifact_publication, artifact_validation, auth_service, automation_orchestrator, automation_scheduler, automation_service, automation_status, build_pipeline, builtin_recipe, command_containment, deb_inspector, dependency_preparation, execution_projection, execution_recovery, execution_service, maintenance, notifications, package_service, recipe_store, resource_limits, settings_service, storage, storage_inventory, storage_pruning, system_diagnostics, upstream_archive, upstream_detection, upstream_observation, validation_oci, validation_service, workspace_cleanup
 from .api_errors import canonical_error_payload
 from .automation_ledger import AutomationLedger
 from .upstream_detection import AutomationDetectionService
@@ -34,7 +35,7 @@ from .execution_manager import DEFAULT_SHUTDOWN_TIMEOUT, ExecutionManager, Execu
 from .http_handler import create_handler
 from .lifecycle import MutationGate, MutationGateClosed
 from .recipe_schema import RecipeDocumentError, recipe_document_for_storage, require_safe_name, validate_recipe_metadata
-from .settings_store import SettingsDocumentError, SessionSecretError, cookie_secret, github_token, load_settings, oidc_client_secret, prepare_cookie_secret, resource_repair_security
+from .settings_store import SettingsDocumentError, SessionSecretError, cookie_secret, github_token, load_secrets, load_settings, oidc_client_secret, prepare_cookie_secret, resource_repair_security, secrets_path, settings_path
 from .runtime import RuntimeConfig, listeners_overlap
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1693,6 +1694,35 @@ def repo_settings() -> dict:
 
 def effective_security() -> dict:
     return app_settings()["security"]
+
+
+def system_diagnostics_snapshot(server=None) -> dict:
+    """Read-only snapshot shared by HTTP and future support tooling."""
+    def bounded_document(path: Path) -> None:
+        try:
+            if path.lstat().st_size > 256 * 1024:
+                raise ValueError("diagnostic document bound exceeded")
+        except FileNotFoundError:
+            pass
+
+    def bounded_settings():
+        bounded_document(settings_path(DATA))
+        return app_settings()
+
+    def bounded_secrets():
+        bounded_document(secrets_path(DATA))
+        return load_secrets(DATA)
+
+    return system_diagnostics.build_system_diagnostics(
+        runtime=replace(RUNTIME, data=DATA, repository_root=REPOSITORY_ROOT),
+        load_configuration=bounded_settings, load_secret_document=bounded_secrets,
+        execution_manager=getattr(server, "execution_manager", None),
+        mutation_gate=APPLICATION_MUTATION_GATE,
+        validation_manager=APPLICATION_VALIDATION_MANAGER,
+        scheduler=APPLICATION_AUTOMATION_SCHEDULER,
+        orchestrator=APPLICATION_AUTOMATION_ORCHESTRATOR,
+        repository_active=PUBLIC_REPOSITORY_ACTIVE,
+    )
 
 
 def settings_view() -> dict:

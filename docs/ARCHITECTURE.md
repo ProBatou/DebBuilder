@@ -81,6 +81,15 @@ the canonical code inventory in `debbuilder/api_errors.py`. The committed
 authenticated read-only `GET /api/openapi.json` route. See [API contract](API.md)
 for generation and validation commands.
 
+`debbuilder/system_diagnostics.py` is the canonical, transport-independent
+diagnostic service and check-ID inventory. The HTTP handler passes existing
+process services through the application facade. Each probe has its own safe
+failure boundary; no raw subsystem record or exception is serialized. Settings
+validation, repository configuration parsing, cached containment capability,
+and admission/scheduler state reuse existing projections. Repository file reads
+are size-limited and do not mutate or reconcile state. The resulting snapshot
+is a bounded read-only operator view, not a continuous health monitor.
+
 ## Build model
 
 Builds run in per-Run workspaces and use structured argument vectors rather

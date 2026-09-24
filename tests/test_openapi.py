@@ -34,7 +34,7 @@ class OpenApiContractTests(TestCase):
         actual = operations(document)
         expected = {(route.method, route.path_template): route for route in ADMIN_API_ROUTES}
         self.assertEqual(set(actual), set(expected))
-        self.assertEqual(len(actual), 37)
+        self.assertEqual(len(actual), 38)
         self.assertEqual(set(OPERATION_DOCS), {route.operation_id for route in ADMIN_API_ROUTES})
         self.assertEqual(
             {operation["operationId"] for operation in actual.values()},

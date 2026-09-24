@@ -38,3 +38,24 @@ the OpenAPI schema is intentionally a client guide rather than a second
 validator. Likewise, execution, automation, and storage projections have
 documented stable fields plus subsystem-dependent fields. Tests pin the
 important request fields and real response wrappers to the runtime.
+
+## System diagnostics
+
+`GET /api/system/diagnostics` is a configured-admin, read-only snapshot for
+troubleshooting. It returns diagnostic schema version 1, an overall status,
+and nine checks with stable IDs from `debbuilder/system_diagnostics.py`.
+Check statuses are `ok`, `warning`, `failed`, or `unknown`. Overall status is
+`failed` if any check failed, otherwise `warning` if any check is warning or
+unknown, otherwise `ok`. A degraded probe is still HTTP 200; HTTP errors use
+the canonical `ApiError` contract and normally mean authentication is
+unavailable/denied or the response itself could not be constructed.
+
+Details are a fixed allowlist of bounded scalar fields. The endpoint omits
+paths, environment values, credentials, command output, Run/Recipe contents,
+and raw exception text. Repository metadata presence does **not** verify its
+signature or prove publication readiness. OCI reports only local Podman binary
+presence, not runtime functionality or qualified-image state. No bootstrap,
+repair, container, image pull, network probe, or repository publication occurs.
+This is an on-demand explanation of prerequisites and current admission, not
+historical monitoring or alerting. A future support bundle can call the same
+Python service, but this endpoint neither creates nor exports a bundle.

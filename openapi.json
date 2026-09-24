@@ -77,6 +77,77 @@
         ]
       }
     },
+    "/api/system/diagnostics": {
+      "get": {
+        "operationId": "system.diagnostics",
+        "summary": "Get bounded system diagnostics",
+        "tags": [
+          "system"
+        ],
+        "x-debbuilder-effect": "read_only",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemDiagnosticsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "500": {
+            "description": "HTTP 500 admin API error. Documented codes: internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "internal_error"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable"
+            ]
+          }
+        },
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
     "/api/openapi.json": {
       "get": {
         "operationId": "system.openapi",
@@ -5093,6 +5164,162 @@
           }
         ],
         "description": "Deletion report or dry-run preview."
+      },
+      "SystemDiagnosticDetails": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "recipe_schema_version": {
+            "type": "integer"
+          },
+          "run_schema_version": {
+            "type": "integer"
+          },
+          "python_version": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "debian_architecture": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "auth_mode": {
+            "type": "string",
+            "enum": [
+              "none",
+              "header",
+              "oidc"
+            ]
+          },
+          "listener_active": {
+            "type": "boolean"
+          },
+          "configuration_valid": {
+            "type": "boolean"
+          },
+          "signed_release_present": {
+            "type": "boolean"
+          },
+          "public_key_present": {
+            "type": "boolean"
+          },
+          "signing_fingerprint": {
+            "type": "string",
+            "pattern": "^(?:[0-9A-F]{40}|[0-9A-F]{64})$"
+          },
+          "podman_installed": {
+            "type": "boolean"
+          },
+          "runtime_verified": {
+            "type": "boolean"
+          },
+          "admission_blocked": {
+            "type": "boolean"
+          },
+          "open": {
+            "type": "boolean"
+          },
+          "recovery_blocked": {
+            "type": "boolean"
+          },
+          "backend": {
+            "type": "string",
+            "enum": [
+              "systemd",
+              "systemd_cgroup",
+              "process_group",
+              "unresolved",
+              "unknown"
+            ]
+          },
+          "available": {
+            "type": "boolean"
+          },
+          "running": {
+            "type": "boolean"
+          },
+          "checks_enabled": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false,
+        "description": "Allowlisted scalar fields only. Fields vary by check; no paths, commands, exception text, or secrets."
+      },
+      "SystemDiagnosticCheck": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "enum": [
+              "application.runtime",
+              "settings.documents",
+              "repository.publication",
+              "validation.oci",
+              "execution.admission",
+              "execution.containment",
+              "application.mutations",
+              "automation.scheduler",
+              "automation.orchestrator"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "warning",
+              "failed",
+              "unknown"
+            ]
+          },
+          "message": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "details": {
+            "$ref": "#/components/schemas/SystemDiagnosticDetails"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "status",
+          "message",
+          "details"
+        ]
+      },
+      "SystemDiagnosticsResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "warning",
+              "failed"
+            ]
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SystemDiagnosticCheck"
+            },
+            "minItems": 9,
+            "maxItems": 9
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "status",
+          "checks"
+        ],
+        "description": "Global failed if any check failed, otherwise warning if any warning/unknown, otherwise ok. Individual probe failures return unknown and HTTP 200."
       },
       "StatusResponse": {
         "type": "object",

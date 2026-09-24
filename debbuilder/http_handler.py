@@ -158,6 +158,9 @@ def create_handler(api):
             security = api.effective_security()
             api.json_response(self, {"ok": True, "repo_default": apt["repository"], "suite_default": apt["distribution"], "component_default": apt["component"], "arch_default": apt["architecture"], "notification_type": api.app_settings()["notifications"].get("type", "none"), "auth_mode": security["auth_mode"], "workflow_dirs": {"examples": str(api.EXAMPLES), "user": str(api.USER_WORKFLOWS)}})
 
+        def _get_system_diagnostics(self, _variables, _parsed):
+            api.json_response(self, api.system_diagnostics_snapshot(self.server))
+
         def _get_openapi(self, _variables, _parsed):
             from .openapi import openapi_document
             api.json_response(self, openapi_document())

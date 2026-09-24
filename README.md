@@ -2,6 +2,9 @@
 
 DebBuilder is a self-hosted console for building, validating, and publishing Debian packages from GitHub sources into a personal APT repository.
 
+The [roadmap](docs/ROADMAP.md) tracks the active v1 release audit and the
+post-v1 work. The v1 release is still in progress.
+
 ## Current features
 
 - GitHub release, tag, source-archive, and official release-asset acquisition;

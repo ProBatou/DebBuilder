@@ -126,18 +126,34 @@ jobs:
         env:
           RELEASE_TAG: ${{ steps.release_tag.outputs.tag }}
           STORAGE_DRIVER: vfs
+          PODMAN_SHORT_RUNROOT: /tmp/dbb-run-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           wrapper_dir="$RUNNER_TEMP/debbuilder-podman-wrapper"
           podman_diag_log="$RUNNER_TEMP/debbuilder-podman.stderr.log"
+          if [[ ! "$PODMAN_SHORT_RUNROOT" =~ ^/tmp/dbb-run-[0-9]+-[0-9]+$ ]]; then
+            echo "invalid workflow-owned Podman runroot: $PODMAN_SHORT_RUNROOT" >&2
+            exit 1
+          fi
+          if ((${#PODMAN_SHORT_RUNROOT} >= 50)); then
+            echo "workflow-owned Podman runroot is not shorter than 50 characters: $PODMAN_SHORT_RUNROOT" >&2
+            exit 1
+          fi
           mkdir -p -- "$wrapper_dir"
+          mkdir -p -- "$PODMAN_SHORT_RUNROOT"
+          echo "workflow-owned Podman runroot prepared: $PODMAN_SHORT_RUNROOT (length ${#PODMAN_SHORT_RUNROOT})"
           cat > "$wrapper_dir/podman" <<'PODMAN_WRAPPER'
           #!/usr/bin/env bash
           set -euo pipefail
 
           : "${PODMAN_DIAG_LOG:?PODMAN_DIAG_LOG must be set}"
+          : "${PODMAN_SHORT_RUNROOT:?PODMAN_SHORT_RUNROOT must be set}"
           root=""
           runroot=""
           args=("$@")
+
+          log_diag() {
+            printf '%s\n' "$*" | tee -a "$PODMAN_DIAG_LOG" >&2
+          }
 
           for ((index = 0; index < ${#args[@]}; index++)); do
             case "${args[$index]}" in
@@ -157,22 +173,25 @@ jobs:
                   exit 125
                 fi
                 runroot="${args[$((index + 1))]}"
+                args[$((index + 1))]="$PODMAN_SHORT_RUNROOT"
                 ;;
               --runroot=*)
                 runroot="${args[$index]#--runroot=}"
+                args[$index]="--runroot=$PODMAN_SHORT_RUNROOT"
                 ;;
             esac
           done
 
           if [[ -n "$root" ]]; then
             mkdir -p -- "$root"
-            echo "podman wrapper: root directory prepared: $root" >&2
+            log_diag "podman wrapper: root directory prepared unchanged: $root (length ${#root})"
           fi
           if [[ -n "$runroot" ]]; then
-            mkdir -p -- "$runroot"
-            echo "podman wrapper: runroot directory prepared: $runroot" >&2
+            mkdir -p -- "$PODMAN_SHORT_RUNROOT"
+            log_diag "podman wrapper: canonical runroot requested: $runroot (length ${#runroot})"
+            log_diag "podman wrapper: mapped runroot: $PODMAN_SHORT_RUNROOT (length ${#PODMAN_SHORT_RUNROOT})"
           fi
-          echo "podman wrapper: invoking /usr/bin/podman" >&2
+          log_diag "podman wrapper: invoking /usr/bin/podman with storage driver ${STORAGE_DRIVER:-<unset>}"
           exec /usr/bin/podman "${args[@]}" \
             2> >(tee -a "$PODMAN_DIAG_LOG" >&2)
           PODMAN_WRAPPER
@@ -188,9 +207,14 @@ jobs:
             --output-dir "$GITHUB_WORKSPACE/release-assets" \
             > release-build.json
           builder_status=$?
+          rm -rf -- "$PODMAN_SHORT_RUNROOT"
+          cleanup_status=$?
           set -e
           if [[ "$builder_status" -ne 0 ]]; then
             echo "canonical builder exit status: $builder_status" >&2
+            if [[ "$cleanup_status" -ne 0 ]]; then
+              echo "workflow-owned Podman runroot cleanup also failed with status: $cleanup_status" >&2
+            fi
             echo "Podman stderr (final 12000 bytes):" >&2
             if [[ -s "$podman_diag_log" ]]; then
               tail -c 12000 "$podman_diag_log" >&2
@@ -200,6 +224,13 @@ jobs:
             fi
             exit "$builder_status"
           fi
+          if [[ "$cleanup_status" -ne 0 ]]; then
+            echo "canonical builder succeeded, but workflow-owned Podman runroot cleanup failed with status: $cleanup_status" >&2
+            exit "$cleanup_status"
+          fi
+          echo "Podman wrapper diagnostics:"
+          tail -c 12000 "$podman_diag_log"
+          echo
           (
             cd release-assets
             sha256sum --check --strict SHA256SUMS

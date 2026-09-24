@@ -125,14 +125,14 @@ jobs:
         shell: bash
         env:
           RELEASE_TAG: ${{ steps.release_tag.outputs.tag }}
+          STORAGE_DRIVER: vfs
         run: |
-          sudo -E python3 -m debbuilder.release_build \
+          python3 -m debbuilder.release_build \
             --tag "$RELEASE_TAG" \
             --source-root "$GITHUB_WORKSPACE" \
             --validation-images "$GITHUB_WORKSPACE/debbuilder/validation_images.json" \
             --output-dir "$GITHUB_WORKSPACE/release-assets" \
             > release-build.json
-          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/release-assets"
           (
             cd release-assets
             sha256sum --check --strict SHA256SUMS

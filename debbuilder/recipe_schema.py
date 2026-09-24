@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import re
+from pathlib import PurePosixPath
 
 from .archive_payload import normalize_archive_payload
 from .resource_limits import ResourceLimitError, normalize_policy
@@ -29,6 +30,8 @@ OPERATOR_OVERRIDE_FIELDS = {"active", "package", "build", "resource_limits"}
 OPERATOR_PACKAGE_OVERRIDE_FIELDS = {"maintainer"}
 OPERATOR_BUILD_OVERRIDE_FIELDS = {"environment", "inactivity_timeout", "maximum_runtime"}
 AUTOMATION_POLICIES = {"manual", "detect", "test", "build", "build_validate", "full"}
+MAX_ENSURE_DIRECTORIES = 256
+MAX_ENSURE_DIRECTORY_LENGTH = 1024
 
 
 class RecipeDocumentError(ValueError):
@@ -77,6 +80,51 @@ def _string_list(value, what: str) -> list[str]:
     if any(not isinstance(row, str) or not row.strip() for row in rows):
         raise ValueError(f"{what} must contain non-empty strings")
     return [row.strip() for row in rows]
+
+
+def _ensure_directories(value) -> list[str]:
+    rows = _list(value, "build.ensure_directories")
+    if len(rows) > MAX_ENSURE_DIRECTORIES:
+        raise RecipeDocumentError(
+            "post_build_directory_invalid_path",
+            f"build.ensure_directories must contain at most {MAX_ENSURE_DIRECTORIES} paths",
+            path="$.build.ensure_directories",
+        )
+    normalized = []
+    seen = set()
+    for index, row in enumerate(rows):
+        path = f"$.build.ensure_directories[{index}]"
+        if not isinstance(row, str):
+            raise RecipeDocumentError(
+                "post_build_directory_invalid_path",
+                "build.ensure_directories entries must be strings",
+                path=path,
+            )
+        parsed = PurePosixPath(row)
+        if (
+            not row
+            or not parsed.parts
+            or len(row) > MAX_ENSURE_DIRECTORY_LENGTH
+            or any(ord(character) < 32 for character in row)
+            or "\\" in row
+            or parsed.is_absolute()
+            or row != parsed.as_posix()
+            or any(part in {"", ".", ".."} for part in parsed.parts)
+        ):
+            raise RecipeDocumentError(
+                "post_build_directory_invalid_path",
+                "build.ensure_directories entries must be canonical relative POSIX paths",
+                path=path,
+            )
+        if row in seen:
+            raise RecipeDocumentError(
+                "post_build_directory_invalid_path",
+                f"Duplicate post-build directory: {row}",
+                path=path,
+            )
+        seen.add(row)
+        normalized.append(row)
+    return normalized
 
 
 def _environment(value, what: str) -> dict[str, str]:
@@ -428,6 +476,7 @@ def normalize_recipe(workflow: dict) -> dict:
             "extra_dependencies": _string_list(build_in.get("extra_dependencies"), "build.extra_dependencies"),
             "source_changes": _list(build_in.get("source_changes"), "build.source_changes"),
             "commands": _string_list(build_in.get("commands"), "build.commands"),
+            "ensure_directories": _ensure_directories(build_in.get("ensure_directories")),
             "inactivity_timeout": _optional_positive_int(build_in["inactivity_timeout"], "build.inactivity_timeout") if "inactivity_timeout" in build_in else 300,
             "maximum_runtime": _optional_positive_int(build_in.get("maximum_runtime"), "build.maximum_runtime"),
             "environment": _environment(build_in.get("environment"), "build.environment"),
@@ -585,6 +634,27 @@ def validate_recipe_metadata(workflow: dict) -> dict:
             raise ValueError("build.output.paths must not be empty")
         for path in build["output"]["paths"]:
             _safe_relative(path, "build.output.paths entry")
+    if build["ensure_directories"] and artifact["mode"] != "source_build":
+        raise RecipeDocumentError(
+            "post_build_directory_invalid_path",
+            "build.ensure_directories is only supported for source_build Recipes",
+            path="$.build.ensure_directories",
+        )
+    if build["output"]["mode"] != "source":
+        selected = (
+            [build["output"]["path"]]
+            if build["output"]["mode"] == "path"
+            else build["output"].get("paths", [])
+        )
+        selected_parts = [PurePosixPath(path).parts for path in selected]
+        for index, directory in enumerate(build["ensure_directories"]):
+            parts = PurePosixPath(directory).parts
+            if not any(parts[:len(parent)] == parent for parent in selected_parts):
+                raise RecipeDocumentError(
+                    "post_build_directory_invalid_path",
+                    f"Post-build directory is not covered by build.output: {directory}",
+                    path=f"$.build.ensure_directories[{index}]",
+                )
     for index, change in enumerate(build["source_changes"], 1):
         if not isinstance(change, dict) or change.get("operation") not in SOURCE_CHANGE_TYPES:
             raise ValueError(f"source change {index} has an unsupported operation")
@@ -664,6 +734,8 @@ def _compact_recipe(recipe: dict) -> dict:
     """Compact a newly validated runtime Recipe into its persisted shape."""
     if recipe["build"]["output"]["mode"] != "path":
         recipe["build"]["output"].pop("path", None)
+    if not recipe["build"]["ensure_directories"]:
+        recipe["build"].pop("ensure_directories", None)
     if recipe["artifact"]["mode"] != "upstream_archive":
         recipe["artifact"].pop("payload", None)
     recipe["service"].pop("configured", None)

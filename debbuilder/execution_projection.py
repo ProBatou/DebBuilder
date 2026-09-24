@@ -348,6 +348,7 @@ def _public_build(details) -> dict:
     environment_keys = _bounded_list(plan.get("environment_keys") or list(environment), limit=100, text_limit=128)
     commands = plan.get("commands") if isinstance(plan.get("commands"), list) else []
     selection = plan.get("selection") if isinstance(plan.get("selection"), dict) else {}
+    ensured = details.get("ensure_directories") if isinstance(details.get("ensure_directories"), dict) else {}
     public_plan = {
         "selection": {"source": safe_text(selection.get("source"), limit=64)} if selection.get("source") else {},
         "command_count": len(commands),
@@ -357,7 +358,14 @@ def _public_build(details) -> dict:
         "maximum_runtime": _number(plan.get("maximum_runtime")),
         "output": _public_output(plan.get("output")),
     }
-    return {"plan": {key: value for key, value in public_plan.items() if _present(value) and value != []}}
+    public_ensured = {
+        key: value for key in ("requested", "created", "already_existed")
+        if (value := _number(ensured.get(key))) is not None and value >= 0
+    }
+    return {
+        "plan": {key: value for key, value in public_plan.items() if _present(value) and value != []},
+        **({"ensure_directories": public_ensured} if public_ensured else {}),
+    }
 
 
 def _public_mapping(row) -> dict:

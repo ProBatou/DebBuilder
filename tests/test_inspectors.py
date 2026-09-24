@@ -71,6 +71,7 @@ class InspectorProjectionTests(TestCase):
         self.assertEqual(minimal["schema_version"], 1)
         self.assertEqual(minimal["identity"]["package"], "inspection-demo")
         self.assertEqual(minimal["build"]["command_count"], 0)
+        self.assertEqual(minimal["build"]["ensure_directory_count"], 0)
         self.assertFalse(minimal["counts_truncated"])
         self.assertEqual(minimal["automation"]["eligible"], False)
         inactive = inspectors.inspect_recipe(recipe(active=False, automation={"enabled": True, "policy": "build"}))
@@ -155,6 +156,29 @@ class InspectorProjectionTests(TestCase):
         self.assertFalse(projected["lifecycle"]["steps_truncated"])
         self.assertFalse(projected["execution"]["cancellable"])
         self.assertTrue(inspectors.inspect_run(run(), cancellation_owned=True)["execution"]["cancellable"])
+
+    def test_recipe_and_run_inspectors_expose_only_ensured_directory_counts(self):
+        configured = recipe(build={
+            "output": {"mode": "path", "path": "apps/server"},
+            "ensure_directories": ["apps/server/node_modules"],
+        })
+        recipe_inspection = inspectors.inspect_recipe(configured)
+        self.assertEqual(recipe_inspection["build"]["ensure_directory_count"], 1)
+        self.assertNotIn("node_modules", json.dumps(recipe_inspection))
+
+        value = run("success")
+        value["steps"][4].update({
+            "status": "success",
+            "details": {"ensure_directories": {
+                "requested": 2, "created": 1, "already_existed": 1,
+                "entries": [{"path": SENTINELS[10], "status": "created"}],
+            }},
+        })
+        run_inspection = inspectors.inspect_run(value)
+        self.assertEqual(run_inspection["build"]["ensure_directories"], {
+            "requested": 2, "created": 1, "already_existed": 1,
+        })
+        self.assertNotIn(SENTINELS[10], json.dumps(run_inspection))
 
     def test_suspicious_identity_and_public_metadata_are_suppressed(self):
         suspicious = inspectors.inspect_recipe(recipe(name="password-123"))

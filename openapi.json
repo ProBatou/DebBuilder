@@ -2420,7 +2420,7 @@
             ]
           },
           "422": {
-            "description": "HTTP 422 admin API error. Documented codes: invalid_recipe_json, recipe_identity_mismatch, unsupported_version_source, unknown_field.",
+            "description": "HTTP 422 admin API error. Documented codes: invalid_recipe_json, recipe_identity_mismatch, unsupported_version_source, unknown_field, post_build_directory_invalid_path.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2432,7 +2432,8 @@
               "invalid_recipe_json",
               "recipe_identity_mismatch",
               "unsupported_version_source",
-              "unknown_field"
+              "unknown_field",
+              "post_build_directory_invalid_path"
             ]
           },
           "503": {
@@ -3338,7 +3339,7 @@
             ]
           },
           "422": {
-            "description": "HTTP 422 admin API error. Documented codes: invalid_recipe_json, unknown_field, unsupported_recipe_schema, unsupported_version_source, invalid_automation_policy.",
+            "description": "HTTP 422 admin API error. Documented codes: invalid_recipe_json, unknown_field, unsupported_recipe_schema, unsupported_version_source, invalid_automation_policy, post_build_directory_invalid_path.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3351,7 +3352,8 @@
               "unknown_field",
               "unsupported_recipe_schema",
               "unsupported_version_source",
-              "invalid_automation_policy"
+              "invalid_automation_policy",
+              "post_build_directory_invalid_path"
             ]
           },
           "503": {
@@ -3466,7 +3468,7 @@
             ]
           },
           "422": {
-            "description": "HTTP 422 admin API error. Documented codes: invalid_recipe_json, unsupported_recipe_schema, unsupported_version_source, unknown_field.",
+            "description": "HTTP 422 admin API error. Documented codes: invalid_recipe_json, unsupported_recipe_schema, unsupported_version_source, unknown_field, post_build_directory_invalid_path.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3478,7 +3480,8 @@
               "invalid_recipe_json",
               "unsupported_recipe_schema",
               "unsupported_version_source",
-              "unknown_field"
+              "unknown_field",
+              "post_build_directory_invalid_path"
             ]
           },
           "503": {
@@ -3580,7 +3583,7 @@
             ]
           },
           "422": {
-            "description": "HTTP 422 admin API error. Documented codes: unsupported_recipe_schema, unsupported_version_source, unknown_field.",
+            "description": "HTTP 422 admin API error. Documented codes: unsupported_recipe_schema, unsupported_version_source, unknown_field, post_build_directory_invalid_path.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3591,7 +3594,8 @@
             "x-debbuilder-error-codes": [
               "unsupported_recipe_schema",
               "unsupported_version_source",
-              "unknown_field"
+              "unknown_field",
+              "post_build_directory_invalid_path"
             ]
           },
           "429": {
@@ -4529,6 +4533,12 @@
             "type": "object",
             "properties": {
               "commands": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "ensure_directories": {
                 "type": "array",
                 "items": {
                   "type": "string"
@@ -5710,6 +5720,11 @@
                 "minimum": 0,
                 "maximum": 10000
               },
+              "ensure_directory_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
               "source_change_count": {
                 "type": "integer",
                 "minimum": 0,
@@ -5728,6 +5743,7 @@
               "command_count",
               "output_mode",
               "output_path_count",
+              "ensure_directory_count",
               "source_change_count",
               "inactivity_timeout_configured",
               "maximum_runtime_configured"
@@ -6423,6 +6439,41 @@
               "containment_backend"
             ]
           },
+          "build": {
+            "type": "object",
+            "properties": {
+              "ensure_directories": {
+                "type": "object",
+                "properties": {
+                  "requested": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 10000
+                  },
+                  "created": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 10000
+                  },
+                  "already_existed": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 10000
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "requested",
+                  "created",
+                  "already_existed"
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "ensure_directories"
+            ]
+          },
           "error": {
             "type": "object",
             "properties": {
@@ -6476,6 +6527,7 @@
           "validation",
           "publication",
           "execution",
+          "build",
           "error"
         ]
       },

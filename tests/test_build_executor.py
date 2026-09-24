@@ -1,14 +1,15 @@
 import shlex
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from debbuilder.build_executor import BuildError, execute_build, select_commands, validate_build_plan
+from debbuilder.build_executor import BuildError, ensure_post_build_directories, execute_build, select_commands, validate_build_plan
 
 
 def recipe(commands=None, working_directory=".", environment=None, output=None):
-    return {"build": {"commands": commands or [], "working_directory": working_directory, "environment": environment or {}, "inactivity_timeout": 300, "maximum_runtime": None, "output": output or {"mode":"path","path":"dist"}}}
+    return {"build": {"commands": commands or [], "ensure_directories": [], "working_directory": working_directory, "environment": environment or {}, "inactivity_timeout": 300, "maximum_runtime": None, "output": output or {"mode":"path","path":"dist"}}}
 
 
 DETECTION = {"proposed_commands": ["npm ci", "npm run build"]}
@@ -187,6 +188,99 @@ class BuildExecutorTests(unittest.TestCase):
                 with self.subTest(path=path), self.assertRaises(BuildError) as raised:
                     validate_build_plan(recipe(["true"], output={"mode":"path","path":path}), {}, source, dry_run=True)
                 self.assertEqual(raised.exception.code, "unsafe_output_path")
+
+    def test_ensure_directories_creates_missing_parents_and_preserves_existing_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            (source / "existing").mkdir()
+            result = ensure_post_build_directories(source, ["new/parents/leaf", "existing"])
+            self.assertTrue((source / "new/parents/leaf").is_dir())
+            self.assertEqual(result, {
+                "requested": 2, "created": 1, "already_existed": 1,
+                "entries": [
+                    {"path": "new/parents/leaf", "status": "created"},
+                    {"path": "existing", "status": "already_existed"},
+                ],
+            })
+
+    def test_ensure_directories_rejects_files_special_entries_and_symlinks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            (source / "file").write_text("not a directory")
+            (source / "real").mkdir()
+            (source / "link").symlink_to("real")
+            (source / "broken").symlink_to("missing")
+            (source / "parent-link").symlink_to("real", target_is_directory=True)
+            os.mkfifo(source / "fifo")
+            cases = (
+                ("file", "post_build_directory_not_directory", "file"),
+                ("fifo", "post_build_directory_not_directory", "special"),
+                ("link", "post_build_directory_symlink", "symlink"),
+                ("broken", "post_build_directory_symlink", "symlink"),
+                ("parent-link/child", "post_build_directory_symlink", "symlink"),
+            )
+            for path, code, kind in cases:
+                with self.subTest(path=path), self.assertRaises(BuildError) as raised:
+                    ensure_post_build_directories(source, [path])
+                self.assertEqual(raised.exception.code, code)
+                self.assertEqual(raised.exception.details["actual_kind"], kind)
+                self.assertNotIn(str(source), str(raised.exception.details))
+
+    def test_ensure_directories_rejects_unsafe_paths_without_mutation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            for path in ("../escape", "/absolute", "foo/./bar", "foo//bar", "foo\\bar"):
+                with self.subTest(path=path), self.assertRaises(BuildError) as raised:
+                    ensure_post_build_directories(source, [path])
+                self.assertEqual(raised.exception.code, "post_build_directory_invalid_path")
+            self.assertEqual(list(source.iterdir()), [])
+
+    def test_ensure_directories_rejects_a_symlinked_source_root(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            real_source = base / "real-source"
+            real_source.mkdir()
+            source_link = base / "source-link"
+            source_link.symlink_to(real_source, target_is_directory=True)
+
+            with self.assertRaises(BuildError) as raised:
+                ensure_post_build_directories(source_link, ["empty"])
+
+            self.assertEqual(raised.exception.code, "post_build_directory_escape")
+            self.assertFalse((real_source / "empty").exists())
+
+    def test_ensured_directory_is_resolved_but_other_missing_output_still_fails(self):
+        success = lambda command, **_kwargs: {"command":command,"arguments":[command],"working_directory":"/source","configured_working_directory":".","status":"success","exit_code":0,"stdout":"","stderr":"","duration":0.1,"timed_out":False}
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            configured = recipe(["true"], output={"mode":"paths", "paths":["empty", "ordinary"]})
+            configured["build"]["ensure_directories"] = ["empty"]
+            with self.assertRaises(BuildError) as raised:
+                execute_build(configured, {}, source, dry_run=False, runner=success)
+            self.assertEqual(raised.exception.code, "expected_output_missing")
+            self.assertTrue((source / "empty").is_dir())
+            self.assertEqual(raised.exception.details["ensure_directories"]["created"], 1)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            configured = recipe(["true"], output={"mode":"path", "path":"empty"})
+            configured["build"]["ensure_directories"] = ["empty"]
+            result = execute_build(configured, {}, source, dry_run=False, runner=success)
+            self.assertEqual(result["output"]["kind"], "directory")
+            self.assertEqual(result["ensure_directories"]["created"], 1)
+
+    def test_command_failure_does_not_ensure_and_dry_run_never_mutates(self):
+        failed = lambda command, **_kwargs: {"command":command,"arguments":[command],"working_directory":"/source","configured_working_directory":".","status":"failed","exit_code":2,"stdout":"","stderr":"failed","duration":0.1,"timed_out":False}
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            configured = recipe(["false"], output={"mode":"path", "path":"empty"})
+            configured["build"]["ensure_directories"] = ["empty"]
+            with self.assertRaises(BuildError):
+                execute_build(configured, {}, source, dry_run=False, runner=failed)
+            self.assertFalse((source / "empty").exists())
+            result = execute_build(configured, {}, source, dry_run=True, runner=lambda *_a, **_k: self.fail("must not run"))
+            self.assertEqual(result["plan"]["ensure_directories"], ["empty"])
+            self.assertFalse((source / "empty").exists())
 
 
 if __name__ == "__main__":

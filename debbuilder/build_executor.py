@@ -1,7 +1,9 @@
 """Build plan validation, ordered execution, and output resolution."""
 from __future__ import annotations
 
-from pathlib import Path
+import os
+import stat
+from pathlib import Path, PurePosixPath
 
 from .command_runner import (
     CommandValidationError,
@@ -20,6 +22,204 @@ class BuildError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.details = details or {}
+
+
+_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+_MAX_ENSURE_DIRECTORIES = 256
+_MAX_ENSURE_DIRECTORY_LENGTH = 1024
+
+
+def _post_build_parts(value, *, index: int) -> tuple[str, ...]:
+    if not isinstance(value, str):
+        raise BuildError(
+            "post_build_directory_invalid_path",
+            "Post-build directory paths must be strings",
+            details={"directory_index": index},
+        )
+    parsed = PurePosixPath(value)
+    if (
+        not value
+        or not parsed.parts
+        or len(value) > _MAX_ENSURE_DIRECTORY_LENGTH
+        or any(ord(character) < 32 for character in value)
+        or "\\" in value
+        or parsed.is_absolute()
+        or value != parsed.as_posix()
+        or any(part in {"", ".", ".."} for part in parsed.parts)
+    ):
+        raise BuildError(
+            "post_build_directory_invalid_path",
+            "Post-build directory must be a canonical relative POSIX path",
+            details={"directory_index": index},
+        )
+    return parsed.parts
+
+
+def _validate_post_build_directories(build: dict) -> list[str]:
+    directories = build.get("ensure_directories") or []
+    if not isinstance(directories, list):
+        raise BuildError(
+            "post_build_directory_invalid_path",
+            "build.ensure_directories must be a list",
+        )
+    if len(directories) > _MAX_ENSURE_DIRECTORIES:
+        raise BuildError(
+            "post_build_directory_invalid_path",
+            f"build.ensure_directories must contain at most {_MAX_ENSURE_DIRECTORIES} paths",
+        )
+    seen = set()
+    output = build["output"]
+    selected = [] if output.get("mode") == "source" else (
+        [output.get("path")] if output.get("mode") == "path" else output.get("paths", [])
+    )
+    selected_parts = [PurePosixPath(path).parts for path in selected if isinstance(path, str)]
+    for index, directory in enumerate(directories):
+        parts = _post_build_parts(directory, index=index)
+        if directory in seen:
+            raise BuildError(
+                "post_build_directory_invalid_path",
+                "Post-build directory paths must be unique",
+                details={"directory_index": index, "directory": directory},
+            )
+        seen.add(directory)
+        if output.get("mode") != "source" and not any(parts[:len(parent)] == parent for parent in selected_parts):
+            raise BuildError(
+                "post_build_directory_invalid_path",
+                "Post-build directory is not covered by build.output",
+                details={"directory_index": index, "directory": directory},
+            )
+    return list(directories)
+
+
+def _ensure_summary(entries: list[dict], requested: int) -> dict:
+    return {
+        "requested": requested,
+        "created": sum(row["status"] == "created" for row in entries),
+        "already_existed": sum(row["status"] == "already_existed" for row in entries),
+        "entries": list(entries),
+    }
+
+
+def _directory_kind(mode: int) -> str:
+    if stat.S_ISLNK(mode):
+        return "symlink"
+    if stat.S_ISDIR(mode):
+        return "directory"
+    if stat.S_ISREG(mode):
+        return "file"
+    return "special"
+
+
+def _directory_open_error(parent_fd: int, part: str, relative: str, index: int, entries: list[dict], requested: int) -> BuildError:
+    details = {
+        "directory_index": index,
+        "directory": relative,
+        "ensure_directories": _ensure_summary(entries, requested),
+    }
+    try:
+        kind = _directory_kind(os.stat(part, dir_fd=parent_fd, follow_symlinks=False).st_mode)
+    except OSError:
+        return BuildError(
+            "post_build_directory_creation_failed",
+            f"Post-build directory could not be created safely: {relative}",
+            details=details,
+        )
+    details["actual_kind"] = kind
+    if kind == "symlink":
+        return BuildError(
+            "post_build_directory_symlink",
+            f"Post-build directory path contains a symbolic link: {relative}",
+            details=details,
+        )
+    return BuildError(
+        "post_build_directory_not_directory",
+        f"Post-build directory path contains a non-directory entry: {relative}",
+        details=details,
+    )
+
+
+def ensure_post_build_directories(source_directory: str | Path, directories: list[str], *, on_result=None) -> dict:
+    """Create declared directories below a pinned source root without following links."""
+    if not isinstance(directories, list) or len(directories) > _MAX_ENSURE_DIRECTORIES:
+        raise BuildError(
+            "post_build_directory_invalid_path",
+            f"Post-build directories must be a list of at most {_MAX_ENSURE_DIRECTORIES} paths",
+        )
+    validated = []
+    seen = set()
+    for index, directory in enumerate(directories):
+        parts = _post_build_parts(directory, index=index)
+        if directory in seen:
+            raise BuildError(
+                "post_build_directory_invalid_path",
+                "Post-build directory paths must be unique",
+                details={"directory_index": index, "directory": directory},
+            )
+        seen.add(directory)
+        validated.append((directory, parts))
+    entries = []
+    try:
+        root_fd = os.open(os.path.abspath(source_directory), _DIRECTORY_FLAGS)
+    except OSError as exc:
+        raise BuildError(
+            "post_build_directory_escape",
+            "The acquired source root could not be pinned safely",
+            details={"ensure_directories": _ensure_summary(entries, len(validated))},
+        ) from exc
+    try:
+        if not stat.S_ISDIR(os.fstat(root_fd).st_mode):
+            raise BuildError(
+                "post_build_directory_escape",
+                "The acquired source root is not a real directory",
+                details={"ensure_directories": _ensure_summary(entries, len(validated))},
+            )
+        for index, (relative, parts) in enumerate(validated):
+            parent_fd = os.dup(root_fd)
+            created_final = False
+            try:
+                for component_index, part in enumerate(parts):
+                    created = False
+                    try:
+                        child_fd = os.open(part, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+                    except FileNotFoundError:
+                        try:
+                            os.mkdir(part, 0o755, dir_fd=parent_fd)
+                            created = True
+                        except FileExistsError:
+                            pass
+                        except OSError as exc:
+                            raise BuildError(
+                                "post_build_directory_creation_failed",
+                                f"Post-build directory could not be created: {relative}",
+                                details={
+                                    "directory_index": index,
+                                    "directory": relative,
+                                    "ensure_directories": _ensure_summary(entries, len(validated)),
+                                },
+                            ) from exc
+                        try:
+                            child_fd = os.open(part, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+                        except OSError as exc:
+                            raise _directory_open_error(
+                                parent_fd, part, relative, index, entries, len(validated),
+                            ) from exc
+                    except OSError as exc:
+                        raise _directory_open_error(
+                            parent_fd, part, relative, index, entries, len(validated),
+                        ) from exc
+                    os.close(parent_fd)
+                    parent_fd = child_fd
+                    if component_index == len(parts) - 1:
+                        created_final = created
+                entry = {"path": relative, "status": "created" if created_final else "already_existed"}
+                entries.append(entry)
+                if callable(on_result):
+                    on_result(dict(entry), _ensure_summary(entries, len(validated)))
+            finally:
+                os.close(parent_fd)
+    finally:
+        os.close(root_fd)
+    return _ensure_summary(entries, len(validated))
 
 
 def select_commands(configured: list[str], proposed: list[str], *, dry_run: bool) -> dict:
@@ -72,6 +272,7 @@ def _safe_path_output(source: Path, relative: str, *, require_exists: bool) -> d
 
 def validate_build_plan(recipe: dict, detection: dict, source_directory: str | Path, *, dry_run: bool) -> dict:
     build = recipe["build"]
+    ensure_directories = _validate_post_build_directories(build)
     is_static = detection.get("project_type") == "static"
     is_source_noop = detection.get("build_mode") == "source" and not build["commands"] and not detection.get("proposed_commands")
     if is_static and build["commands"]:
@@ -97,11 +298,12 @@ def validate_build_plan(recipe: dict, detection: dict, source_directory: str | P
         "environment_keys": sorted(build["environment"]),
         "inactivity_timeout": build.get("inactivity_timeout", 300),
         "maximum_runtime": build.get("maximum_runtime"),
+        "ensure_directories": ensure_directories,
         "output": output,
     }
 
 
-def execute_build(recipe: dict, detection: dict, source_directory: str | Path, *, dry_run: bool, runner=run_command, inactivity_timeout: float | None = None, maximum_runtime: float | None = None, on_result=None, on_output=None, cancellation_event=None, on_cancel=None) -> dict:
+def execute_build(recipe: dict, detection: dict, source_directory: str | Path, *, dry_run: bool, runner=run_command, inactivity_timeout: float | None = None, maximum_runtime: float | None = None, on_result=None, on_output=None, on_directory_result=None, cancellation_event=None, on_cancel=None) -> dict:
     plan = validate_build_plan(recipe, detection, source_directory, dry_run=dry_run)
     if dry_run:
         return {"executed": False, "reason": "dry_run", "plan": plan, "commands": [], "output": plan["output"]}
@@ -151,10 +353,18 @@ def execute_build(recipe: dict, detection: dict, source_directory: str | Path, *
         if cancellation_event is not None and cancellation_event.is_set():
             cancellation = on_cancel() if callable(on_cancel) else {}
             raise ExecutionCancelled(cancellation)
+    if cancellation_event is not None and cancellation_event.is_set():
+        cancellation = on_cancel() if callable(on_cancel) else {}
+        raise ExecutionCancelled(cancellation)
+    ensure_directories = None
     try:
+        ensure_directories = ensure_post_build_directories(
+            source_directory, plan["ensure_directories"], on_result=on_directory_result,
+        )
         output = _safe_output(source_directory, recipe["build"]["output"], require_exists=True)
     except BuildError as exc:
-        exc.details = {"plan": plan, "commands": results, **exc.details}
+        completed_ensure = {"ensure_directories": ensure_directories} if ensure_directories is not None else {}
+        exc.details = {"plan": plan, "commands": results, **completed_ensure, **exc.details}
         raise
     reason = "static_noop" if detection.get("project_type") == "static" else "source_noop" if source_noop else "build"
-    return {"executed": True, "reason": reason, "plan": plan, "commands": results, "output": output}
+    return {"executed": True, "reason": reason, "plan": plan, "commands": results, "ensure_directories": ensure_directories, "output": output}

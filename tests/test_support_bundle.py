@@ -35,7 +35,7 @@ def recipe():
 
 def run():
     return {"schema_version": 1, "identity": {}, "lifecycle": {}, "artifact": {},
-            "validation": {}, "publication": {}, "execution": {}, "error": {}}
+            "validation": {}, "publication": {}, "execution": {}, "build": {}, "error": {}}
 
 
 class SupportBundleBuilderTests(TestCase):

@@ -50,6 +50,16 @@ routing is separated from package projection, execution, automation,
 Validation, Publication, settings, and repository services. The application
 module wires those boundaries to the standard-library HTTP server.
 
+`debbuilder/api_routes.py` is the canonical inventory for named admin API
+operations. Its immutable descriptors define each method, path template,
+stable operation identifier, handler identity, authentication boundary, and
+read/mutation effect. `debbuilder/http_handler.py` uses that inventory for
+runtime dispatch while keeping response handling and subsystem calls in the
+existing HTTP layer. Future API-description generation can consume the same
+inventory; no generated or served API description is available yet. The
+separate public APT listener and legacy wildcard admin `HEAD` handling are not
+named API operations and remain outside the registry.
+
 ## Build model
 
 Builds run in per-Run workspaces and use structured argument vectors rather

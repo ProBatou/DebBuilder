@@ -13,8 +13,9 @@ from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
 from . import __version__
+from .api_routes import ADMIN_API_ROUTES, RouteEffect, match_route, validate_routes
 from .execution_projection import public_error
-from .lifecycle import MutationGateClosed, is_durable_mutation_route
+from .lifecycle import MutationGateClosed
 
 
 def create_handler(api):
@@ -137,108 +138,32 @@ def create_handler(api):
             self.end_headers()
 
         def _get_api(self, parsed) -> bool:
-            path = parsed.path
-            if path == "/api/status":
-                apt = api.repo_settings()
-                security = api.effective_security()
-                api.json_response(self, {"ok": True, "repo_default": apt["repository"], "suite_default": apt["distribution"], "component_default": apt["component"], "arch_default": apt["architecture"], "notification_type": api.app_settings()["notifications"].get("type", "none"), "auth_mode": security["auth_mode"], "workflow_dirs": {"examples": str(api.EXAMPLES), "user": str(api.USER_WORKFLOWS)}})
-            elif path == "/api/auth/status":
-                security = api.effective_security()
-                user = self.headers.get(api.AUTH_HEADER, "")
-                if not user and security["auth_mode"] == "oidc":
-                    user = api.oidc_session_user(self.headers)
-                api.json_response(self, {"ok": True, "auth_mode": security["auth_mode"], "user": user})
-            elif path == "/api/dashboard":
-                api.json_response(self, {"dashboard": api.dashboard_summary()})
-            elif path == "/api/packages":
-                api.json_response(self, {"packages": api.list_packages()})
-            elif path.startswith("/api/packages/"):
-                self._get_package(path)
-            elif path == "/api/recipes":
-                api.json_response(self, {"recipes": api.list_recipes()})
-            elif self._automation_identity(path) is not None:
-                recipe_id, action = self._automation_identity(path)
-                if action:
-                    return False
-                try:
-                    api.json_response(self, {"automation": api.get_automation_status(recipe_id)})
-                except ValueError as exc:
-                    api.json_response(self, {"error": {
-                        "code": "invalid_recipe_id", "message": str(exc), "details": {},
-                    }}, 400)
-                except api.automation_status.AutomationActionError as exc:
-                    api.json_response(self, {"error": public_error(exc.as_dict())}, exc.status)
-            elif path == "/api/executions":
-                api.json_response(self, {"executions": api.list_executions()})
-            elif path.startswith("/api/executions/"):
-                if path.endswith("/logs"):
-                    self._get_execution_log(parsed)
-                    return True
-                validation_identity = self._validation_identity(path)
-                if validation_identity is not None:
-                    run_id, attempt_id, action = validation_identity
-                    if action:
-                        return False
-                    try:
-                        validation = api.get_validation_attempt(
-                            run_id,
-                            attempt_id,
-                            manager=getattr(self.server, "validation_manager", None),
-                        )
-                    except ValueError as exc:
-                        api.json_response(self, {"error": {
-                            "code": "invalid_validation_identity", "message": str(exc),
-                        }}, 400)
-                        return True
-                    except api.validation_service.ValidationAdmissionError as exc:
-                        api.json_response(self, {"error": public_error(exc.as_dict())}, exc.status)
-                        return True
-                    api.json_response(self, {"validation": validation})
-                    return True
-                self._get_execution(path)
-            elif path == "/api/settings":
-                api.json_response(self, {"settings": api.settings_view()})
-            elif path == "/api/storage":
-                api.json_response(self, {"storage": api.storage_snapshot(
-                    getattr(self.server, "storage_inventory", None),
-                )})
-            elif path == "/api/workflows":
-                api.json_response(self, api.workflow_listing())
-            elif path.startswith("/api/workflows/"):
-                self._get_workflow(path)
-            else:
+            matched = match_route("GET", parsed.path)
+            if matched is None:
                 return False
+            getattr(self, matched.route.handler)(matched.path_variables, parsed)
             return True
 
-        @staticmethod
-        def _validation_identity(path: str):
-            parts = path.strip("/").split("/")
-            if len(parts) not in {5, 6} or parts[:2] != ["api", "executions"] or parts[3] != "validations":
-                return None
-            run_id = urllib.parse.unquote(parts[2])
-            attempt_id = urllib.parse.unquote(parts[4])
-            action = parts[5] if len(parts) == 6 else ""
-            return run_id, attempt_id, action
+        def _get_status(self, _variables, _parsed):
+            apt = api.repo_settings()
+            security = api.effective_security()
+            api.json_response(self, {"ok": True, "repo_default": apt["repository"], "suite_default": apt["distribution"], "component_default": apt["component"], "arch_default": apt["architecture"], "notification_type": api.app_settings()["notifications"].get("type", "none"), "auth_mode": security["auth_mode"], "workflow_dirs": {"examples": str(api.EXAMPLES), "user": str(api.USER_WORKFLOWS)}})
 
-        @staticmethod
-        def _automation_identity(path: str):
-            parts = path.strip("/").split("/")
-            if len(parts) not in {4, 5} or parts[:2] != ["api", "recipes"] or parts[3] != "automation":
-                return None
-            action = parts[4] if len(parts) == 5 else ""
-            if action not in {"", "check", "retry"}:
-                return None
-            return urllib.parse.unquote(parts[2]), action
+        def _get_auth_status(self, _variables, _parsed):
+            security = api.effective_security()
+            user = self.headers.get(api.AUTH_HEADER, "")
+            if not user and security["auth_mode"] == "oidc":
+                user = api.oidc_session_user(self.headers)
+            api.json_response(self, {"ok": True, "auth_mode": security["auth_mode"], "user": user})
 
-        @staticmethod
-        def _observation_identity(path: str):
-            parts = path.strip("/").split("/")
-            if len(parts) != 5 or parts[:2] != ["api", "recipes"] or parts[3:] != ["observation", "refresh"]:
-                return None
-            return urllib.parse.unquote(parts[2])
+        def _get_dashboard(self, _variables, _parsed):
+            api.json_response(self, {"dashboard": api.dashboard_summary()})
 
-        def _get_package(self, path: str):
-            name = urllib.parse.unquote(path.rsplit("/", 1)[-1])
+        def _get_packages(self, _variables, _parsed):
+            api.json_response(self, {"packages": api.list_packages()})
+
+        def _get_package(self, variables, _parsed):
+            name = variables["name"]
             try:
                 package = api.get_package(name)
             except ValueError as exc:
@@ -246,8 +171,24 @@ def create_handler(api):
                 return
             api.json_response(self, {"package": package} if package else {"error": "not found"}, 200 if package else 404)
 
-        def _get_execution(self, path: str):
-            run_id = urllib.parse.unquote(path.rsplit("/", 1)[-1])
+        def _get_recipes(self, _variables, _parsed):
+            api.json_response(self, {"recipes": api.list_recipes()})
+
+        def _get_automation(self, variables, _parsed):
+            try:
+                api.json_response(self, {"automation": api.get_automation_status(variables["recipe_id"])})
+            except ValueError as exc:
+                api.json_response(self, {"error": {
+                    "code": "invalid_recipe_id", "message": str(exc), "details": {},
+                }}, 400)
+            except api.automation_status.AutomationActionError as exc:
+                api.json_response(self, {"error": public_error(exc.as_dict())}, exc.status)
+
+        def _get_executions(self, _variables, _parsed):
+            api.json_response(self, {"executions": api.list_executions()})
+
+        def _get_execution(self, variables, _parsed):
+            run_id = variables["run_id"]
             try:
                 execution = api.get_execution(run_id)
             except ValueError as exc:
@@ -255,8 +196,8 @@ def create_handler(api):
                 return
             api.json_response(self, {"execution": execution} if execution else {"error": "not found"}, 200 if execution else 404)
 
-        def _get_execution_log(self, parsed):
-            run_id = urllib.parse.unquote(parsed.path[len("/api/executions/"):-len("/logs")].strip("/"))
+        def _get_execution_log(self, variables, parsed):
+            run_id = variables["run_id"]
             query = urllib.parse.parse_qs(parsed.query)
             try:
                 after = int((query.get("after") or ["0"])[0] or 0)
@@ -267,8 +208,35 @@ def create_handler(api):
                 return
             api.json_response(self, {"log": log} if log else {"error": "not found"}, 200 if log else 404)
 
-        def _get_workflow(self, path: str):
-            workflow_id = path.rsplit("/", 1)[-1]
+        def _get_validation(self, variables, _parsed):
+            try:
+                validation = api.get_validation_attempt(
+                    variables["run_id"], variables["attempt_id"],
+                    manager=getattr(self.server, "validation_manager", None),
+                )
+            except ValueError as exc:
+                api.json_response(self, {"error": {
+                    "code": "invalid_validation_identity", "message": str(exc),
+                }}, 400)
+                return
+            except api.validation_service.ValidationAdmissionError as exc:
+                api.json_response(self, {"error": public_error(exc.as_dict())}, exc.status)
+                return
+            api.json_response(self, {"validation": validation})
+
+        def _get_settings(self, _variables, _parsed):
+            api.json_response(self, {"settings": api.settings_view()})
+
+        def _get_storage(self, _variables, _parsed):
+            api.json_response(self, {"storage": api.storage_snapshot(
+                getattr(self.server, "storage_inventory", None),
+            )})
+
+        def _get_workflows(self, _variables, _parsed):
+            api.json_response(self, api.workflow_listing())
+
+        def _get_workflow(self, variables, _parsed):
+            workflow_id = variables["workflow_id"]
             try:
                 workflow_file = api.workflow_path(workflow_id)
             except ValueError as exc:
@@ -298,9 +266,13 @@ def create_handler(api):
             if not self._authorized():
                 return
             try:
+                parsed = urlparse(self.path)
+                matched = match_route("POST", parsed.path)
                 gate = getattr(self.server, "mutation_gate", None)
-                lease = gate.lease() if gate is not None and is_durable_mutation_route(
-                    "POST", urlparse(self.path).path,
+                lease = gate.lease() if (
+                    gate is not None
+                    and matched is not None
+                    and matched.route.effect is RouteEffect.DURABLE_MUTATION
                 ) else _NullLease()
                 with lease:
                     data = api.read_body(self)
@@ -327,231 +299,231 @@ def create_handler(api):
                     api.json_response(self, {"error": str(exc)}, 400)
 
         def _post(self, data: dict):
-            parsed_path = urlparse(self.path).path
-            observation_recipe_id = self._observation_identity(parsed_path)
-            if observation_recipe_id is not None:
-                if not isinstance(data, dict) or data:
-                    api.json_response(self, {"error": {
-                        "code": "invalid_observation_refresh_request",
-                        "message": "Upstream refresh does not accept request fields",
-                        "details": {},
-                    }}, 400)
-                    return
-                try:
-                    observation = api.refresh_upstream_observation(observation_recipe_id)
-                except FileNotFoundError:
-                    api.json_response(self, {"error": {
-                        "code": "recipe_not_found", "message": "Recipe was not found", "details": {},
-                    }}, 404)
-                    return
-                except api.upstream_detection.UpstreamDetectionError as exc:
-                    api.json_response(self, {"error": {
-                        "code": exc.code, "message": str(exc),
-                        "details": {"classification": exc.classification},
-                    }}, 502)
-                    return
-                except api.upstream_observation.UpstreamObservationError as exc:
-                    status = 409 if exc.code == "recipe_changed_during_detection" else 503
-                    api.json_response(self, {"error": {
-                        "code": exc.code, "message": str(exc), "details": {},
-                    }}, status)
-                    return
-                api.json_response(self, {"ok": True, "observation": observation}, 200)
+            parsed = urlparse(self.path)
+            matched = match_route("POST", parsed.path)
+            if matched is None:
+                api.json_response(self, {"error": "not found"}, 404)
                 return
-            automation_identity = self._automation_identity(parsed_path)
-            if automation_identity is not None and automation_identity[1] in {"check", "retry"}:
-                recipe_id, action = automation_identity
-                try:
-                    if action == "check":
-                        if not isinstance(data, dict) or data:
-                            api.json_response(self, {"error": {
-                                "code": "invalid_automation_check_request",
-                                "message": "Check now does not accept request fields",
-                                "details": {},
-                            }}, 400)
-                            return
-                        result = api.check_automation_now(recipe_id)
-                    else:
-                        result = api.retry_automation(recipe_id, data)
-                except ValueError as exc:
-                    api.json_response(self, {"error": {
-                        "code": "invalid_recipe_id", "message": str(exc), "details": {},
-                    }}, 400)
-                    return
-                except api.automation_status.AutomationActionError as exc:
-                    api.json_response(self, {"error": public_error(exc.as_dict())}, exc.status)
-                    return
-                api.json_response(self, {"ok": True, "automation": result}, 202)
-                return
-            validation_identity = self._validation_identity(parsed_path)
-            if validation_identity is not None and validation_identity[2] == "cancel":
-                run_id, attempt_id, _action = validation_identity
-                if not isinstance(data, dict) or data:
-                    api.json_response(self, {"error": {
-                        "code": "invalid_validation_cancellation_request",
-                        "message": "Validation cancellation does not accept request fields",
-                    }}, 400)
-                    return
-                try:
-                    result = api.cancel_validation_attempt(
-                        getattr(self.server, "validation_manager", None), run_id, attempt_id,
-                    )
-                except ValueError as exc:
-                    api.json_response(self, {"error": {
-                        "code": "invalid_validation_identity", "message": str(exc), "details": {},
-                    }}, 400)
-                    return
-                except api.validation_service.ValidationAdmissionError as exc:
-                    api.json_response(self, {"error": public_error(exc.as_dict())}, exc.status)
-                    return
-                except api.validation_service.ValidationCancellationError as exc:
-                    api.json_response(self, {"error": public_error(exc.as_dict())}, exc.status)
-                    return
-                status = 202 if result["validation"]["status"] == "cancelling" else 200
-                api.json_response(self, {"ok": True, **result}, status)
-                return
-            if parsed_path.startswith("/api/executions/") and parsed_path.endswith("/cancel"):
-                run_id = urllib.parse.unquote(parsed_path[len("/api/executions/"):-len("/cancel")].strip("/"))
-                if not isinstance(data, dict) or data:
-                    api.json_response(self, {"error": {
-                        "code": "invalid_cancellation_request",
-                        "message": "Execution cancellation does not accept request fields",
-                    }}, 400)
-                    return
-                try:
-                    service = getattr(self.server, "maintenance_service", None)
-                    result = api.cancel_execution(
-                        getattr(self.server, "execution_manager", None),
-                        run_id,
-                        maintenance_request=service.request if service is not None else None,
-                    )
-                except ValueError as exc:
-                    api.json_response(self, {"error": {
-                        "code": "invalid_execution_id", "message": str(exc), "details": {},
-                    }}, 400)
-                    return
-                except api.ExecutionCancellationError as exc:
-                    api.json_response(self, {"error": public_error(exc.as_dict())}, exc.status)
-                    return
-                api.json_response(self, {"ok": True, "cancellation": result}, 200 if result["status"] == "cancelled" else 202)
-                return
-            if self.path == "/api/recipes/validate":
-                recipe = data.get("recipe") if isinstance(data, dict) and "recipe" in data else data
-                try:
-                    api.json_response(self, api.recipe_json_validation(recipe))
-                except api.RecipeDocumentError as exc:
-                    api.json_response(self, {"ok": False, "error": {"code": exc.code, "message": str(exc), "path": exc.path}}, 422)
-                return
-            if self.path == "/api/recipes/import":
-                recipe = data.get("recipe") if isinstance(data, dict) else data
-                replace = data.get("replace", False) if isinstance(data, dict) else False
-                if not isinstance(replace, bool):
-                    api.json_response(self, {"ok": False, "error": {"code": "invalid_replace", "message": "replace must be a boolean", "path": "$.replace"}}, 422)
-                    return
-                try:
-                    api.json_response(self, api.import_recipe_json(recipe, replace=replace))
-                except api.builtin_recipe.BuiltinRecipeError as exc:
-                    api.json_response(self, {"ok": False, "error": exc.as_dict()}, 409)
-                except api.RecipeDocumentError as exc:
-                    api.json_response(self, {"ok": False, "error": {"code": exc.code, "message": str(exc), "path": exc.path}}, 422)
-                except FileExistsError as exc:
-                    api.json_response(self, {"ok": False, "error": {"code": "recipe_exists", "message": str(exc), "path": "$.name"}}, 409)
-                except PermissionError as exc:
-                    api.json_response(self, {"ok": False, "error": {"code": "readonly_recipe", "message": str(exc), "path": "$.name"}}, 403)
-                return
-            if self.path == "/api/run":
-                workflow = data.get("workflow", data)
-                if workflow.get("active") is False:
-                    api.json_response(self, {"error": "recipe is disabled"}, 409)
-                    return
-                dry_run = bool(data.get("dry_run", True))
-                try:
-                    result = api.enqueue_recipe_run(getattr(self.server, "execution_manager", None), workflow, dry_run=dry_run)
-                except api.RunAdmissionError as exc:
-                    api.json_response(self, {"error": public_error(exc.as_dict())}, exc.status)
-                    return
-                api.json_response(self, result, 202)
-                return
-            if self.path == "/api/upstream-archive/inspect":
-                workflow = data.get("workflow", data)
-                try:
-                    api.json_response(self, {"inspection": api.inspect_upstream_archive(workflow)})
-                except api.RecipeDocumentError as exc:
-                    api.json_response(self, {"error": {
-                        "code": exc.code, "message": str(exc), "path": exc.path,
-                    }}, 422)
-                except api.upstream_archive.UpstreamArchiveError as exc:
-                    api.json_response(self, {"error": {"code": exc.code, "message": str(exc), "details": exc.details}}, 422)
-                return
-            if self.path.startswith("/api/executions/") and self.path.endswith("/validate"):
-                run_id = urllib.parse.unquote(self.path[len("/api/executions/"):-len("/validate")].strip("/"))
-                try:
-                    result = api.admit_validation_attempt(
-                        getattr(self.server, "validation_manager", None), run_id, data,
-                    )
-                except api.validation_service.ValidationAdmissionError as exc:
-                    api.json_response(self, {"error": public_error(exc.as_dict())}, exc.status)
-                    return
-                api.json_response(self, {"validation": result}, 202)
-                return
-            if self.path.startswith("/api/executions/") and self.path.endswith("/publish"):
-                run_id = urllib.parse.unquote(self.path[len("/api/executions/"):-len("/publish")].strip("/"))
-                try:
-                    result = api.publish_build_artifact(run_id, data)
-                except api.artifact_publication.PublicationError as exc:
-                    api.json_response(self, {"error": public_error({
-                        "code": exc.code, "stage": "publication", "message": str(exc),
-                    })}, 400)
-                    return
-                failure_code = str((result.get("error") or {}).get("code") or "")
-                failure_status = 409 if failure_code in {"repository_mutation_busy", "publication_identity_conflict"} else 422
-                api.json_response(self, {"publication": result}, 200 if result["status"] == "success" else failure_status)
-                return
-            if self.path.startswith("/api/executions/") and self.path.endswith("/reconcile-publication"):
-                run_id = urllib.parse.unquote(self.path[len("/api/executions/"):-len("/reconcile-publication")].strip("/"))
-                result = api.reconcile_build_publication(run_id, data)
-                failure_code = str((result.get("error") or {}).get("code") or "")
-                failure_status = 409 if failure_code in {"repository_mutation_busy", "publication_identity_conflict"} else 422
-                api.json_response(self, {"publication": result}, 200 if result["status"] == "success" else failure_status)
-                return
-            if self.path == "/api/notifications/test":
-                result = api.test_notification()
-                api.json_response(self, {"ok": bool(result.get("ok")), "notification": result}, 200 if result.get("ok") else 502)
-                return
-            if self.path == "/api/settings":
-                api.json_response(self, {"ok": True, "settings": api.update_settings(data)})
-                return
-            if self.path == "/api/executions/delete-logs":
-                api.json_response(self, api.delete_execution_logs(
-                    data.get("ids") or [],
-                    all_runs=bool(data.get("all")),
-                    dry_run=bool(data.get("dry_run")),
-                    authorization=getattr(self.server, "cleanup_authorization", None),
-                ))
-                return
-            if self.path == "/api/packages":
-                api.json_response(self, {"ok": True, "package": api.create_or_update_package(data)})
-                return
-            if self.path.startswith("/api/packages/"):
-                package_path = self.path[len("/api/packages/"):].strip("/")
-                if not package_path or "/" in package_path:
-                    api.json_response(self, {"error": "not found"}, 404)
-                    return
-                name = urllib.parse.unquote(package_path)
-                try:
-                    package = api.create_or_update_package(data, name=name)
-                except KeyError:
-                    api.json_response(self, {"error": "not found"}, 404)
-                    return
-                api.json_response(self, {"ok": True, "package": package})
-                return
-            if self.path.startswith("/api/workflows/"):
-                self._save_workflow(data)
-                return
-            api.json_response(self, {"error": "not found"}, 404)
+            getattr(self, matched.route.handler)(data, matched.path_variables, parsed)
 
-        def _save_workflow(self, data: dict):
-            workflow_id = api.sanitize_id(self.path.rsplit("/", 1)[-1])
+        def _post_observation_refresh(self, data, variables, _parsed):
+            observation_recipe_id = variables["recipe_id"]
+            if not isinstance(data, dict) or data:
+                api.json_response(self, {"error": {
+                    "code": "invalid_observation_refresh_request",
+                    "message": "Upstream refresh does not accept request fields",
+                    "details": {},
+                }}, 400)
+                return
+            try:
+                observation = api.refresh_upstream_observation(observation_recipe_id)
+            except FileNotFoundError:
+                api.json_response(self, {"error": {
+                    "code": "recipe_not_found", "message": "Recipe was not found", "details": {},
+                }}, 404)
+                return
+            except api.upstream_detection.UpstreamDetectionError as exc:
+                api.json_response(self, {"error": {
+                    "code": exc.code, "message": str(exc),
+                    "details": {"classification": exc.classification},
+                }}, 502)
+                return
+            except api.upstream_observation.UpstreamObservationError as exc:
+                status = 409 if exc.code == "recipe_changed_during_detection" else 503
+                api.json_response(self, {"error": {
+                    "code": exc.code, "message": str(exc), "details": {},
+                }}, status)
+                return
+            api.json_response(self, {"ok": True, "observation": observation}, 200)
+
+        def _post_automation_check(self, data, variables, _parsed):
+            self._post_automation_action(data, variables["recipe_id"], "check")
+
+        def _post_automation_retry(self, data, variables, _parsed):
+            self._post_automation_action(data, variables["recipe_id"], "retry")
+
+        def _post_automation_action(self, data, recipe_id, action):
+            try:
+                if action == "check":
+                    if not isinstance(data, dict) or data:
+                        api.json_response(self, {"error": {
+                            "code": "invalid_automation_check_request",
+                            "message": "Check now does not accept request fields",
+                            "details": {},
+                        }}, 400)
+                        return
+                    result = api.check_automation_now(recipe_id)
+                else:
+                    result = api.retry_automation(recipe_id, data)
+            except ValueError as exc:
+                api.json_response(self, {"error": {
+                    "code": "invalid_recipe_id", "message": str(exc), "details": {},
+                }}, 400)
+                return
+            except api.automation_status.AutomationActionError as exc:
+                api.json_response(self, {"error": public_error(exc.as_dict())}, exc.status)
+                return
+            api.json_response(self, {"ok": True, "automation": result}, 202)
+
+        def _post_validation_cancel(self, data, variables, _parsed):
+            run_id = variables["run_id"]
+            attempt_id = variables["attempt_id"]
+            if not isinstance(data, dict) or data:
+                api.json_response(self, {"error": {
+                    "code": "invalid_validation_cancellation_request",
+                    "message": "Validation cancellation does not accept request fields",
+                }}, 400)
+                return
+            try:
+                result = api.cancel_validation_attempt(
+                    getattr(self.server, "validation_manager", None), run_id, attempt_id,
+                )
+            except ValueError as exc:
+                api.json_response(self, {"error": {
+                    "code": "invalid_validation_identity", "message": str(exc), "details": {},
+                }}, 400)
+                return
+            except api.validation_service.ValidationAdmissionError as exc:
+                api.json_response(self, {"error": public_error(exc.as_dict())}, exc.status)
+                return
+            except api.validation_service.ValidationCancellationError as exc:
+                api.json_response(self, {"error": public_error(exc.as_dict())}, exc.status)
+                return
+            status = 202 if result["validation"]["status"] == "cancelling" else 200
+            api.json_response(self, {"ok": True, **result}, status)
+
+        def _post_execution_cancel(self, data, variables, _parsed):
+            run_id = variables["run_id"]
+            if not isinstance(data, dict) or data:
+                api.json_response(self, {"error": {
+                    "code": "invalid_cancellation_request",
+                    "message": "Execution cancellation does not accept request fields",
+                }}, 400)
+                return
+            try:
+                service = getattr(self.server, "maintenance_service", None)
+                result = api.cancel_execution(
+                    getattr(self.server, "execution_manager", None),
+                    run_id,
+                    maintenance_request=service.request if service is not None else None,
+                )
+            except ValueError as exc:
+                api.json_response(self, {"error": {
+                    "code": "invalid_execution_id", "message": str(exc), "details": {},
+                }}, 400)
+                return
+            except api.ExecutionCancellationError as exc:
+                api.json_response(self, {"error": public_error(exc.as_dict())}, exc.status)
+                return
+            api.json_response(self, {"ok": True, "cancellation": result}, 200 if result["status"] == "cancelled" else 202)
+
+        def _post_recipe_validate(self, data, _variables, _parsed):
+            recipe = data.get("recipe") if isinstance(data, dict) and "recipe" in data else data
+            try:
+                api.json_response(self, api.recipe_json_validation(recipe))
+            except api.RecipeDocumentError as exc:
+                api.json_response(self, {"ok": False, "error": {"code": exc.code, "message": str(exc), "path": exc.path}}, 422)
+
+        def _post_recipe_import(self, data, _variables, _parsed):
+            recipe = data.get("recipe") if isinstance(data, dict) else data
+            replace = data.get("replace", False) if isinstance(data, dict) else False
+            if not isinstance(replace, bool):
+                api.json_response(self, {"ok": False, "error": {"code": "invalid_replace", "message": "replace must be a boolean", "path": "$.replace"}}, 422)
+                return
+            try:
+                api.json_response(self, api.import_recipe_json(recipe, replace=replace))
+            except api.builtin_recipe.BuiltinRecipeError as exc:
+                api.json_response(self, {"ok": False, "error": exc.as_dict()}, 409)
+            except api.RecipeDocumentError as exc:
+                api.json_response(self, {"ok": False, "error": {"code": exc.code, "message": str(exc), "path": exc.path}}, 422)
+            except FileExistsError as exc:
+                api.json_response(self, {"ok": False, "error": {"code": "recipe_exists", "message": str(exc), "path": "$.name"}}, 409)
+            except PermissionError as exc:
+                api.json_response(self, {"ok": False, "error": {"code": "readonly_recipe", "message": str(exc), "path": "$.name"}}, 403)
+
+        def _post_run(self, data, _variables, _parsed):
+            workflow = data.get("workflow", data)
+            if workflow.get("active") is False:
+                api.json_response(self, {"error": "recipe is disabled"}, 409)
+                return
+            dry_run = bool(data.get("dry_run", True))
+            try:
+                result = api.enqueue_recipe_run(getattr(self.server, "execution_manager", None), workflow, dry_run=dry_run)
+            except api.RunAdmissionError as exc:
+                api.json_response(self, {"error": public_error(exc.as_dict())}, exc.status)
+                return
+            api.json_response(self, result, 202)
+
+        def _post_archive_inspect(self, data, _variables, _parsed):
+            workflow = data.get("workflow", data)
+            try:
+                api.json_response(self, {"inspection": api.inspect_upstream_archive(workflow)})
+            except api.RecipeDocumentError as exc:
+                api.json_response(self, {"error": {
+                    "code": exc.code, "message": str(exc), "path": exc.path,
+                }}, 422)
+            except api.upstream_archive.UpstreamArchiveError as exc:
+                api.json_response(self, {"error": {"code": exc.code, "message": str(exc), "details": exc.details}}, 422)
+
+        def _post_validation_start(self, data, variables, _parsed):
+            try:
+                result = api.admit_validation_attempt(
+                    getattr(self.server, "validation_manager", None), variables["run_id"], data,
+                )
+            except api.validation_service.ValidationAdmissionError as exc:
+                api.json_response(self, {"error": public_error(exc.as_dict())}, exc.status)
+                return
+            api.json_response(self, {"validation": result}, 202)
+
+        def _post_publication_publish(self, data, variables, _parsed):
+            try:
+                result = api.publish_build_artifact(variables["run_id"], data)
+            except api.artifact_publication.PublicationError as exc:
+                api.json_response(self, {"error": public_error({
+                    "code": exc.code, "stage": "publication", "message": str(exc),
+                })}, 400)
+                return
+            self._publication_response(result)
+
+        def _post_publication_reconcile(self, data, variables, _parsed):
+            self._publication_response(api.reconcile_build_publication(variables["run_id"], data))
+
+        def _publication_response(self, result):
+            failure_code = str((result.get("error") or {}).get("code") or "")
+            failure_status = 409 if failure_code in {"repository_mutation_busy", "publication_identity_conflict"} else 422
+            api.json_response(self, {"publication": result}, 200 if result["status"] == "success" else failure_status)
+
+        def _post_notification_test(self, _data, _variables, _parsed):
+            result = api.test_notification()
+            api.json_response(self, {"ok": bool(result.get("ok")), "notification": result}, 200 if result.get("ok") else 502)
+
+        def _post_settings(self, data, _variables, _parsed):
+            api.json_response(self, {"ok": True, "settings": api.update_settings(data)})
+
+        def _post_execution_logs_delete(self, data, _variables, _parsed):
+            api.json_response(self, api.delete_execution_logs(
+                data.get("ids") or [],
+                all_runs=bool(data.get("all")),
+                dry_run=bool(data.get("dry_run")),
+                authorization=getattr(self.server, "cleanup_authorization", None),
+            ))
+
+        def _post_package_create(self, data, _variables, _parsed):
+            api.json_response(self, {"ok": True, "package": api.create_or_update_package(data)})
+
+        def _post_package_update(self, data, variables, _parsed):
+            try:
+                package = api.create_or_update_package(data, name=variables["name"])
+            except KeyError:
+                api.json_response(self, {"error": "not found"}, 404)
+                return
+            api.json_response(self, {"ok": True, "package": package})
+
+        def _post_workflow_save(self, data, variables, _parsed):
+            self._save_workflow(data, variables["workflow_id"])
+
+        def _save_workflow(self, data: dict, workflow_id: str):
+            workflow_id = api.sanitize_id(workflow_id)
             workflow = data.get("workflow", data)
             workflow["name"] = workflow.get("name") or workflow_id
             previous_id = str(data.get("previous_id") or "")
@@ -575,19 +547,16 @@ def create_handler(api):
                 return
             parsed = urlparse(self.path)
             try:
+                matched = match_route("DELETE", parsed.path)
                 gate = getattr(self.server, "mutation_gate", None)
-                lease = gate.lease() if gate is not None and is_durable_mutation_route(
-                    "DELETE", parsed.path,
+                lease = gate.lease() if (
+                    gate is not None
+                    and matched is not None
+                    and matched.route.effect is RouteEffect.DURABLE_MUTATION
                 ) else _NullLease()
                 with lease:
-                    if parsed.path.startswith("/api/workflows/"):
-                        self._delete_workflow(parsed.path)
-                        return
-                    if parsed.path.startswith("/api/executions/") and parsed.path.endswith("/logs"):
-                        self._delete_execution_log(parsed.path)
-                        return
-                    if parsed.path.startswith("/api/packages/"):
-                        self._delete_package(parsed)
+                    if matched is not None:
+                        getattr(self, matched.route.handler)(matched.path_variables, parsed)
                         return
                     api.json_response(self, {"error": "not found"}, 404)
             except MutationGateClosed as exc:
@@ -599,8 +568,8 @@ def create_handler(api):
             except Exception as exc:
                 api.json_response(self, {"error": str(exc)}, 400)
 
-        def _delete_workflow(self, path: str):
-            workflow_id = urllib.parse.unquote(path.rsplit("/", 1)[-1])
+        def _delete_workflow(self, variables, _parsed):
+            workflow_id = variables["workflow_id"]
             try:
                 api.delete_workflow(workflow_id)
             except api.builtin_recipe.BuiltinRecipeError as exc:
@@ -614,16 +583,16 @@ def create_handler(api):
                 return
             api.json_response(self, {"ok": True, "id": workflow_id, "deleted_from_repository": False})
 
-        def _delete_package(self, parsed):
-            name = urllib.parse.unquote(parsed.path.rsplit("/", 1)[-1])
+        def _delete_package(self, variables, parsed):
+            name = variables["name"]
             if parsed.query:
                 api.json_response(self, {"error": "package deletion does not accept repository operations"}, 400)
                 return
             api.delete_package(name)
             api.json_response(self, {"ok": True, "id": name, "deleted_from_repo": False})
 
-        def _delete_execution_log(self, path: str):
-            run_id = urllib.parse.unquote(path[len("/api/executions/"):-len("/logs")].strip("/"))
+        def _delete_execution_log(self, variables, _parsed):
+            run_id = variables["run_id"]
             try:
                 api.json_response(self, {"ok": True, "deletion": api.delete_execution_log(
                     run_id,
@@ -634,6 +603,7 @@ def create_handler(api):
             except api.workspace_cleanup.WorkspaceBusyError as exc:
                 api.json_response(self, {"error": str(exc), "code": "execution_active"}, 409)
 
+    validate_routes(ADMIN_API_ROUTES, Handler)
     return Handler
 
 

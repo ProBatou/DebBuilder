@@ -74,30 +74,8 @@ class MutationGate:
 
 
 def is_durable_mutation_route(method: str, path: str) -> bool:
-    """Classify HTTP routes whose operation may durably change application state."""
-    if method == "DELETE":
-        return (
-            path.startswith("/api/workflows/")
-            or (path.startswith("/api/executions/") and path.endswith("/logs"))
-            or path.startswith("/api/packages/")
-        )
-    if method != "POST":
-        return False
-    return (
-        path == "/api/recipes/import"
-        or path == "/api/run"
-        or path == "/api/notifications/test"
-        or path == "/api/settings"
-        or path == "/api/executions/delete-logs"
-        or path == "/api/packages"
-        or path.startswith("/api/packages/")
-        or path.startswith("/api/workflows/")
-        or (
-            path.startswith("/api/recipes/")
-            and path.endswith(("/automation/check", "/automation/retry", "/observation/refresh"))
-        )
-        or (
-            path.startswith("/api/executions/")
-            and path.endswith(("/cancel", "/validate", "/publish", "/reconcile-publication"))
-        )
-    )
+    """Classify durable HTTP mutations from the canonical API registry."""
+    from .api_routes import RouteEffect, match_route
+
+    matched = match_route(method, path)
+    return matched is not None and matched.route.effect is RouteEffect.DURABLE_MUTATION

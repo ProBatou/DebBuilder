@@ -148,6 +148,145 @@
         ]
       }
     },
+    "/api/support-bundle": {
+      "get": {
+        "operationId": "support_bundle.get",
+        "summary": "Download a bounded support bundle",
+        "tags": [
+          "system"
+        ],
+        "x-debbuilder-effect": "read_only",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/zip": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupportBundleZip"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400 admin API error. Documented codes: invalid_support_bundle_request, invalid_recipe_id, invalid_execution_id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_support_bundle_request",
+              "invalid_recipe_id",
+              "invalid_execution_id"
+            ]
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "404": {
+            "description": "HTTP 404 admin API error. Documented codes: recipe_not_found, build_run_not_found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "recipe_not_found",
+              "build_run_not_found"
+            ]
+          },
+          "409": {
+            "description": "HTTP 409 admin API error. Documented codes: recipe_inspection_unavailable, run_inspection_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "recipe_inspection_unavailable",
+              "run_inspection_unavailable"
+            ]
+          },
+          "500": {
+            "description": "HTTP 500 admin API error. Documented codes: internal_error, support_bundle_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "internal_error",
+              "support_bundle_unavailable"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable"
+            ]
+          }
+        },
+        "parameters": [
+          {
+            "name": "recipe_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.+-]{1,128}$",
+              "maxLength": 128
+            },
+            "description": "Select exactly one Recipe inspection; duplicate, empty or unknown parameters are rejected."
+          },
+          {
+            "name": "run_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.+-]{1,128}$",
+              "maxLength": 128
+            },
+            "description": "Select exactly one Run inspection; no implicit Recipe association is made."
+          }
+        ],
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
     "/api/openapi.json": {
       "get": {
         "operationId": "system.openapi",
@@ -6507,6 +6646,12 @@
           "checks"
         ],
         "description": "Global failed if any check failed, otherwise warning if any warning/unknown, otherwise ok. Individual probe failures return unknown and HTTP 200."
+      },
+      "SupportBundleZip": {
+        "type": "string",
+        "format": "binary",
+        "contentMediaType": "application/zip",
+        "description": "Deterministic ZIP with manifest.json, system-diagnostics.json and at most one optional Recipe and Run inspection."
       },
       "StatusResponse": {
         "type": "object",

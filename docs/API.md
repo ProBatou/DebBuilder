@@ -57,8 +57,8 @@ signature or prove publication readiness. OCI reports only local Podman binary
 presence, not runtime functionality or qualified-image state. No bootstrap,
 repair, container, image pull, network probe, or repository publication occurs.
 This is an on-demand explanation of prerequisites and current admission, not
-historical monitoring or alerting. A future support bundle can call the same
-Python service, but this endpoint neither creates nor exports a bundle.
+historical monitoring or alerting. The support bundle below reuses this same
+Python projection; this endpoint itself neither creates nor exports a bundle.
 
 ## Recipe and Run inspectors
 
@@ -87,5 +87,25 @@ manager still owns the queued or active Run at snapshot time.
 Unsafe or unreadable persisted inputs return canonical HTTP 409 errors;
 invalid IDs return 400 and absent resources return 404. The corresponding
 Python services are `inspect_recipe(...)` and `inspect_run(...)` in
-`debbuilder/inspectors.py`, so a future support bundle can reuse the same
-allowlists without HTTP. No bundle is implemented yet.
+`debbuilder/inspectors.py`; the support bundle reuses these same allowlists.
+
+## Support bundle
+
+`GET /api/support-bundle` downloads a read-only ZIP under configured admin
+authentication. Optional, single `recipe_id` and `run_id` query parameters add
+one inspection of each type, independently; neither selects the other. Unknown
+or repeated parameters return 400. Invalid IDs return 400, missing selections
+404, and unsafe/unreadable inspections 409, all with canonical JSON errors.
+Assembly failures return the generic `support_bundle_unavailable` JSON error.
+
+The archive contains `manifest.json` and `system-diagnostics.json`, plus
+`recipe-inspection.json` and/or `run-inspection.json` when explicitly selected.
+The versioned manifest lists **all** archive entries, including itself, the
+application version, and Boolean selection flags; it has no clock, host or
+local path. Entry order, JSON encoding and ZIP metadata are fixed, so equal
+projections yield byte-identical archives. Entries are at most 512 KiB each,
+total uncompressed JSON at most 2 MiB, and final ZIP at most 2 MiB + 4 KiB.
+There are no arbitrary entry names or filesystem traversal. Only the existing
+sanitized diagnostics and inspectors are serialized: no raw Settings, Secrets,
+Recipes, Runs, logs, command output, OCI data or repository files. Treat the
+download as operator data nevertheless and share it deliberately.

@@ -362,6 +362,8 @@ SCHEMAS.update({
                    "minItems": len(CHECK_IDS), "maxItems": len(CHECK_IDS)},
     }, ("schema_version", "status", "checks"),
         description="Global failed if any check failed, otherwise warning if any warning/unknown, otherwise ok. Individual probe failures return unknown and HTTP 200."),
+    "SupportBundleZip": {"type": "string", "format": "binary", "contentMediaType": "application/zip",
+                         "description": "Deterministic ZIP with manifest.json, system-diagnostics.json and at most one optional Recipe and Run inspection."},
     "StatusResponse": _object({"ok": {"const": True}, "auth_mode": S,
                                "repo_default": S, "suite_default": S, "component_default": S,
                                "arch_default": S, "notification_type": S,
@@ -414,13 +416,14 @@ class OperationDoc:
     request: str | None = None
     errors: tuple[tuple[int, tuple[str, ...]], ...] = ()
     query: tuple[str, ...] = ()
+    media_type: str = "application/json"
 
 
 def _doc(status: int, response: str, request: str | None = None, *,
          also: tuple[int, ...] = (), errors: dict[int, tuple[str, ...]] | None = None,
-         query: tuple[str, ...] = ()) -> OperationDoc:
+         query: tuple[str, ...] = (), media_type: str = "application/json") -> OperationDoc:
     return OperationDoc(((status, response), *((other, response) for other in also)),
-                        request, tuple(sorted((errors or {}).items())), query)
+                        request, tuple(sorted((errors or {}).items())), query, media_type)
 
 
 # One operation-specific representation table. Paths, methods, IDs, tags,
@@ -428,6 +431,13 @@ def _doc(status: int, response: str, request: str | None = None, *,
 OPERATION_DOCS = {
     "system.status": _doc(200, "StatusResponse"),
     "system.diagnostics": _doc(200, "SystemDiagnosticsResponse"),
+    "support_bundle.get": _doc(200, "SupportBundleZip", query=("recipe_id", "run_id"),
+                               media_type="application/zip", errors={
+        400: ("invalid_support_bundle_request", "invalid_recipe_id", "invalid_execution_id"),
+        404: ("recipe_not_found", "build_run_not_found"),
+        409: ("recipe_inspection_unavailable", "run_inspection_unavailable"),
+        500: ("support_bundle_unavailable",),
+    }),
     "system.openapi": _doc(200, "OpenApiDocument"),
     "auth.status": _doc(200, "AuthStatusResponse"),
     "dashboard.get": _doc(200, "DashboardResponse"),
@@ -483,6 +493,12 @@ SCHEMAS["OpenApiDocument"] = _object({"openapi": S, "info": _object(extra=True),
 
 _PATH_VARIABLE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _QUERY_PARAMETERS = {
+    "recipe_id": {"name": "recipe_id", "in": "query", "required": False,
+                  "schema": _INSPECTION_ID,
+                  "description": "Select exactly one Recipe inspection; duplicate, empty or unknown parameters are rejected."},
+    "run_id": {"name": "run_id", "in": "query", "required": False,
+               "schema": _INSPECTION_ID,
+               "description": "Select exactly one Run inspection; no implicit Recipe association is made."},
     "after": {"name": "after", "in": "query", "required": False,
               "schema": {"type": "integer", "default": 0},
               "description": "Log offset; negative values are clamped to zero."},
@@ -506,7 +522,7 @@ def _error_response(status: int, codes: tuple[str, ...]) -> dict:
 def _operation(route) -> dict:
     doc = OPERATION_DOCS[route.operation_id]
     responses = {
-        str(status): {"description": "Successful response", "content": {"application/json": {"schema": _ref(schema)}}}
+        str(status): {"description": "Successful response", "content": {doc.media_type: {"schema": _ref(schema)}}}
         for status, schema in doc.success
     }
     common_errors = {401: ("authentication_required",),

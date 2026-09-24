@@ -99,6 +99,13 @@ durable record. Publication status reuses the canonical proof projector;
 automation eligibility reuses the Recipe rule. No inspector triggers
 upstream discovery, Validation, publication, recovery or repair.
 
+`debbuilder/support_bundle.py` assembles only those existing projections into
+a deterministic, bounded in-memory ZIP. It has no stores, probes, filesystem
+reads, network or subprocess access. The authenticated, read-only HTTP route
+resolves optional explicit Recipe/Run selections through the app facade before
+calling the builder; it never acquires a mutation lease. ZIP metadata and
+filenames are fixed and construction failures expose only a canonical error.
+
 ## Build model
 
 Builds run in per-Run workspaces and use structured argument vectors rather

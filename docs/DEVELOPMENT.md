@@ -45,6 +45,11 @@ is needed. The Python projections in `debbuilder/inspectors.py` are directly
 testable without a running HTTP server; they never initiate build or upstream
 work. Their exact response schemas are generated into `openapi.json`.
 
+To share a bounded diagnostic snapshot, download `GET /api/support-bundle`
+with optional `recipe_id` and/or `run_id` query parameters. The ZIP contains
+only the existing safe projections and a versioned manifest, not raw records
+or logs. See [API contract](API.md) for limits and error behavior.
+
 ## Checks
 
 The broad local checks are:

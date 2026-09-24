@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 import time
 import urllib.parse
@@ -18,9 +19,11 @@ from .api_errors import ApiError
 from .api_routes import ADMIN_API_ROUTES, RouteEffect, match_route, validate_routes
 from .execution_projection import public_error
 from .lifecycle import MutationGateClosed
+from .support_bundle import SupportBundleError, build_support_bundle
 
 
 LOGGER = logging.getLogger(__name__)
+_SUPPORT_SELECTION_ID = re.compile(r"[A-Za-z0-9_.+-]{1,128}\Z")
 
 
 def create_handler(api):
@@ -160,6 +163,66 @@ def create_handler(api):
 
         def _get_system_diagnostics(self, _variables, _parsed):
             api.json_response(self, api.system_diagnostics_snapshot(self.server))
+
+        def _get_support_bundle(self, _variables, parsed):
+            try:
+                pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True, errors="strict")
+            except UnicodeError:
+                pairs = [("invalid", "")]
+            if len(pairs) > 2 or len({key for key, _ in pairs}) != len(pairs) or any(
+                key not in {"recipe_id", "run_id"} for key, _ in pairs
+            ):
+                api.json_response(self, ApiError("invalid_support_bundle_request", "The support bundle request is invalid"), 400)
+                return
+            selected = dict(pairs)
+            recipe = run = None
+            if "recipe_id" in selected:
+                if not _SUPPORT_SELECTION_ID.fullmatch(selected["recipe_id"]):
+                    api.json_response(self, ApiError("invalid_recipe_id", "The Recipe identifier is invalid"), 400)
+                    return
+                try:
+                    recipe = api.get_recipe_inspection(selected["recipe_id"])
+                except ValueError:
+                    api.json_response(self, ApiError("invalid_recipe_id", "The Recipe identifier is invalid"), 400)
+                    return
+                except api.InspectionReadError:
+                    api.json_response(self, ApiError("recipe_inspection_unavailable", "The Recipe cannot be inspected safely"), 409)
+                    return
+                if recipe is None:
+                    api.json_response(self, ApiError("recipe_not_found", "The Recipe was not found"), 404)
+                    return
+            if "run_id" in selected:
+                if not _SUPPORT_SELECTION_ID.fullmatch(selected["run_id"]):
+                    api.json_response(self, ApiError("invalid_execution_id", "The execution identifier is invalid"), 400)
+                    return
+                try:
+                    run = api.get_run_inspection(selected["run_id"], manager=getattr(self.server, "execution_manager", None))
+                except ValueError:
+                    api.json_response(self, ApiError("invalid_execution_id", "The execution identifier is invalid"), 400)
+                    return
+                except api.InspectionReadError:
+                    api.json_response(self, ApiError("run_inspection_unavailable", "The Run cannot be inspected safely"), 409)
+                    return
+                if run is None:
+                    api.json_response(self, ApiError("build_run_not_found", "Build Run was not found"), 404)
+                    return
+            try:
+                payload = build_support_bundle(
+                    diagnostics=api.system_diagnostics_snapshot(self.server),
+                    recipe_inspection=recipe, run_inspection=run,
+                )
+            except SupportBundleError:
+                LOGGER.exception("Support bundle assembly failed")
+                api.json_response(self, ApiError("support_bundle_unavailable", "The support bundle cannot be generated"), 500)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", 'attachment; filename="debbuilder-support.zip"')
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
 
         def _get_openapi(self, _variables, _parsed):
             from .openapi import openapi_document

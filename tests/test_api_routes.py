@@ -16,6 +16,7 @@ from tests.admin_api_case import AdminApiCase
 EXPECTED_ROUTES = {
     ("GET", "/api/status", "system.status"),
     ("GET", "/api/system/diagnostics", "system.diagnostics"),
+    ("GET", "/api/support-bundle", "support_bundle.get"),
     ("GET", "/api/openapi.json", "system.openapi"),
     ("GET", "/api/auth/status", "auth.status"),
     ("GET", "/api/dashboard", "dashboard.get"),
@@ -68,7 +69,7 @@ class ApiRouteRegistryTests(unittest.TestCase):
             method: sum(route.method == method for route in ADMIN_API_ROUTES)
             for method in ("GET", "POST", "DELETE")
         }
-        self.assertEqual(by_method, {"GET": 19, "POST": 18, "DELETE": 3})
+        self.assertEqual(by_method, {"GET": 20, "POST": 18, "DELETE": 3})
         self.assertEqual(
             sum(route.effect is RouteEffect.DURABLE_MUTATION for route in ADMIN_API_ROUTES),
             19,

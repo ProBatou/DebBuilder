@@ -6,8 +6,8 @@ DebBuilder is a self-hosted web console for turning GitHub-hosted projects into
 Debian packages, validating their install lifecycle, and publishing them to a
 signed personal APT repository.
 
-The [roadmap](docs/ROADMAP.md) tracks the active v1 release audit and the
-post-v1 work. The v1 release is still in progress.
+The current public release is **v1.0.0**. The [roadmap](docs/ROADMAP.md) tracks
+ongoing post-v1 development.
 
 ## What it does
 
@@ -21,8 +21,12 @@ artifacts.
 - GitHub release, tag, source-archive, and official release-asset acquisition
 - Node.js, Python, Rust, and static-project detection
 - declarative source changes, build commands, Debian metadata, file ownership,
-  persistent directories, and systemd units
+  persistent directories, post-build `ensure_directories`, and systemd units
+- opt-in ELF runtime dependency detection for supported prebuilt amd64 Release
+  assets, with Bookworm resolution and manual/detected dependency overrides
 - Podman-based install, upgrade, restart, removal, and purge validation
+- system diagnostics, Recipe and Run inspectors, bounded support bundles, and a
+  documented OpenAPI contract
 - signed `reprepro` publication with exact package reconciliation
 - manual and automated Recipe lifecycles, Run history, OIDC/reverse-proxy
   authentication modes, and notifications
@@ -37,8 +41,9 @@ Recipe -> Build -> Validation -> Publication
    it.
 2. **Build** resolves an exact upstream identity and produces a Debian package
    in an isolated Run workspace.
-3. **Validation** exercises the package lifecycle in a disposable Podman
-   container with networking disabled.
+3. **Validation** explicitly prepares repositories and dependencies, then
+   exercises the package lifecycle in a disposable Podman container with
+   networking disabled, using the canonical #27 Validation flow.
 4. **Publication** adds the verified artifact to the signed APT repository.
 
 Automation uses the same lifecycle and never changes the policy or upstream
@@ -47,18 +52,17 @@ for the deeper model.
 
 ## Installation
 
-> **Release status:** The steps below describe the qualified v1 installation
-> contract. v1 is not published yet; the badge above always reports the latest
-> public release.
+> **Release status:** The current public release is **v1.0.0**. The badge above
+> always reports the latest public release.
 
 The currently qualified installation target is Debian 13 on amd64, with
 systemd and cgroup v2. The host needs network access for normal APT dependency
 installation, GitHub source acquisition, and the first pull of each selected
 Validation image.
 
-When the v1 package is published, download its Debian package and `SHA256SUMS`
-from [GitHub Releases](https://github.com/ProBatou/DebBuilder/releases), verify
-the checksum, then install the local package with APT:
+Download the v1.0.0 Debian package and `SHA256SUMS` from
+[GitHub Releases](https://github.com/ProBatou/DebBuilder/releases), verify the
+checksum, then install the local package with APT:
 
 ```bash
 sha256sum --check SHA256SUMS
@@ -76,8 +80,8 @@ landing page and client installer. No manual repository or GPG setup is
 required.
 
 Its declared runtime dependencies are `python3`, `python3-dbus`, `reprepro`,
-`gnupg`, `gpgv`, `podman`, `kmod`, and `ca-certificates`; APT installs them as
-package dependencies rather than as manual bootstrap steps.
+`gnupg`, `gpgv`, `podman`, `kmod`, `ca-certificates`, and `binutils`; APT
+installs them as package dependencies rather than as manual bootstrap steps.
 
 ## Access
 
@@ -179,6 +183,8 @@ served by the public listener. Please report vulnerabilities as described in
 - [Operations](docs/OPERATIONS.md)
 - [APT repository operations](docs/APT_REPOSITORY.md)
 - [Validation](docs/VALIDATION.md)
+- [API contract](docs/API.md)
+- [ELF inspection and runtime dependencies](docs/ELF_INSPECTION.md)
 - [Release process](docs/RELEASE_PROCESS.md)
 - [Development guide](docs/DEVELOPMENT.md)
 - [Roadmap](https://github.com/ProBatou/DebBuilder/blob/main/docs/ROADMAP.md)
@@ -217,4 +223,5 @@ then `npm run test:ui`. Development scenarios and contributor rules are in the
 ## Version and release status
 
 The badge at the top of this page reads the latest public release directly from
-GitHub. The repository is preparing for v1, but v1 has not been released.
+GitHub. The current public release is **v1.0.0**, and post-v1 development is
+ongoing.

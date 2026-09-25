@@ -22,7 +22,10 @@ On first Validation for a profile, DebBuilder:
 3. otherwise pulls the exact `repository@sha256:...` reference;
 4. records the selected digest at admission and verifies the immutable local
    image ID before container creation; and
-5. runs the package lifecycle with container networking disabled.
+5. prepares the admitted repositories, dependencies, and required toolchain in
+   an explicitly network-enabled preparation container; and
+6. runs the package lifecycle in a separately owned container with networking
+   disabled.
 
 A registry outage fails that Validation request and it can be retried. It does
 not prevent service startup or use of an already verified exact local image.
@@ -38,11 +41,22 @@ The qualified profile-image matrix currently covers amd64. The Debian package
 remains `Architecture: all`, but Validation reports an unsupported profile
 architecture when no matching descriptor exists.
 
-Both profiles provide a curated Debian runtime baseline, including the
-dependencies required by the DebBuilder package itself. Validation does not
-download arbitrary dependencies declared by a candidate package: it uses
-`dpkg --install` inside the network-disabled container. A package that needs
-capabilities outside a profile requires an explicitly reviewed profile.
+Both profiles provide a curated Debian runtime baseline. Before the lifecycle,
+the canonical #27 flow uses an explicitly network-enabled preparation container
+to configure admitted repositories, resolve the candidate package's dependency
+closure, and download the exact package bundle. The resulting
+`PreparedRuntimeDependencies` contract and owned prepared environment are then
+passed to a separate lifecycle container. That container proves its network is
+disabled before installing the prepared packages and exercising install,
+upgrade, service, restart, removal, and purge behavior. Dependency downloads
+are never part of this offline lifecycle, and a candidate package cannot fetch
+arbitrary dependencies there.
+
+The same preparation boundary supports #30 runtime dependency resolution. For
+the Bookworm/amd64 resolver profile it can prepare `dpkg-dev` and `binutils`,
+then install that prepared toolchain in an offline owned lifecycle container.
+This does not modify the admitted Validation image or its accepted immutable
+digest.
 
 The lifecycle checks package installation, service behavior where applicable,
 upgrade from a retained previous artifact, restart, removal, purge, and

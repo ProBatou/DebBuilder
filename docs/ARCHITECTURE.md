@@ -139,6 +139,25 @@ PyPI names into Debian package names. Explicit PEP 517 projects receive a
 reviewable `python3 -m build` proposal; source applications with no compilation
 step can package selected runtime files directly.
 
+Runtime dependency detection is opt-in and leaves historical Recipes
+unchanged. For supported prebuilt amd64 Release assets, the packaging path is:
+
+```text
+final staging
+-> candidate ELF inspection
+-> Bookworm/amd64 dependency resolution
+-> bundled/external classification
+-> manual + detected dependency merge
+-> DEBIAN/control
+-> package
+-> #27 Validation
+```
+
+Inspection uses `readelf`, never `ldd`, and never executes upstream ELF files.
+The currently supported resolver profile is Debian Bookworm on amd64. See
+[ELF inspection and runtime dependencies](ELF_INSPECTION.md) for the detailed
+contract, limits, override rules, and offline resolver boundary.
+
 ## Boundaries
 
 DebBuilder's workspace, process, and filesystem controls reduce accidental

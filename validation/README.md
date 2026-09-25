@@ -30,12 +30,16 @@ podman build -t debbuilder-validation:bookworm -f validation/Dockerfile validati
 ```
 
 Validation profiles provide a curated baseline of Debian runtime packages for
-offline lifecycle tests. Both profiles include the managed DebBuilder package's
-declared runtime dependencies, including `podman` and `kmod`.
-Validation uses
-`dpkg --install` inside a network-disabled container; it does not fetch
-arbitrary packages declared in `Depends`. A package requiring capabilities
-outside a profile must use or add an explicitly reviewed validation profile.
+offline lifecycle tests. The canonical #27 flow first uses an explicitly
+network-enabled preparation container to resolve admitted repositories and
+download an exact dependency bundle. A separately owned lifecycle container
+then proves its network is disabled before installing that prepared bundle and
+running package lifecycle checks. Candidate packages cannot fetch arbitrary
+dependencies during the offline lifecycle.
+
+For Bookworm/amd64 ELF dependency resolution, the same preparation boundary can
+also select `dpkg-dev` and `binutils` and make them available in an offline
+owned lifecycle container without changing the admitted image digest.
 
 The controlled allowlist also contains `bookworm-node22`. Build it with:
 

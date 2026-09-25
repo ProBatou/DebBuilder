@@ -35,3 +35,7 @@ The reference’s exact identity is labeled as coming from a **previous Test fix
 ## #24B2 operator review refinement
 
 The operator accepted the Svelte choice and Calm operations desk direction, then requested corrections before API integration. [#24B2 references](references/README.md) now show a viewport-anchored collapsible sidebar, six concise top-level headers, a compact Packages repository summary and read-only inventory subview, selectable Package/Recipe/Run lists, contextual actions, compact Overview and Run dependencies, and System/Settings organization. [Theme](system/theme.md), [i18n](system/i18n.md), [responsive rules](system/responsive.md) and the [capability map](system/navigation.md) record the new behavior. The prototype remains isolated and fixture-only. #24C is pending a separate operator review.
+
+## #24B3 operator review refinement
+
+The final fixture review adds a geometric cube mark and semantic SVG navigation icons, locally editable Settings and Recipe Advanced fixtures, a compact translated Run pipeline with original log verbosity choices, in-Run failure diagnosis, and a compact public APT landing with three closed disclosures. The admin inventory remains a reprepro-only secondary view. [References](references/README.md) document the captured states. No API or production cutover is included; #24C still requires separate operator approval.

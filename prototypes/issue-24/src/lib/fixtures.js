@@ -64,4 +64,4 @@ export const recipeRows = [
   {id:'archive-agent',source:'example/archive-agent',kind:'sourceArchive'},
   {id:'worker-agent',source:'example/worker-agent',kind:'repositorySource'},
 ];
-export const stageKeys = ['recipes.source','recipes.detection','runs.dependenciesResolved','runs.stage','recipes.install','packages.built','packages.validation','packages.publication'];
+export const stageKeys = ['runs.stage.source','runs.stage.resolve','runs.stage.dependencies','runs.stage.build','runs.stage.install','runs.stage.package','runs.stage.validate','runs.stage.publish'];

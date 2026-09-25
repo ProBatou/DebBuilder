@@ -3,6 +3,8 @@
   import {views, scenarios} from './lib/fixtures.js';
   import {translate, localeNames} from './lib/i18n.js';
   import Modal from './lib/Modal.svelte';
+  import BrandMark from './lib/BrandMark.svelte';
+  import NavIcon from './lib/NavIcon.svelte';
   import Overview from './pages/Overview.svelte';
   import Packages from './pages/Packages.svelte';
   import Recipes from './pages/Recipes.svelte';
@@ -63,9 +65,9 @@
 <svelte:head><title>DebBuilder · {t('nav.'+view)}</title></svelte:head>
 <div class="shell" class:sidebar-collapsed={collapsed}>
   <aside class:mobile-open={menuOpen} class="sidebar" aria-label={t('nav.open')}>
-    <div class="sidebar-head"><div class="brand-mark" aria-hidden="true">D<span>▪</span></div><div class="brand-copy"><strong>DebBuilder</strong><small>{t('nav.version')}</small></div><button class="collapse-button" title={collapsed?t('nav.expand'):t('nav.collapse')} aria-label={collapsed?t('nav.expand'):t('nav.collapse')} aria-expanded={!collapsed} on:click={toggleSidebar}>{collapsed?'»':'«'}</button></div>
+    <div class="sidebar-head"><div class="brand-mark"><BrandMark /></div><div class="brand-copy"><strong>DebBuilder</strong><small>{t('nav.version')}</small></div><button class="collapse-button" title={collapsed?t('nav.expand'):t('nav.collapse')} aria-label={collapsed?t('nav.expand'):t('nav.collapse')} aria-expanded={!collapsed} on:click={toggleSidebar}>{collapsed?'»':'«'}</button></div>
     <nav aria-label={t('nav.open')}>
-      {#each views as [key,icon]}<button class:active={view===key} title={t('nav.'+key)} aria-label={t('nav.'+key)} aria-current={view===key?'page':undefined} on:click={() => navigate(key)}><span class="nav-icon" aria-hidden="true">{icon}</span><span class="nav-text">{t('nav.'+key)}</span></button>{/each}
+      {#each views as [key]}<button class:active={view===key} title={t('nav.'+key)} aria-label={t('nav.'+key)} aria-current={view===key?'page':undefined} on:click={() => navigate(key)}><span class="nav-icon"><NavIcon name={key} /></span><span class="nav-text">{t('nav.'+key)}</span></button>{/each}
     </nav>
     <div class="sidebar-bottom"><div class="repo-indicator" title={t('nav.repositoryOnline')} aria-label={t('nav.repositoryOnline')}><span class="repo-dot" aria-hidden="true"></span><div class="repo-copy"><strong>{t('nav.repositoryOnline')}</strong><small>Luminous · amd64</small></div></div><span class="version" title={t('nav.version')}>{collapsed?'v1.0.0':t('nav.version')}</span></div>
   </aside>

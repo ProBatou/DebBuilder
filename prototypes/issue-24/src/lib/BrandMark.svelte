@@ -1,0 +1,1 @@
+<svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M20 2 36 11v18L20 38 4 29V11L20 2Z" fill="#0B756E"/><path d="m20 6 12 7-12 7-12-7 12-7Z" fill="#B9F0DB"/><path d="m8 17 10 6v10L8 27V17Z" fill="#63D1B0"/><path d="m22 23 10-6v10l-10 6V23Z" fill="#D8FAEC"/><path d="m20 20 12-7v4l-12 7-12-7v-4l12 7Z" fill="#0E544F"/></svg>

@@ -1,10 +1,10 @@
-# #24B2 public APT landing reference
+# #24B3 public APT landing reference
 
 The [independent prototype page](../../prototypes/issue-24/repository-public.html) previews the future unauthenticated page at `repo.probatou.com`. It is **separate from** the admin Packages > Repository inventory subview. The admin subview is an operator-facing reprepro inventory; this public page teaches clients how to install from the signed APT repository. It has no admin shell, API, authentication or operational diagnostics.
 
 ## Current contract used by the reference
 
-The source of truth for commands is [APT_REPOSITORY.md](../APT_REPOSITORY.md), `debbuilder/repository_templates/install.sh`, `debbuilder/local_repository_bootstrap.py` and `debbuilder/repo_files.py` (all read-only during #24B2). Packaged defaults are suite `Luminous`, component `main`. The public listener allows `/`, `/install.sh`, `/repository.gpg`, `/dists/*` and `/pool/*`. The bootstrap exports the signing key and signed `dists/Luminous/InRelease`; the generated installer validates the embedded fingerprint, installs `/etc/apt/keyrings/debbuilder.gpg`, writes `/etc/apt/sources.list.d/debbuilder.sources` in deb822 format and runs `apt-get update`.
+The source of truth for commands is [APT_REPOSITORY.md](../APT_REPOSITORY.md), `debbuilder/repository_templates/install.sh`, `debbuilder/local_repository_bootstrap.py` and `debbuilder/repo_files.py` (all read-only during #24B3). Packaged defaults are suite `Luminous`, component `main`. The public listener allows `/`, `/install.sh`, `/repository.gpg`, `/dists/*` and `/pool/*`. The bootstrap exports the signing key and signed `dists/Luminous/InRelease`; the generated installer validates the embedded fingerprint, installs `/etc/apt/keyrings/debbuilder.gpg`, writes `/etc/apt/sources.list.d/debbuilder.sources` in deb822 format and runs `apt-get update`.
 
 The reference's primary copyable command uses the documented generated installer:
 
@@ -12,7 +12,7 @@ The reference's primary copyable command uses the documented generated installer
 curl -fsSL https://repo.probatou.com/install.sh | sudo bash
 ```
 
-The three visible steps explain its key, deb822 source and update stages. Their copy controls copy the public key URL, a deb822 source stanza and `sudo apt-get update`. The direct links use only allowed public paths: `repository.gpg`, `dists/Luminous/InRelease`, `dists/Luminous/Release` and `install.sh`. Package rows and the Online label are **fixtures**. The fingerprint field is present but intentionally has no invented fingerprint; the prototype says it is absent from the design fixture. A deployed page must render the actual bootstrap fingerprint. The host is the operator-specified public domain; no `example.org` endpoint is used on this page.
+The normal desktop path shows the installer and a package-install example within one viewport. Manual installation, Published packages and Repository information are native disclosures closed by default. Opening Manual installation explains the key, deb822 source and update stages. Their copy controls copy the public key URL, a deb822 source stanza and `sudo apt-get update`. The direct links use only allowed public paths: `repository.gpg`, `dists/Luminous/InRelease`, `dists/Luminous/Release` and `install.sh`. Package rows and the Online label are **fixtures**. The fingerprint field is present but intentionally has no invented fingerprint; the prototype says it is absent from the design fixture. A deployed page must render the actual bootstrap fingerprint. The host is the operator-specified public domain; no `example.org` endpoint is used on this page.
 
 ## Future template application
 
@@ -20,4 +20,4 @@ The future change targets `debbuilder/repository_templates/index.html`, which is
 
 Theme follows `prefers-color-scheme` with light and dark semantic roles. Locale defaults to `navigator.languages`, with a small selector stored under a public-only browser key. The prototype reuses catalog/format helpers but has a separate Svelte entry and stylesheet; the eventual template may embed a small generated translation table rather than ship the prototype runtime. Package names, versions, suite, component, paths and commands stay untranslated.
 
-This checkpoint adds only the design reference, screenshots and browser checks. It does not alter the production template, listener, bootstrap, `static/` or deployment.
+This checkpoint updates only the design reference, screenshots and browser checks. It does not alter the production template, listener, bootstrap, `static/` or deployment.

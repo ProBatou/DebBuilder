@@ -216,7 +216,11 @@ function collectWorkflow() {
       priority: value('packagePriority') || 'optional',
       maintainer: value('packageMaintainer'),
       description: rawValue('packageDescription') || packageName,
-      runtime_dependencies: lines(value('packageRuntimeDependencies'))
+      runtime_dependencies: lines(value('packageRuntimeDependencies')),
+      runtime_dependency_detection: {
+        enabled: !!$('packageElfDetectionEnabled')?.checked,
+        overrides: (() => { const raw = value('packageElfOverrides'); return raw ? JSON.parse(raw) : []; })(),
+      },
     },
     source: {
       provider: 'github',
@@ -336,6 +340,8 @@ function renderWorkflow(wf) {
     setValue('buildWorkingDirectory', build.working_directory || '.'); setValue('buildInactivityTimeout', window.recipeAdvancedFields.inactivity_timeout); setValue('buildMaximumRuntime', window.recipeAdvancedFields.maximum_runtime); setValue('buildEnsureDirectories', (build.ensure_directories || []).join('\n')); setValue('buildEnvironment', environmentText(build.environment)); renderBuildOutput();
     setValue('installDestination', install.destination || ''); setValue('installContentSource', install.content?.source || 'build_output'); setValue('installDirectoryMode', install.directory_mode || '0755'); setValue('installFileMode', install.file_mode || '0644');
     setValue('packageArchitecture', packageData.architecture || 'amd64'); setValue('packageSection', packageData.section || 'misc'); setValue('packagePriority', packageData.priority || 'optional'); setValue('packageMaintainer', packageData.maintainer || ''); setValue('packageDescription', packageData.description || packageData.name); setValue('packageRuntimeDependencies', (packageData.runtime_dependencies || []).join(', '));
+    if ($('packageElfDetectionEnabled')) $('packageElfDetectionEnabled').checked = packageData.runtime_dependency_detection?.enabled === true;
+    setValue('packageElfOverrides', (packageData.runtime_dependency_detection?.overrides || []).length ? JSON.stringify(packageData.runtime_dependency_detection.overrides, null, 2) : '');
     setValue('installOwnerUser', owner.user || packageData.name); setValue('installOwnerGroup', owner.group || packageData.name); setValue('installAccountUser', account.user || owner.user || packageData.name); setValue('installAccountGroup', account.group || owner.group || packageData.name); setValue('installDirectories', installDirectoriesText(install.directories)); if (typeof renderAccountProvisioning === 'function') renderAccountProvisioning(account); window.recipeInstallMappings = (install.config_files || []).map(row => normalizeInstallMapping(row)); renderInstallMappings();
     setValue('maintainerPreinst', scripts.preinst); setValue('maintainerPostinst', scripts.postinst); setValue('maintainerPrerm', scripts.prerm); setValue('maintainerPostrm', scripts.postrm);
     window.recipeServiceVisible = !!String(service.name || '').trim() && !!String(service.command || '').trim(); if ($('serviceEnabled')) $('serviceEnabled').checked = service.enabled === true; setValue('serviceType', service.type || ''); setValue('serviceName', service.name || ''); setValue('serviceUser', service.user || ''); setValue('serviceGroup', service.group || ''); setValue('serviceRestart', service.restart || ''); setValue('serviceCommand', service.command);

@@ -107,6 +107,12 @@ assert.deepEqual(JSON.parse(JSON.stringify(collected.resource_limits)), roundTri
 assert.equal(collected.package.version_revision, '1+b1');
 assert.equal(collected.package.description, roundTrip.package.description);
 assert.deepEqual(JSON.parse(JSON.stringify(collected.package.runtime_dependencies)), []);
+assert.equal(collected.package.runtime_dependency_detection.enabled, false);
+const elfPolicy = {enabled:true, overrides:[{soname:'liboptional.so.1', action:'ignore', reason:'optional plugin'}]};
+context.renderWorkflow({...roundTrip, package:{...roundTrip.package, runtime_dependency_detection:elfPolicy}});
+assert.deepEqual(JSON.parse(JSON.stringify(context.collectWorkflow().package.runtime_dependency_detection)), elfPolicy);
+assert.equal(nodes.packageElfDetectionEnabled.checked, true);
+context.renderWorkflow(roundTrip);
 assert.deepEqual(JSON.parse(JSON.stringify(collected.build.source_changes)), roundTrip.build.source_changes);
 assert.deepEqual(JSON.parse(JSON.stringify(collected.build.ensure_directories)), roundTrip.build.ensure_directories);
 assert.equal(nodes.buildEnsureDirectories.value, 'apps/server/node_modules\npackages/contracts/node_modules');

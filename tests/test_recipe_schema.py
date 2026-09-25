@@ -18,6 +18,32 @@ def current(name="demo", **values):
 
 
 class RecipeSchemaTests(unittest.TestCase):
+    def test_runtime_detection_v5_defaults_and_overrides_round_trip(self):
+        old = current(package={"name": "demo", "runtime_dependencies": ["ca-certificates"]})
+        stored = recipe_document_for_storage(old)
+        self.assertEqual(stored["schema_version"], 5)
+        self.assertFalse(validate_recipe_metadata(stored)["package"]["runtime_dependency_detection"]["enabled"])
+        self.assertEqual(recipe_document_for_storage(stored), stored)
+        configured = current(
+            package={"name": "demo", "architecture": "amd64", "runtime_dependencies": ["ca-certificates"],
+                     "runtime_dependency_detection": {"enabled": True, "overrides": [
+                         {"soname": "libmissing.so.1", "action": "ignore", "reason": "loaded only by optional plugin"},
+                         {"soname": "libcustom.so.1", "action": "manual", "reason": "operator verified", "relation": "libc6 (>= 2.34)"},
+                     ]}},
+            artifact={"mode": "upstream_archive", "archive_source": "release_asset", "name_pattern": "demo_amd64.tar.gz",
+                      "payload": {"mode": "entire_archive"}},
+        )
+        saved = recipe_document_for_storage(configured)
+        self.assertEqual(saved["schema_version"], 5)
+        self.assertEqual(saved["package"]["runtime_dependencies"], ["ca-certificates"])
+        self.assertEqual([row["soname"] for row in saved["package"]["runtime_dependency_detection"]["overrides"]],
+                         ["libmissing.so.1", "libcustom.so.1"])
+        self.assertEqual(recipe_document_for_storage(saved), saved)
+        for bad in (current(package={"name": "demo", "runtime_dependency_detection": {"enabled": True}}),
+                    current(package={"name": "demo", "runtime_dependency_detection": {"overrides": [{"soname": "x", "action": "ignore", "reason": ""}]}})):
+            with self.subTest(bad=bad), self.assertRaises(RecipeDocumentError):
+                recipe_document_for_storage(bad)
+
     def test_v5_fixtures_and_builtin_shape_round_trip_canonically(self):
         fixtures = Path(__file__).parent / "fixtures" / "recipes"
         for path in sorted(fixtures.glob("*.json")):

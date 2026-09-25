@@ -78,7 +78,14 @@ SCHEMAS = {
         "name": {"type": "string", "pattern": "^[a-zA-Z0-9_.+-]+$"},
         "active": B,
         "package": _object({"name": S, "architecture": {"type": "string", "enum": sorted(SAFE_ARCH)},
-                            "maintainer": S, "description": S, "runtime_dependencies": STRINGS}, extra=True),
+                            "maintainer": S, "description": S, "runtime_dependencies": STRINGS,
+                            "runtime_dependency_detection": _object({
+                                "enabled": B,
+                                "overrides": {"type": "array", "maxItems": 32, "items": _object({
+                                    "soname": S, "action": {"type": "string", "enum": ["ignore", "manual"]},
+                                    "reason": S, "relation": S,
+                                }, ("soname", "action", "reason"))},
+                            })}, extra=True),
         "source": _object({"provider": S, "repository": S, "tracking": S,
                            "version": _object({"source": {"type": "string", "enum": sorted(VERSION_SOURCES)},
                                                "expression": S}, extra=True)}, extra=True),
@@ -257,6 +264,9 @@ SCHEMAS.update({
             "payload_mode": _enum_schema(PAYLOAD_MODES),
             "include_count": _INSPECTION_COUNT, "exclude_count": _INSPECTION_COUNT,
         }),
+        "runtime_dependency_detection": _inspection_object({
+            "enabled": B, "override_count": _INSPECTION_COUNT,
+        }),
         "installation": _inspection_object({
             "content_source": _enum_schema({"build_output", "configured_files"}),
             "destination_configured": B, "account_provisioning": B,
@@ -333,6 +343,13 @@ SCHEMAS.update({
                 "created": _INSPECTION_COUNT,
                 "already_existed": _INSPECTION_COUNT,
             }),
+        }),
+        "runtime_dependency_detection": _inspection_object({
+            "status": _enum_schema({"not_run", "disabled", "success"}),
+            "detected_count": _INSPECTION_COUNT, "manual_count": _INSPECTION_COUNT,
+            "bundled_count": _INSPECTION_COUNT, "unresolved_count": _INSPECTION_COUNT,
+            "overridden_count": _INSPECTION_COUNT,
+            "effective_depends": {"type": "array", "maxItems": 256, "items": S},
         }),
         "error": _inspection_object({
             "code": _nullable({"type": "string", "pattern": "^[a-z][a-z0-9_]{0,127}$"}),

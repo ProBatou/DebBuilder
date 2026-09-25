@@ -16,6 +16,7 @@ from typing import Protocol
 
 from .elf_inspection import ElfInspectionError, ElfInspectionResult, inspect_elf
 from .validation_images import admitted_image
+from .recipe_schema import normalize_runtime_dependency_detection
 
 
 CONTRACT_VERSION = 1
@@ -54,6 +55,7 @@ class Requirement:
     package: str = ""
     version_constraint: str = ""
     metadata_source: str = ""
+    operator_decision: str = ""
 
 
 @dataclass(frozen=True)
@@ -70,12 +72,13 @@ class ResolutionResult:
 class OwnedContainerResolutionEnvironment:
     """Use #27's owned container and bounded-process helper, without a new OCI lifecycle."""
 
-    def __init__(self, container):
+    def __init__(self, container, *, filtered_installed: frozenset[str] = frozenset()):
         identity = container.identity
         expected = admitted_image("bookworm", architecture="amd64")["digest"]
         if (identity.get("state") != "running" or identity.get("image", {}).get("digest") != expected
-                or identity.get("role") != "dependency-preparation"):
-            raise ResolutionError("resolver_environment_mismatch", "Resolver requires an owned Bookworm/amd64 preparation container")
+                or identity.get("role") != "lifecycle"
+                or identity.get("configuration", {}).get("network") != "none"):
+            raise ResolutionError("resolver_environment_mismatch", "Resolver requires a networkless owned Bookworm/amd64 lifecycle container")
         mounts = identity.get("configuration", {}).get("mounts", [])
         required = {MOUNT_ROOT, WORK_ROOT, "/debbuilder-input/bounded_process.py"}
         if not required.issubset({mount.get("destination") for mount in mounts}):
@@ -83,6 +86,7 @@ class OwnedContainerResolutionEnvironment:
         if any(not mount.get("read_only") for mount in mounts if mount.get("destination") in required):
             raise ResolutionError("resolver_environment_incomplete", "Resolver inputs must be mounted read-only")
         self.container = container
+        self.filtered_installed = filtered_installed
 
     def execute(self, arguments: list[str], *, timeout: float) -> dict:
         result = self.container.exec([
@@ -93,7 +97,7 @@ class OwnedContainerResolutionEnvironment:
         return result
 
 
-def _run(environment: PreparedBookwormEnvironment, arguments: list[str]) -> str:
+def _run(environment: PreparedBookwormEnvironment, arguments: list[str], *, filtered: bool = False) -> str:
     result = environment.execute(arguments, timeout=COMMAND_TIMEOUT)
     stdout, stderr = str(result.get("stdout") or ""), str(result.get("stderr") or "")
     if len(stdout.encode()) + len(stderr.encode()) > MAX_COMMAND_BYTES:
@@ -102,7 +106,10 @@ def _run(environment: PreparedBookwormEnvironment, arguments: list[str]) -> str:
         raise ResolutionError("resolver_timeout", "Debian resolver command timed out")
     if result.get("exit_code") != 0:
         raise ResolutionError("resolver_command_failed", (stderr or stdout or "Debian resolver command failed")[:1000])
-    if stderr.strip():
+    if stderr.strip() and not (filtered and all(
+        re.fullmatch(r"dpkg-shlibdeps: warning: /debbuilder-elf-work/filtered/[^\n]+ contains an unresolvable reference to symbol [^\n]+: it's probably a plugin", line)
+        for line in stderr.strip().splitlines()
+    )):
         raise ResolutionError("resolver_command_output_invalid", "Unexpected Debian resolver diagnostic output")
     return stdout
 
@@ -260,10 +267,12 @@ def _merge_depends(environment: PreparedBookwormEnvironment, relations: set[str]
 
 
 def _resolve_one(environment: PreparedBookwormEnvironment, installed: str, needed: tuple[str, ...]) -> tuple[dict[str, tuple[str, str, str]], tuple[str, ...], dict[str, tuple[str, ...]]]:
+    filtered = installed in getattr(environment, "filtered_installed", ())
+    selected = f"{WORK_ROOT}/filtered{installed}" if filtered else f"{MOUNT_ROOT}{installed}"
     output = _run(environment, [
-        "env", "-i", "-C", WORK_ROOT, "LC_ALL=C", "PATH=/usr/bin:/bin", "dpkg-shlibdeps", "-v", "-O",
-        f"-S{MOUNT_ROOT}", f"-e{MOUNT_ROOT}{installed}",
-    ])
+        "env", "-i", "-C", WORK_ROOT, "LC_ALL=C", "PATH=/usr/bin:/bin", "DEB_HOST_ARCH=amd64", "dpkg-shlibdeps", "-v", "-O",
+        f"-S{MOUNT_ROOT}", f"-e{selected}",
+    ], filtered=filtered)
     return _parse_shlibdeps(output, needed)
 
 
@@ -271,7 +280,12 @@ def _owner(environment: PreparedBookwormEnvironment, path: str) -> str:
     if not path.startswith("/") or path.startswith(MOUNT_ROOT + "/") or "\n" in path:
         raise ResolutionError("resolver_mapping_ambiguous", "Selected Debian library path is invalid")
     canonical = _canonical(environment, path)
-    ownership = _run(environment, ["dpkg-query", "-S", canonical]).strip().splitlines()
+    try:
+        ownership = _run(environment, ["dpkg-query", "-S", path]).strip().splitlines()
+    except ResolutionError as exc:
+        if path == canonical or exc.code != "resolver_command_failed":
+            raise
+        ownership = _run(environment, ["dpkg-query", "-S", canonical]).strip().splitlines()
     if len(ownership) != 1 or ": " not in ownership[0]:
         raise ResolutionError("resolver_mapping_ambiguous", "Shared-library ownership is ambiguous")
     package = ownership[0].split(": ", 1)[0].split(":", 1)[0]
@@ -290,12 +304,19 @@ def _canonical(environment: PreparedBookwormEnvironment, path: str) -> str:
 def resolve_elf_dependencies(
     staging_root: str | Path, entrypoints: dict[str, ElfInspectionResult], *,
     distribution: str, architecture: str, environment: PreparedBookwormEnvironment | None,
+    overrides: tuple[dict, ...] = (),
 ) -> ResolutionResult:
     """Return a bounded proposal; all Debian commands run in the supplied target OCI environment."""
     if distribution != "bookworm" or architecture != "amd64":
         return ResolutionResult(CONTRACT_VERSION, "unsupported", distribution, architecture, (), (), ("Automatic resolution supports Bookworm/amd64 only",))
     if environment is None:
         raise ResolutionError("resolver_environment_missing", "A prepared Bookworm/amd64 environment is required")
+    try:
+        decisions = {row["soname"]: row for row in normalize_runtime_dependency_detection(
+            {"enabled": True, "overrides": list(overrides)},
+        )["overrides"]}
+    except ValueError as exc:
+        raise ResolutionError("invalid_dependency_override", str(exc)) from exc
     root = Path(staging_root)
     if root.is_symlink() or not root.is_dir():
         raise ResolutionError("unsafe_staging_path", "Staging root must be a real directory")
@@ -351,7 +372,8 @@ def resolve_elf_dependencies(
             if len(rows) + len(inspection.needed) > MAX_REQUIREMENTS:
                 raise ResolutionError("resolver_traversal_limit", "ELF requirement count exceeds its bound")
             bundled = {soname: _bundled(root, installed, inspection, soname) for soname in inspection.needed}
-            external = tuple(soname for soname in inspection.needed if not bundled[soname])
+            external = tuple(soname for soname in inspection.needed if not bundled[soname] and
+                             soname not in decisions)
             if inspection.linkage == "dynamic":
                 try:
                     sources, proposed, found = _resolve_one(environment, installed, external)
@@ -371,12 +393,26 @@ def resolve_elf_dependencies(
                 if len(rows) >= MAX_REQUIREMENTS:
                     raise ResolutionError("resolver_traversal_limit", "ELF requirement count exceeds its bound")
                 local = bundled[soname]
+                decision = decisions.get(soname)
                 if local:
+                    if decision:
+                        raise ResolutionError("invalid_dependency_override", "Override targets a bundled requirement")
                     child = inspect_elf(_staged(root, local))
                     if child.kind != "elf" or child.soname != soname:
                         raise ResolutionError("bundled_library_invalid", "Bundled library is not a matching valid ELF")
                     rows.append(Requirement(installed, soname, local, "bundled"))
                     walk(local, child, depth + 1)
+                    continue
+                if decision and decision["action"] == "ignore":
+                    rows.append(Requirement(installed, soname, "", "ignored_explicitly",
+                                            operator_decision=decision["reason"]))
+                    continue
+                if decision and decision["action"] == "manual":
+                    relation = decision["relation"]
+                    depends.add(relation)
+                    rows.append(Requirement(installed, soname, "", "manually_resolved",
+                                            DEPENDENCY.fullmatch(relation).group(1), relation,
+                                            "operator_mapping", decision["reason"]))
                     continue
                 source = sources.get(soname)
                 if source is None:
@@ -391,10 +427,13 @@ def resolve_elf_dependencies(
                 elif package != owner:
                     raise ResolutionError("resolver_mapping_ambiguous", "Debian symbols metadata disagrees with installed library owner")
                 relation = _dependency_for(package, proposed)
-                rows.append(Requirement(installed, soname, path, "resolved_external", package, relation, metadata))
+                rows.append(Requirement(installed, soname, path,
+                                        "resolved_external", package, relation, metadata))
         finally:
             active.remove(installed)
 
     for installed, inspection in sorted(entrypoints.items()):
         walk(installed, inspection, 0)
+    if set(decisions) - {row.soname for row in rows}:
+        raise ResolutionError("invalid_dependency_override", "Override does not match an observed ELF requirement")
     return ResolutionResult(CONTRACT_VERSION, "success", distribution, architecture, _merge_depends(environment, depends), tuple(rows), ())

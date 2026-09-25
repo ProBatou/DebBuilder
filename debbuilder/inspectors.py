@@ -14,7 +14,7 @@ from .archive_payload import PAYLOAD_MODES
 from .build_models import RUN_STATUSES, STEP_NAMES, STEP_STATUSES, validate_run
 from .recipe_schema import (
     ARCHIVE_ASSET_SELECTIONS, ARCHIVE_SOURCES, ARTIFACT_MODES,
-    AUTOMATION_POLICIES, OUTPUT_MODES, RESTART_POLICIES, SAFE_ARCH,
+    AUTOMATION_POLICIES, DEBIAN_RELATION, OUTPUT_MODES, RESTART_POLICIES, SAFE_ARCH,
     SERVICE_TYPES, SOURCE_ARCHIVE_FORMATS, VERSION_SOURCES,
     automation_eligible, validate_recipe_metadata,
 )
@@ -42,6 +42,9 @@ _RUN_ERROR_CODES = STABLE_ERROR_CODES | frozenset({
     "post_build_directory_invalid_path", "post_build_directory_escape",
     "post_build_directory_symlink", "post_build_directory_not_directory",
     "post_build_directory_creation_failed",
+    "resolver_environment_incomplete", "resolver_environment_mismatch", "soname_unresolved",
+    "resolver_mapping_ambiguous", "elf_architecture_mismatch", "malformed_elf",
+    "invalid_dependency_override", "resolver_command_failed", "resolver_output_invalid",
 })
 PUBLICATION_INSPECTION_STATUSES = frozenset({"not_run", "running", "success", "failed", "cancelled"})
 
@@ -148,6 +151,10 @@ def inspect_recipe(recipe: dict, *, source: str = "user", observation: dict | No
             "include_count": _count(payload["include"]),
             "exclude_count": _count(payload["exclude"]),
         },
+        "runtime_dependency_detection": {
+            "enabled": package["runtime_dependency_detection"]["enabled"],
+            "override_count": _count(package["runtime_dependency_detection"]["overrides"]),
+        },
         "installation": {
             "content_source": _enum(install["content"]["source"], {"build_output", "configured_files"}),
             "destination_configured": bool(install["destination"]),
@@ -197,6 +204,14 @@ def inspect_run(run: dict, *, validation: dict | None = None, validation_count: 
     build_step = next((row for row in steps if row.get("name") == "build"), {})
     build_details = build_step.get("details") if isinstance(build_step.get("details"), dict) else {}
     ensured = build_details.get("ensure_directories") if isinstance(build_details.get("ensure_directories"), dict) else {}
+    staging_step = next((row for row in steps if row.get("name") == "staging"), {})
+    staging_details = staging_step.get("details") if isinstance(staging_step.get("details"), dict) else {}
+    dependency_details = staging_details.get("runtime_dependency_detection") if isinstance(staging_details.get("runtime_dependency_detection"), dict) else {}
+
+    def public_relations(value):
+        if not isinstance(value, list):
+            return []
+        return [row for row in value[:256] if isinstance(row, str) and DEBIAN_RELATION.fullmatch(row)]
 
     def bounded_count(value) -> int:
         return min(value, MAX_COLLECTION_COUNT) if type(value) is int and value >= 0 else 0
@@ -263,6 +278,15 @@ def inspect_run(run: dict, *, validation: dict | None = None, validation_count: 
                 "created": bounded_count(ensured.get("created")),
                 "already_existed": bounded_count(ensured.get("already_existed")),
             },
+        },
+        "runtime_dependency_detection": {
+            "status": _enum(dependency_details.get("status"), {"disabled", "success"}, "not_run"),
+            "detected_count": _count(dependency_details.get("detected_packages")),
+            "manual_count": _count(dependency_details.get("manual_packages")),
+            "bundled_count": bounded_count(dependency_details.get("bundled_requirements")),
+            "unresolved_count": bounded_count(dependency_details.get("unresolved_requirements")),
+            "overridden_count": bounded_count(dependency_details.get("overridden_requirements")),
+            "effective_depends": public_relations(dependency_details.get("effective_depends")),
         },
         "error": {"code": code, "stage": stage},
     }

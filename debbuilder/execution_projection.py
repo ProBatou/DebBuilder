@@ -421,6 +421,18 @@ def _public_staging(details) -> dict:
         } if isinstance(details.get("account"), dict) else {},
         "systemd": _public_systemd(details.get("systemd")),
     }
+    detection = details.get("runtime_dependency_detection")
+    if isinstance(detection, dict):
+        from .recipe_schema import DEBIAN_RELATION
+        relations = detection.get("effective_depends")
+        result["runtime_dependency_detection"] = {
+            "status": detection.get("status") if detection.get("status") in {"disabled", "success"} else "unknown",
+            "detected_count": min(len(detection.get("detected_packages") or []), 256),
+            "bundled_count": _number(detection.get("bundled_requirements")),
+            "unresolved_count": _number(detection.get("unresolved_requirements")),
+            "overridden_count": _number(detection.get("overridden_requirements")),
+            "effective_depends": [row for row in (relations or [])[:256] if isinstance(row, str) and DEBIAN_RELATION.fullmatch(row)],
+        }
     return {key: value for key, value in result.items() if _present(value) and value != []}
 
 

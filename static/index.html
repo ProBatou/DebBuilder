@@ -147,7 +147,9 @@
                     <label class="span-2"><span>Section</span><input id="packageSection" value="misc"></label>
                     <label class="span-2"><span>Priority</span><select id="packagePriority"><option>optional</option><option>required</option><option>important</option><option>standard</option><option>extra</option></select></label>
                     <label class="span-6"><span>Maintainer</span><input id="packageMaintainer" placeholder="Name &lt;email@example.org&gt;"></label>
-                    <label class="span-6"><span>Runtime Depends</span><input id="packageRuntimeDependencies"></label>
+                    <label class="span-6"><span>Manual Runtime Depends</span><input id="packageRuntimeDependencies"></label>
+                    <label class="span-6"><input id="packageElfDetectionEnabled" type="checkbox"> Detect shared-library dependencies for this amd64 Release-asset payload</label>
+                    <label class="span-6"><span>ELF overrides (JSON)</span><textarea id="packageElfOverrides" rows="2" placeholder='[{"soname":"libfoo.so.1","action":"manual","reason":"vendor package","relation":"libfoo1 (>= 1.0)"}]'></textarea><small>Use a named SONAME, an action (manual or ignore), and a reason. Build computes Debian relations after final staging.</small></label>
                     <label class="span-6 package-description-field"><span>Debian description</span><textarea id="packageDescription" rows="1" placeholder="Short package summary"></textarea><small>The first line is the package summary; additional lines are preserved as Debian long description text.</small></label>
                   </div>
                 </div>

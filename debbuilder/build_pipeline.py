@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import time
 from datetime import datetime
+from pathlib import Path
 
 from .build_models import utc_now
 from .automation_identity import (
@@ -14,7 +15,12 @@ from .automation_identity import (
 from .build_store import BuildStore, canonical_recipe_sha256
 from .command_identity import clear_identity, persist_identity, recording_identities, update_identity
 from .execution_cancellation import SERVER_SHUTDOWN, CancellationControl, ExecutionCancelled
-from . import build_executor, deb_inspector, debian_packaging, dependency_checker, project_detection, source_acquisition, source_changes, upstream_archive, upstream_artifact
+from . import build_executor, deb_inspector, debian_packaging, dependency_checker, elf_toolchain, project_detection, source_acquisition, source_changes, upstream_archive, upstream_artifact
+from .elf_dependency_resolution import ResolutionError
+from .dependency_preparation import DependencyPreparationError
+from .validation_oci import OciOwnershipError
+from .validation_backend import BackendError
+from .artifact_validation import ValidationError
 from .recipe_schema import recipe_for_storage, validate_recipe_metadata
 
 
@@ -517,11 +523,25 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
         staging_step, staging_started = _start_step(run, store, "staging")
         try:
             _cancellation_checkpoint(control, run, store, "staging")
+            def analyze_dependencies(staging_root, content_files, install_destination):
+                _cancellation_checkpoint(control, run, store, "debian_metadata")
+                try:
+                    return elf_toolchain.analyze_staged_payload(
+                        canonical, staging_root, content_files, install_destination,
+                        Path(run["workspace"]), cancellation_event=control.event,
+                    )
+                except (ResolutionError, DependencyPreparationError, OciOwnershipError, BackendError, ValidationError, OSError) as exc:
+                    message = "ELF dependency analysis failed" if isinstance(exc, OSError) else str(exc)
+                    raise debian_packaging.PackagingError(
+                        getattr(exc, "code", "resolver_environment_incomplete"), message,
+                        details={"unresolved_requirements": sum(row.status == "unresolved" for row in getattr(exc, "requirements", ()))},
+                    ) from exc
             staging = debian_packaging.prepare_staging(
                 canonical, {**build, "version": run["version"]["debian"]},
                 run["workspace"], preview=dry_run,
                 before_systemd=lambda: _cancellation_checkpoint(control, run, store, "systemd"),
                 before_metadata=lambda: _cancellation_checkpoint(control, run, store, "debian_metadata"),
+                dependency_analysis=analyze_dependencies if canonical["package"]["runtime_dependency_detection"]["enabled"] else None,
             )
             _cancellation_checkpoint(control, run, store, "staging")
             validation = debian_packaging.validate_staging(staging)

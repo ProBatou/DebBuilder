@@ -32,6 +32,9 @@ OPERATOR_BUILD_OVERRIDE_FIELDS = {"environment", "inactivity_timeout", "maximum_
 AUTOMATION_POLICIES = {"manual", "detect", "test", "build", "build_validate", "full"}
 MAX_ENSURE_DIRECTORIES = 256
 MAX_ENSURE_DIRECTORY_LENGTH = 1024
+MAX_ELF_OVERRIDES = 32
+ELF_SONAME = re.compile(r"[A-Za-z0-9_+.-]{1,128}\Z")
+DEBIAN_RELATION = re.compile(r"[a-z0-9][a-z0-9+.-]*(?: \(>= [A-Za-z0-9.+:~\-]+\))?\Z")
 
 
 class RecipeDocumentError(ValueError):
@@ -80,6 +83,33 @@ def _string_list(value, what: str) -> list[str]:
     if any(not isinstance(row, str) or not row.strip() for row in rows):
         raise ValueError(f"{what} must contain non-empty strings")
     return [row.strip() for row in rows]
+
+
+def normalize_runtime_dependency_detection(value) -> dict:
+    policy = _dict(value, "package.runtime_dependency_detection")
+    if set(policy) - {"enabled", "overrides"}:
+        raise ValueError("unknown runtime dependency detection field")
+    enabled = policy.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ValueError("runtime dependency detection enabled must be boolean")
+    overrides = _list(policy.get("overrides"), "package.runtime_dependency_detection.overrides")
+    if len(overrides) > MAX_ELF_OVERRIDES:
+        raise ValueError("too many runtime dependency overrides")
+    normalized, seen = [], set()
+    for row in overrides:
+        if not isinstance(row, dict) or set(row) - {"soname", "action", "reason", "relation"}:
+            raise ValueError("invalid runtime dependency override")
+        soname, action, reason = row.get("soname"), row.get("action"), row.get("reason")
+        relation = row.get("relation", "")
+        if not isinstance(soname, str) or not ELF_SONAME.fullmatch(soname) or soname in seen:
+            raise ValueError("invalid or duplicate runtime dependency override SONAME")
+        if action not in {"ignore", "manual"} or not isinstance(reason, str) or not reason.strip() or len(reason) > 256 or any(ord(char) < 32 for char in reason):
+            raise ValueError("invalid runtime dependency override decision")
+        if not isinstance(relation, str) or (action == "manual" and not DEBIAN_RELATION.fullmatch(relation)) or (action == "ignore" and relation):
+            raise ValueError("invalid runtime dependency override relation")
+        seen.add(soname)
+        normalized.append({"soname": soname, "action": action, "reason": reason.strip(), "relation": relation})
+    return {"enabled": enabled, "overrides": normalized}
 
 
 def _ensure_directories(value) -> list[str]:
@@ -447,6 +477,7 @@ def normalize_recipe(workflow: dict) -> dict:
             "maintainer": str(package_in.get("maintainer") or ""),
             "description": str(package_in.get("description") or package_name),
             "runtime_dependencies": _string_list(package_in.get("runtime_dependencies"), "package.runtime_dependencies"),
+            "runtime_dependency_detection": normalize_runtime_dependency_detection(package_in.get("runtime_dependency_detection")),
         },
         "source": {
             "provider": str(source_in.get("provider") or "github"),
@@ -555,6 +586,12 @@ def validate_recipe_metadata(workflow: dict) -> dict:
     for dependency in package["runtime_dependencies"]:
         if not re.fullmatch(r"[a-z0-9][a-z0-9+.-]*", dependency):
             raise ValueError("runtime dependencies must be simple Debian package names")
+    if package["runtime_dependency_detection"]["enabled"] and (
+        recipe["artifact"]["mode"] != "upstream_archive"
+        or recipe["artifact"]["archive_source"] != "release_asset"
+        or package["architecture"] != "amd64"
+    ):
+        raise ValueError("automatic ELF dependencies require an amd64 Release-asset payload")
     if not re.fullmatch(r"[A-Za-z0-9.+~]+", package["version_revision"]):
         raise ValueError("package.version_revision is invalid")
     if not isinstance(recipe["active"], bool):

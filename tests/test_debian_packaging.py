@@ -51,6 +51,26 @@ def archive_packaging_recipe(payload):
 
 
 class DebianPackagingTests(unittest.TestCase):
+    def test_dependency_analysis_runs_after_staging_and_controls_final_deb(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = self.make_workspace(temporary)
+            recipe = packaging_recipe(service=False)
+            def analyze(staging, copied, destination):
+                self.assertTrue((staging / "opt/demo/bin/demo").is_file())
+                self.assertTrue((staging / "DEBIAN/control").is_file())
+                self.assertIn("Depends: ca-certificates", (staging / "DEBIAN/control").read_text())
+                self.assertIn("bin/demo", copied)
+                self.assertEqual(destination, "/opt/demo")
+                return {"status": "success", "effective_depends": ["ca-certificates", "libc6 (>= 2.34)"]}
+            staging = debian_packaging.prepare_staging(
+                recipe, {"output": {"path": str(workspace / "source")}, "version": "1.2.3-1"},
+                workspace, dependency_analysis=analyze,
+            )
+            self.assertIn("Depends: ca-certificates, libc6 (>= 2.34), adduser", staging["control"])
+            artifact = debian_packaging.build_deb(recipe, staging, workspace)
+            inspected = deb_inspector.inspect_deb(artifact["path"], workspace=workspace)
+            self.assertIn("libc6 (>= 2.34)", inspected["depends"])
+
     def test_recipe_helper_keeps_derived_service_state_out_of_authored_input(self):
         enabled = authored_packaging_recipe(service=True)
         disabled = authored_packaging_recipe(service=False)

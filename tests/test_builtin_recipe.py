@@ -41,7 +41,7 @@ class BuiltinRecipeTests(unittest.TestCase):
         self.assertEqual(canonical["name"], "debbuilder")
         self.assertEqual(canonical["management"], {
             "owner": "application", "builtin_id": "debbuilder",
-            "definition_version": 7, "operator_overrides": {},
+            "definition_version": 8, "operator_overrides": {},
         })
         self.assertEqual(builtin_recipe.OPERATOR_OVERRIDE_PATHS, (
             "active",
@@ -51,7 +51,7 @@ class BuiltinRecipeTests(unittest.TestCase):
             "build.maximum_runtime",
             "resource_limits",
         ))
-        self.assertEqual(canonical["package"]["runtime_dependencies"], ["python3", "python3-dbus", "reprepro", "gnupg", "gpgv", "podman", "kmod", "ca-certificates"])
+        self.assertEqual(canonical["package"]["runtime_dependencies"], ["python3", "python3-dbus", "reprepro", "gnupg", "gpgv", "podman", "kmod", "ca-certificates", "binutils"])
         self.assertTrue(canonical["install"]["maintainer_scripts"]["postinst"].startswith("PYTHONDONTWRITEBYTECODE=1 "))
         self.assertEqual(canonical["runtime_apt_repositories"], [])
         self.assertEqual(canonical["install"]["config_files"], [{
@@ -145,19 +145,19 @@ class BuiltinRecipeTests(unittest.TestCase):
         builtin_recipe.update_builtin_recipe(self.path, edited)
 
         upgraded_definition = self.definition()
-        upgraded_definition["management"]["definition_version"] = 8
-        upgraded_definition["package"]["description"] = "DebBuilder managed definition v8"
+        upgraded_definition["management"]["definition_version"] = 9
+        upgraded_definition["package"]["description"] = "DebBuilder managed definition v9"
         upgraded_definition["package"]["runtime_dependencies"].append("curl")
-        definition_path = Path(self.temporary.name) / "definition-v8.json"
+        definition_path = Path(self.temporary.name) / "definition-v9.json"
         definition_path.write_text(json.dumps(upgraded_definition))
 
         result = builtin_recipe.reconcile_builtin_recipe(self.workflows, definition_path=definition_path)
 
         self.assertEqual(result.action, "upgraded")
-        self.assertEqual(result.previous_definition_version, 7)
-        self.assertEqual(result.definition_version, 8)
+        self.assertEqual(result.previous_definition_version, 8)
+        self.assertEqual(result.definition_version, 9)
         self.assertFalse(result.recipe["active"])
-        self.assertEqual(result.recipe["package"]["description"], "DebBuilder managed definition v8")
+        self.assertEqual(result.recipe["package"]["description"], "DebBuilder managed definition v9")
         self.assertIn("curl", result.recipe["package"]["runtime_dependencies"])
         self.assertEqual(result.recipe["management"]["operator_overrides"], {"active": False})
 
@@ -172,7 +172,7 @@ class BuiltinRecipeTests(unittest.TestCase):
 
         result = builtin_recipe.reconcile_builtin_recipe(self.workflows)
 
-        self.assertEqual((result.action, result.previous_definition_version, result.definition_version), ("upgraded", 5, 7))
+        self.assertEqual((result.action, result.previous_definition_version, result.definition_version), ("upgraded", 5, 8))
         self.assertFalse(result.recipe["active"])
         self.assertIn("kmod", result.recipe["package"]["runtime_dependencies"])
         self.assertTrue(result.recipe["install"]["maintainer_scripts"]["postinst"].startswith("PYTHONDONTWRITEBYTECODE=1 "))
@@ -192,7 +192,7 @@ class BuiltinRecipeTests(unittest.TestCase):
 
         self.assertEqual(result.action, "upgraded")
         self.assertEqual(result.previous_definition_version, 1)
-        self.assertEqual(result.definition_version, 7)
+        self.assertEqual(result.definition_version, 8)
         self.assertEqual(result.recipe["service"]["restart_sec"], "3s")
         self.assertEqual(result.recipe["service"]["timeout_stop_sec"], "20s")
         self.assertEqual(result.recipe["service"]["kill_signal"], "SIGTERM")
@@ -220,7 +220,7 @@ class BuiltinRecipeTests(unittest.TestCase):
 
         self.assertEqual(result.action, "upgraded")
         self.assertEqual(result.previous_definition_version, 2)
-        self.assertEqual(result.definition_version, 7)
+        self.assertEqual(result.definition_version, 8)
         self.assertEqual(result.recipe["service"]["environment_files"], ["/etc/debbuilder/debbuilder.env"])
         self.assertFalse(result.recipe["active"])
         self.assertEqual(result.recipe["package"]["maintainer"], "Operator <operator@example.test>")
@@ -283,7 +283,7 @@ class BuiltinRecipeTests(unittest.TestCase):
     def test_self_build_definition_keeps_required_source_install_and_service_contract(self):
         recipe = validate_recipe_metadata(self.definition())
         self.assertEqual(recipe["source"]["repository"], "ProBatou/DebBuilder")
-        self.assertEqual(recipe["package"]["runtime_dependencies"], ["python3", "python3-dbus", "reprepro", "gnupg", "gpgv", "podman", "kmod", "ca-certificates"])
+        self.assertEqual(recipe["package"]["runtime_dependencies"], ["python3", "python3-dbus", "reprepro", "gnupg", "gpgv", "podman", "kmod", "ca-certificates", "binutils"])
         self.assertEqual(recipe["build"]["detected_project"], "python")
         self.assertEqual(recipe["build"]["commands"], [])
         self.assertEqual(recipe["build"]["output"], {

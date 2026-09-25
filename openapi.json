@@ -4490,6 +4490,46 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "runtime_dependency_detection": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "overrides": {
+                    "type": "array",
+                    "maxItems": 32,
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "soname": {
+                          "type": "string"
+                        },
+                        "action": {
+                          "type": "string",
+                          "enum": [
+                            "ignore",
+                            "manual"
+                          ]
+                        },
+                        "reason": {
+                          "type": "string"
+                        },
+                        "relation": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false,
+                      "required": [
+                        "soname",
+                        "action",
+                        "reason"
+                      ]
+                    }
+                  }
+                },
+                "additionalProperties": false
               }
             },
             "additionalProperties": true
@@ -5833,6 +5873,24 @@
               "exclude_count"
             ]
           },
+          "runtime_dependency_detection": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "override_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "enabled",
+              "override_count"
+            ]
+          },
           "installation": {
             "type": "object",
             "properties": {
@@ -5984,6 +6042,7 @@
           "source",
           "build",
           "artifact",
+          "runtime_dependency_detection",
           "installation",
           "service",
           "automation",
@@ -6474,6 +6533,61 @@
               "ensure_directories"
             ]
           },
+          "runtime_dependency_detection": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "disabled",
+                  "not_run",
+                  "success"
+                ]
+              },
+              "detected_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "manual_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "bundled_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "unresolved_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "overridden_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "effective_depends": {
+                "type": "array",
+                "maxItems": 256,
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "detected_count",
+              "manual_count",
+              "bundled_count",
+              "unresolved_count",
+              "overridden_count",
+              "effective_depends"
+            ]
+          },
           "error": {
             "type": "object",
             "properties": {
@@ -6528,6 +6642,7 @@
           "publication",
           "execution",
           "build",
+          "runtime_dependency_detection",
           "error"
         ]
       },

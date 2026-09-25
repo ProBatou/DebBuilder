@@ -516,12 +516,12 @@ class ArtifactValidationTests(unittest.TestCase):
                 )
             self.assertEqual(raised.exception.code, "dependency_install_failed")
 
-    def test_release_images_satisfy_builtin_debbuilder_runtime_dependencies(self):
+    def test_release_images_and_explicit_apt_preparation_cover_builtin_dependencies(self):
         root = Path(__file__).resolve().parents[1]
         builtin = json.loads((root / "debbuilder/builtin_recipes/debbuilder.json").read_text())
         runtime_dependencies = set(builtin["package"]["runtime_dependencies"])
 
-        self.assertEqual(runtime_dependencies, {"python3", "python3-dbus", "reprepro", "gnupg", "gpgv", "podman", "kmod", "ca-certificates"})
+        self.assertEqual(runtime_dependencies, {"python3", "python3-dbus", "reprepro", "gnupg", "gpgv", "podman", "kmod", "ca-certificates", "binutils"})
         for profile in ("Dockerfile", "Dockerfile.node22"):
             with self.subTest(profile=profile):
                 dockerfile = (root / "validation" / profile).read_text()
@@ -529,7 +529,11 @@ class ArtifactValidationTests(unittest.TestCase):
                     "apt-get install -y --no-install-recommends", 1,
                 )[1].split("&& apt-get clean", 1)[0]
                 image_packages = set(install_clause.replace("\\", " ").split())
-                self.assertLessEqual(runtime_dependencies, image_packages)
+                # binutils is a new host dependency of DebBuilder's ELF inspector.
+                # #27 prepares it from Bookworm APT for installation; the admitted
+                # image and its pinned digest are deliberately unchanged.
+                self.assertLessEqual(runtime_dependencies - {"binutils"}, image_packages)
+                self.assertNotIn("binutils", image_packages)
 
     def test_validation_after_workspace_cleanup_preserves_artifact_and_holds_lease(self):
         with tempfile.TemporaryDirectory() as temporary:

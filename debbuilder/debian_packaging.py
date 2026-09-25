@@ -253,7 +253,7 @@ def _stage_archive_payload(output: dict, source_root: Path, destination: Path) -
     return copied
 
 
-def generate_control(recipe: dict, version: str) -> str:
+def generate_control(recipe: dict, version: str, *, effective_dependencies: tuple[str, ...] | None = None) -> str:
     package = recipe["package"]
     if not package.get("maintainer"):
         raise PackagingError("invalid_debian_metadata", "Package maintainer is required")
@@ -265,9 +265,11 @@ def generate_control(recipe: dict, version: str) -> str:
         f"Section: {package.get('section') or 'misc'}", f"Priority: {package.get('priority') or 'optional'}",
         f"Architecture: {package['architecture']}", f"Maintainer: {package['maintainer']}",
     ]
-    dependencies = list(package.get("runtime_dependencies") or [])
+    dependencies = list(package.get("runtime_dependencies") or []) if effective_dependencies is None else list(effective_dependencies)
     account = recipe["install"].get("account") or recipe["install"]["owner"]
-    if (account.get("create_user") or account.get("create_group")) and "adduser" not in dependencies:
+    if (account.get("create_user") or account.get("create_group")) and not any(
+        row == "adduser" or row.startswith("adduser (") for row in dependencies
+    ):
         dependencies.append("adduser")
     if dependencies:
         lines.append(f"Depends: {', '.join(dependencies)}")
@@ -296,7 +298,7 @@ def _configured_scripts(recipe: dict, generated: dict[str, list[str]]) -> dict[s
     return scripts
 
 
-def prepare_staging(recipe: dict, build_result: dict, workspace: str | Path, *, preview: bool = False, before_systemd=None, before_metadata=None) -> dict:
+def prepare_staging(recipe: dict, build_result: dict, workspace: str | Path, *, preview: bool = False, before_systemd=None, before_metadata=None, dependency_analysis=None) -> dict:
     workspace = Path(workspace).resolve()
     staging = (workspace / "staging").resolve()
     staging.mkdir(parents=True, exist_ok=True)
@@ -468,7 +470,15 @@ def prepare_staging(recipe: dict, build_result: dict, workspace: str | Path, *, 
 
     if callable(before_metadata):
         before_metadata()
-    control = generate_control(recipe, build_result["version"])
+    if include_output and destination:
+        _apply_modes(destination, install["directory_mode"], install["file_mode"])
+    # dpkg-shlibdeps needs package metadata while examining the completed payload.
+    # Replace this provisional control with the effective relations after analysis.
+    if callable(dependency_analysis) and not preview:
+        (debian / "control").write_text(generate_control(recipe, build_result["version"]))
+    dependency_result = dependency_analysis(staging, copied, install["destination"]) if callable(dependency_analysis) and not preview else None
+    effective = tuple(dependency_result["effective_depends"]) if dependency_result is not None else None
+    control = generate_control(recipe, build_result["version"], effective_dependencies=effective)
     (debian / "control").write_text(control)
     if conffiles:
         (debian / "conffiles").write_text("\n".join(conffiles) + "\n")
@@ -477,8 +487,6 @@ def prepare_staging(recipe: dict, build_result: dict, workspace: str | Path, *, 
         path = debian / name
         path.write_text(text)
         path.chmod(0o755)
-    if include_output and destination:
-        _apply_modes(destination, install["directory_mode"], install["file_mode"])
     debian.chmod(0o755)
     (debian / "control").chmod(0o644)
     if (debian / "conffiles").exists():
@@ -487,6 +495,7 @@ def prepare_staging(recipe: dict, build_result: dict, workspace: str | Path, *, 
         "staging_directory": str(staging), "install_destination": install["destination"], "include_output": include_output,
         "content_source": str(content_source), "content_sources": [str(path) for path in content_sources], "content_available": content_available, "content_files": copied, "preview": preview, "warnings": preview_warnings,
         "version": build_result["version"], "control": control, "conffiles": conffiles, "configurations": configurations, "directories": directories,
+        "runtime_dependency_detection": dependency_result,
         "maintainer_scripts": scripts, "systemd": {"configured": service["configured"], "enabled": service["enabled"], "path": unit_path, "content": unit_text},
         "ownership": {"user": owner["user"], "group": owner["group"], "applied_by": "postinst"}, "account": account,
         "permissions": {"directories": install["directory_mode"], "files": install["file_mode"]},

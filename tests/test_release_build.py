@@ -121,7 +121,7 @@ class RealReleaseBuildTests(unittest.TestCase):
             self.assertEqual(result["checks"]["metadata"], {
                 "package": "debbuilder", "version": CURRENT_DEBIAN_VERSION, "architecture": "all",
             })
-            self.assertEqual(result["checks"]["depends"], "python3, python3-dbus, reprepro, gnupg, gpgv, podman, kmod, ca-certificates")
+            self.assertEqual(result["checks"]["depends"], "python3, python3-dbus, reprepro, gnupg, gpgv, podman, kmod, ca-certificates, binutils")
             control_dir = root / "control"
             subprocess.run(["dpkg-deb", "-e", str(artifact), str(control_dir)], check=True)
             postinst = (control_dir / "postinst").read_text()

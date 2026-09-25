@@ -550,6 +550,8 @@ function renderOpenExecution(execution, {preserveLog = false} = {}) {
           : 'Not eligible';
   const meta = [['Run ID', '#' + execution.id], ['Package', execution.package || execution.recipe_id || '—'], ['Origin', executionOriginLabel(execution)], ['Lifecycle', lifecycle], ['Mode', execution.mode || execution.action || '—'], ['Build status', execution.build_status || execution.status], ['Date', fmtTime(execution.updated || execution.created_at)], ['Validation', execution.validation_status || validation.status || 'Not run'], ['Publication eligibility', publicationEligibility], ['Validation recovery', recovery?.message || '—'], ['Publication', execution.publication_status || publication.status || 'Not run']];
   const moreMeta = [['Recipe', execution.recipe_id || '—'], ['Source', source.repository || '—'], ['Resolved ref', source.ref || source.tag || '—'], ['Source payload', sourcePayload], ['Source asset', sourceAsset.name || '—'], ['Source SHA-256', sourceAsset.sha256 || '—'], ['Upstream', version.upstream || '—'], ['Debian version', version.debian || '—'], ['Artifact', artifact.name || '—'], ['Size', artifact.size || '—'], ['SHA-256', artifact.sha256 || '—']];
+  const elf = execution.staging?.runtime_dependency_detection;
+  if (elf?.status === 'success') moreMeta.push(['ELF Depends', (elf.effective_depends || []).join(', ') || 'None'], ['ELF bundled', elf.bundled_count || 0]);
   const symbols = {pending: '○', running: '◌', success: '✓', failed: '✕', cancelled: '⊘', skipped: '–'};
   if ($('executionMeta')) $('executionMeta').innerHTML = executionMetaHtml(meta);
   if ($('executionMetaMore')) $('executionMetaMore').innerHTML = executionMetaHtml(moreMeta);

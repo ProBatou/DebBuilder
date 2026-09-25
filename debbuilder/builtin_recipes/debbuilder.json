@@ -9,7 +9,7 @@
   "management": {
     "owner": "application",
     "builtin_id": "debbuilder",
-    "definition_version": 7,
+    "definition_version": 8,
     "operator_overrides": {}
   },
   "resource_limits": {
@@ -36,8 +36,10 @@
       "gpgv",
       "podman",
       "kmod",
-      "ca-certificates"
-    ]
+      "ca-certificates",
+      "binutils"
+    ],
+    "runtime_dependency_detection": {"enabled": false, "overrides": []}
   },
   "source": {
     "provider": "github",

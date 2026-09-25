@@ -34,7 +34,7 @@ class FakeBookworm:
         elif arguments == ["test", "-f", resolver.WORK_ROOT + "/debian/control"]:
             return {"stdout": "", "stderr": "", "exit_code": 0}
         elif arguments[:2] == ["realpath", "-e"]:
-            value = arguments[2].replace("/usr/lib/libc.so.6", "/lib/libc.so.6") + "\n"
+            value = ("/usr/lib/libc.so.6" if arguments[2] == "/lib/libc.so.6" else arguments[2]) + "\n"
         elif arguments[:2] == ["dpkg-query", "-S"]:
             path = arguments[2]
             package = {"/lib64/ld-linux-x86-64.so.2": "libc6", "/lib/libc.so.6": "libc6", "/lib/libz.so.1": "zlib1g"}.get(path)
@@ -42,7 +42,7 @@ class FakeBookworm:
                 return {"stdout": "", "stderr": "unknown path", "exit_code": 1}
             value = f"{package}:amd64: {path}\n"
         elif "dpkg-shlibdeps" in arguments:
-            installed = arguments[-1].removeprefix("-e" + resolver.MOUNT_ROOT)
+            installed = arguments[-1].removeprefix("-e" + resolver.MOUNT_ROOT).removeprefix("-e" + resolver.WORK_ROOT + "/filtered")
             value = self.outputs[installed]
         elif arguments[:2] == ["dpkg", "--compare-versions"]:
             return {"stdout": "", "stderr": "", "exit_code": 0 if arguments[2] > arguments[4] else 1}
@@ -99,9 +99,42 @@ class ResolverTests(unittest.TestCase):
             "requester": "/opt/app/bin/app", "soname": "libc.so.6", "selected_library": "/lib/libc.so.6",
             "status": "resolved_external", "package": "libc6", "version_constraint": "libc6 (>= 2.34)",
             "metadata_source": "symbols",
+            "operator_decision": "",
         })
         self.assertTrue(all("/var/lib/dpkg" not in " ".join(call) for call in fake.calls))
         self.assertTrue(any("dpkg-shlibdeps" in call for call in fake.calls))
+        self.assertIn(("dpkg-query", "-S", "/lib/libc.so.6"), fake.calls)
+        self.assertNotIn(("dpkg-query", "-S", "/usr/lib/libc.so.6"), fake.calls)
+
+    def test_explicit_manual_and_ignore_decisions_are_provenanced(self):
+        library_source = self.root / "ghost.c"
+        library_source.write_text("int ghost(void) { return 1; }")
+        library = self.root / "libghost.so.1"
+        subprocess.run(["gcc", "-shared", "-fPIC", "-Wl,-soname,libghost.so.1", "-o", str(library), str(library_source)], check=True, capture_output=True)
+        binary = self.compile(source='extern int puts(const char *); extern int ghost(void); int main(void) { puts("x"); return ghost(); }',
+                              options=("-L" + str(self.root), "-l:libghost.so.1"))
+        self.assertIn("libghost.so.1", binary.needed)
+        for action in ("ignore", "manual"):
+            with self.subTest(action=action):
+                env = FakeBookworm({"/opt/app/bin/app": LIBC})
+                env.filtered_installed = frozenset({"/opt/app/bin/app"})
+                decision = {"soname": "libghost.so.1", "action": action, "reason": "operator verified"}
+                if action == "manual":
+                    decision["relation"] = "libghost1 (>= 1.0)"
+                result = self.resolve({"/opt/app/bin/app": binary}, environment=env, overrides=(decision,))
+                row = next(row for row in result.requirements if row.soname == "libghost.so.1")
+                self.assertEqual(row.status, "ignored_explicitly" if action == "ignore" else "manually_resolved")
+                self.assertEqual(row.operator_decision, "operator verified")
+                self.assertEqual("libghost1 (>= 1.0)" in result.depends, action == "manual")
+                self.assertTrue(any("/filtered/opt/app/bin/app" in " ".join(call) for call in env.calls))
+
+    def test_merge_keeps_strongest_detected_constraint(self):
+        env = FakeBookworm()
+        merged = resolver._merge_depends(env, {
+            "libc6", "libc6 (>= 2.31)", "libc6 (>= 2.34)", "ca-certificates",
+        })
+        self.assertEqual(merged, ("ca-certificates", "libc6 (>= 2.34)"))
+        self.assertTrue(any(call[:2] == ("dpkg", "--compare-versions") for call in env.calls))
 
     def test_additional_debian_package_and_version(self):
         binary = self.compile(source="extern unsigned long compressBound(unsigned long); int main(void) { return (int)compressBound(42); }", options=("-Wl,--no-as-needed", "-lz"))

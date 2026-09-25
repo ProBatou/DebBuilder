@@ -30,12 +30,13 @@ def diagnostics():
 def recipe():
     return {"schema_version": 1, "counts_truncated": False,
             "identity": {}, "source": {}, "build": {}, "artifact": {},
-            "installation": {}, "service": {}, "automation": {}, "observation": {}}
+            "runtime_dependency_detection": {}, "installation": {}, "service": {}, "automation": {}, "observation": {}}
 
 
 def run():
     return {"schema_version": 1, "identity": {}, "lifecycle": {}, "artifact": {},
-            "validation": {}, "publication": {}, "execution": {}, "build": {}, "error": {}}
+            "validation": {}, "publication": {}, "execution": {}, "build": {},
+            "runtime_dependency_detection": {}, "error": {}}
 
 
 class SupportBundleBuilderTests(TestCase):

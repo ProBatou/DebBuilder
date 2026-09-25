@@ -27,6 +27,14 @@ Open `http://localhost:4173/repository-public.html` after starting the prototype
 
 The [approved #24B4 audit](../recipe-editor/README.md) is implemented in this isolated fixture prototype. [Implementation notes](../recipe-editor/prototype-implementation.md) record applicability, proof boundaries and the operator decisions. `npm run test:browser -- --capture-recipes` refreshes only Recipe and managed self-build images. The Plan/Advanced/Expert references above are distinct from the earlier generic drawer design.
 
+## #24B6 final interaction polish
+
+These selected references show the final layout and interaction changes. `npm run test:browser -- --capture-b6` refreshes only these images and the two public desktop theme references above, whose command surfaces now use the shared semantic code colors. [Interaction notes](../system/interactions.md) cover exact object navigation, focus and Options dismissal; [responsive rules](../system/responsive.md) cover mobile subnavigation.
+
+| Desktop | Mobile |
+| --- | --- |
+| [Settings layout](b6-desktop-settings.png), [System Maintenance](b6-desktop-system-maintenance.png), [failed Run Light](b6-desktop-run-failed-light.png), [failed Run Dark](b6-desktop-run-failed-dark.png), [Run Options open](b6-desktop-run-options.png) | [Package detail and Back](b6-mobile-package-detail.png), [open drawer footer](b6-mobile-sidebar-open.png), [System tabs](b6-mobile-system-tabs.png), [Settings tabs](b6-mobile-settings-tabs.png), [Run Options open](b6-mobile-run-options.png) |
+
 ## #24B3 interaction boundaries
 
 Settings and Recipe editor edits save only to in-memory fixtures. Secret values are never echoed. The Run diagnosis stays in Runs, with a separate Recipe navigation action for the dependency fixture. The Run list scrolls inside the selector while its search and status controls remain visible. The public landing uses `install.sh` as its primary action and keeps its three detail sections closed by default. The cube mark v0 appears in both entries and the favicon; local SVG icons make the collapsed admin navigation recognizable.

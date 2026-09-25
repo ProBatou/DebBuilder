@@ -3,12 +3,12 @@ export const views = [
 ];
 export const scenarios = ['normal','blocker','running','failed','empty','recovery','one','three','manyActions','manyPackages','manyRuns','long'];
 export const packageRows = [
-  {id:'zoraxy',source:'GitHub Release asset',built:'3.1.4-1',published:'3.1.3-1',status:'readyPublish',tone:'success'},
-  {id:'pocket-id',source:'GitHub Release asset',built:'1.8.2-1',published:'1.8.1-1',status:'validationNeeded',tone:'warning'},
-  {id:'archive-agent',source:'GitHub source archive',built:'5.0.0-3',published:'—',status:'buildFailed',tone:'danger'},
-  {id:'debbuilder',source:'System-managed self-build',built:'1.0.0',published:'1.0.0',status:'upToDate',tone:'success'},
-  {id:'maintainerr',source:'GitHub source archive',built:'3.29.0-1',published:'3.28.0-1',status:'validationNeeded',tone:'warning'},
-  {id:'seerr',source:'GitHub repository',built:'2.0.0-1',published:'1.9.0-1',status:'readyPublish',tone:'success'},
+  {id:'zoraxy',source:'GitHub Release asset',built:'3.1.4-1',published:'3.1.3-1',status:'readyPublish',tone:'success',runId:'ui-24-validated',recipeId:'zoraxy'},
+  {id:'pocket-id',source:'GitHub Release asset',built:'1.8.2-1',published:'1.8.1-1',status:'validationNeeded',tone:'warning',runId:'ui-24-running',recipeId:'pocket-id'},
+  {id:'archive-agent',source:'GitHub source archive',built:'5.0.0-3',published:'—',status:'buildFailed',tone:'danger',runId:'ui-24-failed',recipeId:'archive-agent'},
+  {id:'debbuilder',source:'System-managed self-build',built:'1.0.0',published:'1.0.0',status:'upToDate',tone:'success',runId:'ui-24-published'},
+  {id:'maintainerr',source:'GitHub source archive',built:'3.29.0-1',published:'3.28.0-1',status:'validationNeeded',tone:'warning',runId:'ui-24-queued',recipeId:'maintainerr'},
+  {id:'seerr',source:'GitHub repository',built:'2.0.0-1',published:'1.9.0-1',status:'readyPublish',tone:'success',runId:'ui-24-prepared',recipeId:'seerr'},
 ];
 // Represents the repository manager's inventory, which can differ from DebBuilder-managed packages.
 export const repositoryInventory = [

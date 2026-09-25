@@ -43,3 +43,27 @@ select{appearance:none;-webkit-appearance:none;background-color:var(--surface)!i
 .recipe-advanced-navigation{padding:6px 0}.recipe-advanced-navigation h3{font-size:14px;margin:0 0 9px}.recipe-advanced-menu{display:grid;gap:7px}.recipe-advanced-menu button{width:100%;text-align:left;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink);padding:13px;font-size:12px;font-weight:700}.recipe-advanced-menu button:hover{background:var(--subtle)}
 @media(max-width:600px){.recipe-editor .recipe-advanced-group{display:none}.recipe-editor .recipe-advanced-group.active{display:block}.recipe-advanced-navigation .back-button{margin-bottom:5px}}
 .recipe-continue{justify-self:start}
+
+/* #24B6: a focused title still announces navigation, with a ring for keyboard use. */
+.page-title h1:focus{outline:none}.page-title h1:focus-visible{outline:3px solid var(--focus);outline-offset:4px;border-radius:3px}
+
+/* Technical excerpts use one semantic surface in both color schemes. */
+:root{--code-bg:#edf3f5;--code-ink:#233740;--code-border:#cfdee3}
+:root[data-theme=dark]{--code-bg:#10232c;--code-ink:#dcebee;--code-border:#3e5963}
+.log-output,.diagnosis-panel pre,.recipe-json-box textarea,.copy-row code{background:var(--code-bg);color:var(--code-ink);border:1px solid var(--code-border)}
+.diagnosis-panel code,.repo-packages code{color:var(--code-ink)}
+
+/* Compact operational facts, without new maintenance metrics. */
+.maintenance-layout{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}.maintenance-card{padding:18px}.maintenance-card h2{margin:0 0 12px}.maintenance-card>p{font-size:11px;line-height:1.45;margin:0 0 15px}.maintenance-facts>div{display:flex;justify-content:space-between;gap:12px;padding:9px 0;border-top:1px solid var(--line);font-size:11px}.maintenance-facts span{color:var(--muted)}.maintenance-facts strong{text-align:right;overflow-wrap:anywhere}.maintenance-card>.button{margin-top:14px;white-space:normal;text-align:center}
+
+/* Secondary navigation reads as a lightweight region while forms use the workspace width. */
+.settings-layout{grid-template-columns:205px minmax(0,1fr);gap:20px}.settings-nav{padding:8px;background:var(--surface);border:1px solid var(--line);border-radius:8px;min-width:0}.settings-nav button{min-height:42px}.settings-content{width:100%;max-width:none;min-width:0}.settings-edit-field input:not([type=checkbox]),.settings-edit-field select{max-width:460px}
+.package-detail-wrap{position:sticky;top:20px;align-self:start;min-width:0}.package-detail-wrap .package-detail{position:static;top:auto}
+
+/* Preserve swipe/keyboard access to mobile tabs without an intrusive scrollbar. */
+.segmented-tabs,.settings-nav,.recipe-levels{scrollbar-width:none;-ms-overflow-style:none;overscroll-behavior-inline:contain;-webkit-overflow-scrolling:touch}.segmented-tabs::-webkit-scrollbar,.settings-nav::-webkit-scrollbar,.recipe-levels::-webkit-scrollbar{display:none}
+@media(max-width:1100px){.maintenance-layout{grid-template-columns:repeat(2,minmax(0,1fr))}.maintenance-layout .maintenance-card:last-child{grid-column:1/-1}}
+@media(max-width:800px){.settings-layout{grid-template-columns:1fr}.settings-nav{position:static;display:flex;overflow-x:auto;overflow-y:hidden;white-space:nowrap;padding:5px}.settings-nav button{flex:none}.sidebar{overflow-y:auto;overscroll-behavior:contain}.sidebar-bottom{display:grid;grid-template-columns:minmax(0,1fr);justify-items:start;align-items:start;gap:10px;margin:auto 8px 0}.sidebar-bottom .repo-indicator{width:100%;flex:none;align-items:flex-start}.sidebar-bottom .repo-copy{min-width:0}.sidebar-bottom .repo-copy strong,.sidebar-bottom .repo-copy small{white-space:normal;overflow-wrap:anywhere}.sidebar-bottom .version{display:block;padding-left:18px}.sidebar-collapsed .sidebar-bottom{display:grid;grid-template-columns:minmax(0,1fr);justify-items:start;gap:10px;margin:auto 8px 0}.sidebar-collapsed .sidebar-bottom .version{display:block;padding-left:18px;font-size:10px}}
+@media(max-width:600px){.maintenance-layout{grid-template-columns:1fr}.maintenance-layout .maintenance-card:last-child{grid-column:auto}.package-layout .package-detail-wrap{display:none;position:static}.package-layout.mobile-detail .package-detail-wrap{display:block}.package-detail-back{display:inline-flex;align-items:center;min-height:44px;margin:0 0 10px 2px;padding:8px 4px}.package-detail-wrap .package-detail{display:block}.settings-nav{max-width:100%}}
+@media(max-width:600px){.managed-self-build .section-head{flex-wrap:wrap}}
+@media(max-width:600px){.settings-savebar>div{flex-wrap:wrap}.settings-savebar .button{flex:1 1 135px;min-width:0;white-space:normal}}

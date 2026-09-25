@@ -13,7 +13,8 @@ const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const captures=path.resolve(root,'../../docs/design/references');
 const publicOnly=process.argv.includes('--capture-public');
 const recipeOnly=process.argv.includes('--capture-recipes');
-const capture=process.argv.includes('--capture')||publicOnly||recipeOnly;
+const b6Only=process.argv.includes('--capture-b6');
+const capture=process.argv.includes('--capture')||publicOnly||recipeOnly||b6Only;
 const views=['overview','packages','recipes','runs','system','settings'];
 const labels={overview:'Overview',packages:'Packages',recipes:'Recipes',runs:'Runs',system:'System',settings:'Settings'};
 async function freePort(){const server=createServer();await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const port=server.address().port;await new Promise(resolve=>server.close(resolve));return port;}
@@ -45,7 +46,7 @@ async function openPublic(size='desktop',scheme='light',locale='en'){
   return {page,errors,viewport};
 }
 async function fit(page,viewport,name){const width=await page.evaluate(()=>document.documentElement.scrollWidth);assert.ok(width<=viewport.width,`${name} overflows by ${width-viewport.width}px`);}
-async function shot(page,name){if(capture&&(!publicOnly||name.startsWith('public-repository-'))&&(!recipeOnly||name.includes('recipes')||name==='desktop-system-managed-self-build'))await page.screenshot({path:path.join(captures,`${name}.png`),fullPage:name!=='desktop-recipes-advanced-editor',style:'.prototype-tools,.tool-reopen{visibility:hidden!important}'});}
+async function shot(page,name){if(capture&&(!publicOnly||name.startsWith('public-repository-'))&&(!recipeOnly||name.includes('recipes')||name==='desktop-system-managed-self-build')&&(!b6Only||name.startsWith('b6-')||name==='public-repository-desktop-light-en'||name==='public-repository-desktop-dark-en'))await page.screenshot({path:path.join(captures,`${name}.png`),fullPage:name!=='desktop-recipes-advanced-editor',style:'.prototype-tools,.tool-reopen{visibility:hidden!important}'});}
 async function nav(page,name,mobile=false){if(mobile)await page.getByRole('button',{name:'Open navigation'}).click();await page.locator('.sidebar nav button').filter({hasText:labels[name]}).click();assert.equal(await page.locator('main h1').textContent(),labels[name]);}
 try{
  await ready(base);browser=await chromium.launch({headless:true});if(capture)await mkdir(captures,{recursive:true});
@@ -232,6 +233,89 @@ try{
   const {page,errors,viewport}=await open('runs','desktop','light','fr','manyRuns');const list=page.locator('.run-selection');assert.ok(await list.count());assert.equal(await page.locator('.run-filters label').count(),2);await page.locator('.run-filters input').fill('archive-agent');assert.equal(await list.locator('button').count(),1);await page.locator('.run-filters input').fill('');await page.locator('.run-filters select').selectOption('cancelled');assert.equal(await list.locator('button').count(),1);assert.ok(await list.locator('.status-chip.neutral').count());await page.locator('.run-filters select').selectOption('all');await list.evaluate(node=>node.scrollTop=node.scrollHeight);assert.ok(await list.evaluate(node=>node.scrollTop>0));assert.ok(await page.locator('.run-filters').isVisible());await fit(page,viewport,'runs-fr-many');assert.deepEqual(errors,[]);await page.close();
   const run=await open('runs','desktop','light','en','running');await run.page.locator('.log-options summary').click();await run.page.getByRole('combobox',{name:/Log detail/}).selectOption('raw');assert.equal(await run.page.getByRole('combobox',{name:/Log detail/}).inputValue(),'raw');await run.page.getByRole('button',{name:'Pause'}).click();assert.ok(await run.page.getByText('Live output paused').isVisible());await run.page.getByRole('button',{name:'Resume'}).click();assert.ok(await run.page.getByText('Following live output').isVisible());await shot(run.page,'desktop-runs-running');await run.page.close();
   const fail=await open('runs','desktop','light','en','failed');await fail.page.getByRole('button',{name:'View diagnosis'}).click();assert.equal(await fail.page.locator('main h1').textContent(),'Runs');assert.ok(await fail.page.getByText('Failure diagnosis').isVisible());assert.ok(await fail.page.getByText('libexample.so.1').count()>0);await shot(fail.page,'desktop-runs-failed-diagnosis');await fail.page.getByRole('button',{name:/Review Recipe/}).click();assert.equal(await fail.page.locator('main h1').textContent(),'Recipes');await fail.page.close();
+ }
+ // #24B6: focus modality and exact cross-object identities.
+ {
+  const {page,errors}=await open('overview');
+  await nav(page,'packages');
+  assert.equal(await page.locator('main h1').evaluate(node=>getComputedStyle(node).outlineStyle),'none','pointer navigation leaves no title ring');
+  await page.locator('.sidebar nav button').filter({hasText:'Recipes'}).focus();await page.keyboard.press('Enter');
+  assert.equal(await page.locator('main h1').evaluate(node=>document.activeElement===node),true);
+  assert.notEqual(await page.locator('main h1').evaluate(node=>getComputedStyle(node).outlineStyle),'none','keyboard navigation retains a title ring');
+  await nav(page,'runs');await page.locator('.run-selection button').filter({hasText:'pocket-id'}).click();
+  assert.equal(await page.locator('.run-detail .detail-breadcrumb strong').textContent(),'ui-24-running');
+  await nav(page,'packages');await page.locator('.package-row').filter({hasText:'archive-agent'}).click();
+  await page.getByRole('button',{name:'View Run'}).click();
+  assert.equal(await page.locator('.run-detail .detail-breadcrumb strong').textContent(),'ui-24-failed','Package opens its own Run');
+  await nav(page,'recipes');await page.locator('.recipe-picker .selection-list button').filter({hasText:'pocket-id'}).click();
+  await nav(page,'packages');await page.locator('.package-row').filter({hasText:'archive-agent'}).click();
+  await page.getByRole('button',{name:'Review Recipe'}).click();
+  assert.equal(await page.locator('.editor-head h2').textContent(),'archive-agent','Package opens its own Recipe');
+  await nav(page,'overview');await page.locator('.overview-main .panel').first().locator('.click-row').filter({hasText:'archive-agent'}).click();
+  assert.equal(await page.locator('.package-detail h2').textContent(),'archive-agent','Overview action opens exact Package');
+  await nav(page,'overview');await page.locator('.overview-main .panel').nth(1).locator('.click-row').filter({hasText:'pocket-id'}).click();
+  assert.equal(await page.locator('.run-detail .detail-breadcrumb strong').textContent(),'ui-24-running','Recent activity opens exact Run');
+  assert.deepEqual(errors,[]);await page.close();
+  const diagnosis=await open('runs','desktop','light','en','failed');
+  await nav(diagnosis.page,'recipes');await diagnosis.page.locator('.recipe-picker .selection-list button').filter({hasText:'pocket-id'}).click();
+  await nav(diagnosis.page,'runs');await diagnosis.page.getByRole('button',{name:'View diagnosis'}).click();
+  await diagnosis.page.getByRole('button',{name:/Review Recipe/}).click();
+  assert.equal(await diagnosis.page.locator('.editor-head h2').textContent(),'archive-agent','diagnosis opens failed Run Recipe');
+  assert.deepEqual(diagnosis.errors,[]);await diagnosis.page.close();
+ }
+ // Shared code colors must follow each theme, in admin and public excerpts.
+ for(const theme of ['light','dark']){
+  const {page,errors}=await open('runs','desktop',theme,'en','failed');
+  await page.getByRole('button',{name:'View diagnosis'}).click();
+  const blocks=await page.locator('.diagnosis-panel pre,.log-output').evaluateAll(nodes=>nodes.map(node=>({background:getComputedStyle(node).backgroundColor,text:getComputedStyle(node).color,border:getComputedStyle(node).borderTopColor,token:(()=>{const probe=document.createElement('span');probe.style.background='var(--code-bg)';node.parentElement.append(probe);const color=getComputedStyle(probe).backgroundColor;probe.remove();return color;})()})));
+  assert.equal(blocks.length,2);for(const block of blocks){assert.equal(block.background,block.token);assert.notEqual(block.background,block.text);assert.notEqual(block.border,block.background);const level=Number(block.background.match(/\d+/)?.[0]);assert.ok(theme==='light'?level>180:level<70,`${theme} code surface has wrong brightness`);}
+  await shot(page,`b6-desktop-run-failed-${theme}`);assert.deepEqual(errors,[]);await page.close();
+  const publicView=await openPublic('desktop',theme,'en');
+  const publicCode=await publicView.page.locator('.command-line code').first().evaluate(node=>({background:getComputedStyle(node).backgroundColor,token:(()=>{const probe=document.createElement('span');probe.style.background='var(--code-bg)';node.parentElement.append(probe);const color=getComputedStyle(probe).backgroundColor;probe.remove();return color;})()}));
+  assert.equal(publicCode.background,publicCode.token);assert.deepEqual(publicView.errors,[]);await publicView.page.close();
+ }
+ {
+  const {page,errors,viewport}=await open('settings');
+  const widths=await page.evaluate(()=>({content:document.querySelector('.settings-content').getBoundingClientRect().width,main:document.querySelector('main').getBoundingClientRect().width,nav:getComputedStyle(document.querySelector('.settings-nav')).backgroundColor,canvas:getComputedStyle(document.documentElement).backgroundColor}));
+  assert.ok(widths.content>850,`Settings content too narrow: ${widths.content}`);assert.notEqual(widths.nav,widths.canvas);
+  await shot(page,'b6-desktop-settings');await fit(page,viewport,'b6-desktop-settings');assert.deepEqual(errors,[]);await page.close();
+  const maintenance=await open('system');await maintenance.page.getByRole('button',{name:'Maintenance',exact:true}).click();
+  assert.equal(await maintenance.page.locator('.maintenance-card').count(),3);
+  const heights=await maintenance.page.locator('.maintenance-card').evaluateAll(nodes=>nodes.map(node=>node.getBoundingClientRect().height));
+  assert.ok(heights.every(height=>height<330),`Maintenance cards are too tall: ${heights}`);
+  assert.ok(await maintenance.page.getByText('128 Runs').isVisible());assert.ok(await maintenance.page.getByRole('button',{name:'Clear execution history'}).isVisible());
+  await shot(maintenance.page,'b6-desktop-system-maintenance');assert.deepEqual(maintenance.errors,[]);await maintenance.page.close();
+ }
+ {
+  const {page,errors,viewport}=await open('packages','mobile');await page.locator('.package-row').filter({hasText:'archive-agent'}).click();
+  const back=page.locator('.package-detail-back');assert.equal(await back.locator('xpath=ancestor::section[contains(@class,"panel")]').count(),0);
+  const backBox=await back.boundingBox(),cardBox=await page.locator('.package-detail').boundingBox();assert.ok(backBox.y+backBox.height<=cardBox.y);
+  await shot(page,'b6-mobile-package-detail');await fit(page,viewport,'b6-mobile-package-detail');
+  await back.click();assert.ok(await page.locator('.package-list').isVisible());assert.ok(await page.locator('.package-row.selected').evaluate(node=>document.activeElement===node));
+  await page.getByRole('button',{name:'Open navigation'}).click();
+  const repo=await page.locator('.sidebar .repo-indicator').boundingBox(),version=await page.locator('.sidebar-bottom .version').boundingBox();
+  assert.ok(repo&&version&&repo.y+repo.height<=version.y,'mobile drawer footer overlaps');assert.ok(version.y+version.height<=viewport.height);
+  await shot(page,'b6-mobile-sidebar-open');assert.deepEqual(errors,[]);await page.close();
+  const shortContext=await browser.newContext({viewport:{width:390,height:520}});const shortPage=await shortContext.newPage();await shortPage.goto(`${base}?view=overview&clean=1`);await shortPage.getByRole('button',{name:'Open navigation'}).click();
+  await shortPage.locator('.sidebar').evaluate(node=>node.scrollTop=node.scrollHeight);
+  const shortVersion=await shortPage.locator('.sidebar-bottom .version').boundingBox();assert.ok(shortVersion&&shortVersion.y>=0&&shortVersion.y+shortVersion.height<=520,'footer reachable in short drawer');await shortContext.close();
+ }
+ for(const view of ['system','settings']){
+  const {page,errors,viewport}=await open(view,'mobile','light','de');const nav=page.locator(view==='system'?'.segmented-tabs':'.settings-nav');
+  assert.ok(await nav.evaluate(node=>node.scrollWidth>node.clientWidth),`${view} tabs must scroll`);
+  assert.equal(await nav.evaluate(node=>getComputedStyle(node).scrollbarWidth),'none');
+  await nav.locator('button').last().click();
+  const geometry=await nav.evaluate(node=>{const active=node.querySelector('[aria-current=page]').getBoundingClientRect(),outer=node.getBoundingClientRect();return {left:active.left,right:active.right,outerLeft:outer.left,outerRight:outer.right,scroll:node.scrollLeft};});
+  assert.ok(geometry.scroll>0&&geometry.left>=geometry.outerLeft-1&&geometry.right<=geometry.outerRight+1,`${view} active tab out of view`);
+  await shot(page,`b6-mobile-${view}-tabs`);await fit(page,viewport,`b6-mobile-${view}`);assert.deepEqual(errors,[]);await page.close();
+ }
+ for(const size of ['desktop','mobile']){
+  const {page,errors,viewport}=await open('runs',size);if(size==='mobile')await page.locator('.run-selection button').first().click();
+  const options=page.locator('.log-options'),trigger=options.locator('summary');await trigger.click();assert.equal(await options.getAttribute('open'),'');
+  await options.locator('select').selectOption('raw');assert.equal(await options.getAttribute('open'),'','inside interaction keeps Options open');
+  await page.getByRole('heading',{name:'Stages'}).click();assert.equal(await options.getAttribute('open'),null,'outside click closes Options');
+  await trigger.click();await shot(page,`b6-${size}-run-options`);await page.keyboard.press('Escape');assert.equal(await options.getAttribute('open'),null);assert.ok(await trigger.evaluate(node=>document.activeElement===node),'Escape returns focus');
+  await fit(page,viewport,`b6-${size}-run-options`);assert.deepEqual(errors,[]);await page.close();
  }
  const installerTemplate=await readFile(path.resolve(root,'../../debbuilder/repository_templates/install.sh'),'utf8');
  assert.ok(installerTemplate.includes('Signed-By: /etc/apt/keyrings/debbuilder.gpg'));

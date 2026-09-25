@@ -26,7 +26,7 @@ from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import apt_repo, artifact_publication, artifact_validation, auth_service, automation_orchestrator, automation_scheduler, automation_service, automation_status, build_pipeline, builtin_recipe, command_containment, deb_inspector, dependency_preparation, execution_projection, execution_recovery, execution_service, inspectors, maintenance, notifications, package_service, recipe_store, resource_limits, settings_service, storage, storage_inventory, storage_pruning, system_diagnostics, upstream_archive, upstream_detection, upstream_observation, validation_oci, validation_service, workspace_cleanup
+from . import apt_repo, artifact_publication, artifact_validation, auth_service, automation_orchestrator, automation_scheduler, automation_service, automation_status, build_pipeline, builtin_recipe, command_containment, deb_inspector, dependency_preparation, execution_projection, execution_recovery, execution_service, inspectors, maintenance, notifications, package_service, recipe_store, repository_inventory, resource_limits, settings_service, storage, storage_inventory, storage_pruning, system_diagnostics, upstream_archive, upstream_detection, upstream_observation, validation_oci, validation_service, workspace_cleanup
 from .api_errors import canonical_error_payload
 from .automation_ledger import AutomationLedger
 from .upstream_detection import AutomationDetectionService
@@ -1602,6 +1602,14 @@ def list_packages(*, include_history: bool = False) -> list[dict]:
     recipe_ids = [str(package.get("recipe") or "") for package in packages if package.get("recipe")]
     statuses = automation_projection_service().statuses(recipe_ids) if recipe_ids else {}
     return [{**package, "automation": statuses.get(str(package.get("recipe") or ""))} for package in packages]
+
+
+def repository_inventory_snapshot() -> dict:
+    apt = repo_settings()
+    return repository_inventory.inventory(
+        REPOSITORY_ROOT, distribution=apt["distribution"],
+        component=apt["component"], architecture=apt["architecture"],
+    )
 
 
 def get_package(name: str) -> dict | None:

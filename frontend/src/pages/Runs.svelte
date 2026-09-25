@@ -3,12 +3,15 @@
   import {api} from '../api/client.js';
   import {createPoller} from '../features/polling.js';
   import {navigate} from '../navigation/location.js';
+  import {openRecipe} from '../navigation/recipe.js';
   import {t,when} from '../i18n/i18n.js';
   import ErrorNotice from '../components/ErrorNotice.svelte';
   import Status from '../components/Status.svelte';
   export let id = '', language = 'en';
   let rows = [], run = null, logs = '', offset = 0, verbosity = 'normal', following = true;
   let query = '', filter = 'all', error = null, detailError = null, logError = null, optionsOpen = false;
+  let navigationError = null;
+  async function review(recipeId) {navigationError = null; try {await openRecipe(recipeId);} catch(caught) {navigationError = caught;}}
   let listController, detailController, listPoller, detailPoller, selectedId = '', generation = 0, logNode;
   const active = row => row?.lifecycle_active === true || ['queued','running','cancelling'].includes(row?.status);
   async function loadList(signal) {const response = await api.runs({signal}); return response.executions || [];}
@@ -55,6 +58,7 @@
 <h1>{t('runs',language)}</h1><ErrorNotice {error} retry={refreshList} {language}/>
 <div class="split"><section class="panel"><div class="filters"><label>{t('search',language)} <input type="search" bind:value={query}></label><label>{t('status',language)} <select bind:value={filter}><option value="all">{t('all',language)}</option><option value="active">{t('activeWork',language)}</option><option value="failed">failed</option><option value="completed">completed</option><option value="cancelled">cancelled</option></select></label></div><div class="list">{#each visible as row (row.id)}<button class:active={id===row.id} class="row" onclick={() => navigate('runs',row.id)}><span><strong>{row.package || row.id}</strong><small>{when(row.updated,language)} · {row.id}</small></span><Status value={row.lifecycle_status || row.status} {language}/></button>{:else}<p>{t('noItems',language)}</p>{/each}</div></section>
 <div class="detail">{#if id}<button class="back" onclick={() => navigate('runs')}>← {t('back',language)}</button>{/if}<ErrorNotice error={detailError} retry={() => select(id)} {language}/>{#if run}<section class="panel"><h2>{run.package || run.id}</h2><p class="muted"><code>{run.id}</code> · {when(run.updated,language)}</p><Status value={run.lifecycle_status || run.status} {language}/>
+  {#if run.recipe_id || run.recipe}<p><button onclick={() => review(run.recipe_id || run.recipe)}>{t('reviewRecipe',language)} →</button></p><ErrorNotice error={navigationError} {language}/>{/if}
   {#if run.recovery_blocker || run.validations?.at(-1)?.recovery_blocker}<div class="notice error"><strong>{t('recovery',language)}</strong><p>{run.recovery_blocker?.reason || run.recovery_blocker?.code || run.validations.at(-1).recovery_blocker.reason || run.validations.at(-1).recovery_blocker.code}</p></div>{/if}
   {#if run.cancellation}<p>{run.cancellation.reason || run.cancellation.code}</p>{/if}
   {#if run.diagnostic}<section class="subpanel"><h3>{t('diagnosis',language)}</h3><p>{run.diagnostic.title}</p><p>{run.diagnostic.next_action}</p>{#each run.diagnostic.facts || [] as fact}<p><strong>{fact.label}:</strong> {Array.isArray(fact.value) ? fact.value.join(', ') : fact.value}</p>{/each}</section>{/if}

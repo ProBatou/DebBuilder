@@ -212,6 +212,8 @@ def graceful_shutdown_setup(app, runtime):
 
 SCENARIOS = {
     "showcase": Scenario("showcase", "Deterministic static Runs, packages, and Recipes used by the UI showcase.", showcase.seed),
+    "inventory-empty": Scenario("inventory-empty", "Showcase with an empty exact repository inventory.", showcase.seed),
+    "inventory-error": Scenario("inventory-error", "Showcase with an unavailable exact repository inventory.", showcase.seed),
     "cancellation-running": Scenario("cancellation-running", "Running cancellable local process-tree fixture with live logs.", seed_cancellation, pipeline_setup(running=True), True),
     "queued-cancellable": Scenario("queued-cancellable", "Queued Run held behind a local blocker for real queue cancellation.", seed_queued, queued_setup, True),
     "build-failure": Scenario("build-failure", "Harmless local command that fails with captured stdout and stderr.", seed_failure, pipeline_setup(running=False), True),
@@ -281,6 +283,16 @@ def serve(selected: Scenario, *, host: str = "127.0.0.1", port: int = 8765) -> N
         state.canonical_recipe = canonical_recipe
 
         class BehaviorLabHandler(app.Handler):
+            def _get_repository_inventory(self, _variables, _parsed):
+                from debbuilder.api_errors import ApiError
+                if selected.name == "inventory-error":
+                    app.json_response(self, ApiError("repository_inventory_unavailable", "Repository inventory is unavailable"), 503)
+                    return
+                result = showcase.repository_inventory_fixture()
+                if selected.name == "inventory-empty":
+                    result = {**result, "packages": []}
+                app.json_response(self, result)
+
             def _canonical_run(self, data: object) -> bool:
                 if not selected.allow_run or not state.canonical_recipe or not isinstance(data, dict):
                     return False

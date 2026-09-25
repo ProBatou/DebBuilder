@@ -10,6 +10,7 @@
   import Overview from '../pages/Overview.svelte';
   import Packages from '../pages/Packages.svelte';
   import Runs from '../pages/Runs.svelte';
+  import Recipes from '../pages/Recipes.svelte';
   import System from '../pages/System.svelte';
 
   let session = null, status = null, error = null, loading = true, menu = false;
@@ -23,7 +24,7 @@
     finally {loading = false;}
   }
   onMount(() => {initLocale(); initTheme(); bootstrap(); return () => controller?.abort();});
-  const pages = ['overview', 'packages', 'runs', 'system'];
+  const pages = ['overview', 'packages', 'runs', 'recipes', 'system'];
   function open(page) {navigate(page); menu = false;}
 </script>
 
@@ -33,7 +34,6 @@
     <div class="brand"><span class="mark"><BrandMark/></span><strong>DebBuilder</strong><button class="mobile-close" aria-label={t('back',$locale)} onclick={() => menu = false}>×</button></div>
     <nav aria-label="Main">
       {#each pages as page}<button class:active={$location.page === page} aria-current={$location.page === page ? 'page' : undefined} onclick={() => open(page)}><NavIcon name={page}/>{t(page,$locale)}</button>{/each}
-      <button disabled title={t('availableLater',$locale)}><NavIcon name="recipes"/>{t('recipes',$locale)}</button>
       <button disabled title={t('availableLater',$locale)}><NavIcon name="settings"/>{t('settings',$locale)}</button>
     </nav>
     <div class="sidebar-bottom"><small>{status?.repo_default || t('repository',$locale)}</small><small>{session?.user || session?.auth_mode || ''}</small></div>
@@ -50,7 +50,8 @@
       {:else if $location.page === 'overview'}<Overview language={$locale}/>
       {:else if $location.page === 'packages'}<Packages id={$location.id} language={$locale}/>
       {:else if $location.page === 'runs'}<Runs id={$location.id} language={$locale}/>
-      {:else}<System language={$locale}/>{/if}
+      {:else if $location.page === 'recipes'}<Recipes id={$location.id} language={$locale}/>
+      {:else}<System id={$location.id} language={$locale}/>{/if}
     </div>
   </main>
 </div>

@@ -398,6 +398,16 @@ SCHEMAS.update({
     "AuthStatusResponse": _object({"ok": {"const": True}, "auth_mode": S, "user": S}, ("ok", "auth_mode", "user")),
     "DashboardResponse": _object({"dashboard": _object(extra=True)}, ("dashboard",)),
     "PackagesResponse": _object({"packages": {"type": "array", "items": _ref("Package")}}, ("packages",)),
+    "RepositoryInventoryPackage": _object({
+        "name": S, "version": S, "architecture": S, "component": S,
+    }, ("name", "version", "architecture", "component")),
+    "RepositoryInventoryResponse": _object({
+        "repository": _object({"suite": S, "codename": S, "components": STRINGS,
+                               "architectures": STRINGS},
+                              ("suite", "codename", "components", "architectures")),
+        "packages": {"type": "array", "items": _ref("RepositoryInventoryPackage"),
+                     "maxItems": 10000},
+    }, ("repository", "packages"), description="Exact bounded reprepro list under the publication repository lease. Architecture denotes the reprepro repository slot."),
     "PackageResponse": _wrapped("package", "Package"),
     "PackageMutationResponse": _object({"ok": {"const": True}, "package": _ref("Package")}, ("ok", "package")),
     "RecipesResponse": _object({"recipes": {"type": "array", "items": _object(extra=True)}}, ("recipes",)),
@@ -468,6 +478,11 @@ OPERATION_DOCS = {
     "auth.status": _doc(200, "AuthStatusResponse"),
     "dashboard.get": _doc(200, "DashboardResponse"),
     "packages.list": _doc(200, "PackagesResponse"),
+    "repository.inventory": _doc(200, "RepositoryInventoryResponse", errors={
+        409: ("repository_mutation_busy",),
+        502: ("repository_inventory_invalid",),
+        503: ("repository_inventory_unavailable", "repository_inventory_timeout", "repository_inventory_too_large"),
+    }),
     "packages.get": _doc(200, "PackageResponse", errors={400: ("invalid_package_id",), 404: ("not_found",)}),
     "recipes.list": _doc(200, "RecipesResponse"),
     "recipes.inspect": _doc(200, "RecipeInspectionResponse", errors={

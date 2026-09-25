@@ -1,6 +1,6 @@
 import {writable} from 'svelte/store';
 
-const pages = new Set(['overview', 'packages', 'runs', 'system']);
+const pages = new Set(['overview', 'packages', 'runs', 'recipes', 'system']);
 export function parseLocation(hash = '') {
   const [page, id = ''] = hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
   return {page: pages.has(page) ? page : 'overview', id};

@@ -654,6 +654,106 @@
         ]
       }
     },
+    "/api/repository/inventory": {
+      "get": {
+        "operationId": "repository.inventory",
+        "summary": "List exact reprepro inventory",
+        "tags": [
+          "repository"
+        ],
+        "x-debbuilder-effect": "read_only",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepositoryInventoryResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "409": {
+            "description": "HTTP 409 admin API error. Documented codes: repository_mutation_busy.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "repository_mutation_busy"
+            ]
+          },
+          "500": {
+            "description": "HTTP 500 admin API error. Documented codes: internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "internal_error"
+            ]
+          },
+          "502": {
+            "description": "HTTP 502 admin API error. Documented codes: repository_inventory_invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "repository_inventory_invalid"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable, repository_inventory_unavailable, repository_inventory_timeout, repository_inventory_too_large.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable",
+              "repository_inventory_unavailable",
+              "repository_inventory_timeout",
+              "repository_inventory_too_large"
+            ]
+          }
+        },
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
     "/api/packages/{name}": {
       "get": {
         "operationId": "packages.get",
@@ -6912,6 +7012,78 @@
         "required": [
           "packages"
         ]
+      },
+      "RepositoryInventoryPackage": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "architecture": {
+            "type": "string"
+          },
+          "component": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "version",
+          "architecture",
+          "component"
+        ]
+      },
+      "RepositoryInventoryResponse": {
+        "type": "object",
+        "properties": {
+          "repository": {
+            "type": "object",
+            "properties": {
+              "suite": {
+                "type": "string"
+              },
+              "codename": {
+                "type": "string"
+              },
+              "components": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "architectures": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "suite",
+              "codename",
+              "components",
+              "architectures"
+            ]
+          },
+          "packages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RepositoryInventoryPackage"
+            },
+            "maxItems": 10000
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "repository",
+          "packages"
+        ],
+        "description": "Exact bounded reprepro list under the publication repository lease. Architecture denotes the reprepro repository slot."
       },
       "PackageResponse": {
         "type": "object",

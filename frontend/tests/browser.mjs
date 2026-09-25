@@ -8,7 +8,9 @@ try {
   for (const viewport of [{width:1440,height:900},{width:390,height:844}]) {
     const page = await browser.newPage({viewport});
     const failures=[];
+    const mutations=[];
     page.on('pageerror', error => failures.push(error.message));
+    page.on('request', request => {if (new URL(request.url()).pathname.startsWith('/api/') && request.method() !== 'GET') mutations.push(`${request.method()} ${request.url()}`);});
     await page.goto(base);
     await page.getByRole('heading',{name:'Overview'}).waitFor();
     async function openNavigation(name) {
@@ -20,6 +22,33 @@ try {
     const packageId = await page.locator('.detail h2').textContent();
     assert.ok(packageId);
     assert.ok(page.url().includes(encodeURIComponent(packageId)));
+    await page.getByRole('button',{name:'View repository inventory'}).click();
+    await page.getByText('Published entries',{exact:true}).waitFor();
+    assert.ok(await page.locator('.table-wrap tbody tr').count() >= 3);
+    const packageRecipeId = await page.evaluate(async name => (await (await fetch(`/api/packages/${encodeURIComponent(name)}`)).json()).package.recipe, packageId);
+    await page.getByRole('button',{name:'Review Recipe'}).click();
+    await page.getByText('No matching current evidence').waitFor();
+    assert.ok(page.url().endsWith(`#/recipes/${encodeURIComponent(packageRecipeId)}`));
+    await openNavigation('Recipes');
+    await page.locator('.list .row').first().click();
+    await page.getByText('View canonical JSON').waitFor();
+    await page.getByText('Lifecycle hooks').first().waitFor();
+    await page.goto(`${base}/#/recipes/archive-agent`);
+    await page.getByText('Prebuilt artifact').waitFor();
+    await page.getByText('ELF detection').waitFor();
+    assert.equal(await page.getByText('build commands').count(),0);
+    await page.goto(`${base}/#/recipes/vendor-cli`);
+    await page.getByText('Prebuilt artifact').waitFor();
+    assert.equal(await page.getByText('ELF detection').count(),0);
+    await page.getByText('Service not configured').waitFor();
+    await page.goto(`${base}/#/recipes/seerr`);
+    await page.getByText('Source build').waitFor();
+    await page.getByText('postinst configured').waitFor();
+    await openNavigation('Packages');
+    await page.locator('.list .row').filter({hasText:'debbuilder'}).first().click();
+    await page.getByRole('button',{name:'Review Recipe'}).click();
+    await page.getByText('Managed identity',{exact:true}).waitFor();
+    assert.ok(page.url().includes('#/system/managed'));
     await openNavigation('Runs');
     await page.locator('.list .row').first().click();
     const runId = await page.locator('.detail code').first().textContent();
@@ -27,6 +56,14 @@ try {
     assert.ok(page.url().includes(encodeURIComponent(runId)));
     await page.getByText('Stages',{exact:true}).waitFor();
     await page.getByText('Logs',{exact:true}).waitFor();
+    if (await page.getByRole('button',{name:'Review Recipe'}).count()) {
+      const runRecipeId = await page.evaluate(async value => (await (await fetch(`/api/executions/${encodeURIComponent(value)}`)).json()).execution.recipe_id, runId);
+      await page.getByRole('button',{name:'Review Recipe'}).click();
+      await page.getByText('No matching current evidence').waitFor();
+      assert.ok(page.url().endsWith(`#/recipes/${encodeURIComponent(runRecipeId)}`));
+      await openNavigation('Runs');
+      await page.locator('.list .row').first().click();
+    }
     await page.getByRole('button',{name:'Options'}).click();
     await page.getByRole('button',{name:'Raw',exact:true}).click();
     await page.getByRole('button',{name:'Options'}).click();
@@ -40,6 +77,9 @@ try {
     await page.waitForTimeout(1800);
     assert.equal(runRequests,stoppedCount);
     assert.ok(await page.locator('.grid .panel').count() >= 1);
+    await page.getByRole('button',{name:'System-managed self-build'}).click();
+    await page.getByText('Managed identity',{exact:true}).waitFor();
+    await page.getByText('Definition version',{exact:true}).waitFor();
     const theme = page.getByLabel('Theme');
     await theme.selectOption('dark');
     assert.equal(await page.locator('html').getAttribute('data-theme'),'dark');
@@ -52,6 +92,7 @@ try {
     }
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false);
     assert.deepEqual(failures,[]);
+    assert.deepEqual(mutations,[]);
     await page.close();
   }
   console.log('Behavior Lab desktop/mobile API browser checks passed');

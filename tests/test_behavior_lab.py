@@ -143,6 +143,9 @@ class BehaviorLabTests(unittest.TestCase):
         with urlopen(f"{url}/api/executions", timeout=5) as response:
             executions = json.load(response)["executions"]
         self.assertTrue(any(row["id"] == "ui-01-prepared" for row in executions))
+        with urlopen(f"{url}/api/repository/inventory", timeout=5) as response:
+            rows = json.load(response)["packages"]
+        self.assertEqual([row["name"] for row in rows], ["bashrc", "debbuilder", "repository-only"])
         with urlopen(f"{url}/", timeout=5) as response:
             self.assertIn("DebBuilder", response.read().decode())
         request = Request(f"{url}/api/run", data=b"{}", method="POST", headers={"Content-Type": "application/json"})

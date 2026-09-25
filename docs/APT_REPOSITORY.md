@@ -83,3 +83,9 @@ redirections that prevent safe proof. Administrator-managed `reprepro` signing
 or hook configuration remains trusted configuration, not a sandbox boundary.
 Public downloads are lock-free and stream a pinned, no-follow file descriptor
 so a client connection does not hold the mutation lease.
+
+The admin `GET /api/repository/inventory` endpoint lists exact reprepro
+entries under this same lease. It returns a transient busy error during
+publication. Its package rows are separate from `/api/packages`, which is
+DebBuilder's managed package projection; neither view implies that public
+metadata signatures or downloads were verified by the inventory request.

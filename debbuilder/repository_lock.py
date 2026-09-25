@@ -224,7 +224,8 @@ class RepositoryLease:
 
 
 @contextmanager
-def repository_lease(repo_root: str | Path, *, operation: str, blocking: bool = False):
+def repository_lease(repo_root: str | Path, *, operation: str, blocking: bool = False,
+                     create_lock: bool = True):
     """Lease one pinned repository root across threads and processes."""
     if repository_lease_held():
         raise RepositoryLockError(
@@ -238,7 +239,8 @@ def repository_lease(repo_root: str | Path, *, operation: str, blocking: bool = 
             try:
                 lock_fd = os.open(
                     LOCK_FILE,
-                    os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+                    (os.O_RDWR | os.O_CREAT if create_lock else os.O_RDONLY)
+                    | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
                     0o600,
                     dir_fd=root_fd,
                 )

@@ -92,6 +92,7 @@ ADMIN_API_ROUTES: tuple[ApiRoute, ...] = (
     _route("GET", "/api/auth/status", "auth.status", "_get_auth_status", R, "authentication", "Get authentication status"),
     _route("GET", "/api/dashboard", "dashboard.get", "_get_dashboard", R, "dashboard", "Get dashboard summary"),
     _route("GET", "/api/packages", "packages.list", "_get_packages", R, "packages", "List packages"),
+    _route("GET", "/api/repository/inventory", "repository.inventory", "_get_repository_inventory", R, "repository", "List exact reprepro inventory"),
     _route("GET", "/api/packages/{name}", "packages.get", "_get_package", R, "packages", "Get a package"),
     _route("GET", "/api/recipes", "recipes.list", "_get_recipes", R, "recipes", "List recipes"),
     _route("GET", "/api/recipes/{recipe_id}/inspect", "recipes.inspect", "_get_recipe_inspection", R, "recipes", "Inspect one Recipe safely"),

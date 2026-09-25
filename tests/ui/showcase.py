@@ -20,6 +20,19 @@ ROOT = Path(__file__).resolve().parents[2]
 RECIPE_FIXTURES = ROOT / "tests" / "fixtures" / "recipes"
 
 
+def repository_inventory_fixture() -> dict:
+    """Lab contract fixture, deliberately distinct from the exported Packages index."""
+    return {
+        "repository": {"suite": "stable", "codename": "stable", "components": ["main"],
+                       "architectures": ["amd64"]},
+        "packages": [
+            {"name": "bashrc", "version": "1.4.0-1", "architecture": "amd64", "component": "main"},
+            {"name": "debbuilder", "version": "0.1.7-1", "architecture": "amd64", "component": "main"},
+            {"name": "repository-only", "version": "2.0-1", "architecture": "amd64", "component": "main"},
+        ],
+    }
+
+
 def load_recipe(name: str) -> dict:
     return recipe_for_storage(json.loads((RECIPE_FIXTURES / f"{name}.json").read_text()))
 

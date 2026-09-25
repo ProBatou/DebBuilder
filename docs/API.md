@@ -25,6 +25,33 @@ declares only request/response representation details not available in those
 runtime contracts; tests reject missing or extra operation descriptions and
 unknown documented codes. The checked-in JSON is derived, not edited by hand.
 
+## Exact repository inventory
+
+`GET /api/repository/inventory` is an authenticated, read-only snapshot of the
+configured reprepro database. It returns repository `suite`, `codename`,
+`components`, and `architectures`, plus sorted package entries with `name`,
+`version`, `architecture`, and `component`. Entries are sorted by name,
+version, architecture, then component. A package may appear in multiple
+architecture slots; versions are not collapsed. An empty repository returns
+an empty `packages` array.
+
+The endpoint reads `reprepro list` under the repository lease also used by
+publication. Concurrent publication returns HTTP 409, avoiding a partial
+snapshot. It never uses the DebBuilder Packages index as inventory. The
+command has a 15 second deadline, 2 MiB stdout and 64 KiB stderr limits, and
+a 10,000 entry limit. Unavailable repository/tool, malformed output, timeout,
+and excess output/entries return canonical errors without command stderr or
+repository paths. The endpoint does not export or modify repository data.
+
+`GET /api/recipes` supplies list projections, while
+`GET /api/workflows/{workflow_id}` supplies the canonical authored Recipe v5
+document. Inspection and automation GET routes supply separate read-only
+context. Authored values in the Svelte Plan are Configured or Default. The
+current public Run DTO does not expose an immutable Recipe snapshot relation,
+so the Plan reports no matching current evidence and Test required.
+Application-managed self-build is identified by management metadata and shown
+under System. This migration does not send Recipe or lifecycle mutations.
+
 The API uses configured local (`none`), trusted reverse-proxy header, or OIDC
 session authentication. The document describes all three without embedding
 the current deployment settings. Its `security` alternatives mean only the

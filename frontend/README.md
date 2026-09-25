@@ -1,4 +1,4 @@
-# Production admin frontend source (#24C1)
+# Production admin frontend source (#24C2A)
 
 This is the future authenticated admin UI source. The shipped `static/` tree is still the production entry. The separate public APT landing remains `debbuilder/repository_templates/index.html` and is outside this build.
 
@@ -13,7 +13,7 @@ npm test
 npm run build
 ```
 
-`src/app` owns the shell and bootstrap, `src/api` owns read-only HTTP requests, `src/features` owns polling, `src/pages` owns view-local state, and `src/navigation`, `src/theme`, `src/i18n` own small browser preferences. No Recipe serializer or mutation adapter exists. The common semantic tokens and layout are in `src/styles.css`; the fixture prototype remains under `prototypes/issue-24` for design reference only.
+`src/app` owns the shell and bootstrap, `src/api` owns read-only HTTP requests, `src/features` owns polling and Recipe projections, `src/pages` owns view-local state, and `src/navigation`, `src/theme`, `src/i18n` own small browser preferences. No Recipe serializer or mutation adapter exists. The common semantic tokens and layout are in `src/styles.css`; the fixture prototype remains under `prototypes/issue-24` for design reference only.
 
 ## API and auth
 
@@ -23,9 +23,23 @@ Runs list polling is view-scoped and uses 5-second intervals. Selected Run detai
 
 Theme (`System`, `Light`, `Dark`) and locale (`EN`, `FR`, `DE`, `ES`) are local browser preferences. English is the fallback. Browser `Intl` formats dates and numbers. IDs, package names, versions, technical values, errors, logs and backend-authored prose remain untranslated.
 
+Packages uses `/api/packages` for DebBuilder-managed package state and opens
+`/api/repository/inventory` on demand for exact reprepro entries. Inventory
+errors retain their own retry state; they never fall back to package data.
+Recipes uses `/api/recipes` for list projections and `/api/workflows/{id}` for
+the authored v5 document. Inspection and automation GETs are optional scoped
+context. The Plan labels authored values Configured/Default; it never treats
+Run history as evidence for the current Recipe without an immutable snapshot
+match. No such relation is present in the public Run DTO, so the Plan says
+No matching current evidence / Test required. Managed self-build is selected
+from backend management metadata and shown under System. Package and Run links
+fetch the canonical Recipe first and route by its metadata. All C2A paths use
+GET requests only; Recipe writes and lifecycle actions remain outside this
+checkpoint.
+
 ## Isolated development and browser check
 
-In one terminal from the repository root, run `python3 -m tests.ui.behavior_lab --scenario showcase --host 127.0.0.1 --port 8765`. In another, from `frontend/`, run `npm run dev -- --port 5174`; Vite proxies `/api` to the Lab. Set `DEBBUILDER_DEV_API` to another isolated backend origin if needed. `npm run test:browser` checks real Lab data at 1440px and 390px while both servers run. The Lab creates and removes disposable data; never target the production `/opt/debbuilder` installation.
+In one terminal from the repository root, run `python3 -m tests.ui.behavior_lab --scenario showcase --host 127.0.0.1 --port 8765`. In another, from `frontend/`, run `npm run dev -- --port 5174`; Vite proxies `/api` to the Lab. Set `DEBBUILDER_DEV_API` to another isolated backend origin if needed. `npm run test:browser` checks real Lab data at 1440px and 390px while both servers run. For inventory empty/error states use the `inventory-empty` and `inventory-error` Lab scenarios with `DEBBUILDER_EXPECT_INVENTORY=empty` or `error` and run `node tests/browser-inventory.mjs`. The Lab creates and removes disposable data; never target the production `/opt/debbuilder` installation.
 
 ## Future package integration
 

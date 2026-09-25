@@ -241,6 +241,12 @@ def create_handler(api):
         def _get_packages(self, _variables, _parsed):
             api.json_response(self, {"packages": api.list_packages()})
 
+        def _get_repository_inventory(self, _variables, _parsed):
+            try:
+                api.json_response(self, api.repository_inventory_snapshot())
+            except api.repository_inventory.RepositoryInventoryError as exc:
+                api.json_response(self, ApiError(exc.code, str(exc)), exc.status)
+
         def _get_package(self, variables, _parsed):
             name = variables["name"]
             try:

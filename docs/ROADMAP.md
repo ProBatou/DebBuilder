@@ -24,21 +24,21 @@ specific dependency is stated:
 | --- | --- | --- |
 | [#20 System diagnostics, support bundle and documented API](https://github.com/ProBatou/DebBuilder/issues/20) | **Completed** | Stable operator/API contracts. #22 and #23 can build on it; #24 can consume the established API/diagnostic surface. |
 | [#25 Generic Git repositories and direct archive URLs](https://github.com/ProBatou/DebBuilder/issues/25) | **Deferred** | The source abstraction was audited, but implementation is intentionally postponed while real usage remains GitHub-only. Revisit when a concrete non-GitHub source need appears. It no longer blocks #24. |
-| [#30 Runtime shared-library dependencies for prebuilt binaries](https://github.com/ProBatou/DebBuilder/issues/30) | **In progress** | Safe ELF inspection and explainable Debian `Depends` proposals for prebuilt binaries. Must settle before #24 so the dependency UX reflects real backend capability. |
+| [#30 Runtime shared-library dependencies for prebuilt binaries](https://github.com/ProBatou/DebBuilder/issues/30) | **Completed** | Bounded ELF inspection, Bookworm/amd64 Debian dependency resolution, opt-in Recipe packaging and offline Validation are integrated. The dependency UX can now reflect the backend capability. |
 | [#31 Explicit empty output directories](https://github.com/ProBatou/DebBuilder/issues/31) | **Completed** | Declarative post-build directory preparation with fail-closed path handling, empty-directory staging and operator diagnostics is implemented. |
 
-#31 is complete. #30 remains in progress and is the only outstanding hard gate
-for #24.
+#30 and #31 are complete. #25 remains deferred.
 
 ## UI/UX redesign
 
 - [#24 Interface redesign and frontend architecture review](https://github.com/ProBatou/DebBuilder/issues/24)
-  waits for **#30 only**. #20 and #31 are already complete. #25 has been deliberately
-  deferred and is no longer a prerequisite: the redesign may target the real
-  current GitHub source workflow and leave room for future source providers
-  without implementing them speculatively. #21, #22 and #23 are not
-  prerequisites. Begin #24 with its stated UX/frontend architecture audit and
-  design-direction proposal before implementation.
+  is **ready / unblocked** with no remaining hard implementation gate. #20,
+  #30 and #31 are complete. #25 has been deliberately deferred and is not a
+  prerequisite: the redesign may target the current GitHub source workflow
+  and leave room for future source providers without implementing them
+  speculatively. #21, #22 and #23 are not prerequisites. Begin #24 with its
+  stated UX/frontend architecture audit and design-direction proposal before
+  implementation.
 
 ## Distribution, developer tools and integrations
 
@@ -81,22 +81,22 @@ flowchart TD
     I22["#22 CLI"]
     I23["#23 credentials/webhooks"]
     I25["#25 generic sources — deferred"]
-    I30["#30 binary runtime deps — in progress"]
+    I30["#30 binary runtime deps — completed"]
     I31["#31 empty output dirs — completed"]
-    I24["#24 UI/UX redesign"]
+    I24["#24 UI/UX redesign — ready"]
     I33["#33 payload idea"]
     I34["#34 container idea"]
 
     I12 --> I20
     I20 --> I22 & I23
-    I30 --> I24
 ```
 
 Arrows are current hard implementation gates. #12 and #20 are completed
-historical foundations, and #31 is now complete. #25 remains available as future source-expansion work
-but is deliberately not a hard gate for #24. #21, #22 and #23 do not block the
-redesign. Coordination relationships are described above and are deliberately
-absent from the hard-dependency graph.
+historical foundations, and #30 and #31 are complete. The former #30 → #24
+gate is satisfied and no longer active. #25 remains available as future
+source-expansion work but is deliberately not a hard gate for #24. #21, #22
+and #23 do not block the redesign. Coordination relationships are described
+above and are deliberately absent from the hard-dependency graph.
 
 ## Completed foundations
 
@@ -108,6 +108,7 @@ packaging work remains part of the baseline. In particular,
 [#19](https://github.com/ProBatou/DebBuilder/issues/19),
 [#20](https://github.com/ProBatou/DebBuilder/issues/20),
 [#27](https://github.com/ProBatou/DebBuilder/issues/27),
-[#28](https://github.com/ProBatou/DebBuilder/issues/28) and
+[#28](https://github.com/ProBatou/DebBuilder/issues/28),
+[#30](https://github.com/ProBatou/DebBuilder/issues/30) and
 [#32](https://github.com/ProBatou/DebBuilder/issues/32) are closed. Later work
 must preserve their relevant contracts.

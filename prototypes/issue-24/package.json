@@ -1,0 +1,21 @@
+{
+  "name": "debbuilder-issue-24-design-spike",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "check": "svelte-check --tsconfig ./jsconfig.json",
+    "test:browser": "node tests/reference.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@sveltejs/vite-plugin-svelte": "7.3.1",
+    "svelte": "5.57.1",
+    "svelte-check": "^4.3.0",
+    "typescript": "^5.9.0",
+    "vite": "8.3.1"
+  }
+}

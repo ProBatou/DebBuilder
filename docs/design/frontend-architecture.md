@@ -1,5 +1,7 @@
 # #24A — Frontend architecture decision
 
+**#24B update:** the isolated spike supports [adopting Svelte](24b-decision.md) for the later admin migration; this document remains the #24A comparison.
+
 ## Current architecture and pressure points
 
 The frontend is one HTML document with ordered classic scripts, global `let` state, page functions and string-template renderers. It has no bundler or client router. That is deployable as static files by the Python server and Debian package. Existing `ui_core.js`, `components.css`, `pages.css`, Recipe modules and page modules show useful factoring, and Playwright plus Node JS tests already cover behavior.

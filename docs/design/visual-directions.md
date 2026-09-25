@@ -1,5 +1,7 @@
 # #24A — Visual directions and design system seed
 
+**#24B operator decision:** use A as the reference language and borrow B guidance for first-package and complex steps. See [design system v0](system/principles.md) and [references](references/README.md).
+
 These are three comparable candidates for six later high-fidelity desktop/mobile reference screens: Overview, Recipe editor, Run detail, Packages/Repository, System, Settings. None is selected at #24A.
 
 | Dimension | A. Calm operations desk | B. Guided workshop | C. Compact control room |

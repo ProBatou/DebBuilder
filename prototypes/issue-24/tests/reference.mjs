@@ -1,14 +1,16 @@
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {createServer} from 'node:net';
-import {mkdir} from 'node:fs/promises';
+import {mkdir,readFile} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 import path from 'node:path';
 import {chromium} from '@playwright/test';
+import {publicRepositoryFixture as publicRepo} from '../src/lib/publicRepositoryFixture.js';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const captures=path.resolve(root,'../../docs/design/references');
-const capture=process.argv.includes('--capture');
+const publicOnly=process.argv.includes('--capture-public');
+const capture=process.argv.includes('--capture')||publicOnly;
 const views=['overview','packages','recipes','runs','system','settings'];
 const labels={overview:'Overview',packages:'Packages',recipes:'Recipes',runs:'Runs',system:'System',settings:'Settings'};
 async function freePort(){const server=createServer();await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const port=server.address().port;await new Promise(resolve=>server.close(resolve));return port;}
@@ -27,8 +29,20 @@ async function open(view='overview',size='desktop',theme='light',locale='en',sce
   await page.waitForFunction(()=>{const root=getComputedStyle(document.documentElement).color;return getComputedStyle(document.querySelector('main h1')).color===root&&[...document.querySelectorAll('.panel h2')].every(node=>getComputedStyle(node).color===root);});
   return {page,errors,viewport};
 }
+async function openPublic(size='desktop',scheme='light',locale='en'){
+  const viewport=size==='mobile'?{width:390,height:844}:{width:1440,height:1000};
+  const context=await browser.newContext({viewport,deviceScaleFactor:1,reducedMotion:'reduce',colorScheme:scheme,locale:{en:'en-US',fr:'fr-FR',de:'de-DE',es:'es-ES'}[locale]});
+  await context.grantPermissions(['clipboard-read','clipboard-write'],{origin:base.slice(0,-1)});
+  const page=await context.newPage();
+  const errors=[];page.on('pageerror',error=>errors.push(error.message));
+  const response=await page.goto(`${base}repository-public.html?clean=1`);
+  assert.equal(response?.status(),200,'public HTML entry is served');
+  await page.waitForFunction(expected=>document.documentElement.lang===expected,locale);
+  await page.waitForFunction(()=>document.querySelector('.public-page')&&document.querySelector('main h1'));
+  return {page,errors,viewport};
+}
 async function fit(page,viewport,name){const width=await page.evaluate(()=>document.documentElement.scrollWidth);assert.ok(width<=viewport.width,`${name} overflows by ${width-viewport.width}px`);}
-async function shot(page,name){if(capture)await page.screenshot({path:path.join(captures,`${name}.png`),fullPage:true,style:'.prototype-tools,.tool-reopen{visibility:hidden!important}'});}
+async function shot(page,name){if(capture&&(!publicOnly||name.startsWith('public-repository-')))await page.screenshot({path:path.join(captures,`${name}.png`),fullPage:true,style:'.prototype-tools,.tool-reopen{visibility:hidden!important}'});}
 async function nav(page,name,mobile=false){if(mobile)await page.getByRole('button',{name:'Open navigation'}).click();await page.locator('.sidebar nav button').filter({hasText:labels[name]}).click();assert.equal(await page.locator('main h1').textContent(),labels[name]);}
 try{
  await ready(base);browser=await chromium.launch({headless:true});if(capture)await mkdir(captures,{recursive:true});
@@ -87,5 +101,44 @@ try{
   assert.deepEqual(errors,[]);await page.close();
  }
  for(const locale of ['en','fr','de','es'])for(const size of ['desktop','mobile']){const {page,errors,viewport}=await open('settings',size,'light',locale,'long');for(const view of views){if(view!=='settings'){if(size==='mobile')await page.locator('.mobile-top .icon-button').click();await page.locator('.sidebar nav button').nth(views.indexOf(view)).click();}await fit(page,viewport,`${locale}-${size}-${view}`);}assert.deepEqual(errors,[]);await page.close();}
- console.log('Browser reference checks passed: six screens on desktop/mobile, theme and locale combinations, navigation, fixtures, persistence, keyboard, responsive overflow.');
+ const installerTemplate=await readFile(path.resolve(root,'../../debbuilder/repository_templates/install.sh'),'utf8');
+ assert.ok(installerTemplate.includes('Signed-By: /etc/apt/keyrings/debbuilder.gpg'));
+ assert.ok(installerTemplate.includes('apt-get update'));
+ assert.equal(publicRepo.baseUrl,'https://repo.probatou.com');
+ const publicColors={};
+ for(const [size,scheme,locale,captureName] of [
+  ['desktop','light','en','public-repository-desktop-light-en'],
+  ['desktop','dark','en','public-repository-desktop-dark-en'],
+  ['mobile','light','en','public-repository-mobile-light-en'],
+  ['mobile','dark','de','public-repository-mobile-dark-de'],
+  ['mobile','light','fr',null],['desktop','light','es',null],
+ ]){
+  const {page,errors,viewport}=await openPublic(size,scheme,locale);
+  assert.equal(await page.locator('.sidebar,.workspace,.page-title,.prototype-tools').count(),0,'public page contains no admin shell');
+  assert.equal(await page.getByRole('heading',{name:'Packages',exact:true}).count(),0);
+  assert.equal(await page.locator('.public-page').count(),1);
+  await fit(page,viewport,`public-${size}-${scheme}-${locale}`);
+  assert.equal(await page.getByRole('link',{name:/InRelease/}).getAttribute('href'),`${publicRepo.baseUrl}/dists/Luminous/InRelease`);
+  assert.equal(await page.getByRole('link',{name:/Public signing key|Öffentlicher Signaturschlüssel|Clé de signature publique|Clave pública de firma/}).getAttribute('href'),`${publicRepo.baseUrl}/repository.gpg`);
+  if(size==='desktop'&&locale==='en')publicColors[scheme]=await page.evaluate(()=>getComputedStyle(document.documentElement).backgroundColor);
+  if(captureName)await shot(page,captureName);
+  if(locale==='en'&&scheme==='light'){
+   await page.getByRole('button',{name:'Copy Generated installer'}).click();
+   assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),`curl -fsSL ${publicRepo.baseUrl}/install.sh | sudo bash`);
+   await page.getByRole('button',{name:'Copy Add repository'}).click();
+   assert.ok((await page.evaluate(()=>navigator.clipboard.readText())).includes('Signed-By: /etc/apt/keyrings/debbuilder.gpg'));
+   await page.getByRole('button',{name:'Copy Update package lists'}).focus();await page.keyboard.press('Enter');
+   assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),'sudo apt-get update');
+  }
+  if(locale==='de'){
+   assert.equal(await page.locator('main h1').textContent(),'DebBuilder-Repository');
+   await page.getByRole('combobox',{name:'Sprache'}).selectOption('fr');
+   assert.equal(await page.locator('main h1').textContent(),'Dépôt DebBuilder');
+   await page.reload();await page.waitForFunction(()=>document.documentElement.lang==='fr');
+  }
+  assert.deepEqual(errors,[],`public ${size} ${scheme} ${locale} page errors`);
+  await page.close();
+ }
+ assert.notEqual(publicColors.light,publicColors.dark,'public landing follows prefers-color-scheme');
+ console.log('Browser reference checks passed: admin screens and independent public landing, Light/Dark, four locales, copy, links, responsive overflow and keyboard paths.');
 }finally{await browser?.close();server.kill('SIGTERM');}

@@ -12,3 +12,13 @@ These PNGs are generated from the isolated Svelte fixture prototype with `npm ru
 | Settings | [General](desktop-settings-light-en.png) | [General](mobile-settings-light-en.png) | [dark ES](desktop-settings-dark-es-normal.png) |
 
 The browser test also exercises 0/1/3/8+ actions, 28 packages, 30 Runs, all four locales across all six pages at desktop/mobile widths, sidebar collapse/persistence/sticky anchors, mobile navigation, Recipe blocker, dialogs, Run poller mounting, theme and language persistence and overflow. The live preview is required to review secondary repository inventory, search, selection, drill-down, Advanced disclosures and theme/language controls.
+
+## Public APT landing — separate reference
+
+The **[public APT landing](../public-repository-landing.md)** is a second, standalone prototype entry at `/repository-public.html`. It represents the future unauthenticated page served by `repo.probatou.com`. It is distinct from the Packages > Repository inventory admin subview above. It has no sidebar, Packages header, admin controls or API. Its package rows and status are fixtures; its command and link paths follow the existing repository installer/public-file contract.
+
+| Light desktop | Dark desktop | Light mobile | Long locale / Dark mobile |
+| --- | --- | --- | --- |
+| [EN](public-repository-desktop-light-en.png) | [EN](public-repository-desktop-dark-en.png) | [EN](public-repository-mobile-light-en.png) | [DE](public-repository-mobile-dark-de.png) |
+
+Open `http://localhost:4173/repository-public.html` after starting the prototype preview. The small language control changes EN/FR/DE/ES; Light/Dark follows the browser's color scheme. `?clean=1` hides the fixture footer note for screenshots.

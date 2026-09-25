@@ -1,16 +1,17 @@
-# Isolated #24B Svelte design spike
+# Isolated #24B2 Svelte design reference
 
-This directory is a design reference. It does not replace `static/`, call the DebBuilder API, or write production data. Source and Run values are deterministic fixtures, and action dialogs explain the real backend boundary. The six navigation destinations follow the approved information architecture. Use the Reference state selector to inspect normal, blocker, running, failed, empty and recovery-blocked states.
+This directory renders deterministic fixture data only. It does not replace `static/`, call a DebBuilder API, or write production data. The six destinations are Overview, Packages, Recipes, Runs, System and Settings; Repository inventory is a read-only secondary view reached from a compact Packages summary. Its installation commands can be copied locally; public file controls remain fixture dialogs. The desktop sidebar is viewport anchored and locally collapsible; mobile uses a separate menu. Theme (System/Light/Dark) and language (EN/FR/DE/ES) are local browser preferences.
 
 ```sh
 npm ci
 npm run check
 npm run build
+npm run test:i18n
 npm run test:browser
-npm run test:browser -- --capture  # regenerate docs/design/references/*.png
-npm run preview
+npm run test:browser -- --capture
+npm run preview -- --host 0.0.0.0
 ```
 
-The build is relative-base and emits hashed JS/CSS plus a manifest in ignored `dist/`. A future migration would run `npm ci && npm run build` **before** Debian packaging, then copy the built admin entry/assets into the source `static/` tree packaged by the built-in Recipe (`build.output.paths` includes `static`). `RuntimeConfig.static` and the HTTP handler already serve HTML/JS/CSS from that tree. The manifest is a build artifact, not a runtime API. The current static handler has a narrow MIME mapping, so a migration must either keep output to HTML/JS/CSS or deliberately extend that mapping for any added asset types. Do not modify the built-in Recipe/release pipeline during this spike. Node/npm and `node_modules` remain build/test dependencies, not Debian runtime dependencies.
+Use the floating Prototype controls to switch normal, blocker, running, failed, empty, recovery, 0/1/3/8+ actions, many packages, many Runs and long Advanced fixtures. Add `?clean=1` for a UI-only screenshot with no fixture controls; `?view=runs&scenario=failed&clean=1` opens a specific state. All action dialogs explain the future backend boundary and send no requests. See [reference index](../../docs/design/references/README.md) and [design system](../../docs/design/system/principles.md).
 
-The production UI still needs real API adapters, Recipe v5 round-trip, auth/session, lifecycle parity and package tests. This reference does not claim those are implemented.
+The relative-base Vite build emits hashed JS/CSS plus a manifest into ignored `dist/`. A future migration must handle Recipe v5 round-trip, auth/session, lifecycle/automation parity, packaging, asset caching and API authority. This checkpoint does not implement those tasks.

@@ -1,100 +1,87 @@
 <script>
-  import {tick as afterUpdate} from 'svelte';
-  import StatusChip from './lib/StatusChip.svelte';
-  import Provenance from './lib/Provenance.svelte';
+  import {onMount, tick} from 'svelte';
+  import {views, scenarios} from './lib/fixtures.js';
+  import {translate, localeNames} from './lib/i18n.js';
   import Modal from './lib/Modal.svelte';
-  import RunPoller from './lib/RunPoller.svelte';
-  import RecipePlan from './lib/RecipePlan.svelte';
-  import RunDependencySummary from './lib/RunDependencySummary.svelte';
-  import {views, scenarios, packageRows, runStages, fixtureText} from './lib/fixtures.js';
+  import Overview from './pages/Overview.svelte';
+  import Packages from './pages/Packages.svelte';
+  import Recipes from './pages/Recipes.svelte';
+  import Runs from './pages/Runs.svelte';
+  import System from './pages/System.svelte';
+  import Settings from './pages/Settings.svelte';
 
   let view = 'overview';
   let scenario = 'normal';
+  let locale = 'en';
+  let theme = 'system';
+  let systemDark = false;
+  let collapsed = false;
   let menuOpen = false;
-  let mobileMenuButton;
-  let advancedOpen = false;
+  let toolsOpen = true;
+  let toolsEnabled = true;
   let modal = '';
-  let follow = true;
-  let tick = 0;
-  let selectedPackage = 'zoraxy';
-  let sourceChoice = 'Release asset';
-  let proposedDirectory = false;
-  let testing = false;
-  $: state = fixtureText[scenario];
-  $: blocker = scenario === 'blocker' && !proposedDirectory;
-  $: canBuild = scenario !== 'recovery' && scenario !== 'running' && !blocker;
-  $: activeStage = scenario === 'running' ? Math.min(3 + Math.floor(tick / 3) % 3, 5) : scenario === 'failed' ? 6 : scenario === 'blocker' ? 2 : 7;
-  $: logLines = scenario === 'running'
-    ? [`00:00 Source resolved · GitHub Release asset`, `00:01 Checksum recorded · zoraxy_linux_amd64`, `00:02 Runtime library analysis ready`, `00:0${tick % 10} Staging /usr/local/bin/zoraxy`]
-    : scenario === 'failed'
-      ? ['00:00 Build artifact verified', '00:01 Offline validation started', '00:02 Service failed to start: WorkingDirectory missing']
-      : scenario === 'recovery'
-        ? ['Previous process ended before a terminal Run state was recorded.', 'Admission remains blocked until containment is resolved.']
-        : ['Source identity resolved · v3.1.4', 'Build artifact 3.1.4-1 verified', 'Offline Validation passed · matching proof recorded'];
-  async function navigate(name) { view = name; menuOpen = false; window.scrollTo(0, 0); await afterUpdate(); document.querySelector('#main h1')?.focus(); }
-  function closeMenu() { menuOpen = false; mobileMenuButton?.focus(); }
-  function setScenario(value) { scenario = value; proposedDirectory = false; testing = false; tick = 0; }
-  function nextAction() { if (scenario === 'blocker') navigate('recipes'); else if (scenario === 'failed' || scenario === 'recovery' || scenario === 'running') navigate('runs'); else navigate('packages'); }
+  let focusPackage = '';
+  let focusRun = '';
+  let focusRecipe = '';
+  let menuButton;
+  $: t = (key, values = {}) => translate(locale, key, values);
+  $: effectiveTheme = theme === 'system' ? (systemDark ? 'dark' : 'light') : theme;
+  $: if (typeof document !== 'undefined') {
+    document.documentElement.dataset.theme = effectiveTheme;
+    document.documentElement.lang = locale;
+  }
+  onMount(() => {
+    locale = ['en','fr','de','es'].includes(localStorage.getItem('debBuilder24Locale')) ? localStorage.getItem('debBuilder24Locale') : 'en';
+    theme = ['system','light','dark'].includes(localStorage.getItem('debBuilder24Theme')) ? localStorage.getItem('debBuilder24Theme') : 'system';
+    collapsed = localStorage.getItem('debBuilder24SidebarCollapsed') === '1';
+    const media = matchMedia('(prefers-color-scheme: dark)');
+    const update = () => systemDark = media.matches;
+    update(); media.addEventListener('change', update);
+    const requested = new URLSearchParams(location.search);
+    if (scenarios.includes(requested.get('scenario'))) scenario = requested.get('scenario');
+    if (views.some(([key]) => key === requested.get('view'))) view = requested.get('view');
+    if (requested.get('clean') === '1') {toolsOpen = false;toolsEnabled = false;}
+    return () => media.removeEventListener('change',update);
+  });
+  async function navigate(target, id = '') {
+    view = target;
+    focusPackage = target === 'packages' ? id : '';
+    focusRun = target === 'runs' ? id : '';
+    focusRecipe = target === 'recipes' ? id : '';
+    menuOpen = false;
+    window.scrollTo(0,0);
+    await tick();
+    document.querySelector('#main h1')?.focus();
+  }
+  function toggleSidebar() {collapsed = !collapsed; localStorage.setItem('debBuilder24SidebarCollapsed',collapsed?'1':'0');}
+  function closeMobileMenu() {menuOpen = false; menuButton?.focus();}
+  function changeTheme(value) {theme=value;localStorage.setItem('debBuilder24Theme',value);}
+  function changeLocale(value) {locale=value;localStorage.setItem('debBuilder24Locale',value);}
+  function openModal(name) {modal=name;}
 </script>
-<svelte:window on:keydown={(event) => { if (event.key === 'Escape' && menuOpen) closeMenu(); }} />
-<svelte:head><title>DebBuilder · {views.find(row => row[0] === view)?.[1]} · #24B reference</title></svelte:head>
-<div class="prototype-banner"><span>DESIGN REFERENCE <strong>#24B</strong></span><span>Fixture data · actions are simulated</span></div>
-<div class="app-shell">
-  <aside class:open={menuOpen} class="sidebar" aria-label="Main navigation">
-    <div class="brand"><span class="brand-mark" aria-hidden="true">D<span>▪</span></span><div><strong>DebBuilder</strong><small>Package operations</small></div></div>
-    <nav aria-label="Primary">
-      {#each views as [key,label,icon]}
-        <button class:active={view === key} aria-current={view === key ? 'page' : undefined} on:click={() => navigate(key)}><span class="nav-icon" aria-hidden="true">{icon}</span>{label}</button>
-      {/each}
+<svelte:window on:keydown={(event) => {if(event.key==='Escape' && menuOpen) closeMobileMenu();}} />
+<svelte:head><title>DebBuilder · {t('nav.'+view)}</title></svelte:head>
+<div class="shell" class:sidebar-collapsed={collapsed}>
+  <aside class:mobile-open={menuOpen} class="sidebar" aria-label={t('nav.open')}>
+    <div class="sidebar-head"><div class="brand-mark" aria-hidden="true">D<span>▪</span></div><div class="brand-copy"><strong>DebBuilder</strong><small>{t('nav.version')}</small></div><button class="collapse-button" title={collapsed?t('nav.expand'):t('nav.collapse')} aria-label={collapsed?t('nav.expand'):t('nav.collapse')} aria-expanded={!collapsed} on:click={toggleSidebar}>{collapsed?'»':'«'}</button></div>
+    <nav aria-label={t('nav.open')}>
+      {#each views as [key,icon]}<button class:active={view===key} title={t('nav.'+key)} aria-label={t('nav.'+key)} aria-current={view===key?'page':undefined} on:click={() => navigate(key)}><span class="nav-icon" aria-hidden="true">{icon}</span><span class="nav-text">{t('nav.'+key)}</span></button>{/each}
     </nav>
-    <div class="sidebar-bottom"><span class="repo-dot" aria-hidden="true"></span><div><strong>Repository online</strong><small>stable · amd64</small></div></div>
+    <div class="sidebar-bottom"><div class="repo-indicator" title={t('nav.repositoryOnline')} aria-label={t('nav.repositoryOnline')}><span class="repo-dot" aria-hidden="true"></span><div class="repo-copy"><strong>{t('nav.repositoryOnline')}</strong><small>Luminous · amd64</small></div></div><span class="version" title={t('nav.version')}>{collapsed?'v1.0.0':t('nav.version')}</span></div>
   </aside>
-  {#if menuOpen}<button class="nav-scrim" aria-label="Close navigation" on:click={closeMenu}></button>{/if}
+  {#if menuOpen}<button class="nav-scrim" aria-label={t('nav.close')} on:click={closeMobileMenu}></button>{/if}
   <div class="workspace">
-    <header class="topbar"><button bind:this={mobileMenuButton} class="mobile-menu icon-button" aria-label="Open navigation" aria-expanded={menuOpen} on:click={() => menuOpen = !menuOpen}>☰</button><div class="breadcrumb">Workspace <span>/</span> <strong>{views.find(row => row[0] === view)?.[1]}</strong></div><div class="topbar-actions"><span class="topbar-env">LOCAL REFERENCE</span><span class="avatar" aria-label="Operator">OP</span></div></header>
+    <header class="mobile-top"><button bind:this={menuButton} class="icon-button" aria-label={t('nav.open')} aria-expanded={menuOpen} on:click={() => menuOpen=!menuOpen}>☰</button><strong>DebBuilder</strong><span class="mobile-version">v1.0.0</span></header>
     <main id="main" class="content">
-      <div class="page-heading"><div><p class="eyebrow">{view === 'overview' ? 'WORKSPACE' : view === 'runs' ? 'EXECUTION' : view.toUpperCase()}</p><h1 tabindex="-1">{views.find(row => row[0] === view)?.[1]}</h1><p class="subhead">{view === 'overview' ? 'Keep packages moving, with blockers and next actions in view.' : view === 'packages' ? 'Your managed packages, artifacts, and public repository.' : view === 'recipes' ? 'Define what DebBuilder will do before you run it.' : view === 'runs' ? 'Follow execution, validation, publication, and recovery.' : view === 'system' ? 'Host capability and diagnostics, explained by workflow impact.' : 'Application and integration defaults.'}</p></div>
-        {#if view === 'overview' || view === 'packages'}<button class="button primary" on:click={() => navigate('recipes')}>+ Create package</button>{:else if view === 'recipes'}<button class="button primary" on:click={() => modal = 'test'} disabled={blocker || scenario === 'recovery'}>Test plan <span aria-hidden="true">→</span></button>{:else if view === 'system'}<button class="button secondary" on:click={() => modal = 'support'}>Download support bundle</button>{/if}
-      </div>
-      <div class="scenario-bar"><label for="scenario">Reference state</label><select id="scenario" bind:value={scenario} on:change={(event) => setScenario(event.currentTarget.value)}>{#each scenarios as [key,label]}<option value={key}>{label}</option>{/each}</select><span class="scenario-note">Deterministic design fixture</span></div>
-
-      {#if view === 'overview'}
-        <section class={'hero hero-'+state.tone} aria-label="Current attention"><div class="hero-icon" aria-hidden="true">{scenario === 'normal' ? '✓' : scenario === 'running' ? '◌' : scenario === 'empty' ? '＋' : '!'}</div><div><p class="eyebrow">{scenario === 'normal' ? 'TODAY’S STATUS' : 'NEEDS ATTENTION'}</p><h2>{state.headline}</h2><p>{state.detail}</p></div><button class="button secondary" on:click={nextAction}>{scenario === 'normal' ? 'Review packages' : scenario === 'empty' ? 'Create first package' : 'View next action'} →</button></section>
-        <div class="metric-grid"><article class="metric"><span>Managed packages</span><strong>{scenario === 'empty' ? '0' : '4'}</strong><small>Across the current repository</small></article><article class="metric"><span>Active runs</span><strong>{scenario === 'running' || scenario === 'recovery' ? '1' : '0'}</strong><small>{scenario === 'recovery' ? 'Admission blocked' : 'Queue available'}</small></article><article class="metric"><span>Ready to publish</span><strong>{scenario === 'empty' ? '0' : '1'}</strong><small>Exact artifact validated</small></article></div>
-        <div class="two-column"><section class="panel"><div class="section-head"><div><p class="eyebrow">PACKAGE FLOW</p><h2>Next actions</h2></div><button class="text-button" on:click={() => navigate('packages')}>All packages →</button></div>{#if scenario === 'empty'}<div class="empty-state"><strong>Start with a GitHub source</strong><p>A short guided plan will prepare your first Recipe.</p><button class="button primary" on:click={() => navigate('recipes')}>Choose source</button></div>{:else}<div class="attention-row"><div class="row-icon amber">!</div><div><strong>Pocket-ID</strong><small>Validate build 1.8.2-1 before publishing</small></div><StatusChip label="Validation needed" tone="warning" icon="!" /></div><div class="attention-row"><div class="row-icon green">✓</div><div><strong>Zoraxy</strong><small>Validated asset 3.1.4-1</small></div><StatusChip label="Ready to publish" tone="ready" icon="✓" /></div><div class="attention-row"><div class="row-icon red">×</div><div><strong>Archive Agent</strong><small>Build failed at output resolution</small></div><StatusChip label="Review failure" tone="danger" icon="!" /></div>{/if}</section>
-          <section class="panel"><div class="section-head"><div><p class="eyebrow">APT REPOSITORY</p><h2>Public distribution</h2></div><StatusChip label="Available" tone="success" icon="✓" /></div><div class="repo-summary"><span>Repository URL</span><code>https://repo.example.invalid/deb</code><span>Distribution</span><strong>stable · main · amd64</strong><span>Last publication</span><strong>Today at 09:42</strong></div><button class="text-button" on:click={() => navigate('packages')}>View repository packages →</button></section></div>
-        <section class="panel recent-panel"><div class="section-head"><div><p class="eyebrow">LATEST OPERATIONS</p><h2>Recent runs</h2></div><button class="text-button" on:click={() => navigate('runs')}>All runs →</button></div><div class="recent-list"><div><span class="tiny-dot green"></span><strong>zoraxy · Build</strong><small>Asset v3.1.4 · 9 min ago</small><StatusChip label="Success" tone="success" icon="✓" /></div><div><span class="tiny-dot amber"></span><strong>pocket-id · Validation</strong><small>Offline environment · 32 min ago</small><StatusChip label="Review" tone="warning" icon="!" /></div></div></section>
-      {:else if view === 'packages'}
-        <div class="tab-row" aria-label="Package sections"><button aria-current="page">Packages</button><button on:click={() => modal = 'repository'}>Repository inventory</button></div>
-        <div class="package-layout"><section class="panel package-list"><div class="section-head"><div><p class="eyebrow">MANAGED PACKAGES</p><h2>Package status</h2></div><span class="muted">{scenario === 'empty' ? 0 : packageRows.length} total</span></div>{#if scenario === 'empty'}<div class="empty-state"><strong>No package records</strong><p>Choose a GitHub source and review its Recipe.</p><button class="button primary" on:click={() => navigate('recipes')}>Create package</button></div>{:else}<div class="table-wrap"><table><thead><tr><th>Package</th><th>State</th><th>Built</th><th>Published</th><th></th></tr></thead><tbody>{#each packageRows as row}<tr class:selected={selectedPackage === row.name}><td><strong>{row.name}</strong><small>{row.source}</small></td><td><StatusChip label={row.status} tone={row.tone} icon={row.tone === 'danger' ? '!' : '✓'} /></td><td>{row.version}</td><td>{row.published}</td><td><button class="text-button" aria-label={'Open '+row.name} on:click={() => selectedPackage = row.name}>Open →</button></td></tr>{/each}</tbody></table></div>{/if}</section><aside class="panel detail-panel"><p class="eyebrow">PACKAGE DETAIL</p><h2>{selectedPackage}</h2><p class="muted">GitHub Release asset · linux-amd64</p><div class="detail-divider"></div><dl class="fact-list"><div><dt>Available source</dt><dd>v3.1.4 · Release asset</dd></div><div><dt>Latest build</dt><dd>3.1.4-1 · amd64</dd></div><div><dt>Validation</dt><dd><StatusChip label="Passed" tone="success" icon="✓" /></dd></div><div><dt>Publication</dt><dd>3.1.3-1 published</dd></div></dl><div class="detail-actions"><button class="button primary" on:click={() => modal = 'publish'}>Review publication</button><button class="button secondary" on:click={() => navigate('runs')}>View Run</button></div></aside></div>
-        <section class="panel repository-panel"><div class="section-head"><div><p class="eyebrow">PUBLIC REPOSITORY</p><h2>Distribution status</h2></div><StatusChip label="Available" tone="success" icon="✓" /></div><p>Published artifacts remain distinct from built and validated versions. Install instructions and signed metadata are on the public landing page.</p><div class="repo-metadata"><span>stable / main</span><span>amd64</span><span>repository.gpg</span><span>InRelease signed</span></div></section>
-      {:else if view === 'recipes'}
-        <div class="recipe-layout"><div class="recipe-main"><section class="progress-strip" aria-label="Recipe progress"><div class="done"><b>1</b><span>GitHub source</span></div><div class="done"><b>2</b><span>Detection</span></div><div class="current"><b>3</b><span>Review plan</span></div><div><b>4</b><span>Test & Build</span></div></section>
-          <section class="panel"><div class="section-head"><div><p class="eyebrow">SOURCE</p><h2>Choose GitHub source</h2><p>Choose the artifact DebBuilder will use. Tracking can be changed in Advanced.</p></div><Provenance kind="Configured" /></div><div class="field-grid"><label><span>GitHub repository</span><input value="zoraxy/zoraxy" readonly aria-describedby="source-help"></label><label><span>Source type</span><select bind:value={sourceChoice}><option>Release asset</option><option>GitHub source archive</option><option>GitHub repository</option><option>Upstream Debian package</option></select></label></div><p class="field-help" id="source-help">GitHub sources only. This reference uses a fixture and does not fetch upstream data.</p><div class="resolved-source"><span class="check-icon">✓</span><div><strong>Exact source identity</strong><p>Previous Test fixture: release <b>v3.1.4</b> · asset <code>zoraxy_linux_amd64</code> · immutable identity recorded by its Run</p></div><Provenance kind="Resolved" /></div></section>
-          <section class="panel"><div class="section-head"><div><p class="eyebrow">DETECTION</p><h2>What we found</h2><p>Review the proposal before it becomes your saved plan.</p></div><Provenance kind="Detected" /></div><div class="detected-grid"><div><span>Project</span><strong>Prebuilt Linux executable</strong><small>Single Release asset</small></div><div><span>Build</span><strong>No compilation required</strong><small>Copy and package the verified asset</small></div><div><span>Runtime libraries</span><strong>Checked after Build</strong><small>Final Depends require staged payload</small></div></div></section>
-          <RecipePlan {blocker} {proposedDirectory} onConfirm={() => proposedDirectory = true} />
-          <section class="panel advanced-panel"><button class="disclosure-trigger" aria-expanded={advancedOpen} on:click={() => advancedOpen = !advancedOpen}><span><p class="eyebrow">ADVANCED</p><strong>Review detailed controls</strong><small>Commands, environment, mappings, permissions, systemd, resource limits and maintainer scripts.</small></span><span aria-hidden="true">{advancedOpen ? '⌃' : '⌄'}</span></button>{#if advancedOpen}<div class="advanced-content"><div><strong>Build & source</strong><p>Commands · environment · working directory · output paths</p></div><div><strong>Install & service</strong><p>Mappings · owner/group/mode · systemd directives</p></div><div><strong>Runtime & safeguards</strong><p>Resource limits · ELF details and overrides · maintainer scripts</p></div><div class="inline-note">These groups are a visual disclosure prototype; the canonical Recipe v5 editor remains in the existing UI.</div></div>{/if}</section></div>
-          <aside class="recipe-aside"><div class="panel sticky-panel"><p class="eyebrow">NEXT STEP</p><h2>{blocker ? 'Confirm a directory' : 'Test this plan'}</h2><p>{blocker ? 'One item needs your decision before the plan can be prepared.' : 'Test resolves and prepares the source without executing build commands.'}</p><button class="button primary wide" disabled={blocker || scenario === 'recovery'} on:click={() => {testing = true; modal = 'test';}}>Test plan →</button><button class="button secondary wide" disabled={!canBuild} on:click={() => modal = 'build'}>Build package</button><small>Run admission and eligibility stay authoritative in the backend.</small></div></aside></div>
-      {:else if view === 'runs'}
-        <RunPoller {scenario} onSnapshot={(snapshot) => tick = snapshot.sequence} />
-        <div class="run-header panel" data-poll-count={tick}><div><p class="eyebrow">RUN · UI-024-REFERENCE</p><h2>zoraxy · {scenario === 'failed' ? 'Validation' : scenario === 'blocker' ? 'Test' : 'Build'}</h2><p>Recipe snapshot · v3.1.4 · GitHub Release asset · started 09:42</p></div><div class="run-header-right"><StatusChip label={state.run} tone={state.tone} icon={scenario === 'running' ? '◌' : scenario === 'normal' ? '✓' : '!'} /><button class="button secondary" on:click={() => modal = 'inspect'}>Inspect Run</button></div></div>
-        {#if scenario === 'recovery' || scenario === 'blocker' || scenario === 'failed'}<section class="diagnostic" role="alert"><div class="diagnostic-icon">!</div><div><p class="eyebrow">{scenario === 'recovery' ? 'ADMISSION BLOCKED' : 'PRIMARY DIAGNOSTIC'}</p><h2>{scenario === 'recovery' ? 'Interrupted Run remains unresolved' : scenario === 'failed' ? 'Offline service validation failed' : 'Dependency requirement unresolved'}</h2><p>{scenario === 'recovery' ? 'The previous command containment cannot be confirmed stopped. Run history remains readable; no new Build/Test is admitted.' : scenario === 'failed' ? 'The service could not enter /opt/zoraxy. Add the directory to the install plan and revalidate the exact artifact.' : 'One requirement has no safe Debian package relation. Review the advanced dependency evidence before Build.'}</p><code>{scenario === 'recovery' ? 'execution_recovery_unresolved' : scenario === 'failed' ? 'validation_service_failed' : 'soname_unresolved'}</code></div><button class="button secondary" on:click={() => navigate(scenario === 'recovery' ? 'system' : 'recipes')}>Review {scenario === 'recovery' ? 'system' : 'Recipe'} →</button></section>{/if}
-        <div class="run-layout"><section class="panel stage-panel"><div class="section-head"><div><p class="eyebrow">LIFECYCLE</p><h2>Stages</h2></div><span class="muted">{scenario === 'running' ? 'Live' : 'Recorded'}</span></div><ol class="stage-list">{#each runStages as stage, i}<li class:stage-active={i === activeStage} class:stage-complete={i < activeStage}><span class="stage-marker">{i < activeStage ? '✓' : i === activeStage ? '◌' : '·'}</span><div><strong>{stage}</strong><small>{i < activeStage ? 'Completed' : i === activeStage ? (scenario === 'normal' ? 'Ready to publish' : state.run) : 'Not reached'}</small></div></li>{/each}</ol></section><div class="run-main"><section class="panel action-panel"><div class="section-head"><div><p class="eyebrow">ACTIONS</p><h2>Move this artifact forward</h2></div></div><div class="action-grid"><div><strong>Execution</strong><p>Queued and running work can request cancellation.</p><button class="button secondary" disabled={scenario !== 'running'} on:click={() => modal = 'cancel'}>Request cancellation</button></div><div><strong>Validation</strong><p>Validate the exact built artifact in an offline environment.</p><button class="button secondary" disabled={scenario === 'running' || scenario === 'recovery' || scenario === 'empty'} on:click={() => modal = 'validate'}>{scenario === 'failed' || scenario === 'normal' ? 'Revalidate' : 'Validate'}</button></div><div><strong>Publication</strong><p>Publish only after a matching successful Validation proof.</p><button class="button primary" disabled={scenario !== 'normal'} on:click={() => modal = 'publish'}>Review publication</button></div></div></section>
-          <RunDependencySummary {scenario} />
-          <section class="panel log-panel"><div class="section-head"><div><p class="eyebrow">OUTPUT</p><h2>Run log</h2></div><div class="log-controls"><StatusChip label={scenario === 'running' ? 'Live' : 'Saved'} tone={scenario === 'running' ? 'info' : 'neutral'} icon="●" />{#if scenario === 'running'}<button class="button compact" on:click={() => follow = !follow}>{follow ? 'Pause follow' : 'Resume follow'}</button>{/if}</div></div><div class="log-box" role="log" aria-live="off"><pre>{logLines.join('\n')}</pre></div><p class="log-help">{scenario === 'running' ? (follow ? 'Following new output.' : 'Log follow paused; the Run continues.') : 'Saved output.'} Verbosity and raw diagnostics remain available in Advanced.</p></section></div></div>
-      {:else if view === 'system'}
-        <section class={'hero compact-hero hero-'+state.tone}><div class="hero-icon" aria-hidden="true">{scenario === 'recovery' ? '!' : '✓'}</div><div><p class="eyebrow">HOST READINESS</p><h2>{scenario === 'recovery' ? 'Build admission blocked' : 'Core checks are available'}</h2><p>{scenario === 'recovery' ? 'Recovery could not confirm an interrupted command has stopped.' : 'The host can accept ordinary package work; optional capabilities are shown below.'}</p></div></section>
-        <div class="system-grid"><section class="panel"><div class="section-head"><div><p class="eyebrow">CAPABILITIES</p><h2>Build & execution</h2></div><StatusChip label={scenario === 'recovery' ? 'Blocked' : 'Available'} tone={scenario === 'recovery' ? 'danger' : 'success'} icon={scenario === 'recovery' ? '!' : '✓'} /></div><div class="check-row"><div><strong>Build admission</strong><small>{scenario === 'recovery' ? 'Closed until recovery resolves' : 'Worker and queue available'}</small></div><StatusChip label={scenario === 'recovery' ? 'Blocked' : 'OK'} tone={scenario === 'recovery' ? 'danger' : 'success'} icon="✓" /></div><div class="check-row"><div><strong>Command containment</strong><small>systemd/cgroup support checked at admission</small></div><StatusChip label="Known" tone="info" icon="i" /></div><div class="check-row"><div><strong>Package tools</strong><small>dpkg-deb detected</small></div><StatusChip label="OK" tone="success" icon="✓" /></div></section><section class="panel"><div class="section-head"><div><p class="eyebrow">CAPABILITIES</p><h2>Validation & publication</h2></div></div><div class="check-row"><div><strong>Offline validation</strong><small>Container runtime must be verified for each attempt</small></div><StatusChip label="Check at use" tone="warning" icon="!" /></div><div class="check-row"><div><strong>APT repository</strong><small>Publication serialized; signed metadata available</small></div><StatusChip label="OK" tone="success" icon="✓" /></div><div class="check-row"><div><strong>Automation</strong><small>Scheduler available</small></div><StatusChip label="OK" tone="success" icon="✓" /></div></section></div>
-        <div class="two-column system-bottom"><section class="panel"><p class="eyebrow">SUPPORT</p><h2>Inspect and explain</h2><p>Read-only Recipe/Run inspectors and a bounded support bundle help diagnose failures without changing package state.</p><div class="button-row"><button class="button secondary" on:click={() => modal = 'inspect'}>Open inspector</button><button class="button secondary" on:click={() => modal = 'support'}>Support bundle</button></div></section><section class="panel"><p class="eyebrow">DEVELOPER</p><h2>API and runtime facts</h2><p>Recipe schema v5 · Run schema v4 · authentication mode OIDC/none by deployment.</p><button class="text-button" on:click={() => modal = 'openapi'}>View raw OpenAPI contract →</button></section></div>
-        <section class="panel managed-panel"><div><p class="eyebrow">SYSTEM-MANAGED SELF-BUILD</p><h2>DebBuilder Recipe</h2><p>Its plan is maintained by DebBuilder. Read-only source/build/install fields stay separate from operator-owned Recipes; only permitted operational overrides can change.</p></div><div class="managed-actions"><StatusChip label="Managed" tone="info" icon="i" /><button class="button secondary" on:click={() => modal = 'inspect'}>Inspect plan</button></div></section>
-      {:else if view === 'settings'}
-        <div class="settings-layout"><div class="settings-main"><section class="panel"><div class="section-head"><div><p class="eyebrow">GENERAL</p><h2>Workspace identity</h2></div><StatusChip label="Saved" tone="success" icon="✓" /></div><div class="field-grid"><label><span>Application name</span><input value="DebBuilder" readonly></label><label><span>Public URL</span><input value="https://debbuilder.example.invalid" readonly></label></div><p class="field-help">Reference only. The existing application persists settings through its current API.</p></section><section class="panel"><p class="eyebrow">INTEGRATIONS</p><h2>GitHub and repository</h2><div class="settings-row"><div><strong>GitHub integration</strong><small>Required to resolve private repositories</small></div><StatusChip label="Configured" tone="success" icon="✓" /></div><div class="settings-row"><div><strong>APT repository</strong><small>stable / main · amd64</small></div><StatusChip label="Available" tone="success" icon="✓" /></div><div class="settings-row"><div><strong>Notifications</strong><small>Optional updates and failures</small></div><StatusChip label="Off" tone="neutral" icon="·" /></div></section><section class="panel"><p class="eyebrow">SECURITY</p><h2>Authentication</h2><p>OIDC configuration and secret retention are explicit. An empty secret field means “keep the current value” in the existing Settings flow.</p><div class="settings-row"><div><strong>OIDC provider</strong><small>Operator login</small></div><StatusChip label="Configured" tone="success" icon="✓" /></div></section></div><aside class="settings-side"><section class="panel"><p class="eyebrow">AUTOMATION</p><h2>Default behavior</h2><p>New Recipes start manual. Review each Recipe policy before enabling periodic actions.</p><StatusChip label="Manual by default" tone="neutral" icon="·" /></section><section class="panel"><p class="eyebrow">MAINTENANCE</p><h2>Storage</h2><p>Managed storage: 125 KiB · 8 Runs. Cleanup affects history, not Recipes or published artifacts.</p><button class="button secondary" on:click={() => navigate('system')}>Open System maintenance →</button></section></aside></div>
-      {/if}
-      <footer class="reference-footer">DebBuilder #24B · Visual and interaction reference · No production data or backend mutations</footer>
+      <div class="page-title"><div><h1 tabindex="-1">{t('nav.'+view)}</h1><p>{t(view+'.subtitle')}</p></div>{#if view==='overview' || view==='packages'}<button class="button primary" on:click={() => navigate('recipes')}>+ {t('packages.create')}</button>{/if}</div>
+      {#if view==='overview'}<Overview {locale} {scenario} {navigate} />
+      {:else if view==='packages'}<Packages {locale} {scenario} {navigate} {focusPackage} {openModal} />
+      {:else if view==='recipes'}<Recipes {locale} {scenario} {focusRecipe} {openModal} />
+      {:else if view==='runs'}<Runs {locale} {scenario} {navigate} {focusRun} {openModal} />
+      {:else if view==='system'}<System {locale} {scenario} {openModal} />
+      {:else}<Settings {locale} {theme} {changeTheme} {changeLocale} {openModal} />{/if}
     </main>
   </div>
 </div>
-<Modal title={modal === 'cancel' ? 'Request cancellation' : modal === 'publish' ? 'Review publication' : modal === 'test' ? 'Test this plan' : modal === 'build' ? 'Build package' : modal === 'validate' ? 'Validate artifact' : modal === 'repository' ? 'Repository inventory' : modal === 'support' ? 'Support bundle' : modal === 'openapi' ? 'OpenAPI contract' : 'Read-only inspection'} open={!!modal} onClose={() => modal = ''}>
-  <p class="modal-copy">{modal === 'test' ? 'A real Test would create an asynchronous Run, resolve the source and prepare a plan. It does not execute build commands or dpkg-deb.' : modal === 'publish' ? 'A real publication would require an exact matching Validation proof and the repository lock.' : modal === 'cancel' ? 'A real cancellation request may transition Running → Cancelling → Cancelled; terminal Runs reject cancellation.' : 'This prototype uses deterministic fixtures. No backend action is sent.'}</p>
-  <div class="modal-actions"><button class="button primary" on:click={() => modal = ''}>Close reference</button></div>
-</Modal>
+{#if toolsEnabled}{#if toolsOpen}<aside class="prototype-tools" aria-label={t('prototype.controls')}><div class="tool-head"><strong>{t('prototype.controls')}</strong><button class="tool-close" aria-label={t('prototype.hide')} on:click={() => toolsOpen=false}>×</button></div><label>{t('prototype.fixture')}<select id="scenario" bind:value={scenario}>{#each scenarios as key}<option value={key}>{t('scenario.'+key)}</option>{/each}</select></label><small>{t('prototype.notice')}</small></aside>{:else}<button class="tool-reopen" aria-label={t('prototype.show')} title={t('prototype.show')} on:click={() => toolsOpen=true}>◇</button>{/if}{/if}
+<Modal title={modal==='test'?t('recipes.testPlan'):modal==='build'?t('recipes.buildPackage'):modal==='cancel'?t('runs.cancel'):modal==='publish'?t('runs.publish'):modal==='notification'?t('settings.testNotification'):t('common.viewDetails')} open={!!modal} closeLabel={t('common.close')} onClose={() => modal=''}><p class="modal-copy">{modal==='test'?t('modal.test'):modal==='publish'?t('modal.publish'):modal==='cancel'?t('modal.cancel'):t('modal.fixture')}</p><div class="modal-actions"><button class="button primary" on:click={() => modal=''}>{t('modal.close')}</button></div></Modal>

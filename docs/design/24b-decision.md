@@ -31,3 +31,7 @@ Vite uses a relative base and content-hashed JS/CSS filenames. A future packagin
 ## Source-preview boundary
 
 The reference’s exact identity is labeled as coming from a **previous Test fixture**. For a first-time source, the current Test remains the authoritative resolution boundary. The prototype did not establish a need for a separate preview API: default UI can say “identity not yet resolved,” run Test, then show the exact identity and plan. If product review insists on an immutable identity before initiating Test, that is a separate API/Issue decision; do not simulate it as shipped.
+
+## #24B2 operator review refinement
+
+The operator accepted the Svelte choice and Calm operations desk direction, then requested corrections before API integration. [#24B2 references](references/README.md) now show a viewport-anchored collapsible sidebar, six concise top-level headers, a compact Packages repository summary and read-only inventory subview, selectable Package/Recipe/Run lists, contextual actions, compact Overview and Run dependencies, and System/Settings organization. [Theme](system/theme.md), [i18n](system/i18n.md), [responsive rules](system/responsive.md) and the [capability map](system/navigation.md) record the new behavior. The prototype remains isolated and fixture-only. #24C is pending a separate operator review.

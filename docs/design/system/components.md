@@ -1,19 +1,18 @@
-# Design system v0 — components
+# Design system — components (#24B2)
 
-| Primitive | Contract and use |
+The approved six destinations are Overview, Packages, Recipes, Runs, System and Settings. Repository inventory is a secondary read-only Packages view, not a top-level destination or permanent tab.
+
+| Component | Behavior |
 | --- | --- |
-| App shell | Desktop rail with six approved destinations; mobile labeled overlay navigation. Page heading provides object context and one main action. |
-| Panel/card | Flat surface, visible border, title/eyebrow, optional action/status. Use for a coherent task or fact set, not every individual field. |
-| Attention hero | Persistent summary of highest-priority state, reason and next action. Danger/warning/info/success variants retain text. |
-| Status chip | Text plus icon and semantic tone; words distinguish `Queued`, `Running`, `Cancelling`, `Cancelled`, `Prepared`, `Failed`, `Validated`, `Published`, `Blocked`. |
-| Provenance chip | `Detected`, `Suggested`, `Configured`, `Resolved`, `Unknown`; always attached to a value or summary. A stale prior Run is labeled as prior evidence. |
-| Data list/table | Heading and scan columns on desktop; within-card horizontal scrolling or labeled rows on mobile. Row actions remain keyboard reachable. Do not collapse built/published versions into one value. |
-| Recipe plan row | Concept, effective/proposed value and provenance; blockers follow the relevant row with safe action. Desktop side panel names the next step. |
-| Stage timeline | Ordered Source → Detection → Dependencies → Build → Staging → Package → Validation → Publication; each stage has textual state. Never infer later stages from Build success. |
-| Log viewer | Distinct monospace surface, explicit live/saved status and follow/pause. Raw verbosity and metadata belong in an advanced disclosure. |
-| Dialog/drawer | Named title, initial focus, Escape close and focus return. Confirmation copy identifies exact artifact/action. A drawer follows the same focus contract. |
-| Forms/buttons | Native labeled controls, help/error adjacent to field; primary, secondary, text and destructive button roles. Disabled controls need a reason near the workflow. |
-| Disclosure/tabs | Native semantics or equivalent keyboard behavior; Advanced retains state when collapsed. Tabs require real panel switching before production; the prototype’s Repository tab opens a labeled reference dialog only. |
-| Empty/loading/error | Empty state offers first action; loading names what is being fetched; error states show affected workflow, reason and next step. Transient toasts may confirm success but must not carry the sole error explanation. |
+| Shell | Desktop rail stays in the viewport, expands/collapses with a local preference, and anchors repository state and version at the bottom. Mobile uses a separate overlay menu. Top-level pages have one title and one subtitle; breadcrumbs appear only in object detail. |
+| Attention | Compact healthy state on Overview; a prominent notice appears for blocker, failure or recovery. The first five priority actions appear as whole-row buttons with a View all link when more exist. |
+| List and detail | Packages, Recipes and Runs have searchable selectors. Packages and Runs filter by state. Native button rows support pointer, Enter and Space; `aria-current` and visible focus expose selection. Desktop details are content height; mobile opens detail with Back. |
+| Repository summary and inventory | Packages shows a compact repository summary. View repository inventory opens a read-only secondary view of the repository manager’s exact contents, which can differ from managed Packages. The inventory view includes three installation commands with working Copy controls and public file actions; those file actions remain fixture dialogs. System Health shows only operational repository state. |
+| Recipe plan | Source, prior Test identity, detection, effective package plan, provenance, blockers and next action. Advanced groups retain the Recipe v5 capability map. |
+| Run detail | Contextual controls depend on lifecycle. The dependency summary is collapsed by default and exposes detected/manual/bundled/override/unresolved/effective values on demand. Stage list and log are separate. |
+| System tabs | Health, Maintenance and Developer. Self-build is a compact managed section. Unknown capability remains explicitly unknown. |
+| Settings tabs | General, Repository, GitHub, Authentication, Notifications, Automation and Advanced. Theme and language are browser preferences in General. Maintenance is in System. |
+| Status and provenance | Text and shape accompany semantic color. `Detected`, `Suggested`, `Configured`, `Resolved` and `Unknown` carry different meanings and visual treatments. |
+| Dialog | Native `dialog` has title, initial focus, Escape close and focus return. Fixture actions explain their boundary. |
 
-Prototype components `StatusChip.svelte`, `Provenance.svelte` and `Modal.svelte` establish reuse. Their exact API is not a commitment to the migration implementation. The public APT landing would share type/spacing/status identity through a small separate stylesheet and remain read-only.
+The prototype uses `StatusChip.svelte`, `Provenance.svelte` and `Modal.svelte` across screens. This is a design reference; API parity is a later checkpoint.

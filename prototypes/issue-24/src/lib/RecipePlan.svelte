@@ -1,8 +1,18 @@
 <script>
+  import {translate} from './i18n.js';
   import StatusChip from './StatusChip.svelte';
   import Provenance from './Provenance.svelte';
-  export let blocker;
-  export let proposedDirectory;
-  export let onConfirm;
+  export let locale,recipe,blocker=false,confirmed=false,onConfirm=()=>{};
+  $: t=(key,values={})=>translate(locale,key,values);
+  $: rows=[
+    ['recipes.planSource',recipe.source+' · '+(recipe.id==='zoraxy'?'v3.1.4':t('recipes.notResolved')),recipe.id==='zoraxy'?'Resolved':'Unknown'],
+    ['recipes.planBuild',t('recipes.noCompile'),'Detected'],
+    ['recipes.planOutput',recipe.id.replaceAll('-','_')+'_linux_amd64','Suggested'],
+    ['recipes.planInstall','/usr/local/bin/'+recipe.id+' · 0755','Configured'],
+    ['recipes.planService',recipe.id==='zoraxy'?'zoraxy.service':t('recipes.noService'),'Configured'],
+    ['recipes.workingDir','/opt/'+recipe.id+' · root:root · 0755',confirmed?'Configured':blocker?'Suggested':'Resolved'],
+    ['recipes.planDependencies',t('recipes.runtimeAfter'),'Unknown'],
+    ['recipes.planSupport',t('recipes.notChecked'),'Unknown'],
+  ];
 </script>
-          <section class="panel plan-panel"><div class="section-head"><div><p class="eyebrow">REVIEW</p><h2>Resolved package plan</h2><p>The values below describe the current Test/Build proposal.</p></div><StatusChip label={blocker ? 'Action required' : 'Ready for Test'} tone={blocker ? 'danger' : 'ready'} icon={blocker ? '!' : '✓'} /></div><div class="plan-rows"><div><span>Output</span><strong>zoraxy_linux_amd64 → executable</strong><Provenance kind="Suggested" /></div><div><span>Install</span><strong>/usr/local/bin/zoraxy · 0755</strong><Provenance kind="Configured" /></div><div><span>Service</span><strong>zoraxy.service · /usr/local/bin/zoraxy</strong><Provenance kind="Configured" /></div><div><span>Working directory</span><strong>/opt/zoraxy · root:root · 0755</strong><Provenance kind={proposedDirectory ? 'Configured' : blocker ? 'Suggested' : 'Resolved'} /></div><div><span>Runtime libraries</span><strong>Final Depends available after Build</strong><Provenance kind="Unknown" /></div><div><span>Build host support</span><strong>Not checked by this fixture</strong><Provenance kind="Unknown" /></div></div>{#if blocker}<div class="inline-alert"><strong>Working directory needs a declaration</strong><p>The service uses <code>/opt/zoraxy</code>. Confirm this package-owned directory before Test; WorkingDirectory alone does not create it.</p><button class="button secondary" on:click={onConfirm}>Confirm directory</button></div>{:else}<div class="inline-note"><span>✓</span> Test can prepare the source and check the plan. Build commands and dpkg-deb are not executed by Test.</div>{/if}</section>
+<section class="panel plan-panel"><div class="section-head"><h2>{t('recipes.planSummary')}</h2><StatusChip label={t(blocker?'scenario.blocker':'recipes.readyTest')} tone={blocker?'danger':'success'} icon={blocker?'!':'✓'} /></div><div class="plan-rows">{#each rows as [key,value,origin]}<div><span>{t(key)}</span><strong>{value}</strong><Provenance {locale} kind={origin} /></div>{/each}</div>{#if blocker}<div class="inline-alert" role="alert"><strong>{t('recipes.dirBlocker')}</strong><p>{t('recipes.dirReason')}</p><button class="button secondary" on:click={onConfirm}>{t('recipes.confirmDir')}</button></div>{:else}<div class="inline-note">✓ {confirmed?t('recipes.dirConfirmed'):t('recipes.testBoundary')}</div>{/if}</section>

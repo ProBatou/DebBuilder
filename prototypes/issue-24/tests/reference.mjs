@@ -6,103 +6,86 @@ import {fileURLToPath} from 'node:url';
 import path from 'node:path';
 import {chromium} from '@playwright/test';
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const captures = path.resolve(root, '../../docs/design/references');
-const shouldCapture = process.argv.includes('--capture');
-const pages = ['overview','packages','recipes','runs','system','settings'];
-const labels = {overview:'Overview',packages:'Packages',recipes:'Recipes',runs:'Runs',system:'System',settings:'Settings'};
-
-async function freePort() {
-  const server = createServer();
-  await new Promise(resolve => server.listen(0,'127.0.0.1',resolve));
-  const port = server.address().port;
-  await new Promise(resolve => server.close(resolve));
-  return port;
-}
-async function ready(url) {
-  for (let i=0;i<80;i++) {
-    try {const response = await fetch(url); if (response.ok) return; } catch {}
-    await new Promise(resolve => setTimeout(resolve,100));
-  }
-  throw new Error('Vite preview did not start');
-}
-async function navigate(page, name, mobile) {
-  if (mobile) await page.getByRole('button',{name:'Open navigation'}).click();
-  await page.locator('.sidebar nav button').filter({hasText:labels[name]}).click();
-  await assert.equal(await page.locator('main h1').textContent(), labels[name]);
-}
-async function screenshot(page,name) {
-  if (shouldCapture) await page.screenshot({path:path.join(captures, name+'.png'), fullPage:true});
-}
-
-const port = await freePort();
-const server = spawn(path.join(root,'node_modules/.bin/vite'),['preview','--host','127.0.0.1','--port',String(port),'--strictPort'],{cwd:root,stdio:'ignore'});
+const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
+const captures=path.resolve(root,'../../docs/design/references');
+const capture=process.argv.includes('--capture');
+const views=['overview','packages','recipes','runs','system','settings'];
+const labels={overview:'Overview',packages:'Packages',recipes:'Recipes',runs:'Runs',system:'System',settings:'Settings'};
+async function freePort(){const server=createServer();await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const port=server.address().port;await new Promise(resolve=>server.close(resolve));return port;}
+async function ready(url){for(let i=0;i<80;i++){try{if((await fetch(url)).ok)return;}catch{}await new Promise(resolve=>setTimeout(resolve,100));}throw Error('Vite preview did not start');}
+const port=await freePort();
+const base=`http://127.0.0.1:${port}/`;
+const server=spawn(path.join(root,'node_modules/.bin/vite'),['preview','--host','127.0.0.1','--port',String(port),'--strictPort'],{cwd:root,stdio:'ignore'});
 let browser;
-try {
-  await ready(`http://127.0.0.1:${port}/`);
-  browser = await chromium.launch({headless:true});
-  if (shouldCapture) await mkdir(captures,{recursive:true});
-  for (const [size,viewport] of [['desktop',{width:1440,height:1000}],['mobile',{width:390,height:844}]]) {
-    const mobile = size === 'mobile';
-    const page = await browser.newPage({viewport,deviceScaleFactor:1,reducedMotion:'reduce'});
-    const errors=[];
-    page.on('pageerror', error=>errors.push(error.message));
-    await page.goto(`http://127.0.0.1:${port}/`);
-    if (mobile) {
-      const menu = page.getByRole('button',{name:'Open navigation'});
-      await menu.click();
-      assert.equal(await menu.getAttribute('aria-expanded'),'true');
-      await page.keyboard.press('Escape');
-      assert.equal(await menu.getAttribute('aria-expanded'),'false');
-      assert.equal(await menu.evaluate(node=>document.activeElement === node),true);
-    }
-    for (const name of pages) {
-      if (name !== 'overview') await navigate(page,name,mobile);
-      await page.waitForTimeout(75);
-      const width = await page.evaluate(()=>document.documentElement.scrollWidth);
-      assert.ok(width <= viewport.width, `${size} ${name} overflows by ${width-viewport.width}px`);
-      await screenshot(page,`${size}-${name}-normal`);
-    }
-    await navigate(page,'recipes',mobile);
-    await page.getByRole('button',{name:'Review detailed controls'}).click();
-    assert.equal(await page.getByRole('button',{name:'Review detailed controls'}).getAttribute('aria-expanded'),'true');
-    await page.locator('#scenario').selectOption('blocker');
-    assert.equal(await page.getByRole('button',{name:'Test plan →'}).first().isDisabled(),true);
-    await screenshot(page,`${size}-recipes-blocker`);
-    await page.getByRole('button',{name:'Confirm directory'}).click();
-    assert.equal(await page.getByRole('button',{name:'Test plan →'}).first().isEnabled(),true);
-    const testTrigger = page.getByRole('button',{name:'Test plan →'}).first();
-    await testTrigger.click();
-    assert.equal(await page.getByRole('dialog').isVisible(),true);
-    assert.equal(await page.evaluate(()=>document.activeElement?.getAttribute('aria-label')),'Close dialog');
-    await page.keyboard.press('Escape');
-    assert.equal(await page.getByRole('dialog').isVisible(),false);
-    assert.equal(await testTrigger.evaluate(node=>document.activeElement === node),true);
-    await navigate(page,'runs',mobile);
-    await page.locator('#scenario').selectOption('running');
-    assert.equal(await page.locator('[data-run-poller]').count(),1);
-    await page.waitForTimeout(1400);
-    const pollCount = Number(await page.locator('.run-header').getAttribute('data-poll-count'));
-    assert.ok(pollCount > 0,'Run poller should update while mounted');
-    await screenshot(page,`${size}-runs-running`);
-    await page.getByRole('button',{name:'Pause follow'}).click();
-    assert.ok((await page.locator('.log-help').textContent()).includes('paused'));
-    await page.locator('#scenario').selectOption('failed');
-    assert.ok((await page.getByRole('alert').textContent()).includes('Offline service validation failed'));
-    await screenshot(page,`${size}-runs-failed`);
-    await navigate(page,'overview',mobile);
-    assert.equal(await page.locator('[data-run-poller]').count(),0);
-    await page.locator('#scenario').selectOption('empty');
-    await screenshot(page,`${size}-overview-empty`);
-    await navigate(page,'system',mobile);
-    await page.locator('#scenario').selectOption('recovery');
-    assert.ok((await page.locator('.hero').textContent()).includes('Build admission blocked'));
-    await screenshot(page,`${size}-system-recovery`);
-    assert.deepEqual(errors,[],`${size} page errors`);
-    await page.close();
-  }
-  console.log(`Browser reference checks passed: 6 screens × 2 viewports, blocker/running/failed/empty/recovery, keyboard dialog, mounted Run polling${shouldCapture ? '; screenshots saved' : ''}.`);
-} finally {
-  await browser?.close();
-  server.kill('SIGTERM');
+async function open(view='overview',size='desktop',theme='light',locale='en',scenario='normal'){
+  const viewport=size==='mobile'?{width:390,height:844}:{width:1440,height:1000};
+  const context=await browser.newContext({viewport,deviceScaleFactor:1,reducedMotion:'reduce'});const page=await context.newPage();
+  const errors=[];page.on('pageerror',error=>errors.push(error.message));
+  await page.addInitScript(({theme,locale})=>{localStorage.setItem('debBuilder24Theme',theme);localStorage.setItem('debBuilder24Locale',locale);},{theme,locale});
+  await page.goto(`${base}?view=${view}&scenario=${scenario}&clean=1`);
+  await page.waitForFunction(({theme,locale})=>document.documentElement.dataset.theme===theme&&document.documentElement.lang===locale,{theme,locale});
+  await page.waitForFunction(()=>{const root=getComputedStyle(document.documentElement).color;return getComputedStyle(document.querySelector('main h1')).color===root&&[...document.querySelectorAll('.panel h2')].every(node=>getComputedStyle(node).color===root);});
+  return {page,errors,viewport};
 }
+async function fit(page,viewport,name){const width=await page.evaluate(()=>document.documentElement.scrollWidth);assert.ok(width<=viewport.width,`${name} overflows by ${width-viewport.width}px`);}
+async function shot(page,name){if(capture)await page.screenshot({path:path.join(captures,`${name}.png`),fullPage:true,style:'.prototype-tools,.tool-reopen{visibility:hidden!important}'});}
+async function nav(page,name,mobile=false){if(mobile)await page.getByRole('button',{name:'Open navigation'}).click();await page.locator('.sidebar nav button').filter({hasText:labels[name]}).click();assert.equal(await page.locator('main h1').textContent(),labels[name]);}
+try{
+ await ready(base);browser=await chromium.launch({headless:true});if(capture)await mkdir(captures,{recursive:true});
+ for(const size of ['desktop','mobile'])for(const view of views){const {page,errors,viewport}=await open(view,size);await fit(page,viewport,`${size}-${view}`);await shot(page,`${size}-${view}-light-en`);assert.deepEqual(errors,[]);await page.close();}
+ for(const [size,view,theme,locale,scenario] of [
+  ['desktop','overview','dark','en','normal'],['desktop','recipes','dark','de','blocker'],['desktop','runs','dark','en','failed'],['desktop','system','dark','fr','recovery'],['desktop','settings','dark','es','normal'],
+  ['mobile','overview','dark','fr','manyActions'],['mobile','recipes','dark','de','blocker'],['mobile','runs','dark','es','running'],['desktop','overview','light','fr','one'],['mobile','packages','light','es','manyPackages']
+ ]){const {page,errors,viewport}=await open(view,size,theme,locale,scenario);if(size==='mobile'&&['recipes','runs','packages'].includes(view))await page.locator(view==='recipes'?'.recipe-picker .selection-list button':view==='runs'?'.run-list .selection-list button':'.package-list .package-row').first().click();await fit(page,viewport,`${size}-${view}-${theme}-${locale}-${scenario}`);await shot(page,`${size}-${view}-${theme}-${locale}-${scenario}`);assert.deepEqual(errors,[]);await page.close();}
+ {const {page,errors,viewport}=await open('packages','mobile');await page.getByRole('button',{name:/View repository inventory/}).click();await fit(page,viewport,'mobile-repository-inventory');await shot(page,'mobile-packages-repository-inventory');assert.deepEqual(errors,[]);await page.close();}
+ {
+  const {page,errors,viewport}=await open();
+  await page.goto(`${base}?clean=0`);
+  for(const [scenario,expected] of [['empty',0],['one',1],['three',3],['manyActions',5]]){await page.locator('#scenario').selectOption(scenario);assert.equal(await page.locator('.overview-main .panel').first().locator('.click-row').count(),expected);}
+  await shot(page,'desktop-overview-many-actions');
+  await page.locator('#scenario').selectOption('normal');await page.locator('.overview-main .panel').first().locator('.click-row').first().click();assert.equal(await page.locator('main h1').textContent(),'Packages');
+  await page.locator('#scenario').selectOption('manyPackages');assert.ok(await page.locator('.package-row').count()>=20);await page.locator('.package-row').nth(4).click();assert.equal(await page.locator('.package-detail h2').textContent(),'maintainerr');await shot(page,'desktop-packages-many');
+  assert.equal(await page.locator('.segmented-tabs').count(),0);await page.getByRole('button',{name:'Hide prototype controls'}).click();await page.getByRole('button',{name:/View repository inventory/}).click();assert.ok(await page.getByText('Published packages').isVisible());assert.ok(await page.getByText('stalwart').isVisible());assert.equal(await page.getByText('maintainerr').count(),0);await shot(page,'desktop-packages-repository-inventory');await page.context().grantPermissions(['clipboard-read','clipboard-write'],{origin:base.slice(0,-1)});await page.getByRole('button',{name:'Copy Add signing key'}).click();assert.ok((await page.evaluate(()=>navigator.clipboard.readText())).includes('repository.gpg'));await page.getByRole('button',{name:'Back to Packages'}).click();await page.getByRole('button',{name:'Show prototype controls'}).click();
+  await nav(page,'recipes');assert.ok(await page.locator('.recipe-picker .selection-list button').count()>=6);await page.locator('.recipe-picker .selection-list button').nth(1).click();assert.equal(await page.locator('.editor-head h2').textContent(),'pocket-id');
+  await page.locator('#scenario').selectOption('blocker');await page.locator('.recipe-picker .selection-list button').first().click();assert.ok(await page.getByText('Working directory needs a declaration.').isVisible());await page.getByRole('button',{name:'Confirm directory'}).click();await page.getByRole('button',{name:'Test plan →'}).click();assert.ok(await page.getByRole('dialog').isVisible());await page.keyboard.press('Escape');assert.equal(await page.getByRole('dialog').isVisible(),false);
+  await nav(page,'runs');assert.ok(await page.locator('.run-selection button').count()>=8);await page.locator('#scenario').selectOption('manyRuns');assert.ok(await page.locator('.run-selection button').count()>=30);await shot(page,'desktop-runs-many');
+  await page.locator('#scenario').selectOption('running');await page.locator('.run-selection button').filter({hasText:'pocket-id'}).click();assert.equal(await page.locator('[data-run-poller]').count(),1);await page.waitForFunction(()=>Number(document.querySelector('[data-run-poller]')?.dataset.pollCount)>0);await page.getByRole('button',{name:'Request cancellation'}).click();assert.ok(await page.getByRole('dialog').isVisible());await page.keyboard.press('Escape');await nav(page,'overview');assert.equal(await page.locator('[data-run-poller]').count(),0);
+  await nav(page,'settings');await page.getByRole('button',{name:'General',exact:true}).click();await page.getByLabel('Theme').selectOption('dark');await page.waitForFunction(()=>document.documentElement.dataset.theme==='dark');await page.getByLabel('Language').selectOption('fr');await page.waitForFunction(()=>document.documentElement.lang==='fr');assert.equal(await page.locator('main h1').textContent(),'Paramètres');const persisted=await page.context().newPage();await persisted.goto(`${base}?view=settings&clean=1`);await persisted.waitForFunction(()=>document.documentElement.dataset.theme==='dark'&&document.documentElement.lang==='fr');await persisted.close();
+  await fit(page,viewport,'theme-locale-persisted');assert.deepEqual(errors,[]);await page.close();
+ }
+ {
+  const {page,errors,viewport}=await open('overview','desktop');const collapse=page.getByRole('button',{name:'Collapse sidebar'});await collapse.click();assert.ok(await page.locator('.shell.sidebar-collapsed').count());await page.reload();assert.ok(await page.locator('.shell.sidebar-collapsed').count());await page.getByRole('button',{name:'Expand sidebar'}).click();
+  const menu=await open('overview','mobile');await menu.page.getByRole('button',{name:'Open navigation'}).click();await menu.page.keyboard.press('Escape');assert.equal(await menu.page.getByRole('button',{name:'Open navigation'}).getAttribute('aria-expanded'),'false');await menu.page.close();assert.deepEqual(errors,[]);await page.close();
+ }
+ {
+  const {page,errors}=await open('system');
+  assert.ok(await page.getByText('Signing status').isVisible());
+  await page.getByRole('button',{name:'Maintenance',exact:true}).click();assert.ok(await page.getByText('Clear execution history').isVisible());
+  await page.getByRole('button',{name:'Developer',exact:true}).click();assert.ok(await page.getByText('Raw OpenAPI contract').isVisible());
+  await nav(page,'settings');
+  for(const [tab,label] of [['Repository','Public repository URL'],['GitHub','GitHub token'],['Authentication','Issuer URL'],['Notifications','ntfy server'],['Automation','Auto validate after successful build'],['Advanced','No additional editable settings']]){
+   await page.getByRole('button',{name:tab,exact:true}).last().click();assert.ok((await page.locator('.settings-content').textContent()).includes(label),`${tab} settings inventory`);
+  }
+  assert.deepEqual(errors,[]);await page.close();
+ }
+ {
+  const {page,errors}=await open('recipes','desktop','light','en','long');
+  const anchors=['.brand-mark','.sidebar nav button:first-child','.repo-indicator','.sidebar .version'];
+  for(const collapsed of [false,true]){
+   if(collapsed)await page.getByRole('button',{name:'Collapse sidebar'}).click();
+   await page.evaluate(()=>scrollTo(0,0));
+   const before=await Promise.all(anchors.map(selector=>page.locator(selector).boundingBox()));
+   await page.evaluate(()=>scrollTo(0,document.documentElement.scrollHeight));
+   await page.waitForFunction(()=>scrollY>350);
+   const after=await Promise.all(anchors.map(selector=>page.locator(selector).boundingBox()));
+   for(let i=0;i<anchors.length;i++){
+    assert.ok(before[i]&&after[i],`${anchors[i]} missing`);
+    assert.ok(Math.abs(before[i].y-after[i].y)<=1,`${anchors[i]} moved while scrolling (${collapsed?'collapsed':'expanded'})`);
+    assert.ok(after[i].y>=0&&after[i].y+after[i].height<=1000,`${anchors[i]} outside viewport`);
+   }
+  }
+  assert.deepEqual(errors,[]);await page.close();
+ }
+ for(const locale of ['en','fr','de','es'])for(const size of ['desktop','mobile']){const {page,errors,viewport}=await open('settings',size,'light',locale,'long');for(const view of views){if(view!=='settings'){if(size==='mobile')await page.locator('.mobile-top .icon-button').click();await page.locator('.sidebar nav button').nth(views.indexOf(view)).click();}await fit(page,viewport,`${locale}-${size}-${view}`);}assert.deepEqual(errors,[]);await page.close();}
+ console.log('Browser reference checks passed: six screens on desktop/mobile, theme and locale combinations, navigation, fixtures, persistence, keyboard, responsive overflow.');
+}finally{await browser?.close();server.kill('SIGTERM');}

@@ -10,3 +10,7 @@ Approved direction: **A, Calm operations desk**, with **B, Guided workshop** use
 6. **Work across sizes.** Desktop may show a contextual side panel; mobile follows the same object hierarchy in one column, with table scrolling contained and complete labels.
 
 The three exploratory directions remain in [visual-directions.md](../visual-directions.md); #24B fixes A as the reference and does not use C as the primary language.
+
+## #24B2 refinement
+
+The operator review keeps the Calm operations desk direction and Svelte choice. Top-level navigation stays at six destinations. Packages shows DebBuilder-managed packages and a compact repository summary; its secondary read-only inventory represents what the repository manager contains. System Health represents whether the repository is operating correctly. These three views must not be treated as interchangeable. A desktop rail stays fixed in the viewport while main content scrolls; mobile has its own navigation. Theme and language are browser-local preferences documented in [theme.md](theme.md) and [i18n.md](i18n.md).

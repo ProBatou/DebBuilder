@@ -1,17 +1,23 @@
-# Design system v0 — interactions and state
+# Design system — interactions and state (#24B2)
+
+## Navigation
+
+Desktop navigation is persistent within the viewport. Collapse changes width, labels and tooltip visibility, and persists in browser storage. Mobile has a separate overlay; Escape closes it and returns focus. The six top-level pages have no redundant breadcrumb. Object detail uses `Packages / package`, `Recipes / recipe` or `Runs / run`. Repository inventory is reached from a compact Packages summary. The secondary view offers copyable key/source/update commands, published package inventory and public file affordances. Copy uses the browser clipboard; public file actions show fixture dialogs. System Health covers only operational state.
+
+Overview action and recent Run rows are whole native buttons. The first five actions appear, with View all when more exist. Packages, Recipes and Runs support a keyboard reachable selector; mobile selection opens detail and Back returns to the selector. Filters/search narrow the list without mutating the fixture.
 
 ## Recipe
 
-Show a guided strip only for Source → Detection → Review → Test/Build. The default plan summarizes source identity, detected project, no-compilation/build command, output, installation, service, runtime dependency proposal, blockers and next action. Advanced reveals command/environment, mappings/permissions, detailed systemd, resource limits, maintainer scripts and ELF overrides. `Resolved` is allowed only for a value returned by an authoritative existing operation; a dependency proposal remains `Suggested` until final staging/Build evidence exists. The reference labels its previous Test source identity accordingly. No #25 source options appear.
+The simple plan summarizes source, exact identity when previously resolved, detection, build, output, installation, service and dependency proposal. The source fixture labels prior Test evidence. A blocker prevents Test/Build until confirmed. Advanced consists of five domain disclosures: source/tracking, build/output, package/installation, service/resources, and automation/data. The [capability map](navigation.md) records Recipe v5 coverage. Test is asynchronous in production and does not execute Build commands or `dpkg-deb`; fixture dialogs send no request.
 
-Test is asynchronous and non-destructive in this reference. In production it creates a Run and prepares source and staging without executing Build commands or `dpkg-deb`. Close does not cancel a real Run. Build admission, queue capacity and cancellation remain backend decisions.
+## Runs
 
-## Runs and actions
+A Run's status determines controls: queued/running can request cancellation; validated can publish or revalidate; prepared/completed can validate; failed can open Recipe review. Recovery-blocked history remains readable. A compact dependency summary expands to detected, manual, bundled, overrides, unresolved and effective Depends. Raw resolver evidence remains for future diagnostics. Log follow/pause affects viewing only. The fixture poller starts while Runs is mounted and stops on unmount.
 
-A Run detail shows current lifecycle, exact Recipe/source snapshot, stage timeline, primary diagnostic, available actions and logs. Running work can request cancellation; a terminal Run cannot. Validation is a separate attempt; publication requires a matching proof for the exact artifact and holds the existing repository lock. Recovery-blocked admission is persistent and visible even if history remains readable. Structured error code is inspectable below a plain-language diagnosis.
+## System and Settings
 
-The spike’s `RunPoller.svelte` owns a fixture polling loop. It starts on mount, stops on unmount, rejects stale/aborted results and never overlaps requests. The real implementation would substitute a read-only API adapter and retain these lifecycle boundaries; this spike sends no backend calls. Log follow/pause changes viewport behavior, not Run execution.
+System Health groups runtime, queue/admission, host containment, tooling, validation capability, repository health/signing/metadata/last publication and automation; unknown capability is labeled unknown. Maintenance houses storage, history, cleanup, retention and recovery. Developer houses inspectors, support bundle and OpenAPI references. Settings retains the actual UI configuration fields; only theme and language operate locally in this prototype. Secrets and backend settings are read-only fixtures here.
 
-## Keyboard and focus
+## Focus and status
 
-Primary navigation uses buttons and `aria-current`; mobile menu exposes `aria-expanded`. Native controls and `dialog` receive visible focus. Opening a dialog records the invoking element, initial focus goes to its close control, Escape closes it and focus returns. Destructive action confirmations need exact object/action text before production. Announce state transitions selectively; do not stream every log line to a live region. Honor reduced motion for all future transitions.
+Native controls and `dialog` have a visible focus ring. Opening a dialog focuses Close; Escape closes and returns focus to the trigger. Every status has text plus icon or shape. The prototype's actions are explanatory dialogs, not simulated backend state mutations. Reduced motion removes transitions.

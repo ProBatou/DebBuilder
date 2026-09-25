@@ -6,11 +6,14 @@ import {fileURLToPath} from 'node:url';
 import path from 'node:path';
 import {chromium} from '@playwright/test';
 import {publicRepositoryFixture as publicRepo} from '../src/lib/publicRepositoryFixture.js';
+import {recipeProfiles,toV5Fixture,fromV5Fixture} from '../src/lib/recipeFixtures.js';
 
+for(const [id,profile] of Object.entries(recipeProfiles)){const document=toV5Fixture(profile);assert.equal(document.schema_version,5);assert.equal(document.name,id);assert.deepEqual(toV5Fixture(fromV5Fixture(document)),document);}
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const captures=path.resolve(root,'../../docs/design/references');
 const publicOnly=process.argv.includes('--capture-public');
-const capture=process.argv.includes('--capture')||publicOnly;
+const recipeOnly=process.argv.includes('--capture-recipes');
+const capture=process.argv.includes('--capture')||publicOnly||recipeOnly;
 const views=['overview','packages','recipes','runs','system','settings'];
 const labels={overview:'Overview',packages:'Packages',recipes:'Recipes',runs:'Runs',system:'System',settings:'Settings'};
 async function freePort(){const server=createServer();await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const port=server.address().port;await new Promise(resolve=>server.close(resolve));return port;}
@@ -42,7 +45,7 @@ async function openPublic(size='desktop',scheme='light',locale='en'){
   return {page,errors,viewport};
 }
 async function fit(page,viewport,name){const width=await page.evaluate(()=>document.documentElement.scrollWidth);assert.ok(width<=viewport.width,`${name} overflows by ${width-viewport.width}px`);}
-async function shot(page,name){if(capture&&(!publicOnly||name.startsWith('public-repository-')))await page.screenshot({path:path.join(captures,`${name}.png`),fullPage:name!=='desktop-recipes-advanced-editor',style:'.prototype-tools,.tool-reopen{visibility:hidden!important}'});}
+async function shot(page,name){if(capture&&(!publicOnly||name.startsWith('public-repository-'))&&(!recipeOnly||name.includes('recipes')||name==='desktop-system-managed-self-build'))await page.screenshot({path:path.join(captures,`${name}.png`),fullPage:name!=='desktop-recipes-advanced-editor',style:'.prototype-tools,.tool-reopen{visibility:hidden!important}'});}
 async function nav(page,name,mobile=false){if(mobile)await page.getByRole('button',{name:'Open navigation'}).click();await page.locator('.sidebar nav button').filter({hasText:labels[name]}).click();assert.equal(await page.locator('main h1').textContent(),labels[name]);}
 try{
  await ready(base);browser=await chromium.launch({headless:true});if(capture)await mkdir(captures,{recursive:true});
@@ -84,6 +87,8 @@ try{
  }
  {
   const {page,errors}=await open('recipes','desktop','light','en','long');
+  await page.locator('.recipe-picker .selection-list button').filter({hasText:'maintainerr'}).click();
+  await page.locator('.recipe-levels button').nth(2).click();
   const anchors=['.brand-mark','.sidebar nav button:first-child','.repo-indicator','.sidebar .version'];
   for(const collapsed of [false,true]){
    if(collapsed)await page.getByRole('button',{name:'Collapse sidebar'}).click();
@@ -110,11 +115,118 @@ try{
   await page.getByRole('button',{name:'Authentication',exact:true}).click();const secret=page.getByLabel(/Client secret/);assert.equal(await secret.inputValue(),'');assert.ok(await page.locator('.settings-content').getByText(/Configured/).count()>0);await secret.fill('new-fixture-secret');await page.getByRole('button',{name:'Save changes'}).click();assert.equal(await secret.inputValue(),'');assert.equal(await page.locator('input[value="new-fixture-secret"]').count(),0);assert.deepEqual(errors,[]);await page.close();
  }
  {
-  const {page,errors}=await open('recipes','desktop','light','en','long');
-  const group=page.locator('.advanced-group').filter({hasText:'Build and output'});if((await group.getAttribute('open'))===null)await group.locator('summary').click();
-  await page.getByRole('button',{name:/Build commands/}).click();assert.ok(await page.locator('.capability-drawer').isVisible());assert.equal(await page.locator('.capability-drawer').getAttribute('role'),'dialog');assert.equal(await page.locator('.capability-drawer').getAttribute('aria-modal'),'true');assert.ok(await page.getByText('Saved',{exact:true}).isVisible());const commands=page.locator('.capability-drawer textarea');await commands.fill('npm ci\nnpm run test');assert.ok(await page.locator('.capability-drawer').getByText('Unsaved changes').isVisible());await shot(page,'desktop-recipes-advanced-editor');await page.locator('.capability-drawer').getByRole('button',{name:'Cancel changes'}).click();await page.getByRole('button',{name:/Build commands/}).click();assert.equal(await commands.inputValue(),'npm ci\nnpm run build');await commands.fill('npm ci\nnpm run test');await page.locator('.capability-drawer').getByRole('button',{name:'Save changes'}).click();assert.ok(await page.getByRole('button',{name:/Build commands/}).textContent().then(x=>x.includes('npm run test')));
-  await page.getByRole('button',{name:/Timeouts/}).click();await page.locator('.capability-drawer input[type=number]').fill('0');await page.locator('.capability-drawer').getByRole('button',{name:'Save changes'}).click();assert.ok(await page.locator('.capability-drawer [role=alert]').isVisible());assert.deepEqual(errors,[]);await page.close();
-  const mobile=await open('recipes','mobile','light','en','long');await mobile.page.locator('.recipe-picker .selection-list button').first().click();await mobile.page.getByRole('button',{name:/Build commands/}).click();assert.equal(await mobile.page.locator('.capability-drawer').evaluate(node=>Math.round(node.getBoundingClientRect().width)),390);await mobile.page.locator('.capability-drawer .back-button').click();await mobile.page.close();
+  const {page,errors,viewport}=await open('recipes');
+  const levels=page.locator('.recipe-levels');
+  await shot(page,'desktop-recipes-plan-audited');
+  await levels.getByRole('button',{name:'Customize'}).click();
+  const nativeSelect=page.locator('.recipe-form-grid select').first();
+  assert.equal(await nativeSelect.evaluate(node=>getComputedStyle(node).appearance),'none');
+  assert.ok((await nativeSelect.evaluate(node=>getComputedStyle(node).backgroundImage)).includes('svg'));
+  await nativeSelect.focus();assert.equal(await nativeSelect.evaluate(node=>document.activeElement===node),true);
+  await levels.getByRole('button',{name:'Plan'}).click();
+  assert.ok(await page.locator('.recipe-plan .inline-note').isVisible());
+  assert.ok(await page.getByText('Working directory is not provisioned').isVisible());
+  await levels.getByRole('button',{name:'Advanced'}).click();
+  assert.equal(await page.getByText('Automatic ELF dependency detection').count(),0,'mapping-only Zoraxy hides ELF');
+  assert.equal(await page.getByText('Build operations').count(),0,'prebuilt hides source-build controls');
+  await shot(page,'desktop-recipes-advanced-editor');
+  await levels.getByRole('button',{name:'Customize'}).click();
+  assert.equal(await page.getByText('Build and output').count(),0);
+  await page.locator('.recipe-picker .selection-list button').filter({hasText:'maintainerr'}).click();
+  await levels.getByRole('button',{name:'Customize'}).click();
+  assert.ok(await page.getByText('Build and output').isVisible());
+  assert.ok(await page.getByRole('button',{name:'Configure service'}).isVisible());
+  const commandList=page.locator('.recipe-list-editor').filter({hasText:'Build commands'});
+  assert.equal(await commandList.locator('.recipe-list-row').count(),2);
+  await commandList.getByRole('button',{name:'Move down 1'}).click();
+  assert.equal(await commandList.locator('input').first().inputValue(),'npm run build');
+  assert.ok(await page.getByText('Unsaved changes').isVisible());
+  await page.getByRole('button',{name:'Cancel changes'}).click();
+  assert.equal(await commandList.locator('input').first().inputValue(),'npm ci');
+  await commandList.getByRole('button',{name:'Add row'}).click();
+  await commandList.locator('input').last().fill('npm run test');
+  await page.getByRole('button',{name:'Save changes'}).click();
+  await levels.getByRole('button',{name:'Plan'}).click();
+  assert.ok(await page.getByText('No matching', {exact:false}).count()===0);
+  await page.locator('.recipe-picker .selection-list button').filter({hasText:'pocket-id'}).click();
+  await levels.getByRole('button',{name:'Advanced'}).click();
+  assert.ok(await page.getByText('Installed files owned by').isVisible());
+  assert.ok(await page.getByText('Account provisioning').isVisible());
+  await shot(page,'desktop-recipes-pocket-id-advanced');
+  assert.ok(await page.getByText('Only package-specific /etc, /var/lib and /var/log paths. /opt runtime directories are not supported.').isVisible());
+  await levels.getByRole('button',{name:'Customize'}).click();
+  assert.ok(await page.getByText('systemd User').isVisible());
+  await page.locator('.recipe-picker .selection-list button').filter({hasText:'seerr'}).click();
+  await levels.getByRole('button',{name:'Plan'}).click();
+  assert.ok(await page.getByText('postinst',{exact:false}).count()>0);
+  await levels.getByRole('button',{name:'Expert'}).click();
+  assert.equal(await page.locator('.recipe-hook-grid textarea').count(),4);
+  await shot(page,'desktop-recipes-seerr-expert');
+  assert.ok((await page.locator('.recipe-hook-grid textarea').nth(1).inputValue()).includes('install -d'));
+  await page.locator('.recipe-picker .selection-list button').filter({hasText:'archive-agent'}).click();
+  await levels.getByRole('button',{name:'Advanced'}).click();
+  assert.ok(await page.getByText('Automatic ELF dependency detection').isVisible());
+  assert.equal(await page.locator('.recipe-elf input[type=checkbox]').isChecked(),false);
+  await page.locator('.recipe-elf input[type=checkbox]').check();
+  await levels.getByRole('button',{name:'Plan'}).click();
+  assert.ok(await page.getByText('Run evidence is stale').isVisible());
+  assert.ok(await page.getByText('inspect copied payload at Build',{exact:false}).count()>0);
+  await page.getByRole('button',{name:'Cancel changes'}).click();
+  assert.ok(await page.locator('.recipe-plan .inline-note').isVisible());
+  await levels.getByRole('button',{name:'Customize'}).click();
+  await page.getByLabel('Description').fill('Changed fixture');
+  await page.getByRole('button',{name:'Save changes'}).click();
+  await levels.getByRole('button',{name:'Plan'}).click();
+  assert.ok(await page.getByText('Run evidence is stale').isVisible());
+  await page.getByRole('button',{name:'Test plan →'}).click();
+  await page.keyboard.press('Escape');
+  assert.ok(await page.locator('.recipe-plan .inline-note').isVisible());
+  await page.getByRole('button',{name:'Create Recipe'}).click();
+  assert.ok(await page.getByText('Test source').isVisible());
+  await shot(page,'desktop-recipes-create-source');
+  await levels.getByRole('button',{name:'Expert'}).click();
+  assert.ok(await page.getByText('Lifecycle scripts — None').isVisible());
+  assert.ok(await page.getByText('Raw Recipe fixture').isVisible());
+  assert.ok((await page.locator('#recipe-json').inputValue()).includes('\"schema_version\": 5'));
+  assert.equal(await page.locator('.capability-drawer').count(),0);
+  await levels.getByRole('button',{name:'Customize'}).click();
+  assert.equal(await page.getByText('Build and output').count(),0,'Create starts with source only');
+  await page.getByLabel('GitHub repository').fill('example/new-recipe');
+  await page.getByRole('button',{name:'Save changes'}).click();
+  assert.ok(await page.getByText('Exact source and outputs remain unknown until Test or Build.').isVisible());
+  await page.getByRole('button',{name:'Test plan →'}).click();await page.keyboard.press('Escape');
+  assert.ok(await page.getByRole('button',{name:/Continue to Customize/}).isVisible());
+  await shot(page,'desktop-recipes-create-plan');
+  await page.getByRole('button',{name:/Continue to Customize/}).click();
+  assert.ok(await page.getByText('Build and output').isVisible());
+  await fit(page,viewport,'recipe-structured');assert.deepEqual(errors,[]);await page.close();
+  const mobile=await open('recipes','mobile','dark','de');
+  await mobile.page.locator('.recipe-picker .selection-list button').first().click();
+  assert.ok(await mobile.page.getByRole('button',{name:/Zurück/}).count()>0);
+  await mobile.page.locator('.recipe-levels button').nth(2).click();
+  await fit(mobile.page,mobile.viewport,'recipe-mobile-de');
+  await shot(mobile.page,'mobile-recipes-advanced-dark-de');
+  await mobile.page.locator('.recipe-advanced-menu button').first().click();
+  await fit(mobile.page,mobile.viewport,'recipe-mobile-de-source');
+  assert.ok(await mobile.page.getByRole('button',{name:/Zurück zu Erweitert/}).isVisible());
+  await shot(mobile.page,'mobile-recipes-source-dark-de');
+  await mobile.page.getByRole('button',{name:/Zurück zu Erweitert/}).click();
+  assert.ok(await mobile.page.locator('.recipe-advanced-menu').isVisible());
+  await mobile.page.locator('.recipe-editor > .back-button').click();
+  assert.ok(await mobile.page.locator('.recipe-picker').isVisible());
+  assert.deepEqual(mobile.errors,[]);await mobile.page.close();
+ }
+ {
+  const {page,errors}=await open('system');
+  await page.getByRole('button',{name:/System-managed self-build/}).last().click();
+  assert.ok(await page.getByText('Authorized operator overrides').isVisible());
+  await shot(page,'desktop-system-managed-self-build');
+  assert.equal(await page.getByText('Installed files owned by').count(),0);
+  await page.getByLabel('Package maintainer').fill('Operator');
+  assert.ok(await page.getByText('Unsaved changes').isVisible());
+  await page.getByRole('button',{name:'Cancel changes'}).click();
+  assert.equal(await page.getByLabel('Package maintainer').inputValue(),'DebBuilder maintainers');
+  assert.deepEqual(errors,[]);await page.close();
  }
  {
   const {page,errors,viewport}=await open('runs','desktop','light','fr','manyRuns');const list=page.locator('.run-selection');assert.ok(await list.count());assert.equal(await page.locator('.run-filters label').count(),2);await page.locator('.run-filters input').fill('archive-agent');assert.equal(await list.locator('button').count(),1);await page.locator('.run-filters input').fill('');await page.locator('.run-filters select').selectOption('cancelled');assert.equal(await list.locator('button').count(),1);assert.ok(await list.locator('.status-chip.neutral').count());await page.locator('.run-filters select').selectOption('all');await list.evaluate(node=>node.scrollTop=node.scrollHeight);assert.ok(await list.evaluate(node=>node.scrollTop>0));assert.ok(await page.locator('.run-filters').isVisible());await fit(page,viewport,'runs-fr-many');assert.deepEqual(errors,[]);await page.close();

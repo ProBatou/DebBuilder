@@ -9,7 +9,8 @@
     "preview": "vite preview --host 127.0.0.1",
     "check": "svelte-check --tsconfig ./jsconfig.json",
     "test:browser": "node tests/reference.mjs",
-    "test:i18n": "node tests/i18n.mjs"
+    "test:i18n": "node tests/i18n.mjs",
+    "test:webkit:select": "node tests/select-webkit.mjs"
   },
   "devDependencies": {
     "@playwright/test": "1.63.0",

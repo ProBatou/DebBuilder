@@ -10,3 +10,5 @@ This documentation is the proposed operator-review architecture for Recipe v5. I
 6. [Migration notes and review questions](migration-notes.md): parity checks, known documentation discrepancies and three genuine operator choices.
 
 The key product separation is **configured Recipe policy**, **detected source facts**, **suggested edits**, **Run-resolved identity**, and **effective Build/Validation evidence**. Low-frequency controls remain reachable without being shown in the ordinary path. Inapplicable values remain inspectable for safe round-tripping.
+
+The approved #24B4 architecture has an [isolated #24B5 fixture implementation](prototype-implementation.md) for operator review.

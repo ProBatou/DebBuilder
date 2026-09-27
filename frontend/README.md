@@ -1,4 +1,4 @@
-# Production admin frontend source (#24C2B)
+# Production admin frontend source (#24C2C)
 
 This is the future authenticated admin UI source. The shipped `static/` tree is still the production entry. The separate public APT landing remains `debbuilder/repository_templates/index.html` and is outside this build.
 
@@ -33,9 +33,10 @@ Run history as evidence for the current Recipe without an immutable snapshot
 match. No such relation is present in the public Run DTO, so the Plan says
 No matching current evidence / Test required. Managed self-build is selected
 from backend management metadata and shown under System. Package and Run links
-fetch the canonical Recipe first and route by its metadata. C2B adds local
-draft editing and ephemeral validation; Recipe persistence and lifecycle
-actions remain outside this checkpoint. The C2B contract is in
+fetch the canonical Recipe first and route by its metadata. C2C adds manual
+guarded Recipe Save, canonical Create, conflict review, and managed override
+Save. Rename remains read only; Delete, Import persistence, Test/Build, and
+automation mutations remain outside this checkpoint. The edit contract is in
 `docs/design/recipe-editor/edit-contract.md`.
 
 ## Isolated development and browser check
@@ -49,3 +50,9 @@ Vite builds `dist/index.html`, `dist/assets/index-<hash>.js`, `dist/assets/index
 The C1 build produced 353 B HTML (about 260 B gzip), 81,750 B JS (28.88 kB gzip), 6,944 B CSS (2.24 kB gzip), and a 185 B manifest. Two successive builds from the same lockfile/source produced identical file hashes. A disposable `/tmp/debbuilder-24c1-stage.*` tree was populated with only those compiled files under `opt/debbuilder/admin-candidate/`; manifest references resolved and no Node toolchain or `node_modules` was staged.
 
 The exact feature state and cutover blockers are in [the parity matrix](../docs/design/24c1-parity.md).
+
+For guarded Recipe Save/Create/conflict browser checks, run Behavior Lab with
+`--scenario recipe-save` on an isolated port, point Vite at it with
+`DEBBUILDER_DEV_API`, then run `npm run test:browser:save` with
+`DEBBUILDER_FRONTEND_URL` and `DEBBUILDER_DEV_API` set to those local URLs.
+The scenario uses disposable Recipe storage and real ETag headers.

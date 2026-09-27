@@ -539,6 +539,15 @@ def create_handler(api):
             except api.RecipeDocumentError as exc:
                 api.json_response(self, {"ok": False, "error": {"code": exc.code, "message": str(exc), "path": exc.path}}, 422)
 
+        def _post_recipe_draft(self, data, _variables, _parsed):
+            if not isinstance(data.get("name"), str) or not isinstance(data.get("repository"), str):
+                api.json_response(self, {"error": {"code": "invalid_recipe", "message": "name and repository must be strings", "path": "$"}}, 422)
+                return
+            try:
+                api.json_response(self, {"recipe": api.new_recipe_draft(data["name"], data["repository"])})
+            except api.RecipeDocumentError as exc:
+                api.json_response(self, {"error": {"code": exc.code, "message": str(exc), "path": exc.path}}, 422)
+
         def _post_recipe_import(self, data, _variables, _parsed):
             recipe = data.get("recipe") if isinstance(data, dict) else data
             replace = data.get("replace", False) if isinstance(data, dict) else False
@@ -644,7 +653,8 @@ def create_handler(api):
             previous_id = str(data.get("previous_id") or "")
             try:
                 revision_arg = {"expected_revision": data["expected_revision"]} if "expected_revision" in data else {}
-                result = api.save_workflow_recipe(workflow_id, workflow, previous_id=previous_id, **revision_arg)
+                result = api.save_workflow_recipe(workflow_id, workflow, previous_id=previous_id,
+                                                  create_only=data.get("create_only", False), **revision_arg)
             except api.builtin_recipe.BuiltinRecipeError as exc:
                 api.json_response(self, {"error": exc.as_dict()}, 409)
                 return
@@ -654,14 +664,14 @@ def create_handler(api):
                 }}, 422)
                 return
             except api.recipe_store.RecipeStoreError as exc:
-                if exc.code != "recipe_revision_conflict":
+                if exc.code not in {"recipe_revision_conflict", "recipe_exists"}:
                     raise
                 api.json_response(self, {"error": {"code": exc.code, "message": str(exc), "path": exc.path}}, 409)
                 return
             except PermissionError as exc:
                 api.json_response(self, {"error": str(exc)}, 403)
                 return
-            api.json_response(self, result)
+            api.json_response(self, result, headers={"ETag": f'"{result["revision"]}"'})
 
         def do_DELETE(self):
             if not self._authorized():

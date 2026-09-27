@@ -2471,6 +2471,15 @@
                   "$ref": "#/components/schemas/WorkflowSaveResponse"
                 }
               }
+            },
+            "headers": {
+              "ETag": {
+                "description": "SHA-256 of exact persisted Recipe bytes; send the unquoted digest as expected_revision on a future save.",
+                "schema": {
+                  "type": "string",
+                  "pattern": "^\"[0-9a-f]{64}\"$"
+                }
+              }
             }
           },
           "400": {
@@ -2515,7 +2524,7 @@
             ]
           },
           "409": {
-            "description": "HTTP 409 admin API error. Documented codes: builtin_recipe_managed_field, builtin_recipe_reserved, recipe_revision_conflict.",
+            "description": "HTTP 409 admin API error. Documented codes: builtin_recipe_managed_field, builtin_recipe_reserved, recipe_revision_conflict, recipe_exists.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2526,11 +2535,12 @@
             "x-debbuilder-error-codes": [
               "builtin_recipe_managed_field",
               "builtin_recipe_reserved",
-              "recipe_revision_conflict"
+              "recipe_revision_conflict",
+              "recipe_exists"
             ]
           },
           "422": {
-            "description": "HTTP 422 admin API error. Documented codes: invalid_recipe_json, invalid_recipe_revision, recipe_identity_mismatch, unsupported_version_source, unknown_field, post_build_directory_invalid_path.",
+            "description": "HTTP 422 admin API error. Documented codes: invalid_recipe_json, invalid_recipe_revision, invalid_create_precondition, recipe_identity_mismatch, unsupported_version_source, unknown_field, post_build_directory_invalid_path.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2541,6 +2551,7 @@
             "x-debbuilder-error-codes": [
               "invalid_recipe_json",
               "invalid_recipe_revision",
+              "invalid_create_precondition",
               "recipe_identity_mismatch",
               "unsupported_version_source",
               "unknown_field",
@@ -3489,6 +3500,104 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/RecipeInput"
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "ProxyIdentity": []
+          },
+          {
+            "OidcSession": []
+          }
+        ]
+      }
+    },
+    "/api/recipes/draft": {
+      "post": {
+        "operationId": "recipes.draft",
+        "summary": "Project a new canonical Recipe draft",
+        "tags": [
+          "recipes"
+        ],
+        "x-debbuilder-effect": "ephemeral_action",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecipeDraftResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400 admin API error. Documented codes: invalid_request, invalid_json, internal_error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_request",
+              "invalid_json",
+              "internal_error"
+            ]
+          },
+          "401": {
+            "description": "HTTP 401 admin API error. Documented codes: authentication_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_required"
+            ]
+          },
+          "422": {
+            "description": "HTTP 422 admin API error. Documented codes: invalid_recipe, missing_id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "invalid_recipe",
+              "missing_id"
+            ]
+          },
+          "503": {
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "authentication_unavailable",
+              "settings_unavailable"
+            ]
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "description": "JSON body; an omitted body is parsed as {} by the current server.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecipeDraftInput"
               }
             }
           }
@@ -4924,6 +5033,9 @@
               "expected_revision": {
                 "type": "string",
                 "pattern": "^[0-9a-f]{64}$"
+              },
+              "create_only": {
+                "type": "boolean"
               }
             },
             "additionalProperties": false,
@@ -4931,6 +5043,34 @@
               "workflow"
             ]
           }
+        ]
+      },
+      "RecipeDraftInput": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "repository": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "repository"
+        ]
+      },
+      "RecipeDraftResponse": {
+        "type": "object",
+        "properties": {
+          "recipe": {
+            "$ref": "#/components/schemas/Recipe"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "recipe"
         ]
       },
       "ArchiveInspectInput": {
@@ -7472,13 +7612,22 @@
           },
           "path": {
             "type": "string"
+          },
+          "recipe": {
+            "$ref": "#/components/schemas/Recipe"
+          },
+          "revision": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
           }
         },
         "additionalProperties": false,
         "required": [
           "ok",
           "id",
-          "path"
+          "path",
+          "recipe",
+          "revision"
         ]
       },
       "DeleteResponse": {

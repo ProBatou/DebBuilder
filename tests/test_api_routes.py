@@ -41,6 +41,7 @@ EXPECTED_ROUTES = {
     ("POST", "/api/executions/{run_id}/validations/{attempt_id}/cancel", "validation.cancel"),
     ("POST", "/api/executions/{run_id}/cancel", "executions.cancel"),
     ("POST", "/api/recipes/validate", "recipes.validate"),
+    ("POST", "/api/recipes/draft", "recipes.draft"),
     ("POST", "/api/recipes/import", "recipes.import"),
     ("POST", "/api/run", "executions.run"),
     ("POST", "/api/upstream-archive/inspect", "archives.inspect"),
@@ -70,14 +71,14 @@ class ApiRouteRegistryTests(unittest.TestCase):
             method: sum(route.method == method for route in ADMIN_API_ROUTES)
             for method in ("GET", "POST", "DELETE")
         }
-        self.assertEqual(by_method, {"GET": 21, "POST": 18, "DELETE": 3})
+        self.assertEqual(by_method, {"GET": 21, "POST": 19, "DELETE": 3})
         self.assertEqual(
             sum(route.effect is RouteEffect.DURABLE_MUTATION for route in ADMIN_API_ROUTES),
             19,
         )
         self.assertEqual(
             {route.operation_id for route in ADMIN_API_ROUTES if route.effect is RouteEffect.EPHEMERAL_ACTION},
-            {"recipes.validate", "archives.inspect"},
+            {"recipes.validate", "recipes.draft", "archives.inspect"},
         )
         self.assertTrue(all(
             route.effect is RouteEffect.READ_ONLY

@@ -321,7 +321,8 @@ def locked_recipe(path: Path):
         yield canonical
 
 
-def save_recipe(path: Path, document: dict, *, expected_revision: str | None = None) -> dict:
+def save_recipe(path: Path, document: dict, *, expected_revision: str | None = None,
+                create_only: bool = False, with_revision: bool = False) -> dict | tuple[dict, str]:
     """Validate and durably save one Recipe in canonical current-schema form."""
     path = Path(path)
     try:
@@ -343,6 +344,8 @@ def save_recipe(path: Path, document: dict, *, expected_revision: str | None = N
         except FileNotFoundError:
             existing = None
         else:
+            if create_only:
+                raise RecipeStoreError("recipe_exists", "Recipe ID already exists", file=path, path="$.name")
             existing = _read_bytes(path)
         if expected_revision is not None and (existing is None or hashlib.sha256(existing).hexdigest() != expected_revision):
             raise RecipeStoreError(
@@ -350,7 +353,8 @@ def save_recipe(path: Path, document: dict, *, expected_revision: str | None = N
             )
         if existing != content:
             _durable_atomic_write(path, content)
-    return canonical
+        revision = hashlib.sha256(content).hexdigest()
+        return (canonical, revision) if with_revision else canonical
 
 
 def validate_recipe_directory(directory: Path) -> RecipeDirectoryValidationReport:

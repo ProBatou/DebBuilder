@@ -212,6 +212,7 @@ def graceful_shutdown_setup(app, runtime):
 
 SCENARIOS = {
     "showcase": Scenario("showcase", "Deterministic static Runs, packages, and Recipes used by the UI showcase.", showcase.seed),
+    "recipe-save": Scenario("recipe-save", "Disposable Recipes for guarded Save, Create, collision, and managed override review.", showcase.seed),
     "inventory-empty": Scenario("inventory-empty", "Showcase with an empty exact repository inventory.", showcase.seed),
     "inventory-error": Scenario("inventory-error", "Showcase with an unavailable exact repository inventory.", showcase.seed),
     "cancellation-running": Scenario("cancellation-running", "Running cancellable local process-tree fixture with live logs.", seed_cancellation, pipeline_setup(running=True), True),
@@ -323,10 +324,16 @@ def serve(selected: Scenario, *, host: str = "127.0.0.1", port: int = 8765) -> N
 
             def _post(self, data: dict):
                 path = urlparse(self.path).path
-                if path == "/api/recipes/validate":
-                    # Ephemeral draft validation is the sole C2B Recipe POST.
+                if path in {"/api/recipes/validate", "/api/recipes/draft"}:
                     super()._post(data)
                     return
+                if selected.name == "recipe-save" and path.startswith("/api/workflows/"):
+                    recipe_id = path.removeprefix("/api/workflows/")
+                    allowed_id = recipe_id in {"seerr", "debbuilder"} or recipe_id.startswith("lab-new-")
+                    guarded = isinstance(data, dict) and isinstance(data.get("workflow"), dict) and not data.get("previous_id")
+                    if allowed_id and guarded and ("expected_revision" in data or data.get("create_only") is True):
+                        super()._post(data)
+                        return
                 if path == "/api/run":
                     if not self._canonical_run(data):
                         _behavior_lab_error(self, selected.name)

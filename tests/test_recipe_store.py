@@ -4,6 +4,7 @@ import os
 import stat
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -76,6 +77,44 @@ class RecipeStoreTests(unittest.TestCase):
             save_recipe(self.directory / "new.json", current_recipe("new"), expected_revision=revision)
         self.assertEqual(missing.exception.code, "recipe_revision_conflict")
         self.assertFalse((self.directory / "new.json").exists())
+
+    def test_create_only_and_save_receipt_are_atomic(self):
+        path = self.directory / "created.json"
+        recipe, revision = save_recipe(path, current_recipe("created"), create_only=True, with_revision=True)
+        self.assertEqual(revision, __import__("hashlib").sha256(path.read_bytes()).hexdigest())
+        self.assertEqual(recipe, load_recipe(path))
+        before = path.read_bytes()
+        with self.assertRaises(RecipeStoreError) as collision:
+            save_recipe(path, {**recipe, "active": False}, create_only=True, with_revision=True)
+        self.assertEqual(collision.exception.code, "recipe_exists")
+        self.assertEqual(path.read_bytes(), before)
+        updated, fresh = save_recipe(path, {**recipe, "active": False}, expected_revision=revision, with_revision=True)
+        self.assertFalse(updated["active"])
+        self.assertEqual(fresh, __import__("hashlib").sha256(path.read_bytes()).hexdigest())
+
+    def test_concurrent_create_only_has_one_winner(self):
+        path = self.directory / "raced.json"
+        def create(active):
+            try:
+                return save_recipe(path, current_recipe("raced", active=active), create_only=True)
+            except RecipeStoreError as exc:
+                return exc.code
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(create, (True, False)))
+        winners = [result for result in results if isinstance(result, dict)]
+        self.assertEqual(len(winners), 1)
+        self.assertIn("recipe_exists", results)
+        self.assertEqual(load_recipe(path), winners[0])
+
+    def test_create_only_treats_symlink_target_as_collision(self):
+        path = self.directory / "linked.json"
+        outside = self.directory / "outside.json"
+        outside.write_text("do not change")
+        path.symlink_to(outside)
+        with self.assertRaises(RecipeStoreError) as collision:
+            save_recipe(path, current_recipe("linked"), create_only=True)
+        self.assertEqual(collision.exception.code, "recipe_exists")
+        self.assertEqual(outside.read_text(), "do not change")
 
     def test_load_is_read_only_even_when_v5_json_is_not_canonical_bytes(self):
         path = self.directory / "snapshot.json"

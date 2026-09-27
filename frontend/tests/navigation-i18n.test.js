@@ -26,3 +26,12 @@ test('Recipe editor chrome has explicit French, German and Spanish translations'
     'discardChanges','keepEditing','add','remove','move','up','down','key','value',
   ]) assert.notEqual(t(key,language),t(key,'en'),`${language}.${key}`);
 });
+
+test('Recipe persistence chrome has explicit translations in every locale', () => {
+  for (const language of ['fr','de','es']) for (const key of [
+    'save','saving','saved','newRecipe','recipeId','githubRepository','continue',
+    'recipeConflict','conflictPreserved','recipeAlreadyExists','latestServer',
+    'changedBoth','changedLocally','changedServer','discardReload','changeIdentity',
+    'revisionUnavailable',
+  ]) assert.notEqual(t(key,language),t(key,'en'),`${language}.${key}`);
+});

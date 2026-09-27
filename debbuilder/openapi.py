@@ -113,7 +113,9 @@ SCHEMAS = {
     "RecipeImportInput": _object({"recipe": _ref("Recipe"), "replace": B}, ("recipe",)),
     "RunInput": {"oneOf": [_ref("Recipe"), _object({"workflow": _ref("Recipe"), "dry_run": B}, ("workflow",))]},
     "WorkflowSaveInput": {"oneOf": [_ref("Recipe"), _object({"workflow": _ref("Recipe"), "previous_id": S,
-        "expected_revision": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}, ("workflow",))]},
+        "expected_revision": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "create_only": B}, ("workflow",))]},
+    "RecipeDraftInput": _object({"name": S, "repository": S}, ("name", "repository")),
+    "RecipeDraftResponse": _object({"recipe": _ref("Recipe")}, ("recipe",)),
     "ArchiveInspectInput": {"oneOf": [_ref("Recipe"), _object({"workflow": _ref("Recipe")}, ("workflow",))]},
     "EmptyRequest": _object(description="An omitted JSON body is also accepted and treated as {}."),
     "IgnoredRequest": _object(extra=True, description="The handler currently ignores request fields; use {}."),
@@ -440,7 +442,9 @@ SCHEMAS.update({
     "NotificationResponse": _object({"ok": {"const": True}, "notification": _ref("Notification")}, ("ok", "notification")),
     "ExecutionCancellationResponse": _object({"ok": {"const": True}, "cancellation": _ref("Cancellation")}, ("ok", "cancellation")),
     "DeleteLogsResponse": _ref("DeleteLogsResult"),
-    "WorkflowSaveResponse": _object({"ok": {"const": True}, "id": S, "path": S}, ("ok", "id", "path")),
+    "WorkflowSaveResponse": _object({"ok": {"const": True}, "id": S, "path": S,
+                                      "recipe": _ref("Recipe"), "revision": {"type": "string", "pattern": "^[0-9a-f]{64}$"}},
+                                     ("ok", "id", "path", "recipe", "revision")),
     "DeleteResponse": _object({"ok": {"const": True}, "id": S,
                                "deleted_from_repository": B, "deleted_from_repo": B}, ("ok", "id")),
     "ExecutionLogDeleteResponse": _object({"ok": {"const": True}, "deletion": _ref("ExecutionLogDeletion")}, ("ok", "deletion")),
@@ -509,6 +513,7 @@ OPERATION_DOCS = {
     "validation.cancel": _doc(200, "ValidationCancellationResponse", "EmptyRequest", also=(202,), errors={400: ("invalid_validation_cancellation_request", "invalid_validation_identity"), 404: ("build_run_not_found",), 409: ("validation_recovery_required",)}),
     "executions.cancel": _doc(200, "ExecutionCancellationResponse", "EmptyRequest", also=(202,), errors={400: ("invalid_cancellation_request", "invalid_execution_id"), 404: ("build_run_not_found",), 409: ("execution_not_cancellable",), 500: ("execution_cancellation_failed",), 503: ("execution_manager_unavailable",)}),
     "recipes.validate": _doc(200, "RecipeValidationResponse", "RecipeInput", errors={422: ("invalid_recipe_json", "unknown_field", "unsupported_recipe_schema", "unsupported_version_source", "invalid_automation_policy", "post_build_directory_invalid_path")}),
+    "recipes.draft": _doc(200, "RecipeDraftResponse", "RecipeDraftInput", errors={422: ("invalid_recipe", "missing_id")}),
     "recipes.import": _doc(200, "RecipeImportResponse", "RecipeImportInput", errors={403: ("readonly_recipe",), 409: ("recipe_exists", "builtin_recipe_reserved"), 422: ("invalid_recipe_json", "unsupported_recipe_schema", "unsupported_version_source", "unknown_field", "post_build_directory_invalid_path")}),
     "executions.run": _doc(202, "RunAdmissionResponse", "RunInput", errors={400: ("invalid_request",), 409: ("recipe_disabled",), 422: ("unsupported_recipe_schema", "unsupported_version_source", "unknown_field", "post_build_directory_invalid_path"), 429: ("execution_queue_full",), 500: ("execution_enqueue_failed",), 503: ("execution_manager_unavailable", "github_unavailable")}),
     "archives.inspect": _doc(200, "ArchiveInspectionResponse", "ArchiveInspectInput", errors={422: ("invalid_recipe_json", "ambiguous_archive_source", "ambiguous_release_asset", "release_asset_not_found", "github_unavailable")}),
@@ -520,7 +525,7 @@ OPERATION_DOCS = {
     "executions.logs.delete_many": _doc(200, "DeleteLogsResponse", "DeleteLogsInput", errors={409: ("execution_active",)}),
     "packages.create": _doc(200, "PackageMutationResponse", "PackageCreateInput", errors={400: ("invalid_request",)}),
     "packages.update": _doc(200, "PackageMutationResponse", "PackageInput", errors={400: ("invalid_package_id",), 404: ("not_found",)}),
-    "workflows.save": _doc(200, "WorkflowSaveResponse", "WorkflowSaveInput", errors={403: ("forbidden",), 409: ("builtin_recipe_managed_field", "builtin_recipe_reserved", "recipe_revision_conflict"), 422: ("invalid_recipe_json", "invalid_recipe_revision", "recipe_identity_mismatch", "unsupported_version_source", "unknown_field", "post_build_directory_invalid_path")}),
+    "workflows.save": _doc(200, "WorkflowSaveResponse", "WorkflowSaveInput", errors={403: ("forbidden",), 409: ("builtin_recipe_managed_field", "builtin_recipe_reserved", "recipe_revision_conflict", "recipe_exists"), 422: ("invalid_recipe_json", "invalid_recipe_revision", "invalid_create_precondition", "recipe_identity_mismatch", "unsupported_version_source", "unknown_field", "post_build_directory_invalid_path")}),
     "workflows.delete": _doc(200, "DeleteResponse", errors={403: ("forbidden", "readonly_recipe"), 404: ("recipe_not_found",)}),
     "executions.logs.delete": _doc(200, "ExecutionLogDeleteResponse", errors={404: ("build_run_not_found",), 409: ("execution_active",)}),
     "packages.delete": _doc(200, "DeleteResponse", errors={400: ("invalid_request",)}),
@@ -567,7 +572,7 @@ def _operation(route) -> dict:
         str(status): {"description": "Successful response", "content": {doc.media_type: {"schema": _ref(schema)}}}
         for status, schema in doc.success
     }
-    if route.operation_id == "workflows.get":
+    if route.operation_id in {"workflows.get", "workflows.save"}:
         responses["200"]["headers"] = {
             "ETag": {"description": "SHA-256 of exact persisted Recipe bytes; send the unquoted digest as expected_revision on a future save.",
                      "schema": {"type": "string", "pattern": '^"[0-9a-f]{64}"$'}},

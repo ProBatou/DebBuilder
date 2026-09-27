@@ -1288,7 +1288,8 @@ def import_recipe_json(recipe, *, replace: bool = False) -> dict:
 _NO_RECIPE_REVISION = object()
 
 
-def save_workflow_recipe(workflow_id: str, workflow: dict, *, previous_id: str = "", expected_revision=_NO_RECIPE_REVISION) -> dict:
+def save_workflow_recipe(workflow_id: str, workflow: dict, *, previous_id: str = "", expected_revision=_NO_RECIPE_REVISION,
+                         create_only: bool = False) -> dict:
     """Persist a normal Recipe or an allowlisted edit to the managed built-in."""
     require_safe_name(workflow_id, "workflow id")
     if previous_id:
@@ -1298,6 +1299,8 @@ def save_workflow_recipe(workflow_id: str, workflow: dict, *, previous_id: str =
             raise RecipeDocumentError("invalid_recipe_revision", "expected_revision must be a lowercase SHA-256 digest", path="$.expected_revision")
         if previous_id and previous_id != workflow_id:
             raise RecipeDocumentError("invalid_recipe_revision", "Revision preconditions do not support rename", path="$.previous_id")
+    if not isinstance(create_only, bool) or (create_only and (expected_revision is not _NO_RECIPE_REVISION or previous_id)):
+        raise RecipeDocumentError("invalid_create_precondition", "create_only requires a new Recipe without revision or previous_id", path="$.create_only")
     revision = None if expected_revision is _NO_RECIPE_REVISION else expected_revision
     canonical = recipe_document_for_storage(workflow)
     if canonical["name"] != workflow_id:
@@ -1321,23 +1324,38 @@ def save_workflow_recipe(workflow_id: str, workflow: dict, *, previous_id: str =
     destination = workflow_path(workflow_id, for_write=True)
     assert destination is not None
     if builtin_recipe.is_builtin_recipe_id(workflow_id):
-        stored = builtin_recipe.update_builtin_recipe(destination, canonical, expected_revision=revision)
+        if create_only:
+            raise builtin_recipe.BuiltinRecipeError("builtin_recipe_reserved", "The managed Recipe ID is reserved", path="$.name")
+        stored, fresh_revision = builtin_recipe.update_builtin_recipe(destination, canonical, expected_revision=revision,
+                                                                       with_revision=True)
         normalized = validate_recipe_metadata(stored)
     else:
         normalized = validate_recipe_metadata(canonical)
         stored = canonical
         with storage.locked_path(destination):
             existing = workflow_path(workflow_id)
+            if create_only and existing:
+                raise recipe_store.RecipeStoreError("recipe_exists", "Recipe ID already exists", file=destination, path="$.name")
             if existing and existing.resolve().parent != USER_WORKFLOWS.resolve():
                 raise PermissionError("shipped recipes are read-only")
-            stored = recipe_store.save_recipe(destination, stored, expected_revision=revision)
+            stored, fresh_revision = recipe_store.save_recipe(destination, stored, expected_revision=revision,
+                                                               create_only=create_only, with_revision=True)
     if previous_id and previous_id != workflow_id:
         previous = workflow_path(previous_id)
         if previous and previous.parent.resolve() == USER_WORKFLOWS.resolve():
             previous.unlink()
-    associate_workflow_package(workflow_id, normalized, previous_id)
+    if expected_revision is _NO_RECIPE_REVISION and not create_only:
+        # Preserve the legacy workflow Save projection. Guarded Svelte Save
+        # persists only the Recipe; Package creation is a separate workflow.
+        associate_workflow_package(workflow_id, normalized, previous_id)
     _wake_automation_after_recipe_save(previous_recipe, normalized)
-    return {"ok": True, "id": workflow_id, "path": str(destination)}
+    return {"ok": True, "id": workflow_id, "path": str(destination), "recipe": stored, "revision": fresh_revision}
+
+
+def new_recipe_draft(name: str, repository: str) -> dict:
+    """Project the backend's v5 defaults without persistence or side effects."""
+    return recipe_document_for_storage({"schema_version": 5, "name": name,
+                                        "source": {"repository": repository}})
 
 
 def automation_projection_service() -> automation_status.AutomationStatusService:

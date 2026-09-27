@@ -1,4 +1,4 @@
-# #24C2B migration parity matrix
+# #24C2C migration parity matrix
 
 Status means functional read-only coverage, not visual similarity. `static/` remains production authority. A later checkpoint must close every blocker before cutover. The public landing has a separate deployment path.
 
@@ -12,10 +12,14 @@ Status means functional read-only coverage, not visual similarity. `static/` rem
 | Recipe editor presentation | `static/app.js`, recipe modules | Recipe v5 | Plan/Customize/Advanced/Expert | Migrated locally | editor Lab browser | persistence inactive |
 | Recipe draft/serialization | `static/recipe_serialization.js` | `recipe_document_for_storage` | baseline/draft model | Qualified locally | exact canonical corpus and isolation tests | future save wiring |
 | Recipe validation | legacy form/API | `POST /api/recipes/validate` | current draft validation | Migrated | Lab browser and API | no durable save |
-| Recipe persistence/create/delete | legacy save routes | workflow API | future Recipes | Not activated | legacy tests | C2C write workflow |
+| Recipe existing Save | legacy save routes | guarded workflow Save + ETag | Recipes | Migrated | API, Lab browser | none |
+| Optimistic concurrency | none | exact-byte revision check | Recipes conflict review | Migrated | store, API, Lab browser | none |
+| Recipe Create | legacy save routes | canonical draft + create-only workflow Save | Recipes | Migrated | store, API, Lab browser | none |
+| Recipe Rename | legacy previous_id | unguarded legacy rename only | read-only ID/name | Deferred post-v1 | editor browser | atomic multi-object design |
+| Recipe Delete | legacy delete route | workflow Delete | future Recipes | Not started | legacy tests | dependency and concurrency review |
 | Recipe import/export/JSON | `static/js/recipe/json_editor.js` | canonical Recipe GET | baseline/draft JSON review | Read-only partial | Lab browser | import mutation inactive |
 | Package → Recipe | legacy Package detail | Package `recipe` ID and canonical Recipe GET | exact Recipe or System managed route | Migrated read-only | Lab browser | none for read-only navigation |
-| Managed self-build | legacy built-in Recipe view | management metadata and canonical Recipe GET | System managed self-build with local allowed overrides | Migrated locally | Lab browser, draft tests | operator override writes later |
+| Managed self-build | legacy built-in Recipe view | management metadata and guarded Save | System managed self-build | Migrated | API, Lab browser | none |
 | Test | `static/js/recipe/test_run_modal.js` | `POST /api/run` dry run | future Recipes | Not started | legacy JS | write checkpoint |
 | Build | `static/app.js` | `POST /api/run` | future Recipes | Not started | legacy JS | write checkpoint |
 | Runs | `static/js/pages/logs.js` | `/api/executions`, `/{run_id}` | Runs | Partially migrated | unit, Lab browser | full lifecycle actions and complete display parity |
@@ -34,4 +38,4 @@ Status means functional read-only coverage, not visual similarity. `static/` rem
 | Support bundle | `static/js/pages/system.js` | `/api/support-bundle` GET | future System Developer | Not started | legacy tests | download and error handling |
 | Public repository landing | `debbuilder/repository_templates/index.html` | separate public listener | separate future template | Not started | prototype reference | separate deployment checkpoint |
 
-`/api/packages` remains the DebBuilder-managed Packages projection. Repository inventory is an independent exact reprepro read. Package → Recipe and Run → Recipe navigation use the returned Recipe ID; application-managed Recipes route to System using management metadata. No current public Run DTO proves an exact Recipe revision, so the Plan reports no matching current evidence. Recipe persistence, Create/Delete, Test/Build, lifecycle actions, and production cutover remain blockers. See [the C2B edit contract](recipe-editor/edit-contract.md).
+`/api/packages` remains the DebBuilder-managed Packages projection. Repository inventory is an independent exact reprepro read. Package → Recipe and Run → Recipe navigation use the returned Recipe ID; application-managed Recipes route to System using management metadata. No current public Run DTO proves an exact Recipe revision, so the Plan reports no matching current evidence. Recipe Delete, Test/Build, lifecycle actions, and production cutover remain blockers. See [the C2B edit contract](recipe-editor/edit-contract.md).

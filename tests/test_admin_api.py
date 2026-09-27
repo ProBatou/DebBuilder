@@ -1226,6 +1226,34 @@ class AdminApiTests(AdminApiCase):
         self.assertEqual(status, 200)
         self.assertTrue(server.recipe_store.load_recipe(server.USER_WORKFLOWS / "revision-case.json")["active"])
 
+    def test_new_recipe_draft_and_create_only_receipt(self):
+        status, draft = self.request("POST", "/api/recipes/draft", {"name": "fresh", "repository": "example/fresh"})
+        self.assertEqual(status, 200)
+        self.assertFalse((server.USER_WORKFLOWS / "fresh.json").exists())
+        recipe = draft["recipe"]
+        self.assertEqual(recipe, server.recipe_document_for_storage(recipe))
+        request = urllib.request.Request(self.base_url + "/api/workflows/fresh",
+            data=json.dumps({"workflow": recipe, "create_only": True}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(request, timeout=5) as response:
+            receipt = json.loads(response.read())
+            etag = response.headers["ETag"]
+        self.assertEqual(receipt["recipe"], recipe)
+        self.assertEqual(etag, '"' + receipt["revision"] + '"')
+        self.assertEqual(receipt["revision"], hashlib.sha256((server.USER_WORKFLOWS / "fresh.json").read_bytes()).hexdigest())
+        self.assertNotIn("fresh", server.package_projection_service().load_overrides())
+        with self.assertRaises(urllib.error.HTTPError) as collision:
+            self.request("POST", "/api/workflows/fresh", {"workflow": {**recipe, "active": False}, "create_only": True})
+        self.assertEqual(collision.exception.code, 409)
+        self.assertEqual(json.loads(collision.exception.read())["error"]["code"], "recipe_exists")
+        self.assertTrue(server.recipe_store.load_recipe(server.USER_WORKFLOWS / "fresh.json")["active"])
+        with self.assertRaises(urllib.error.HTTPError) as invalid:
+            self.request("POST", "/api/workflows/fresh", {
+                "workflow": recipe, "create_only": True, "expected_revision": receipt["revision"],
+            })
+        self.assertEqual(invalid.exception.code, 422)
+        self.assertEqual(json.loads(invalid.exception.read())["error"]["code"], "invalid_create_precondition")
+
     def test_managed_recipe_revision_precondition_keeps_forbidden_fields_protected(self):
         server.builtin_recipe.reconcile_builtin_recipe(server.USER_WORKFLOWS)
         with urllib.request.urlopen(self.base_url + "/api/workflows/debbuilder", timeout=5) as response:

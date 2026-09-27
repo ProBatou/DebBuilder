@@ -89,6 +89,21 @@ class BehaviorLabTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown Behavior Lab scenario"):
             behavior_lab.scenario("missing")
 
+    def test_recipe_save_scenario_uses_disposable_store_and_real_etags(self):
+        _process, url, runtime = self.start_lab("recipe-save")
+        with urlopen(f"{url}/api/workflows/seerr", timeout=5) as response:
+            recipe = json.load(response)
+            revision = response.headers["ETag"].strip('"')
+        request = Request(f"{url}/api/workflows/seerr", method="POST",
+                          data=json.dumps({"workflow": {**recipe, "active": False}, "expected_revision": revision}).encode(),
+                          headers={"Content-Type": "application/json"})
+        with urlopen(request, timeout=5) as response:
+            receipt = json.load(response)
+            self.assertEqual(response.headers["ETag"], '"' + receipt["revision"] + '"')
+        self.assertFalse(receipt["recipe"]["active"])
+        self.assertTrue((runtime / "data" / "workflows" / "seerr.json").exists())
+        self.blocked(url, "/api/workflows/bashrc", {"workflow": recipe})
+
     def test_scenario_listing(self):
         listed = subprocess.run([sys.executable, "-m", "tests.ui.behavior_lab", "--list-scenarios"], cwd=ROOT, text=True, capture_output=True, check=True)
         for name in behavior_lab.SCENARIOS:

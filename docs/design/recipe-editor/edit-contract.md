@@ -65,16 +65,36 @@ validate, review the canonical result and `collision` projection, then require
 an explicit replacement decision before durable import. No Import POST is
 wired in C2B.
 
-## Future save precondition
+## #24C2C durable persistence
 
-`GET /api/workflows/{id}` returns an `ETag` with SHA-256 of exact persisted
-Recipe bytes, read under the Recipe lease with the body. Body shape is
-unchanged. A future editor can send the unquoted lowercase digest as
-`expected_revision` alongside `workflow` in the existing save wrapper. The
-store compares it under the same process/thread lease used for atomic write.
-A missing or changed target returns 409 `recipe_revision_conflict` without
-overwrite. Invalid digests return 422 `invalid_recipe_revision`. Omitting the
-field preserves legacy save behavior. Managed Recipes still enforce the
-backend allowlist. Revision preconditions do not support rename. C2C should
-reload/review on 409 and retry only after user resolution with a fresh
-revision. Svelte does not send this save request in C2B.
+Existing Svelte edits retain the canonical GET body and strong ETag digest as
+baseline and revision. Save freezes the draft, validates that exact candidate
+through `/api/recipes/validate`, then posts it with `expected_revision`. The
+store checks under its Recipe lease and returns the canonical saved Recipe and
+fresh revision from the same write. Save fields are disabled during this short
+validate/write sequence; Cancel and navigation are blocked until it finishes.
+The acknowledged canonical Recipe becomes the new baseline. Later Cancel resets
+to this baseline. No autosave is used.
+
+A 409 revision conflict keeps the local draft and original revision. The editor
+fetches the latest server Recipe and ETag without installing them, and shows
+paths changed locally, on the server, or both. Keep editing retains the warning
+and blocks Save. Discard/reload installs the server body and revision. There is
+no force overwrite or automatic merge. Network, authorization, and validation
+failures retain the draft; backend path and prose remain visible.
+
+Create starts with Recipe ID and GitHub repository. `POST /api/recipes/draft`
+projects a canonical v5 baseline from `recipe_document_for_storage()` without
+persistence. First Save uses `create_only: true`, checked atomically under the
+store lease. A collision preserves the draft and allows changing its ID; no
+Package is created by guarded Save. Success changes Create into Edit and
+installs the saved canonical body and revision. Managed self-build under System
+uses the same guarded Save; the backend allowlist and definition consistency
+checks remain authoritative.
+
+Rename is deferred post-v1. Current legacy `previous_id` behavior writes the
+destination before deleting the source and updates Package references outside
+that transition; destination collision, dependent automation identity, and
+crash durability need a separate transaction design. Existing ID/name and
+managed identity remain read only in Svelte. Delete, Import persistence,
+Test/Build, automation mutation, and observation mutation remain out of scope.

@@ -18,7 +18,7 @@ export function canonicalError(status, payload) {
   return new ApiError({status, code: fallback, message: typeof error === 'string' ? error : 'Request failed'});
 }
 
-export async function request(path, {signal, timeout = 20000, fetchImpl = fetch, method = 'GET', body} = {}) {
+export async function request(path, {signal, timeout = 20000, fetchImpl = fetch, method = 'GET', body, withHeaders = false} = {}) {
   if (!path.startsWith('/api/')) throw new TypeError('API path required');
   const controller = new AbortController();
   const abort = () => controller.abort(signal?.reason);
@@ -31,7 +31,7 @@ export async function request(path, {signal, timeout = 20000, fetchImpl = fetch,
     const type = response.headers.get('content-type') || '';
     const payload = type.includes('json') ? await response.json() : await response.text();
     if (!response.ok) throw canonicalError(response.status, payload);
-    return payload;
+    return withHeaders ? {payload, headers: response.headers} : payload;
   } catch (error) {
     if (error instanceof ApiError) throw error;
     if (timedOut) throw new ApiError({code: 'request_timeout', message: 'Request timed out', kind: 'timeout'});

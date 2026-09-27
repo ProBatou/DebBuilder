@@ -53,15 +53,28 @@ Application-managed self-build is identified by management metadata and shown
 under System. C2B sends only ephemeral `POST /api/recipes/validate`; it does
 not save, import, Test, Build, or send a durable Recipe mutation.
 
-Workflow GET retains the canonical Recipe body and adds an `ETag: "<sha256>"`
-header. The digest covers exact persisted Recipe bytes read with the body under
-the Recipe lease. A future client may send the unquoted lowercase digest as
-optional `expected_revision` in a wrapped workflow save body. Save compares it
-under the write lease; a stale or missing target returns 409
-`recipe_revision_conflict` without overwrite. A malformed digest returns 422
-`invalid_recipe_revision`. Legacy callers omitting it retain current behavior.
-Revision preconditions with `previous_id` rename are rejected; the new editor
-does not offer rename.
+Workflow GET returns the canonical Recipe body with `ETag: "<sha256>"`, the
+SHA-256 of exact persisted bytes read under the Recipe lease. A Svelte edit
+sends `POST /api/workflows/{id}` with `{ "workflow": <draft>,
+"expected_revision": "<unquoted digest>" }`. The store checks the digest
+under its mutation lease; stale or missing targets return 409
+`recipe_revision_conflict`. Invalid digests return 422
+`invalid_recipe_revision`. Save returns the exact persisted canonical `recipe`,
+its `revision` digest, and a matching strong `ETag` from the same mutation.
+Legacy callers may omit the revision and keep their existing behavior.
+
+`POST /api/recipes/draft` accepts `{ "name": "<safe Recipe ID>",
+"repository": "<GitHub owner/name>" }` and returns `{ "recipe": <canonical
+v5 draft> }` without writing state. All defaults come from the backend v5
+schema. The UI requires both inputs before opening the normal editor.
+`POST /api/workflows/{id}` with `{ "workflow": <draft>, "create_only": true }`
+atomically requires an absent target. A collision returns 409 `recipe_exists`
+without changing either Recipe. `create_only` cannot be combined with
+`expected_revision` or `previous_id` (422 `invalid_create_precondition`).
+Guarded Svelte saves do not create a Package association; unguarded legacy
+saves retain their prior Package projection behavior. Revision preconditions
+with `previous_id` rename remain rejected, and the Svelte editor keeps Recipe
+identity read only after creation.
 
 The API uses configured local (`none`), trusted reverse-proxy header, or OIDC
 session authentication. The document describes all three without embedding

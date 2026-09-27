@@ -112,6 +112,7 @@ ADMIN_API_ROUTES: tuple[ApiRoute, ...] = (
     _route("POST", "/api/executions/{run_id}/validations/{attempt_id}/cancel", "validation.cancel", "_post_validation_cancel", D, "validation", "Cancel a validation attempt"),
     _route("POST", "/api/executions/{run_id}/cancel", "executions.cancel", "_post_execution_cancel", D, "executions", "Cancel an execution"),
     _route("POST", "/api/recipes/validate", "recipes.validate", "_post_recipe_validate", E, "recipes", "Validate recipe JSON"),
+    _route("POST", "/api/recipes/draft", "recipes.draft", "_post_recipe_draft", E, "recipes", "Project a new canonical Recipe draft"),
     _route("POST", "/api/recipes/import", "recipes.import", "_post_recipe_import", D, "recipes", "Import a recipe"),
     _route("POST", "/api/run", "executions.run", "_post_run", D, "executions", "Start a recipe run"),
     _route("POST", "/api/upstream-archive/inspect", "archives.inspect", "_post_archive_inspect", E, "archives", "Inspect an upstream archive"),

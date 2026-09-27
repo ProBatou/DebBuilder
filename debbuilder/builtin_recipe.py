@@ -276,7 +276,8 @@ def update_builtin_recipe(
     *,
     definition_path: Path = BUILTIN_RECIPE_PATH,
     expected_revision: str | None = None,
-) -> dict:
+    with_revision: bool = False,
+) -> dict | tuple[dict, str]:
     """Persist only approved operator edits to an already managed built-in."""
     definition = load_builtin_definition(definition_path)
     path = Path(path)
@@ -316,6 +317,10 @@ def update_builtin_recipe(
                 },
             )
         current = effective_builtin_recipe(management["operator_overrides"], definition=definition)
+        if expected_revision is not None and current != existing:
+            raise recipe_store.RecipeStoreError(
+                "recipe_revision_conflict", "The managed Recipe definition changed since it was loaded", file=path, path="$",
+            )
         try:
             canonical_candidate = recipe_document_for_storage(candidate)
         except RecipeDocumentError as exc:
@@ -335,4 +340,5 @@ def update_builtin_recipe(
             )
         overrides = _extract_operator_overrides(canonical_candidate, definition)
         effective = effective_builtin_recipe(overrides, definition=definition)
-        return recipe_store.save_recipe(path, effective, expected_revision=expected_revision)
+        return recipe_store.save_recipe(path, effective, expected_revision=expected_revision,
+                                        with_revision=with_revision)

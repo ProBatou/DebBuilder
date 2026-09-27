@@ -83,6 +83,21 @@ class BuiltinRecipeTests(unittest.TestCase):
         self.assertEqual(replace.call_count, 0)
         self.assertEqual(self.path.stat().st_mtime_ns, before)
 
+    def test_guarded_override_rejects_unreconciled_definition_change(self):
+        builtin_recipe.reconcile_builtin_recipe(self.workflows)
+        baseline, revision = recipe_store.load_recipe_with_revision(self.path)
+        changed = copy.deepcopy(self.definition())
+        changed["management"]["definition_version"] += 1
+        changed["source"]["repository"] = "example/changed-definition"
+        definition_path = Path(self.temporary.name) / "changed-definition.json"
+        definition_path.write_text(json.dumps(changed))
+        candidate = {**baseline, "active": not baseline["active"]}
+        with self.assertRaises(recipe_store.RecipeStoreError) as stale:
+            builtin_recipe.update_builtin_recipe(self.path, candidate, definition_path=definition_path,
+                                                 expected_revision=revision, with_revision=True)
+        self.assertEqual(stale.exception.code, "recipe_revision_conflict")
+        self.assertEqual(recipe_store.load_recipe_with_revision(self.path), (baseline, revision))
+
     def test_unmanaged_reserved_v5_recipe_is_not_adopted(self):
         unmanaged = self.definition()
         unmanaged.pop("management")

@@ -62,7 +62,9 @@ build planning, and staging preview run when applicable; build commands and
 final package creation do not. A successful Test ends `prepared`. Build is
 `dry_run: false`, executes the pipeline and produces a `.deb` or selected
 upstream artifact on `success`. Artifact Validation and Publication remain
-separate. Never-saved Create cannot run until its first Save. An inactive
+separate lifecycle stages, but existing server settings can start them after
+a successful Build. C2D sends no lifecycle mutation requests. Never-saved
+Create cannot run until its first Save. An inactive
 current draft cannot run, but unsaved edits to an existing active Recipe can.
 The admitted Run ID comes only from the 202 response. View Run uses normal
 dirty-navigation protection. A network/timeout outcome is ambiguous: check

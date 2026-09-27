@@ -1,4 +1,4 @@
-# Production admin frontend source (#24C2A)
+# Production admin frontend source (#24C2B)
 
 This is the future authenticated admin UI source. The shipped `static/` tree is still the production entry. The separate public APT landing remains `debbuilder/repository_templates/index.html` and is outside this build.
 
@@ -13,11 +13,11 @@ npm test
 npm run build
 ```
 
-`src/app` owns the shell and bootstrap, `src/api` owns read-only HTTP requests, `src/features` owns polling and Recipe projections, `src/pages` owns view-local state, and `src/navigation`, `src/theme`, `src/i18n` own small browser preferences. No Recipe serializer or mutation adapter exists. The common semantic tokens and layout are in `src/styles.css`; the fixture prototype remains under `prototypes/issue-24` for design reference only.
+`src/app` owns the shell and bootstrap, `src/api` owns HTTP requests, `src/features` owns polling and Recipe draft/projections, `src/pages` owns view-local state, and `src/navigation`, `src/theme`, `src/i18n` own small browser preferences. The Recipe draft adapter preserves canonical v5 fields and can send only ephemeral validation; Save is inactive. The common semantic tokens and layout are in `src/styles.css`; the fixture prototype remains under `prototypes/issue-24` for design reference only.
 
 ## API and auth
 
-The client calls existing GET routes only. `GET /api/auth/status` bootstraps the configured server auth mode; requests use same-origin credentials, so the server remains responsible for OIDC, trusted proxy headers, and local mode. 401, 403 and structured backend errors retain status, code, message and details. Network errors, aborts and 20-second timeouts are distinct. No token or secret is stored in browser storage. The auth bootstrap link on 401 points to the server root. For an isolated Vite/OIDC run, set `VITE_DEBBUILDER_AUTH_ORIGIN` to the isolated backend admin origin before starting Vite; sign in there, then return to the Vite URL. The Vite proxy preserves `/api` same-origin requests; it does not implement OIDC itself. A trusted proxy must still supply its configured identity header on the proxied API path.
+The client calls existing GET routes and ephemeral `POST /api/recipes/validate` only. `GET /api/auth/status` bootstraps the configured server auth mode; requests use same-origin credentials, so the server remains responsible for OIDC, trusted proxy headers, and local mode. 401, 403 and structured backend errors retain status, code, message and details. Network errors, aborts and 20-second timeouts are distinct. No token or secret is stored in browser storage. The auth bootstrap link on 401 points to the server root. For an isolated Vite/OIDC run, set `VITE_DEBBUILDER_AUTH_ORIGIN` to the isolated backend admin origin before starting Vite; sign in there, then return to the Vite URL. The Vite proxy preserves `/api` same-origin requests; it does not implement OIDC itself. A trusted proxy must still supply its configured identity header on the proxied API path.
 
 Runs list polling is view-scoped and uses 5-second intervals. Selected Run detail/log polling uses 1.5 seconds, retries after 5 seconds, and stops on terminal state or navigation. The poller serializes requests, aborts on teardown and ignores stale results. Logs use the backend's rendered-character `after` offset separately for compact/normal/verbose/raw; changing mode resets the cursor. Pause stops automatic scroll while log collection continues. Previously rendered data remains visible after a transient error.
 
@@ -33,13 +33,14 @@ Run history as evidence for the current Recipe without an immutable snapshot
 match. No such relation is present in the public Run DTO, so the Plan says
 No matching current evidence / Test required. Managed self-build is selected
 from backend management metadata and shown under System. Package and Run links
-fetch the canonical Recipe first and route by its metadata. All C2A paths use
-GET requests only; Recipe writes and lifecycle actions remain outside this
-checkpoint.
+fetch the canonical Recipe first and route by its metadata. C2B adds local
+draft editing and ephemeral validation; Recipe persistence and lifecycle
+actions remain outside this checkpoint. The C2B contract is in
+`docs/design/recipe-editor/edit-contract.md`.
 
 ## Isolated development and browser check
 
-In one terminal from the repository root, run `python3 -m tests.ui.behavior_lab --scenario showcase --host 127.0.0.1 --port 8765`. In another, from `frontend/`, run `npm run dev -- --port 5174`; Vite proxies `/api` to the Lab. Set `DEBBUILDER_DEV_API` to another isolated backend origin if needed. `npm run test:browser` checks real Lab data at 1440px and 390px while both servers run. For inventory empty/error states use the `inventory-empty` and `inventory-error` Lab scenarios with `DEBBUILDER_EXPECT_INVENTORY=empty` or `error` and run `node tests/browser-inventory.mjs`. The Lab creates and removes disposable data; never target the production `/opt/debbuilder` installation.
+In one terminal from the repository root, run `python3 -m tests.ui.behavior_lab --scenario showcase --host 127.0.0.1 --port 8765`. In another, from `frontend/`, run `npm run dev -- --port 5174`; Vite proxies `/api` to the Lab. Set `DEBBUILDER_DEV_API` to another isolated backend origin if needed. `npm run test:browser` checks real Lab data and local Recipe editing at 1440px and 390px while both servers run. For inventory empty/error states use the `inventory-empty` and `inventory-error` Lab scenarios with `DEBBUILDER_EXPECT_INVENTORY=empty` or `error` and run `node tests/browser-inventory.mjs`. The Lab creates and removes disposable data; never target the production `/opt/debbuilder` installation.
 
 ## Future package integration
 

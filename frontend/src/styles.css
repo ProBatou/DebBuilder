@@ -7,3 +7,13 @@
 .table-wrap{max-height:460px;overflow:auto;margin-top:12px}table{width:100%;border-collapse:collapse;text-align:left}th,td{border-bottom:1px solid var(--line);padding:9px;overflow-wrap:anywhere}th{position:sticky;top:0;background:var(--surface)}.structured{margin:0;padding-left:18px;overflow-wrap:anywhere}.structured dl{margin:4px 0}.structured li{margin:5px 0}.plan-facts dd{min-width:0}.panel details{border-top:1px solid var(--line);padding:11px 0}.panel details summary{cursor:pointer;font-weight:600}.detail .panel{max-width:100%}
 .tabs{flex-wrap:wrap}.structured span{overflow-wrap:anywhere}
 .plan-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:12px;margin:16px 0}.plan-grid section{min-width:0;padding:12px;background:var(--subtle);border:1px solid var(--line);border-radius:7px}.plan-grid h3{margin:0 0 12px}.plan-grid dl{grid-template-columns:minmax(95px,130px) minmax(0,1fr);font-size:13px}
+/* Recipe draft controls share the existing panel and tab primitives. */
+.recipe-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,17rem),1fr));gap:1rem;margin-top:1rem}
+.recipe-field{min-width:0}.recipe-field>label,.recipe-row label{display:grid;gap:.35rem;text-transform:capitalize}
+.recipe-field input:not([type=checkbox]),.recipe-field select,.recipe-field textarea{width:100%;min-width:0;box-sizing:border-box}
+.recipe-field textarea{min-height:6rem}.recipe-field textarea:focus-visible,dialog button:focus-visible{outline:3px solid var(--focus);outline-offset:2px}.recipe-field fieldset{min-width:0;border:1px solid var(--line);border-radius:.5rem}
+.recipe-row{display:flex;flex-wrap:wrap;align-items:end;gap:.5rem;margin:.6rem 0;padding:.65rem;border:1px solid var(--line);border-radius:.4rem}
+.recipe-row>label{flex:1 1 10rem;min-width:0}.recipe-row-actions{display:flex;gap:.25rem}.recipe-review{display:grid;gap:1rem}
+.recipe-review pre{overflow:auto;max-height:30rem;white-space:pre-wrap;overflow-wrap:anywhere}
+dialog{max-width:min(32rem,calc(100vw - 2rem));border:1px solid var(--line);border-radius:.7rem;background:var(--surface);color:var(--ink)}
+dialog::backdrop{background:#0009}

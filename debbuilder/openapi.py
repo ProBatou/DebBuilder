@@ -112,7 +112,8 @@ SCHEMAS = {
                     "description": "Recipe directly or wrapped in a recipe property."},
     "RecipeImportInput": _object({"recipe": _ref("Recipe"), "replace": B}, ("recipe",)),
     "RunInput": {"oneOf": [_ref("Recipe"), _object({"workflow": _ref("Recipe"), "dry_run": B}, ("workflow",))]},
-    "WorkflowSaveInput": {"oneOf": [_ref("Recipe"), _object({"workflow": _ref("Recipe"), "previous_id": S}, ("workflow",))]},
+    "WorkflowSaveInput": {"oneOf": [_ref("Recipe"), _object({"workflow": _ref("Recipe"), "previous_id": S,
+        "expected_revision": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}, ("workflow",))]},
     "ArchiveInspectInput": {"oneOf": [_ref("Recipe"), _object({"workflow": _ref("Recipe")}, ("workflow",))]},
     "EmptyRequest": _object(description="An omitted JSON body is also accepted and treated as {}."),
     "IgnoredRequest": _object(extra=True, description="The handler currently ignores request fields; use {}."),
@@ -519,7 +520,7 @@ OPERATION_DOCS = {
     "executions.logs.delete_many": _doc(200, "DeleteLogsResponse", "DeleteLogsInput", errors={409: ("execution_active",)}),
     "packages.create": _doc(200, "PackageMutationResponse", "PackageCreateInput", errors={400: ("invalid_request",)}),
     "packages.update": _doc(200, "PackageMutationResponse", "PackageInput", errors={400: ("invalid_package_id",), 404: ("not_found",)}),
-    "workflows.save": _doc(200, "WorkflowSaveResponse", "WorkflowSaveInput", errors={403: ("forbidden",), 409: ("builtin_recipe_managed_field", "builtin_recipe_reserved"), 422: ("invalid_recipe_json", "recipe_identity_mismatch", "unsupported_version_source", "unknown_field", "post_build_directory_invalid_path")}),
+    "workflows.save": _doc(200, "WorkflowSaveResponse", "WorkflowSaveInput", errors={403: ("forbidden",), 409: ("builtin_recipe_managed_field", "builtin_recipe_reserved", "recipe_revision_conflict"), 422: ("invalid_recipe_json", "invalid_recipe_revision", "recipe_identity_mismatch", "unsupported_version_source", "unknown_field", "post_build_directory_invalid_path")}),
     "workflows.delete": _doc(200, "DeleteResponse", errors={403: ("forbidden", "readonly_recipe"), 404: ("recipe_not_found",)}),
     "executions.logs.delete": _doc(200, "ExecutionLogDeleteResponse", errors={404: ("build_run_not_found",), 409: ("execution_active",)}),
     "packages.delete": _doc(200, "DeleteResponse", errors={400: ("invalid_request",)}),
@@ -566,6 +567,11 @@ def _operation(route) -> dict:
         str(status): {"description": "Successful response", "content": {doc.media_type: {"schema": _ref(schema)}}}
         for status, schema in doc.success
     }
+    if route.operation_id == "workflows.get":
+        responses["200"]["headers"] = {
+            "ETag": {"description": "SHA-256 of exact persisted Recipe bytes; send the unquoted digest as expected_revision on a future save.",
+                     "schema": {"type": "string", "pattern": '^"[0-9a-f]{64}"$'}},
+        }
     common_errors = {401: ("authentication_required",),
                      503: ("authentication_unavailable", "settings_unavailable")}
     if route.method == "GET":

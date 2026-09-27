@@ -14,6 +14,12 @@ class UiShowcaseRecipeTests(unittest.TestCase):
             "exclude": [],
         })
         self.assertNotIn("selected_files", recipe["artifact"])
+        self.assertTrue(recipe["package"]["runtime_dependency_detection"]["enabled"])
+
+    def test_showcase_covers_resource_and_inert_automation_policies(self):
+        recipes = showcase_recipes()
+        self.assertEqual(recipes["worker-agent"]["resource_limits"]["tasks_max"], 48)
+        self.assertEqual(recipes["release-tool"]["automation"], {"enabled": False, "policy": "test"})
 
 
 if __name__ == "__main__":

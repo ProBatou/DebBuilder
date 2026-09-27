@@ -56,6 +56,9 @@ def showcase_recipes() -> dict[str, dict]:
         "name": "archive-agent", "version_revision": "3", "architecture": "amd64",
         "description": "Prebuilt archive installed with explicit file mappings",
         "runtime_dependencies": ["ca-certificates", "libssl3"],
+        "runtime_dependency_detection": {"enabled": True, "overrides": [{
+            "soname": "libvendor.so.1", "action": "ignore", "reason": "Bundled in the selected payload", "relation": "",
+        }]},
     })
     archive["source"].update({"repository": "example/archive-agent"})
     archive["artifact"] = {
@@ -102,12 +105,14 @@ def showcase_recipes() -> dict[str, dict]:
     worker["package"].update({"name": "worker-agent", "version_revision": "1", "architecture": "amd64"})
     worker["source"].update({"repository": "example/worker-agent"})
     worker["service"].update({"name": "worker-agent.service", "command": "/usr/bin/node /opt/worker-agent/dist/worker.js"})
+    worker["resource_limits"] = {"tasks_max": 48}
     recipes["worker-agent"] = recipe_for_storage(worker)
 
     release_tool = copy.deepcopy(recipes["bashrc"])
     release_tool.update({"name": "release-tool"})
     release_tool["package"].update({"name": "release-tool", "version_revision": "4", "architecture": "all"})
     release_tool["source"].update({"repository": "example/release-tool"})
+    release_tool["automation"] = {"enabled": False, "policy": "test"}
     recipes["release-tool"] = recipe_for_storage(release_tool)
     return {name: recipe_for_storage(recipe) for name, recipe in recipes.items()}
 

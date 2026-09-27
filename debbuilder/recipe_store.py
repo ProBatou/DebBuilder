@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import fcntl
 import json
 import os
@@ -294,6 +295,18 @@ def load_recipe(path: Path) -> dict:
             raise _document_error(path, exc) from exc
 
 
+def load_recipe_with_revision(path: Path) -> tuple[dict, str]:
+    """Read one canonical Recipe and the SHA-256 of its exact persisted bytes atomically."""
+    path = Path(path)
+    with _recipe_lease(path):
+        raw = _read_bytes(path)
+        document = _decode_recipe(path, raw)
+        try:
+            return recipe_document_for_storage(document), hashlib.sha256(raw).hexdigest()
+        except RecipeDocumentError as exc:
+            raise _document_error(path, exc) from exc
+
+
 @contextmanager
 def locked_recipe(path: Path):
     """Yield one canonical Recipe while retaining its path mutation lease."""
@@ -308,7 +321,7 @@ def locked_recipe(path: Path):
         yield canonical
 
 
-def save_recipe(path: Path, document: dict) -> dict:
+def save_recipe(path: Path, document: dict, *, expected_revision: str | None = None) -> dict:
     """Validate and durably save one Recipe in canonical current-schema form."""
     path = Path(path)
     try:
@@ -331,6 +344,10 @@ def save_recipe(path: Path, document: dict) -> dict:
             existing = None
         else:
             existing = _read_bytes(path)
+        if expected_revision is not None and (existing is None or hashlib.sha256(existing).hexdigest() != expected_revision):
+            raise RecipeStoreError(
+                "recipe_revision_conflict", "Recipe changed since it was loaded", file=path, path="$",
+            )
         if existing != content:
             _durable_atomic_write(path, content)
     return canonical

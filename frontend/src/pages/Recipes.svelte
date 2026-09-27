@@ -7,14 +7,14 @@
   import RecipeDetail from '../features/recipes/RecipeDetail.svelte';
   import ErrorNotice from '../components/ErrorNotice.svelte';
   export let id = '', language = 'en';
-  let rows = [], listingErrors = [], listError = null, listLoading = true, detailError = null, recipe = null;
+  let rows = [], workflowRows = [], listingErrors = [], listError = null, listLoading = true, detailError = null, recipe = null;
   let inspection = null, automation = null, inspectionError = null, automationError = null;
   let query = '', listController, detailController, generation = 0, listGeneration = 0;
   async function load() {
     listController?.abort(); listController = new AbortController(); const token = ++listGeneration; listError = null; listLoading = true; rows = []; listingErrors = [];
     try {
       const [list, workflows] = await Promise.all([api.recipes({signal:listController.signal}), api.workflows({signal:listController.signal})]);
-      if (token === listGeneration) {rows = (list.recipes || []).filter(row => !row.managed); listingErrors = workflows.errors || [];}
+      if (token === listGeneration) {rows = (list.recipes || []).filter(row => !row.managed); workflowRows = workflows.workflows || []; listingErrors = workflows.errors || [];}
     } catch (caught) {if (caught.name !== 'AbortError' && token === listGeneration) listError = caught;}
     finally {if (token === listGeneration) listLoading = false;}
   }
@@ -44,4 +44,4 @@
 <h1>{t('recipes',language)}</h1><p class="muted">{t('readOnly',language)}</p><ErrorNotice error={listError} retry={load} {language}/>
 {#if listingErrors.length}<div class="notice error"><strong>{t('invalidRecipes',language)}</strong>{#each listingErrors as item}<p>{item.id}: {item.error?.message}</p>{/each}</div>{/if}
 <div class="split"><section class="panel"><label>{t('search',language)} <input type="search" bind:value={query}></label><div class="list">{#if listLoading}<p>{t('loading',language)}</p>{:else}{#each visible as row (row.id)}<button class:active={id===row.id} class="row" onclick={() => navigate('recipes',row.id)}><span><strong>{row.id}</strong><small>{row.repository || row.source} · {row.package || '—'}</small></span><span class="chip">{row.active === false ? t('inactive',language) : t('active',language)}</span></button>{:else}{#if !listError}<p>{t('noItems',language)}</p>{/if}{/each}{/if}</div></section>
-<div class="detail">{#if id}<button class="back" onclick={() => navigate('recipes')}>← {t('back',language)}</button>{/if}<ErrorNotice error={detailError} retry={() => detail(id)} {language}/>{#if recipe}<RecipeDetail {recipe} {inspection} {automation} {inspectionError} {automationError} {language}/>{:else if id && !detailError}<p>{t('loading',language)}</p>{:else}<p>{t('selectRecipe',language)}</p>{/if}</div></div>
+<div class="detail">{#if id}<button class="back" onclick={() => navigate('recipes')}>← {t('back',language)}</button>{/if}<ErrorNotice error={detailError} retry={() => detail(id)} {language}/>{#if recipe}<RecipeDetail {recipe} {inspection} {automation} {inspectionError} {automationError} {language} writable={workflowRows.find(row => row.id === id)?.writable === true}/>{:else if id && !detailError}<p>{t('loading',language)}</p>{:else}<p>{t('selectRecipe',language)}</p>{/if}</div></div>

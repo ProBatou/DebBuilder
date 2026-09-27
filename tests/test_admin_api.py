@@ -1190,6 +1190,59 @@ class AdminApiTests(AdminApiCase):
         self.assertFalse((server.USER_WORKFLOWS / "flood.json").exists())
         self.assertTrue((server.USER_WORKFLOWS / "flood-release.json").exists())
 
+    def test_recipe_revision_precondition_prevents_stale_save_and_preserves_legacy_save(self):
+        recipe = {"schema_version": 5, "name": "revision-case", "package": {"name": "revision-case"}}
+        self.request("POST", "/api/workflows/revision-case", {"workflow": recipe})
+        request = urllib.request.Request(self.base_url + "/api/workflows/revision-case")
+        with urllib.request.urlopen(request, timeout=5) as response:
+            baseline = json.loads(response.read())
+            revision = response.headers["ETag"].strip('"')
+        self.assertRegex(revision, r"^[0-9a-f]{64}$")
+        changed = {**baseline, "active": False}
+        status, _ = self.request("POST", "/api/workflows/revision-case", {
+            "workflow": changed, "expected_revision": revision,
+        })
+        self.assertEqual(status, 200)
+        with self.assertRaises(urllib.error.HTTPError) as stale:
+            self.request("POST", "/api/workflows/revision-case", {
+                "workflow": baseline, "expected_revision": revision,
+            })
+        self.assertEqual(stale.exception.code, 409)
+        self.assertEqual(json.loads(stale.exception.read())["error"]["code"], "recipe_revision_conflict")
+        self.assertEqual(server.recipe_store.load_recipe(server.USER_WORKFLOWS / "revision-case.json")["active"], False)
+        with self.assertRaises(urllib.error.HTTPError) as malformed:
+            self.request("POST", "/api/workflows/revision-case", {
+                "workflow": changed, "expected_revision": "bad",
+            })
+        self.assertEqual(malformed.exception.code, 422)
+        self.assertEqual(json.loads(malformed.exception.read())["error"]["code"], "invalid_recipe_revision")
+        with self.assertRaises(urllib.error.HTTPError) as null_revision:
+            self.request("POST", "/api/workflows/revision-case", {
+                "workflow": changed, "expected_revision": None,
+            })
+        self.assertEqual(null_revision.exception.code, 422)
+        self.assertEqual(json.loads(null_revision.exception.read())["error"]["code"], "invalid_recipe_revision")
+        status, _ = self.request("POST", "/api/workflows/revision-case", {"workflow": baseline})
+        self.assertEqual(status, 200)
+        self.assertTrue(server.recipe_store.load_recipe(server.USER_WORKFLOWS / "revision-case.json")["active"])
+
+    def test_managed_recipe_revision_precondition_keeps_forbidden_fields_protected(self):
+        server.builtin_recipe.reconcile_builtin_recipe(server.USER_WORKFLOWS)
+        with urllib.request.urlopen(self.base_url + "/api/workflows/debbuilder", timeout=5) as response:
+            baseline = json.loads(response.read())
+            revision = response.headers["ETag"].strip('"')
+        allowed = {**baseline, "active": not baseline["active"]}
+        self.request("POST", "/api/workflows/debbuilder", {"workflow": allowed, "expected_revision": revision})
+        with self.assertRaises(urllib.error.HTTPError) as stale:
+            self.request("POST", "/api/workflows/debbuilder", {"workflow": baseline, "expected_revision": revision})
+        self.assertEqual(stale.exception.code, 409)
+        self.assertEqual(json.loads(stale.exception.read())["error"]["code"], "recipe_revision_conflict")
+        forbidden = {**allowed, "source": {**allowed["source"], "repository": "other/repo"}}
+        with self.assertRaises(urllib.error.HTTPError) as denied:
+            self.request("POST", "/api/workflows/debbuilder", {"workflow": forbidden})
+        self.assertEqual(denied.exception.code, 409)
+        self.assertEqual(json.loads(denied.exception.read())["error"]["code"], "builtin_recipe_managed_field")
+
     def test_recipe_json_validation_is_canonical_and_does_not_write(self):
         recipe = {
             "schema_version": 5,

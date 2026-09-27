@@ -2356,6 +2356,15 @@
                   "$ref": "#/components/schemas/Recipe"
                 }
               }
+            },
+            "headers": {
+              "ETag": {
+                "description": "SHA-256 of exact persisted Recipe bytes; send the unquoted digest as expected_revision on a future save.",
+                "schema": {
+                  "type": "string",
+                  "pattern": "^\"[0-9a-f]{64}\"$"
+                }
+              }
             }
           },
           "400": {
@@ -2506,7 +2515,7 @@
             ]
           },
           "409": {
-            "description": "HTTP 409 admin API error. Documented codes: builtin_recipe_managed_field, builtin_recipe_reserved.",
+            "description": "HTTP 409 admin API error. Documented codes: builtin_recipe_managed_field, builtin_recipe_reserved, recipe_revision_conflict.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2516,11 +2525,12 @@
             },
             "x-debbuilder-error-codes": [
               "builtin_recipe_managed_field",
-              "builtin_recipe_reserved"
+              "builtin_recipe_reserved",
+              "recipe_revision_conflict"
             ]
           },
           "422": {
-            "description": "HTTP 422 admin API error. Documented codes: invalid_recipe_json, recipe_identity_mismatch, unsupported_version_source, unknown_field, post_build_directory_invalid_path.",
+            "description": "HTTP 422 admin API error. Documented codes: invalid_recipe_json, invalid_recipe_revision, recipe_identity_mismatch, unsupported_version_source, unknown_field, post_build_directory_invalid_path.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2530,6 +2540,7 @@
             },
             "x-debbuilder-error-codes": [
               "invalid_recipe_json",
+              "invalid_recipe_revision",
               "recipe_identity_mismatch",
               "unsupported_version_source",
               "unknown_field",
@@ -4909,6 +4920,10 @@
               },
               "previous_id": {
                 "type": "string"
+              },
+              "expected_revision": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
               }
             },
             "additionalProperties": false,

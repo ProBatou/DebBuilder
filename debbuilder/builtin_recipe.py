@@ -168,9 +168,10 @@ def effective_builtin_recipe(overrides: dict, *, definition: dict | None = None)
         raise BuiltinRecipeError(code, str(exc), path=exc.path) from exc
 
 
-def _load_persisted_for_reconciliation(path: Path) -> dict:
+def _load_persisted_for_reconciliation(path: Path, *, with_revision: bool = False):
     try:
-        recipe = recipe_store.load_recipe(path)
+        recipe = (recipe_store.load_recipe_with_revision(path) if with_revision
+                  else recipe_store.load_recipe(path))
     except recipe_store.RecipeStoreError as exc:
         if exc.code in {
             "builtin_recipe_invalid", "builtin_recipe_override_invalid", "builtin_recipe_upgrade_required",
@@ -274,6 +275,7 @@ def update_builtin_recipe(
     candidate: dict,
     *,
     definition_path: Path = BUILTIN_RECIPE_PATH,
+    expected_revision: str | None = None,
 ) -> dict:
     """Persist only approved operator edits to an already managed built-in."""
     definition = load_builtin_definition(definition_path)
@@ -287,7 +289,14 @@ def update_builtin_recipe(
                 "The debbuilder Recipe ID can only be created by built-in reconciliation",
                 path="$.name",
             ) from exc
-        existing = _load_persisted_for_reconciliation(path)
+        if expected_revision is not None:
+            existing, current_revision = _load_persisted_for_reconciliation(path, with_revision=True)
+            if current_revision != expected_revision:
+                raise recipe_store.RecipeStoreError(
+                    "recipe_revision_conflict", "Recipe changed since it was loaded", file=path, path="$",
+                )
+        else:
+            existing = _load_persisted_for_reconciliation(path)
         management = existing.get("management")
         if management is None:
             raise BuiltinRecipeError(
@@ -326,4 +335,4 @@ def update_builtin_recipe(
             )
         overrides = _extract_operator_overrides(canonical_candidate, definition)
         effective = effective_builtin_recipe(overrides, definition=definition)
-        return recipe_store.save_recipe(path, effective)
+        return recipe_store.save_recipe(path, effective, expected_revision=expected_revision)

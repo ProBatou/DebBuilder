@@ -6,9 +6,21 @@ export function parseLocation(hash = '') {
   return {page: pages.has(page) ? page : 'overview', id};
 }
 export const location = writable(parseLocation(typeof window === 'undefined' ? '' : window.location.hash));
-if (typeof window !== 'undefined') window.addEventListener('hashchange', () => location.set(parseLocation(window.location.hash)));
-export function navigate(page, id = '') {
+let guard = null;
+let current = parseLocation(typeof window === 'undefined' ? '' : window.location.hash);
+export function setNavigationGuard(next) {guard = next; return () => {if (guard === next) guard = null;};}
+if (typeof window !== 'undefined') window.addEventListener('hashchange', async () => {
+  const next = parseLocation(window.location.hash);
+  if (next.page === current.page && next.id === current.id) return;
+  const previous = current;
+  // Restore the address before asking, so Cancel keeps both URL and draft.
+  window.history.replaceState(null,'',`#/${previous.page}${previous.id ? `/${encodeURIComponent(previous.id)}` : ''}`);
+  await navigate(next.page,next.id);
+});
+export async function navigate(page, id = '') {
   if (!pages.has(page)) return;
+  if ((page !== current.page || id !== current.id) && guard && !(await guard({page,id}))) return;
+  current = {page,id};
   window.location.hash = `/${page}${id ? `/${encodeURIComponent(id)}` : ''}`;
-  location.set({page, id});
+  location.set(current);
 }

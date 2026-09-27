@@ -160,7 +160,7 @@ def sanitize_id(value: str) -> str:
     return out or "workflow"
 
 
-def json_response(handler: BaseHTTPRequestHandler, data, status=200):
+def json_response(handler: BaseHTTPRequestHandler, data, status=200, *, headers=None):
     path = urllib.parse.urlparse(handler.path).path
     if status >= 400 and path.startswith("/api/"):
         data = canonical_error_payload(data, status, path)
@@ -168,6 +168,8 @@ def json_response(handler: BaseHTTPRequestHandler, data, status=200):
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.send_header("Content-Length", str(len(body)))
+    for name, value in (headers or {}).items():
+        handler.send_header(name, value)
     handler.end_headers()
     handler.wfile.write(body)
 
@@ -1225,6 +1227,10 @@ def read_workflow_file(path: Path) -> dict:
     return recipe_store.load_recipe(path)
 
 
+def read_workflow_with_revision(path: Path) -> tuple[dict, str]:
+    return recipe_store.load_recipe_with_revision(path)
+
+
 def recipe_json_validation(recipe) -> dict:
     """Canonicalize Recipe JSON without writing it."""
     canonical = recipe_document_for_storage(recipe)
@@ -1279,11 +1285,20 @@ def import_recipe_json(recipe, *, replace: bool = False) -> dict:
     return {"ok": True, "id": workflow_id, "recipe": canonical, "created": existing is None, "replaced": existing is not None}
 
 
-def save_workflow_recipe(workflow_id: str, workflow: dict, *, previous_id: str = "") -> dict:
+_NO_RECIPE_REVISION = object()
+
+
+def save_workflow_recipe(workflow_id: str, workflow: dict, *, previous_id: str = "", expected_revision=_NO_RECIPE_REVISION) -> dict:
     """Persist a normal Recipe or an allowlisted edit to the managed built-in."""
     require_safe_name(workflow_id, "workflow id")
     if previous_id:
         require_safe_name(previous_id, "previous workflow id")
+    if expected_revision is not _NO_RECIPE_REVISION:
+        if not isinstance(expected_revision, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_revision):
+            raise RecipeDocumentError("invalid_recipe_revision", "expected_revision must be a lowercase SHA-256 digest", path="$.expected_revision")
+        if previous_id and previous_id != workflow_id:
+            raise RecipeDocumentError("invalid_recipe_revision", "Revision preconditions do not support rename", path="$.previous_id")
+    revision = None if expected_revision is _NO_RECIPE_REVISION else expected_revision
     canonical = recipe_document_for_storage(workflow)
     if canonical["name"] != workflow_id:
         raise RecipeDocumentError(
@@ -1306,7 +1321,7 @@ def save_workflow_recipe(workflow_id: str, workflow: dict, *, previous_id: str =
     destination = workflow_path(workflow_id, for_write=True)
     assert destination is not None
     if builtin_recipe.is_builtin_recipe_id(workflow_id):
-        stored = builtin_recipe.update_builtin_recipe(destination, canonical)
+        stored = builtin_recipe.update_builtin_recipe(destination, canonical, expected_revision=revision)
         normalized = validate_recipe_metadata(stored)
     else:
         normalized = validate_recipe_metadata(canonical)
@@ -1315,7 +1330,7 @@ def save_workflow_recipe(workflow_id: str, workflow: dict, *, previous_id: str =
             existing = workflow_path(workflow_id)
             if existing and existing.resolve().parent != USER_WORKFLOWS.resolve():
                 raise PermissionError("shipped recipes are read-only")
-            stored = recipe_store.save_recipe(destination, stored)
+            stored = recipe_store.save_recipe(destination, stored, expected_revision=revision)
     if previous_id and previous_id != workflow_id:
         previous = workflow_path(previous_id)
         if previous and previous.parent.resolve() == USER_WORKFLOWS.resolve():

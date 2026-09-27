@@ -323,6 +323,10 @@ def serve(selected: Scenario, *, host: str = "127.0.0.1", port: int = 8765) -> N
 
             def _post(self, data: dict):
                 path = urlparse(self.path).path
+                if path == "/api/recipes/validate":
+                    # Ephemeral draft validation is the sole C2B Recipe POST.
+                    super()._post(data)
+                    return
                 if path == "/api/run":
                     if not self._canonical_run(data):
                         _behavior_lab_error(self, selected.name)

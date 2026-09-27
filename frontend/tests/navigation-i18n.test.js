@@ -19,3 +19,10 @@ test('all production locale catalogs contain translated navigation and Intl form
   }
   assert.equal(t('overview','xx'),t('overview','en'));
 });
+
+test('Recipe editor chrome has explicit French, German and Spanish translations', () => {
+  for (const language of ['fr','de','es']) for (const key of [
+    'edit','validate','cancel','reviewChanges','loadedBaseline','currentDraft',
+    'discardChanges','keepEditing','add','remove','move','up','down','key','value',
+  ]) assert.notEqual(t(key,language),t(key,'en'),`${language}.${key}`);
+});

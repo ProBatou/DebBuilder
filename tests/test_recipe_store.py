@@ -58,6 +58,25 @@ class RecipeStoreTests(unittest.TestCase):
         self.assertEqual(load_recipe(path), second)
         self.assertEqual(path.read_bytes(), canonical_bytes(second))
 
+    def test_revision_is_hash_of_exact_persisted_bytes_and_check_is_atomic(self):
+        from debbuilder.recipe_store import load_recipe_with_revision
+        path = self.directory / "revision.json"
+        saved = save_recipe(path, current_recipe("revision"))
+        loaded, revision = load_recipe_with_revision(path)
+        self.assertEqual(loaded, saved)
+        self.assertEqual(revision, __import__("hashlib").sha256(path.read_bytes()).hexdigest())
+        replacement = {**loaded, "active": False}
+        save_recipe(path, replacement, expected_revision=revision)
+        current = path.read_bytes()
+        with self.assertRaises(RecipeStoreError) as stale:
+            save_recipe(path, loaded, expected_revision=revision)
+        self.assertEqual(stale.exception.code, "recipe_revision_conflict")
+        self.assertEqual(path.read_bytes(), current)
+        with self.assertRaises(RecipeStoreError) as missing:
+            save_recipe(self.directory / "new.json", current_recipe("new"), expected_revision=revision)
+        self.assertEqual(missing.exception.code, "recipe_revision_conflict")
+        self.assertFalse((self.directory / "new.json").exists())
+
     def test_load_is_read_only_even_when_v5_json_is_not_canonical_bytes(self):
         path = self.directory / "snapshot.json"
         original = b'{"schema_version":5,"name":"snapshot"}'

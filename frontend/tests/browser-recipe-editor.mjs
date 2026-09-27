@@ -1,0 +1,130 @@
+import assert from 'node:assert/strict';
+import {chromium} from '@playwright/test';
+
+const base = process.env.DEBBUILDER_FRONTEND_URL || 'http://127.0.0.1:5174';
+const browser = await chromium.launch({headless:true});
+try {
+  for (const viewport of [{width:1440,height:900},{width:390,height:844}]) {
+    const page = await browser.newPage({viewport});
+    const unexpected = [], failures = [], allowed = [];
+    page.on('pageerror', error => failures.push(error.message));
+    page.on('request', request => {
+      if (!new URL(request.url()).pathname.startsWith('/api/') || request.method() === 'GET') return;
+      const route = `${request.method()} ${new URL(request.url()).pathname}`;
+      (route === 'POST /api/recipes/validate' ? allowed : unexpected).push(route);
+    });
+    await page.goto(`${base}/#/recipes/seerr`);
+    await page.getByRole('heading',{name:'seerr'}).waitFor();
+    await page.getByRole('button',{name:'Edit',exact:true}).click();
+    await page.getByText('Editing',{exact:true}).waitFor();
+    const description = page.locator('[data-recipe-path="package.description"] textarea');
+    const original = await description.inputValue();
+    await description.fill(`${original} changed`);
+    await page.getByText('Unsaved changes',{exact:true}).waitFor();
+    await description.fill(original);
+    await page.getByText('Editing',{exact:true}).waitFor();
+    await description.fill(`${original} changed`);
+    await page.getByRole('button',{name:'Validate',exact:true}).click();
+    await page.getByText('Validated against the current backend contract').waitFor();
+    for (const [status,code,message,path] of [[422,'invalid_recipe','Invalid description','$.package.description'],[422,'invalid_recipe','Invalid command','$.build.commands[2]'],[401,'authentication_required','Sign in required','$'],[403,'forbidden','Access forbidden','$']]) {
+      const handler = async route => route.fulfill({status,contentType:'application/json',body:JSON.stringify({error:{code,message,path}})});
+      await page.route('**/api/recipes/validate',handler);
+      await page.getByRole('button',{name:'Validate',exact:true}).click();
+      await page.getByText(message,{exact:false}).first().waitFor();
+      if (path.startsWith('$.build.commands')) {
+        assert.equal(await page.locator('[data-recipe-path="build.commands"] fieldset').getAttribute('aria-describedby'),'recipe-error-build-commands');
+        await page.getByRole('button',{name:'Plan',exact:true}).click();
+      }
+      assert.equal(await description.inputValue(),`${original} changed`);
+      await page.unroute('**/api/recipes/validate',handler);
+    }
+    const offline = route => route.abort('failed');
+    await page.route('**/api/recipes/validate',offline);
+    await page.getByRole('button',{name:'Validate',exact:true}).click();
+    await page.getByText('Network unavailable').first().waitFor();
+    await page.unroute('**/api/recipes/validate',offline);
+    await page.getByRole('button',{name:'Review changes'}).click();
+    await page.getByText('$.package.description').waitFor();
+    await page.getByText('Current draft').waitFor();
+    await page.getByRole('button',{name:'Customize'}).click();
+    const commands = page.locator('[data-recipe-path="build.commands"]');
+    await commands.getByRole('button',{name:'Add commands'}).click();
+    assert.ok(await commands.locator('input').count() >= 2);
+    await commands.locator('input').nth(1).fill('echo extra');
+    await commands.getByRole('button',{name:'Move commands 2 up'}).click();
+    assert.equal(await commands.locator('input').first().inputValue(),'echo extra');
+    await commands.getByRole('button',{name:'Move commands 1 down'}).click();
+    await commands.getByRole('button',{name:'Remove commands 2'}).click();
+    await page.getByRole('button',{name:'Cancel',exact:true}).click();
+    await page.locator('.section-head .chip').getByText('View',{exact:true}).waitFor();
+    await page.getByRole('button',{name:'Edit',exact:true}).click();
+    await page.getByRole('button',{name:'Plan',exact:true}).click();
+    await description.fill(`${original} changed again`);
+    await page.evaluate(() => {location.hash = '/recipes/bashrc';});
+    await page.getByRole('dialog').getByRole('button',{name:'Keep editing'}).click();
+    assert.ok(page.url().endsWith('#/recipes/seerr'));
+    assert.equal(await description.inputValue(),`${original} changed again`);
+    await page.evaluate(() => {location.hash = '/recipes/bashrc';});
+    await page.getByRole('dialog').getByRole('button',{name:'Discard draft'}).click();
+    await page.getByRole('heading',{name:'bashrc'}).waitFor();
+    await page.getByRole('button',{name:'Edit',exact:true}).click();
+    const bashrcDescription = page.locator('[data-recipe-path="package.description"] textarea');
+    await bashrcDescription.fill(`${await bashrcDescription.inputValue()} changed`);
+    if (viewport.width < 600) await page.getByRole('button',{name:'Menu'}).click();
+    await page.getByRole('button',{name:'Packages',exact:true}).first().click();
+    await page.getByRole('dialog').getByRole('button',{name:'Keep editing'}).click();
+    assert.ok(page.url().endsWith('#/recipes/bashrc'));
+    if (viewport.width < 600) await page.getByRole('button',{name:'Menu'}).click();
+    await page.getByRole('button',{name:'Packages',exact:true}).first().click();
+    await page.getByRole('dialog').getByRole('button',{name:'Discard draft'}).click();
+    await page.getByRole('heading',{name:'Packages'}).waitFor();
+    await page.goto(`${base}/#/recipes/archive-agent`);
+    await page.getByRole('heading',{name:'archive-agent'}).waitFor();
+    await page.getByRole('button',{name:'Edit',exact:true}).click();
+    await page.getByRole('button',{name:'Advanced configuration'}).click();
+    assert.equal(await page.locator('[data-recipe-path="package.runtime_dependency_detection.enabled"]').count(),1);
+    await page.getByRole('button',{name:'Expert'}).click();
+    assert.equal(await page.locator('[data-recipe-path="install.maintainer_scripts.postinst"]').count(),1);
+    const hook = page.locator('[data-recipe-path="install.maintainer_scripts.postinst"] textarea');
+    await hook.fill('echo editor-check');
+    if (viewport.width < 600) await page.getByRole('button',{name:'Menu'}).click();
+    await page.getByRole('button',{name:'Runs',exact:true}).first().click();
+    await page.getByRole('dialog').getByRole('button',{name:'Keep editing'}).click();
+    assert.ok(page.url().endsWith('#/recipes/archive-agent'));
+    if (viewport.width < 600) await page.getByRole('button',{name:'Menu'}).click();
+    await page.getByRole('button',{name:'Runs',exact:true}).first().click();
+    await page.getByRole('dialog').getByRole('button',{name:'Discard draft'}).click();
+    await page.getByRole('heading',{name:'Runs'}).waitFor();
+    await page.goto(`${base}/#/recipes/vendor-cli`);
+    await page.getByRole('heading',{name:'vendor-cli'}).waitFor();
+    await page.getByRole('button',{name:'Edit',exact:true}).click();
+    await page.getByRole('button',{name:'Advanced configuration'}).click();
+    assert.equal(await page.locator('[data-recipe-path="package.runtime_dependency_detection.enabled"]').count(),0);
+    await page.getByRole('button',{name:'Cancel',exact:true}).click();
+    if (viewport.width < 600) await page.getByRole('button',{name:'Menu'}).click();
+    await page.getByRole('button',{name:'System',exact:true}).first().click();
+    await page.getByRole('button',{name:'System-managed self-build'}).click();
+    await page.getByRole('heading',{name:'debbuilder'}).waitFor();
+    await page.getByRole('button',{name:'Edit',exact:true}).click();
+    assert.equal(await page.locator('[data-recipe-path="source.repository"] input').isDisabled(),true);
+    assert.equal(await page.locator('[data-recipe-path="active"] input').isDisabled(),false);
+    await page.locator('[data-recipe-path="active"] input').click();
+    await page.getByText('Unsaved changes',{exact:true}).waitFor();
+    await page.getByRole('button',{name:'Cancel',exact:true}).click();
+    await page.getByRole('button',{name:'Edit',exact:true}).click();
+    const theme = page.getByLabel('Theme');
+    await theme.selectOption('dark');
+    await theme.selectOption('light');
+    const locale = page.locator('.preferences select').nth(1);
+    for (const [code,edit] of [['fr','Modification'],['de','Bearbeitung'],['es','Edición'],['en','Editing']]) {
+      await locale.selectOption(code);
+      await page.getByText(edit,{exact:true}).waitFor();
+    }
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false);
+    assert.deepEqual(unexpected,[]);
+    assert.deepEqual(failures,[]);
+    assert.ok(allowed.length >= 1);
+    await page.close();
+  }
+  console.log('Recipe editor desktop/mobile Lab checks passed');
+} finally {await browser.close();}

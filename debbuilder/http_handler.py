@@ -358,7 +358,8 @@ def create_handler(api):
             if not workflow_file:
                 api.json_response(self, {"error": "not found"}, 404)
                 return
-            api.json_response(self, api.read_workflow_file(workflow_file))
+            recipe, revision = api.read_workflow_with_revision(workflow_file)
+            api.json_response(self, recipe, headers={"ETag": f'"{revision}"'})
 
         def _serve_static(self, path: str):
             path = "/index.html" if path == "/" else path
@@ -642,7 +643,8 @@ def create_handler(api):
             workflow["name"] = workflow.get("name") or workflow_id
             previous_id = str(data.get("previous_id") or "")
             try:
-                result = api.save_workflow_recipe(workflow_id, workflow, previous_id=previous_id)
+                revision_arg = {"expected_revision": data["expected_revision"]} if "expected_revision" in data else {}
+                result = api.save_workflow_recipe(workflow_id, workflow, previous_id=previous_id, **revision_arg)
             except api.builtin_recipe.BuiltinRecipeError as exc:
                 api.json_response(self, {"error": exc.as_dict()}, 409)
                 return
@@ -650,6 +652,11 @@ def create_handler(api):
                 api.json_response(self, {"error": {
                     "code": exc.code, "message": str(exc), "path": exc.path,
                 }}, 422)
+                return
+            except api.recipe_store.RecipeStoreError as exc:
+                if exc.code != "recipe_revision_conflict":
+                    raise
+                api.json_response(self, {"error": {"code": exc.code, "message": str(exc), "path": exc.path}}, 409)
                 return
             except PermissionError as exc:
                 api.json_response(self, {"error": str(exc)}, 403)

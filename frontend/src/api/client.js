@@ -11,12 +11,14 @@ export function canonicalError(status, payload) {
   const error = payload?.error;
   const fallback = ({400: 'invalid_request', 401: 'authentication_required', 403: 'forbidden', 404: 'not_found', 409: 'request_conflict'})[status] || 'request_failed';
   if (error && typeof error === 'object') {
-    return new ApiError({status, code: error.code || fallback, message: error.message || 'Request failed', details: error.details || {}});
+    const result = new ApiError({status, code: error.code || fallback, message: error.message || 'Request failed', details: error.details || {}});
+    result.path = error.path || error.details?.path || '$';
+    return result;
   }
   return new ApiError({status, code: fallback, message: typeof error === 'string' ? error : 'Request failed'});
 }
 
-export async function request(path, {signal, timeout = 20000, fetchImpl = fetch} = {}) {
+export async function request(path, {signal, timeout = 20000, fetchImpl = fetch, method = 'GET', body} = {}) {
   if (!path.startsWith('/api/')) throw new TypeError('API path required');
   const controller = new AbortController();
   const abort = () => controller.abort(signal?.reason);
@@ -25,7 +27,7 @@ export async function request(path, {signal, timeout = 20000, fetchImpl = fetch}
   let timedOut = false;
   const timer = setTimeout(() => {timedOut = true; controller.abort();}, timeout);
   try {
-    const response = await fetchImpl(path, {method: 'GET', credentials: 'same-origin', headers: {Accept: 'application/json'}, signal: controller.signal});
+    const response = await fetchImpl(path, {method, credentials: 'same-origin', headers: {Accept: 'application/json', ...(body === undefined ? {} : {'Content-Type':'application/json'})}, body: body === undefined ? undefined : JSON.stringify(body), signal: controller.signal});
     const type = response.headers.get('content-type') || '';
     const payload = type.includes('json') ? await response.json() : await response.text();
     if (!response.ok) throw canonicalError(response.status, payload);
@@ -52,6 +54,7 @@ export const api = {
   recipes: opts => request('/api/recipes', opts),
   workflows: opts => request('/api/workflows', opts),
   workflow: (recipeId, opts) => request(`/api/workflows/${id(recipeId)}`, opts),
+  validateRecipe: (recipe, opts) => request('/api/recipes/validate',{...opts,method:'POST',body:{recipe}}),
   recipeInspection: (recipeId, opts) => request(`/api/recipes/${id(recipeId)}/inspect`, opts),
   automation: (recipeId, opts) => request(`/api/recipes/${id(recipeId)}/automation`, opts),
   runs: opts => request('/api/executions', opts),

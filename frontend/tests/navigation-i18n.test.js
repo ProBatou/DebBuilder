@@ -35,3 +35,11 @@ test('Recipe persistence chrome has explicit translations in every locale', () =
     'revisionUnavailable',
   ]) assert.notEqual(t(key,language),t(key,'en'),`${language}.${key}`);
 });
+
+test('Recipe Run admission chrome has explicit translations in every locale', () => {
+  for (const language of ['fr','de','es']) for (const key of [
+    'test','buildAction','startingTest','startingBuild','testHelp',
+    'testHelpPrebuilt','buildHelp','buildHelpPrebuilt','saveBeforeRun','enableBeforeRun',
+    'testQueued','buildQueued','runNotStarted','admissionUnknown','viewRuns',
+  ]) assert.notEqual(t(key,language),t(key,'en'),`${language}.${key}`);
+});

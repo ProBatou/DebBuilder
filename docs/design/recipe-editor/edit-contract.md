@@ -55,10 +55,22 @@ state is keyed by identity. Managed identity cannot be renamed. `name` is read
 only in C2B. A safe rename transaction and collision policy are needed first.
 
 `POST /api/run` accepts a full Recipe body plus `dry_run`; legacy Test and
-Build use the current form candidate, including edits that may not have
-finished autosaving. C2C should validate and submit the exact current draft
-for Test/Build, explain unsaved state, and never imply that a Run saves a Recipe.
-No C2B Run call exists.
+Build use the current form candidate. C2D validates and submits one cloned
+current draft for either action without saving it. Test is `dry_run: true`:
+source resolution/acquisition, detection, dependency checks, source changes,
+build planning, and staging preview run when applicable; build commands and
+final package creation do not. A successful Test ends `prepared`. Build is
+`dry_run: false`, executes the pipeline and produces a `.deb` or selected
+upstream artifact on `success`. Artifact Validation and Publication remain
+separate. Never-saved Create cannot run until its first Save. An inactive
+current draft cannot run, but unsaved edits to an existing active Recipe can.
+The admitted Run ID comes only from the 202 response. View Run uses normal
+dirty-navigation protection. A network/timeout outcome is ambiguous: check
+Runs before manually trying again; no admission request is retried.
+
+The Recipe ETag hashes exact persisted bytes. Run `recipe_sha256` identifies
+the immutable canonical runtime snapshot and must not be compared with the
+Recipe ETag to claim matching current evidence.
 
 Export is the canonical GET/JSON review. Future Import should parse locally,
 validate, review the canonical result and `collision` projection, then require
@@ -97,4 +109,4 @@ destination before deleting the source and updates Package references outside
 that transition; destination collision, dependent automation identity, and
 crash durability need a separate transaction design. Existing ID/name and
 managed identity remain read only in Svelte. Delete, Import persistence,
-Test/Build, automation mutation, and observation mutation remain out of scope.
+automation mutation, and observation mutation remain out of scope.

@@ -1,8 +1,9 @@
 <script>
   import {onMount, tick} from 'svelte';
-  import {setNavigationGuard} from '../../navigation/location.js';
+  import {navigate, setNavigationGuard} from '../../navigation/location.js';
   import {hydrate, candidate, dirty, cancel, equal, changedPaths, validationErrors} from './draft.js';
   import {loadConflictVersion, saveExistingRecipe, createRecipe, validateRecipe} from './persistence.js';
+  import {admitDraftRun} from './admission.js';
   import {fields} from './fields.js';
   import RecipeEditor from './RecipeEditor.svelte';
   import {recipePlan} from './model.js';
@@ -13,12 +14,18 @@
   export let inspection = null, automation = null, inspectionError = null, automationError = null, language = 'en', writable = true, editablePaths = [];
   let editor = null, loaded = null, received = null, editing = false, validating = false, validation = null, errors = null, section = 'plan';
   let saveState = 'clean', saving = false, currentRevision = null, conflict = null, conflictDialog, conflictHeading, saveStatus = '', replacementId = '';
+  let admissionState = 'idle', admissionError = null, admittedRunId = '', admittedMode = '', admissionHeading;
+  let admissionLocked = false;
   let discardDialog, resolveNavigation, pendingNavigation;
   $: if (recipe !== received) {received = recipe; loaded = recipe; editor = hydrate(recipe,{managed: Boolean(recipe.management),editablePaths}); editing = createMode; currentRevision = revision; saveState = createMode ? 'dirty' : 'clean'; conflict = null; validation = null; errors = null;}
   $: changed = editor && dirty(editor);
-  $: canSave = editing && (changed || createMode) && writable && !saving && !validating && !conflict && (createMode || /^[0-9a-f]{64}$/.test(currentRevision || ''));
+  $: admissionBusy = ['validating_test','starting_test','validating_build','starting_build'].includes(admissionState);
+  $: canSave = editing && (changed || createMode) && writable && !saving && !validating && !admissionBusy && !conflict && (createMode || /^[0-9a-f]{64}$/.test(currentRevision || ''));
+  $: runBlocked = createMode || editor?.draft.active === false;
+  $: testHelpKey = editor?.draft.artifact.mode === 'source_build' ? 'testHelp' : 'testHelpPrebuilt';
+  $: buildHelpKey = editor?.draft.artifact.mode === 'source_build' ? 'buildHelp' : 'buildHelpPrebuilt';
   function update(next) {editor = next; validation = null; errors = null; if (!saving && !conflict) saveState = dirty(next) || createMode ? 'dirty' : 'clean';}
-  function reset() {editor = cancel(editor); editing = createMode || Boolean(conflict); validation = null; errors = null; saveState = conflict ? 'conflict' : createMode ? 'dirty' : 'clean';}
+  function reset() {if (admissionLocked) return; editor = cancel(editor); editing = createMode || Boolean(conflict); validation = null; errors = null; saveState = conflict ? 'conflict' : createMode ? 'dirty' : 'clean';}
   async function showError(error) {
     errors = validationErrors(error); saveState = error.status === 422 ? 'validation_error' : 'save_error';
     const path = error.path || error.details?.path || '$';
@@ -29,6 +36,7 @@
     control?.querySelector('input,textarea,select,button')?.focus();
   }
   async function validate() {
+    if (admissionLocked) return;
     const snapshot = candidate(editor);
     const source = loaded;
     validating = true; saveState = 'validating'; validation = null; errors = null;
@@ -39,7 +47,7 @@
     } finally {validating = false; if (saveState === 'validating') saveState = changed || createMode ? 'dirty' : 'clean';}
   }
   async function save() {
-    if (!canSave) return;
+    if (!canSave || admissionLocked) return;
     const snapshot = candidate(editor), source = loaded, expected = currentRevision;
     saving = true; saveState = 'validating'; validation = null; errors = null; saveStatus = '';
     try {
@@ -68,6 +76,28 @@
       } else await showError(error);
     } finally {saving = false;}
   }
+  async function launch(dryRun) {
+    if (admissionLocked || validating || saving || createMode || editor?.draft.active === false || !editor) return;
+    admissionLocked = true;
+    const action = dryRun ? 'test' : 'build';
+    admissionState = `validating_${action}`;
+    admissionError = null; admittedRunId = ''; errors = null; validation = null;
+    try {
+      admittedRunId = await admitDraftRun(editor, dryRun, {onStarting: () => admissionState = `starting_${action}`});
+      admittedMode = action;
+      admissionState = 'admitted';
+    } catch (error) {
+      admissionError = error;
+      admissionState = 'admission_error';
+      if (error.status === 422 || error.status === 400) {
+        errors = validationErrors(error);
+        const path = error.path || error.details?.path || '$';
+        const target = fields.find(entry => path === `$.${entry.path}` || path.startsWith(`$.${entry.path}.`) || path.startsWith(`$.${entry.path}[`));
+        if (target) section = target.section;
+      }
+      await tick(); admissionHeading?.focus();
+    } finally {admissionLocked = false;}
+  }
   function conflictPaths() {
     if (!conflict?.latest) return [];
     const local = new Set(changedPaths(editor, editor.baseline, editor.draft));
@@ -86,14 +116,14 @@
     conflict = null; saveState = 'dirty'; conflictDialog.close();
   }
   function navigationGuard() {
-    if (saving) return false;
+    if (saving || admissionLocked) return false;
     if (!editing || (!changed && !createMode)) return true;
     if (pendingNavigation) return pendingNavigation;
     pendingNavigation = new Promise(resolve => {resolveNavigation = resolve; discardDialog.showModal();});
     return pendingNavigation;
   }
   function decide(discard) {discardDialog.close(); const resolve = resolveNavigation; resolveNavigation = null; pendingNavigation = null; resolve?.(discard);}
-  function beforeUnload(event) {if (saving || (editing && (changed || createMode))) {event.preventDefault(); event.returnValue = '';}}
+  function beforeUnload(event) {if (saving || admissionLocked || (editing && (changed || createMode))) {event.preventDefault(); event.returnValue = '';}}
   onMount(() => {const release = setNavigationGuard(navigationGuard); window.addEventListener('beforeunload',beforeUnload); return () => {release(); window.removeEventListener('beforeunload',beforeUnload);};});
   $: plan = recipePlan(recipe);
   const groups = [
@@ -116,9 +146,19 @@
 <section class="panel">
   <div class="section-head"><h2>{recipe.name}</h2><span class="chip">{editing ? (changed || createMode ? t('unsaved',language) : t('editing',language)) : writable ? t('view',language) : t('readOnly',language)}</span></div>
   <p class="muted">{recipe.active === false ? t('inactive',language) : t('active',language)} · Recipe v{recipe.schema_version}</p>
+  <div class="recipe-run-actions" aria-busy={admissionBusy}>
+    <div class="actions">
+      <button type="button" onclick={() => launch(true)} disabled={runBlocked || admissionBusy || validating || saving}>{admissionState === 'validating_test' ? t('validating',language) : admissionState === 'starting_test' ? t('startingTest',language) : t('test',language)}</button>
+      <button type="button" onclick={() => launch(false)} disabled={runBlocked || admissionBusy || validating || saving}>{admissionState === 'validating_build' ? t('validating',language) : admissionState === 'starting_build' ? t('startingBuild',language) : t('buildAction',language)}</button>
+    </div>
+    <p class="muted">{t(testHelpKey,language)} {t(buildHelpKey,language)}</p>
+    {#if createMode}<p class="muted">{t('saveBeforeRun',language)}</p>{:else if editor?.draft.active === false}<p class="muted">{t('enableBeforeRun',language)}</p>{/if}
+    {#if admissionState === 'admitted'}<div class="notice" role="status" aria-live="polite"><strong>{t(admittedMode === 'test' ? 'testQueued' : 'buildQueued',language)}</strong> <button type="button" onclick={() => navigate('runs',admittedRunId)}>{t('viewRun',language)}</button></div>{/if}
+    {#if admissionState === 'admission_error'}<div class="notice error" role="alert"><strong bind:this={admissionHeading} tabindex="-1">{t('runNotStarted',language)}</strong><p>{admissionError?.message}</p>{#if admissionError?.details?.path}<code>{admissionError.details.path}</code>{/if}{#if ['network','timeout','ambiguous'].includes(admissionError?.kind)}<p>{t('admissionUnknown',language)}</p><button type="button" onclick={() => navigate('runs')}>{t('viewRuns',language)}</button>{/if}</div>{/if}
+  </div>
   {#if !editing && (writable || editor.managed)}<button type="button" onclick={() => editing = true}>{t('edit',language)}</button>{/if}
   {#if editing}
-    <div class="actions"><button type="button" onclick={validate} disabled={validating || saving}>{validating ? t('validating',language) : t('validate',language)}</button><button type="button" onclick={save} disabled={!canSave}>{saveState === 'validating' ? t('validating',language) : saveState === 'saving' ? t('saving',language) : t('save',language)}</button><button type="button" onclick={reset} disabled={saving}>{t('cancel',language)}</button></div>
+    <div class="actions"><button type="button" onclick={validate} disabled={validating || saving || admissionBusy}>{validating ? t('validating',language) : t('validate',language)}</button><button type="button" onclick={save} disabled={!canSave}>{saveState === 'validating' ? t('validating',language) : saveState === 'saving' ? t('saving',language) : t('save',language)}</button><button type="button" onclick={reset} disabled={saving || admissionBusy}>{t('cancel',language)}</button></div>
     <p class="sr-only" role="status" aria-live="polite">{saveStatus}</p>
     {#if !createMode && !currentRevision}<p class="notice error">{t('revisionUnavailable',language)}</p>{/if}
     {#if conflict}<div class="notice error" role="alert"><p>{t('conflictPreserved',language)}</p><button type="button" onclick={() => {conflictDialog.showModal(); conflictHeading.focus();}}>{t('reviewChanges',language)}</button></div>{/if}

@@ -210,9 +210,36 @@ def graceful_shutdown_setup(app, runtime):
     return state
 
 
+def recipe_admission_setup(_app, runtime):
+    """Exercise real validation/admission without running external source code."""
+    from debbuilder.build_store import BuildStore
+    from debbuilder.execution_manager import ExecutionManager
+
+    store = BuildStore(runtime.data_dir / "builds")
+
+    def execute(run_id, *, store, expected_initial_status, cancellation_control=None):
+        store.transition_status(run_id, expected=expected_initial_status, status="running")
+        with store.locked_run(run_id):
+            run = store.load(run_id)
+            run["status"] = "prepared" if run["mode"] == "dry_run" else "success"
+            store.save(run)
+
+    return ScenarioState(manager=ExecutionManager(store, execute=execute))
+
+
+def seed_recipe_admission(data_dir: Path, repository_root: Path) -> None:
+    showcase.seed(data_dir, repository_root)
+    path = data_dir / "workflows" / "seerr.json"
+    recipe = json.loads(path.read_text())
+    recipe["source"]["tracking"] = "manual"
+    recipe["source"]["ref"] = "v1.0.0"
+    path.write_text(json.dumps(recipe, indent=2) + "\n")
+
+
 SCENARIOS = {
     "showcase": Scenario("showcase", "Deterministic static Runs, packages, and Recipes used by the UI showcase.", showcase.seed),
     "recipe-save": Scenario("recipe-save", "Disposable Recipes for guarded Save, Create, collision, and managed override review.", showcase.seed),
+    "recipe-admission": Scenario("recipe-admission", "Real Recipe validation and Run admission with inert terminal worker fixtures.", seed_recipe_admission, recipe_admission_setup, True),
     "inventory-empty": Scenario("inventory-empty", "Showcase with an empty exact repository inventory.", showcase.seed),
     "inventory-error": Scenario("inventory-error", "Showcase with an unavailable exact repository inventory.", showcase.seed),
     "cancellation-running": Scenario("cancellation-running", "Running cancellable local process-tree fixture with live logs.", seed_cancellation, pipeline_setup(running=True), True),
@@ -270,7 +297,7 @@ def serve(selected: Scenario, *, host: str = "127.0.0.1", port: int = 8765) -> N
         # This is deliberately captured before application startup and before
         # any HTTP request can modify the disposable workflow store.
         fixture_path = runtime.data_dir / "workflows" / f"{selected.name}.json"
-        if selected.allow_run:
+        if selected.allow_run and selected.name != "recipe-admission":
             # Capture the same public Recipe shape served by GET before a
             # request can mutate the disposable workflow store.
             from debbuilder.recipe_schema import recipe_document_for_storage
@@ -295,11 +322,18 @@ def serve(selected: Scenario, *, host: str = "127.0.0.1", port: int = 8765) -> N
                 app.json_response(self, result)
 
             def _canonical_run(self, data: object) -> bool:
-                if not selected.allow_run or not state.canonical_recipe or not isinstance(data, dict):
+                if not selected.allow_run or not isinstance(data, dict):
                     return False
                 if set(data) - {"workflow", "dry_run"} or not isinstance(data.get("workflow"), dict):
                     return False
                 if "dry_run" in data and not isinstance(data["dry_run"], bool):
+                    return False
+                if selected.name == "recipe-admission":
+                    workflow = data["workflow"]
+                    return workflow.get("name") == "seerr" and (
+                        runtime.data_dir / "workflows" / f"{workflow['name']}.json"
+                    ).is_file()
+                if not state.canonical_recipe:
                     return False
                 return _canonical_json(data["workflow"]) == state.canonical_recipe
 

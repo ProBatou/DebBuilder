@@ -1,12 +1,15 @@
 from tests.lifecycle_helpers import stop_partial_manager
 import json
+import hashlib
 import threading
 import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
 from debbuilder import app as server
 from debbuilder.build_store import BuildStore
+from debbuilder.recipe_schema import recipe_for_storage
 from tests.admin_api_case import AdminApiCase
 
 
@@ -81,6 +84,40 @@ class AsyncExecutionTests(AdminApiCase):
                 release.set()
                 self.assertTrue(finished.wait(2))
                 self.assertEqual(BuildStore(server.DATA / "builds").load(response["run_id"])["status"], terminal)
+
+    def test_both_modes_snapshot_unsaved_draft_without_changing_persisted_recipe(self):
+        for dry_run in (True, False):
+            with self.subTest(dry_run=dry_run):
+                name = f"draft-proof-{dry_run}"
+                baseline = recipe(name)
+                path = server.USER_WORKFLOWS / f"{name}.json"
+                path.write_text(json.dumps(recipe_for_storage(baseline), indent=2) + "\n")
+                saved_bytes = path.read_bytes()
+                with urllib.request.urlopen(self.base_url + f"/api/workflows/{name}") as reply:
+                    saved_etag = reply.headers["ETag"]
+                draft = json.loads(json.dumps(baseline))
+                draft["package"]["description"] = "Unsaved draft package"
+                execute, started, release, finished = self.blocking_executor()
+                self.replace_manager(execute=execute)
+                try:
+                    status, response = self.request("POST", "/api/run", {"workflow": draft, "dry_run": dry_run})
+                    self.assertEqual((status, response["status"]), (202, "queued"))
+                    self.assertTrue(started.wait(2))
+                    store = BuildStore(server.DATA / "builds")
+                    run = store.load(response["run_id"])
+                    snapshot_bytes = (store.run_dir(response["run_id"]) / "recipe.json").read_bytes()
+                    self.assertEqual(json.loads(snapshot_bytes), recipe_for_storage(draft))
+                    self.assertEqual(run["recipe_sha256"], hashlib.sha256(snapshot_bytes).hexdigest())
+                    self.assertEqual(run["recipe_id"], name)
+                    self.assertEqual(run["mode"], "dry_run" if dry_run else "build")
+                    self.assertEqual(run["origin"]["kind"], "manual")
+                    self.assertEqual(path.read_bytes(), saved_bytes)
+                    with urllib.request.urlopen(self.base_url + f"/api/workflows/{name}") as reply:
+                        self.assertEqual(reply.headers["ETag"], saved_etag)
+                        self.assertEqual(json.load(reply), recipe_for_storage(baseline))
+                finally:
+                    release.set()
+                    self.assertTrue(finished.wait(2))
 
     def test_response_returns_while_worker_is_still_blocked(self):
         execute, started, release, _finished = self.blocking_executor()

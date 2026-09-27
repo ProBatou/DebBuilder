@@ -1,4 +1,4 @@
-# #24C2C migration parity matrix
+# #24C2D migration parity matrix
 
 Status means functional read-only coverage, not visual similarity. `static/` remains production authority. A later checkpoint must close every blocker before cutover. The public landing has a separate deployment path.
 
@@ -20,8 +20,8 @@ Status means functional read-only coverage, not visual similarity. `static/` rem
 | Recipe import/export/JSON | `static/js/recipe/json_editor.js` | canonical Recipe GET | baseline/draft JSON review | Read-only partial | Lab browser | import mutation inactive |
 | Package → Recipe | legacy Package detail | Package `recipe` ID and canonical Recipe GET | exact Recipe or System managed route | Migrated read-only | Lab browser | none for read-only navigation |
 | Managed self-build | legacy built-in Recipe view | management metadata and guarded Save | System managed self-build | Migrated | API, Lab browser | none |
-| Test | `static/js/recipe/test_run_modal.js` | `POST /api/run` dry run | future Recipes | Not started | legacy JS | write checkpoint |
-| Build | `static/app.js` | `POST /api/run` | future Recipes | Not started | legacy JS | write checkpoint |
+| Test | `static/js/recipe/test_run_modal.js` | validate then `POST /api/run` dry run | Recipes current draft | Migrated admission | API, unit, Lab browser | legacy modal/report detail parity |
+| Build | `static/app.js` | validate then `POST /api/run` build | Recipes current draft | Migrated admission | API, unit, Lab browser | later lifecycle actions |
 | Runs | `static/js/pages/logs.js` | `/api/executions`, `/{run_id}` | Runs | Partially migrated | unit, Lab browser | full lifecycle actions and complete display parity |
 | Run → Recipe | legacy Run context | Run `recipe_id` and canonical Recipe GET | exact Recipe or System managed route | Migrated read-only | Lab browser | immutable Run ↔ Recipe revision evidence for Plan |
 | Logs | `static/js/pages/logs.js` | `/{run_id}/logs`, rendered-character cursor | Runs | Partially migrated | client, polling, Lab browser | long-log/follow and failure browser cases |
@@ -38,4 +38,4 @@ Status means functional read-only coverage, not visual similarity. `static/` rem
 | Support bundle | `static/js/pages/system.js` | `/api/support-bundle` GET | future System Developer | Not started | legacy tests | download and error handling |
 | Public repository landing | `debbuilder/repository_templates/index.html` | separate public listener | separate future template | Not started | prototype reference | separate deployment checkpoint |
 
-`/api/packages` remains the DebBuilder-managed Packages projection. Repository inventory is an independent exact reprepro read. Package → Recipe and Run → Recipe navigation use the returned Recipe ID; application-managed Recipes route to System using management metadata. No current public Run DTO proves an exact Recipe revision, so the Plan reports no matching current evidence. Recipe Delete, Test/Build, lifecycle actions, and production cutover remain blockers. See [the C2B edit contract](recipe-editor/edit-contract.md).
+`/api/packages` remains the DebBuilder-managed Packages projection. Repository inventory is an independent exact reprepro read. Package → Recipe and Run → Recipe navigation use the returned Recipe ID; application-managed Recipes route to System using management metadata. Test/Build View Run selects the exact returned Run ID; the Runs page owns polling, logs, and diagnosis. No current public Run DTO proves an exact Recipe revision, so the Plan reports no matching current evidence. Recipe Delete, Run cancellation, Artifact Validation, Publication, automation mutations, and production cutover remain blockers. See [the C2B edit contract](recipe-editor/edit-contract.md).

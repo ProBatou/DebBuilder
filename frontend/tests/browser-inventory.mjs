@@ -13,7 +13,7 @@ try {
   await page.getByRole('button',{name:'Packages',exact:true}).click();
   await page.getByRole('button',{name:'View repository inventory'}).click();
   if (expected === 'empty') {
-    await page.getByText('Published entries',{exact:true}).waitFor();
+    await page.getByRole('heading',{name:'Published entries'}).waitFor();
     assert.equal(await page.locator('.table-wrap tbody tr').count(),0);
     await page.getByText('No items').last().waitFor();
   } else {

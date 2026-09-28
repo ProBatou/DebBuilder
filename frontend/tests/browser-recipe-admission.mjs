@@ -143,17 +143,7 @@ try {
     assert.equal(runBodies.at(-1).workflow.management.owner,'application');
     assert.equal(runBodies.at(-1).workflow.package.maintainer,managedValue);
     assert.equal(await maintainer.inputValue(),managedValue);
-    for (const theme of ['dark','light','system']) {
-      await page.getByLabel('Theme').selectOption(theme);
-      const applied = await page.locator('html').getAttribute('data-theme');
-      assert.ok(theme === 'system' ? ['dark','light'].includes(applied) : applied === theme);
-    }
-    const language = page.locator('.preferences select').nth(1);
-    for (const [code,label] of [['fr','Tester'],['de','Testen'],['es','Probar'],['en','Test']]) {
-      await language.selectOption(code);
-      await page.getByRole('button',{name:label,exact:true}).waitFor();
-    }
-    assert.equal(mutations.some(path => path.startsWith('/api/workflows/') || ['/api/recipes/import','/api/executions/validate','/api/executions/publish'].includes(path)),false);
+    assert.deepEqual(mutations.filter(path => !['/api/recipes/draft','/api/recipes/validate','/api/run'].includes(path)),[]);
     assert.deepEqual(pageErrors,[]);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false);
     await page.close();

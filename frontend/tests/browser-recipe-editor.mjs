@@ -77,7 +77,7 @@ try {
     if (viewport.width < 600) await page.getByRole('button',{name:'Menu'}).click();
     await page.getByRole('button',{name:'Packages',exact:true}).first().click();
     await page.getByRole('dialog').getByRole('button',{name:'Discard draft'}).click();
-    await page.getByRole('heading',{name:'Packages'}).waitFor();
+    await page.getByRole('heading',{name:'Packages',level:1}).waitFor();
     await page.goto(`${base}/#/recipes/archive-agent`);
     await page.getByRole('heading',{name:'archive-agent'}).waitFor();
     await page.getByRole('button',{name:'Edit',exact:true}).click();
@@ -94,7 +94,7 @@ try {
     if (viewport.width < 600) await page.getByRole('button',{name:'Menu'}).click();
     await page.getByRole('button',{name:'Runs',exact:true}).first().click();
     await page.getByRole('dialog').getByRole('button',{name:'Discard draft'}).click();
-    await page.getByRole('heading',{name:'Runs'}).waitFor();
+    await page.getByRole('heading',{name:'Runs',level:1}).waitFor();
     await page.goto(`${base}/#/recipes/vendor-cli`);
     await page.getByRole('heading',{name:'vendor-cli'}).waitFor();
     await page.getByRole('button',{name:'Edit',exact:true}).click();
@@ -103,7 +103,7 @@ try {
     await page.getByRole('button',{name:'Cancel',exact:true}).click();
     if (viewport.width < 600) await page.getByRole('button',{name:'Menu'}).click();
     await page.getByRole('button',{name:'System',exact:true}).first().click();
-    await page.getByRole('button',{name:'System-managed self-build'}).click();
+    await page.getByRole('button',{name:'System-managed self-build',exact:true}).click();
     await page.getByRole('heading',{name:'debbuilder'}).waitFor();
     await page.getByRole('button',{name:'Edit',exact:true}).click();
     assert.equal(await page.locator('[data-recipe-path="source.repository"] input').isDisabled(),true);
@@ -111,15 +111,6 @@ try {
     await page.locator('[data-recipe-path="active"] input').click();
     await page.getByText('Unsaved changes',{exact:true}).waitFor();
     await page.getByRole('button',{name:'Cancel',exact:true}).click();
-    await page.getByRole('button',{name:'Edit',exact:true}).click();
-    const theme = page.getByLabel('Theme');
-    await theme.selectOption('dark');
-    await theme.selectOption('light');
-    const locale = page.locator('.preferences select').nth(1);
-    for (const [code,edit] of [['fr','Modification'],['de','Bearbeitung'],['es','Edición'],['en','Editing']]) {
-      await locale.selectOption(code);
-      await page.getByText(edit,{exact:true}).waitFor();
-    }
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false);
     assert.deepEqual(unexpected,[]);
     assert.deepEqual(failures,[]);

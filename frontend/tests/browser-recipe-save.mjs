@@ -7,9 +7,11 @@ const browser = await chromium.launch({headless:true});
 try {
   for (const viewport of [{width:1440,height:900},{width:390,height:844}]) {
     const page = await browser.newPage({viewport});
-    const errors = [], saves = [];
+    const errors = [], saves = [], mutations = [];
     page.on('pageerror', error => errors.push(error.message));
     page.on('request', request => {
+      if (request.method() !== 'GET' && new URL(request.url()).pathname.startsWith('/api/'))
+        mutations.push(`${request.method()} ${new URL(request.url()).pathname}`);
       if (request.method() === 'POST' && new URL(request.url()).pathname.startsWith('/api/workflows/'))
         saves.push(JSON.parse(request.postData()));
     });
@@ -108,12 +110,16 @@ try {
     const remoteRecipe = await remoteManaged.json();
     remoteRecipe.package.maintainer = `Remote Operator ${viewport.width} ${Date.now()} <remote@example.test>`;
     assert.equal((await page.request.post(`${api}/api/workflows/debbuilder`,{data:{workflow:remoteRecipe,expected_revision:remoteRevision}})).status(),200);
+    const managedConflictLoad = page.waitForResponse(response => response.url().endsWith('/api/workflows/debbuilder') && response.request().method() === 'GET');
     await page.getByRole('button',{name:'Save',exact:true}).click();
+    await managedConflictLoad;
     await page.getByRole('heading',{name:'Recipe conflict'}).waitFor();
     assert.equal(await page.locator('[data-recipe-path="active"] input').isChecked(),localManaged);
     assert.equal(await page.getByRole('button',{name:'Save',exact:true}).isDisabled(),true);
     await page.getByRole('button',{name:'Discard my draft and reload'}).click();
     assert.deepEqual(errors,[]);
+    assert.ok(mutations.length > 0);
+    assert.deepEqual(mutations.filter(route => !['POST /api/recipes/validate','POST /api/recipes/draft'].includes(route) && !route.startsWith('POST /api/workflows/')),[]);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false);
     await page.close();
   }

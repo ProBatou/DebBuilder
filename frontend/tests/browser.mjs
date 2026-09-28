@@ -8,9 +8,9 @@ try {
   for (const viewport of [{width:1440,height:900},{width:390,height:844}]) {
     const page = await browser.newPage({viewport});
     const failures=[];
-    const mutations=[];
+    const mutations=[], reads=[];
     page.on('pageerror', error => failures.push(error.message));
-    page.on('request', request => {if (new URL(request.url()).pathname.startsWith('/api/') && request.method() !== 'GET') mutations.push(`${request.method()} ${request.url()}`);});
+    page.on('request', request => {const path = new URL(request.url()).pathname; if (!path.startsWith('/api/')) return; if (request.method() === 'GET') reads.push(path); else mutations.push(`${request.method()} ${path}`);});
     await page.goto(base);
     await page.getByRole('heading',{name:'Overview'}).waitFor();
     async function openNavigation(name) {
@@ -23,8 +23,9 @@ try {
     assert.ok(packageId);
     assert.ok(page.url().includes(encodeURIComponent(packageId)));
     await page.getByRole('button',{name:'View repository inventory'}).click();
-    await page.getByText('Published entries',{exact:true}).waitFor();
+    await page.getByRole('heading',{name:'Published entries'}).waitFor();
     assert.ok(await page.locator('.table-wrap tbody tr').count() >= 3);
+    await page.getByRole('button',{name:/Back/}).first().click();
     const packageRecipeId = await page.evaluate(async name => (await (await fetch(`/api/packages/${encodeURIComponent(name)}`)).json()).package.recipe, packageId);
     await page.getByRole('button',{name:'Review Recipe'}).click();
     await page.getByText('No matching current evidence').waitFor();
@@ -77,22 +78,25 @@ try {
     await page.waitForTimeout(1800);
     assert.equal(runRequests,stoppedCount);
     assert.ok(await page.locator('.grid .panel').count() >= 1);
-    await page.getByRole('button',{name:'System-managed self-build'}).click();
+    await page.getByRole('button',{name:'System-managed self-build',exact:true}).click();
     await page.getByText('Managed identity',{exact:true}).waitFor();
     await page.getByText('Definition version',{exact:true}).waitFor();
+    await openNavigation('Settings');
     const theme = page.getByLabel('Theme');
     await theme.selectOption('dark');
     assert.equal(await page.locator('html').getAttribute('data-theme'),'dark');
     await theme.selectOption('light');
     assert.equal(await page.locator('html').getAttribute('data-theme'),'light');
-    const language = page.locator('.preferences select').nth(1);
-    for (const [code,label] of [['fr','Système'],['de','System'],['es','Sistema'],['en','System']]) {
+    const language = page.locator('.preference-fields select').nth(1);
+    for (const [code,label] of [['fr','Paramètres'],['de','Einstellungen'],['es','Ajustes'],['en','Settings']]) {
       await language.selectOption(code);
       await page.getByRole('heading',{name:label,exact:true}).waitFor();
     }
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false);
     assert.deepEqual(failures,[]);
     assert.deepEqual(mutations,[]);
+    const allowedReads = /^\/api\/(?:auth\/status|status|dashboard|packages(?:\/[^/]+)?|repository\/inventory|recipes(?:\/[^/]+\/(?:inspect|automation))?|workflows(?:\/[^/]+)?|executions(?:\/[^/]+(?:\/logs)?)?|system\/diagnostics|storage|settings)$/;
+    assert.deepEqual(reads.filter(path => !allowedReads.test(path)),[]);
     await page.close();
   }
   console.log('Behavior Lab desktop/mobile API browser checks passed');

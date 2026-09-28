@@ -62,4 +62,5 @@ export const api = {
   logs: (runId, verbosity, after, opts) => request(`/api/executions/${id(runId)}/logs?verbosity=${id(verbosity)}&after=${after}`, opts),
   diagnostics: opts => request('/api/system/diagnostics', opts),
   storage: opts => request('/api/storage', opts),
+  settings: opts => request('/api/settings', opts),
 };

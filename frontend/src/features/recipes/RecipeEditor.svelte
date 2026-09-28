@@ -24,16 +24,12 @@
   $: groups = (groupNames[section] || []).map(([label,key]) => ({label, entries:visible.filter(entry => groupFor(entry.path) === key || key === 'other' && !(groupNames[section] || []).some(([,known]) => known === groupFor(entry.path)))})).filter(group => group.entries.length);
   function errorsForField(path) {return Object.entries(errors?.fields || {}).filter(([key]) => key === `$.${path}` || key.startsWith(`$.${path}.`) || key.startsWith(`$.${path}[`)).flatMap(([,items]) => items);}
 </script>
-<div class="recipe-editor">
-  <div class="tabs" role="group" aria-label="Recipe editor sections">
-    {#each ['plan','customize','advanced','expert'] as tab}<button type="button" class:active={section===tab} onclick={() => section=tab}>{t(tab,language)}</button>{/each}
-    <button type="button" class:active={section==='review'} onclick={() => section='review'}>{t('reviewChanges',language)}</button>
-  </div>
+<div class="recipe-fields-editor">
   {#if section === 'review'}
     <section><h3>{t('reviewChanges',language)}</h3><p>{changes.length ? changes.join(', ') : t('noChanges',language)}</p><div class="recipe-review"><details><summary>{t('loadedBaseline',language)}</summary><pre>{JSON.stringify(editor.baseline,null,2)}</pre></details><details open><summary>{t('currentDraft',language)}</summary><pre>{JSON.stringify(editor.draft,null,2)}</pre></details></div></section>
   {:else}
     <div class="editor-groups">
-      {#each groups as group}<section class="panel editor-group"><h3>{groupTitle(group.label)}</h3><div class="recipe-fields">
+      {#each groups as group}<section class="panel recipe-section editor-group"><h3>{groupTitle(group.label)}</h3><div class="recipe-form-grid recipe-fields">
       {#each group.entries as entry (entry.path)}
         {@const disabled = ownership(entry.path,editor.managed,editor.editablePaths) === 'READ_ONLY_MANAGED' || entry.path.endsWith('runtime_dependency_detection.overrides') && !(editor.draft.artifact?.mode === 'upstream_archive' && editor.draft.artifact?.archive_source === 'release_asset' && editor.draft.package?.architecture === 'amd64')}
         <RecipeField {entry} {editor} {update} {disabled} {language} fieldError={errorsForField(entry.path)[0]}/>

@@ -57,19 +57,11 @@
   }
   onMount(() => {load(); return () => controller?.abort();});
 </script>
-
-<div class="settings-layout">
-  <nav class="settings-nav" aria-label={t('settings',language)}>
-    {#each tabs as key}<button class:active={tab === key} aria-current={tab === key ? 'page' : undefined} onclick={() => select(key)}>{label(key)}</button>{/each}
-  </nav>
-  <div class="settings-content">
-    <ErrorNotice {error} retry={load} {language}/>
-    {#if settings}
-      {#if tab === 'general'}<section class="panel settings-appearance"><h2>{t('appearance',language)}</h2><div class="preference-fields"><label>{t('theme',language)}<select value={$theme} onchange={event => setTheme(event.currentTarget.value)}><option value="system">{t('systemTheme',language)}</option><option value="light">{t('light',language)}</option><option value="dark">{t('dark',language)}</option></select></label><label>{t('language',language)}<select value={$locale} onchange={event => setLocale(event.currentTarget.value)}><option value="en">EN</option><option value="fr">FR</option><option value="de">DE</option><option value="es">ES</option></select></label></div><p class="muted">{t('localPreferences',language)}</p></section>{/if}
-      <section class="panel"><div class="section-head"><h2>{label(tab)}</h2><span class="chip">{t('readOnly',language)}</span></div>
-        <div class="settings-facts">{#each facts[tab] as [name,path], index}<div><span>{factLabel(tab,index,name)}</span><strong>{value(path) || '—'}</strong></div>{/each}</div>
-        <p class="muted settings-note">{t('availableLater',language)}</p>
-      </section>
-    {:else if !error}<p>{t('loading',language)}</p>{/if}
-  </div>
-</div>
+<div class="settings-layout"><nav class="settings-nav" aria-label={t('settings',language)}>{#each tabs as key}<button class:active={tab===key} aria-current={tab===key?'page':undefined} onclick={() => select(key)}>{label(key)}</button>{/each}</nav><div class="settings-content">
+<ErrorNotice {error} retry={load} {language}/>
+{#if settings}
+{#if tab==='general'}<section class="panel"><h2>{t('appearance',language)}</h2><div class="field-grid"><label><span>{t('theme',language)}</span><select value={$theme} onchange={event => setTheme(event.currentTarget.value)}><option value="system">{t('systemTheme',language)}</option><option value="light">{t('light',language)}</option><option value="dark">{t('dark',language)}</option></select></label><label><span>{t('language',language)}</span><select value={$locale} onchange={event => setLocale(event.currentTarget.value)}><option value="en">EN</option><option value="fr">FR</option><option value="de">DE</option><option value="es">ES</option></select></label></div><p class="field-help">{t('localPreferences',language)}</p></section>{/if}
+<section class="panel"><div class="section-head"><h2>{label(tab)}</h2></div><div class="settings-edit-fields">{#each facts[tab] as [name,path], index}<label class="settings-edit-field"><span>{factLabel(tab,index,name)}</span><input type="text" value={value(path)} readonly aria-readonly="true" /></label>{/each}</div></section>
+<div class="panel settings-savebar"><strong>{t('readOnly',language)}</strong><p class="muted">{t('availableLater',language)}</p></div>
+{:else if !error}<p>{t('loading',language)}</p>{/if}
+</div></div>

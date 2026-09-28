@@ -18,20 +18,22 @@ try {
       await page.getByRole('button',{name,exact:true}).first().click();
     }
     await openNavigation('Packages');
-    await page.locator('.list .row').first().click();
-    const packageId = await page.locator('.detail h2').textContent();
+    await page.locator('.package-rows .package-row').first().click();
+    const packageId = await page.locator('.package-detail h2').textContent();
     assert.ok(packageId);
     assert.ok(page.url().includes(encodeURIComponent(packageId)));
-    await page.getByRole('button',{name:'View repository inventory'}).click();
+    if (viewport.width < 600) await page.getByRole('button',{name:/Back/}).first().click();
+    await page.getByRole('button',{name:/View repository inventory/}).click();
     await page.getByRole('heading',{name:'Published entries'}).waitFor();
-    assert.ok(await page.locator('.table-wrap tbody tr').count() >= 3);
+    assert.ok(await page.locator('.repo-packages>div').count() >= 3);
     await page.getByRole('button',{name:/Back/}).first().click();
+    if (viewport.width < 600) await page.locator('.package-rows .package-row').filter({hasText:packageId}).first().click();
     const packageRecipeId = await page.evaluate(async name => (await (await fetch(`/api/packages/${encodeURIComponent(name)}`)).json()).package.recipe, packageId);
     await page.getByRole('button',{name:'Review Recipe'}).click();
     await page.getByText('No matching current evidence').waitFor();
     assert.ok(page.url().endsWith(`#/recipes/${encodeURIComponent(packageRecipeId)}`));
     await openNavigation('Recipes');
-    await page.locator('.list .row').first().click();
+    await page.locator('.recipe-picker .selection-list button').first().click();
     await page.getByText('View canonical JSON').waitFor();
     await page.getByText('Lifecycle hooks').first().waitFor();
     await page.goto(`${base}/#/recipes/archive-agent`);
@@ -46,12 +48,12 @@ try {
     await page.getByText('Source build').waitFor();
     await page.getByText('postinst configured').waitFor();
     await openNavigation('Packages');
-    await page.locator('.list .row').filter({hasText:'debbuilder'}).first().click();
+    await page.locator('.package-rows .package-row').filter({hasText:'debbuilder'}).first().click();
     await page.getByRole('button',{name:'Review Recipe'}).click();
     await page.getByText('Managed identity',{exact:true}).waitFor();
     assert.ok(page.url().includes('#/system/managed'));
     await openNavigation('Runs');
-    await page.locator('.list .row').first().click();
+    await page.locator('.run-selection .run-list-row').first().click();
     const runId = await page.locator('.detail code').first().textContent();
     assert.ok(runId);
     assert.ok(page.url().includes(encodeURIComponent(runId)));
@@ -63,13 +65,12 @@ try {
       await page.getByText('No matching current evidence').waitFor();
       assert.ok(page.url().endsWith(`#/recipes/${encodeURIComponent(runRecipeId)}`));
       await openNavigation('Runs');
-      await page.locator('.list .row').first().click();
+      await page.locator('.run-selection .run-list-row').first().click();
     }
-    await page.getByRole('button',{name:'Options'}).click();
-    await page.getByRole('button',{name:'Raw',exact:true}).click();
-    await page.getByRole('button',{name:'Options'}).click();
-    await page.keyboard.press('Escape');
-    assert.equal(await page.getByRole('button',{name:'Raw',exact:true}).count(),0);
+    await page.locator('.log-options summary').click();
+    await page.locator('.log-options select').selectOption('raw');
+    await page.locator('.log-options summary').click();
+    assert.equal(await page.locator('.log-options').evaluate(node => node.open),false);
     let runRequests = 0;
     page.on('request', request => {if (request.url().includes(`/api/executions/${encodeURIComponent(runId)}`)) runRequests++;});
     await openNavigation('System');
@@ -77,7 +78,7 @@ try {
     const stoppedCount = runRequests;
     await page.waitForTimeout(1800);
     assert.equal(runRequests,stoppedCount);
-    assert.ok(await page.locator('.grid .panel').count() >= 1);
+    assert.ok(await page.locator('.system-grid .panel').count() >= 1);
     await page.getByRole('button',{name:'System-managed self-build',exact:true}).click();
     await page.getByText('Managed identity',{exact:true}).waitFor();
     await page.getByText('Definition version',{exact:true}).waitFor();
@@ -87,7 +88,7 @@ try {
     assert.equal(await page.locator('html').getAttribute('data-theme'),'dark');
     await theme.selectOption('light');
     assert.equal(await page.locator('html').getAttribute('data-theme'),'light');
-    const language = page.locator('.preference-fields select').nth(1);
+    const language = page.locator('.settings-content .field-grid select').nth(1);
     for (const [code,label] of [['fr','Paramètres'],['de','Einstellungen'],['es','Ajustes'],['en','Settings']]) {
       await language.selectOption(code);
       await page.getByRole('heading',{name:label,exact:true}).waitFor();

@@ -22,7 +22,7 @@ async function capture(kind, surface, {size='desktop', theme='light', scenario='
   const title = view === 'repository-inventory' ? 'Packages' : view === 'recipes-view' || view === 'recipes-edit' || view === 'recipes-advanced' || view === 'recipes-expert' ? 'Recipes' : view === 'runs-normal' || view === 'runs-failed' ? 'Runs' : view === 'drawer' ? 'Overview' : view[0].toUpperCase() + view.slice(1);
   await page.getByRole('heading',{level:1,name:title}).waitFor({timeout:10000});
   if (kind === 'real') {
-    const ready = surface === 'system' ? '.system-check' : surface === 'settings' ? '.settings-appearance' : surface.startsWith('recipes') ? '.recipe-identity h2' : surface === 'overview' || surface === 'drawer' ? '.overview-grid' : null;
+    const ready = surface === 'system' ? '.system-grid' : surface === 'settings' ? '.settings-content .panel' : surface.startsWith('recipes') ? '.recipe-identity h2' : surface === 'overview' || surface === 'drawer' ? '.overview-grid' : null;
     if (ready) await page.locator(ready).first().waitFor({timeout:10000});
   }
   if (kind === 'b6' && surface.startsWith('recipes')) {
@@ -34,13 +34,13 @@ async function capture(kind, surface, {size='desktop', theme='light', scenario='
     if (await failed.count()) await failed.click();
   }
   if (kind === 'real' && size === 'desktop' && surface === 'runs-normal' && !(route || '').includes('/')) {
-    await page.locator('.run-list .row').first().click();
+    await page.locator('.run-list .run-list-row').first().click();
   }
   await action?.(page,kind);
   if (kind === 'real' && surface === 'packages') await page.locator('.package-detail h2').waitFor();
-  if (kind === 'real' && surface === 'repository-inventory') await page.locator('.table-wrap').first().waitFor();
+  if (kind === 'real' && surface === 'repository-inventory') await page.locator('.repo-packages').first().waitFor();
   if (kind === 'real' && (surface === 'runs-detail' || surface === 'runs-failed' || (surface === 'runs-normal' && size === 'desktop'))) await page.locator('.run-main h2').waitFor();
-  if (kind === 'real' && surface === 'runs-normal' && size === 'mobile') await page.locator('.run-list .row').first().waitFor();
+  if (kind === 'real' && surface === 'runs-normal' && size === 'mobile') await page.locator('.run-list .run-list-row').first().waitFor();
   await page.waitForTimeout(300);
   const filename = `${kind}-${size}-${surface}-${theme}.png`;
   await page.screenshot({path:path.join(output,filename),fullPage:true});
@@ -69,7 +69,7 @@ try {
   }
   for (const surface of ['overview','recipes-view','runs-normal','runs-detail','settings','drawer']) for (const kind of ['b6','real']) {
     const route = surface === 'drawer' ? 'overview' : surface === 'recipes-view' ? kind === 'b6' ? 'recipes' : 'recipes/seerr' : surface === 'runs-normal' || surface === 'runs-detail' ? 'runs' : surface;
-    const action = surface === 'drawer' ? async page => page.getByRole('button',{name:kind==='b6'?'Open navigation':'Menu'}).click() : surface === 'runs-detail' ? async page => page.locator(kind === 'b6' ? '.run-selection button' : '.run-list .row').first().click() : undefined;
+    const action = surface === 'drawer' ? async page => page.getByRole('button',{name:kind==='b6'?'Open navigation':'Menu'}).click() : surface === 'runs-detail' ? async page => page.locator(kind === 'b6' ? '.run-selection button' : '.run-list .run-list-row').first().click() : undefined;
     try {await capture(kind,surface,{size:'mobile',route,action});}
     catch(error) {captures.push({kind,surface,size:'mobile',error:error.message});}
   }

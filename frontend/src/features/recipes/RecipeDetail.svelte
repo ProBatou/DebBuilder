@@ -8,6 +8,7 @@
   import RecipeEditor from './RecipeEditor.svelte';
   import {recipePlan} from './model.js';
   import StructuredValue from './StructuredValue.svelte';
+  import Provenance from '../../components/Provenance.svelte';
   import ErrorNotice from '../../components/ErrorNotice.svelte';
   import {t} from '../../i18n/i18n.js';
   export let recipe, revision = null, createMode = false, saved = () => {};
@@ -126,7 +127,9 @@
   $: plan = recipePlan(recipe);
   const planLabels = new Set(['Source','Tracking','Artifact mode','Build strategy','Output','Install destination','Service','Runtime Depends','ELF detection','Lifecycle hooks']);
   $: planRows = plan.summary.filter(([label]) => planLabels.has(label));
-  function brief(value) {
+  function brief(value,label) {
+    if (label === 'Artifact mode') return value === 'source_build' ? t('sourceBuild',language) : String(value).startsWith('upstream_') ? t('prebuilt',language) : String(value);
+    if (label === 'Service' && value === 'Not configured') return t('serviceNotConfigured',language);
     if (Array.isArray(value)) return value.length ? value.join(', ') : '—';
     if (value && typeof value === 'object') {
       if (Array.isArray(value.paths)) return `${value.mode || 'paths'} · ${value.paths.length} paths`;
@@ -136,32 +139,21 @@
     return String(value ?? '—');
   }
 </script>
-<dialog bind:this={discardDialog} oncancel={event => {event.preventDefault(); decide(false);}} aria-labelledby="discard-title"><h2 id="discard-title">{t('discardChanges',language)}</h2><p>{t('unsavedChanges',language)}</p><div class="actions"><button type="button" onclick={() => decide(false)}>{t('keepEditing',language)}</button><button type="button" onclick={() => decide(true)}>{t('discard',language)}</button></div></dialog>
+<dialog bind:this={discardDialog} oncancel={event => {event.preventDefault(); decide(false);}} aria-labelledby="discard-title"><div class="modal-head"><h2 id="discard-title">{t('discardChanges',language)}</h2><button type="button" class="icon-button" aria-label={t('close',language)} onclick={() => decide(false)}>×</button></div><p class="modal-copy">{t('unsavedChanges',language)}</p><div class="modal-actions"><button type="button" class="button secondary" onclick={() => decide(false)}>{t('keepEditing',language)}</button><button type="button" class="button primary" onclick={() => decide(true)}>{t('discard',language)}</button></div></dialog>
 <dialog bind:this={conflictDialog} aria-labelledby="conflict-title" onclose={() => {}}>
-  <h2 id="conflict-title" bind:this={conflictHeading} tabindex="-1">{t('recipeConflict',language)}</h2>
-  <p>{t('conflictPreserved',language)}</p>
+  <div class="modal-head"><h2 id="conflict-title" bind:this={conflictHeading} tabindex="-1">{t('recipeConflict',language)}</h2><button type="button" class="icon-button" aria-label={t('close',language)} onclick={() => conflictDialog.close()}>×</button></div>
+  <p class="modal-copy">{t('conflictPreserved',language)}</p>
   {#if conflict?.error?.code === 'recipe_exists' || conflict?.error?.code === 'builtin_recipe_reserved'}<p>{t('recipeAlreadyExists',language)}: <strong>{editor?.draft.name}</strong></p>{/if}
   {#if conflict?.loadError}<ErrorNotice error={conflict.loadError} language={language}/>{/if}
   {#if conflict?.latest}<div class="recipe-review"><details><summary>{t('reviewChanges',language)}</summary><ul>{#each conflictPaths() as row}<li><code>{row.path}</code> — {t(row.kind === 'both' ? 'changedBoth' : row.kind === 'local' ? 'changedLocally' : 'changedServer',language)}</li>{/each}</ul><details><summary>{t('latestServer',language)}</summary><pre>{JSON.stringify(conflict.latest.recipe,null,2)}</pre></details></details></div>{/if}
   {#if createMode}<label>{t('changeIdentity',language)} <input bind:value={replacementId} pattern="[A-Za-z0-9_.+-]+" aria-describedby="conflict-title"></label>{/if}
-  <div class="actions"><button type="button" onclick={() => conflictDialog.close()}>{t('keepEditing',language)}</button>{#if conflict?.latest}<button type="button" onclick={reloadConflict}>{t('discardReload',language)}</button>{/if}{#if createMode}<button type="button" onclick={useNewIdentity}>{t('changeIdentity',language)}</button>{/if}</div>
+  <div class="modal-actions"><button type="button" class="button secondary" onclick={() => conflictDialog.close()}>{t('keepEditing',language)}</button>{#if conflict?.latest}<button type="button" class="button primary" onclick={reloadConflict}>{t('discardReload',language)}</button>{/if}{#if createMode}<button type="button" class="button secondary" onclick={useNewIdentity}>{t('changeIdentity',language)}</button>{/if}</div>
 </dialog>
-<section class="panel recipe-main" class:editing>
-  <div class="recipe-identity"><p class="muted">{t('recipes',language)} / <strong>{recipe.name}</strong></p><div class="section-head"><h2>{recipe.name}</h2><div class="identity-actions"><span class="chip">{editing ? (changed || createMode ? t('unsaved',language) : t('editing',language)) : writable ? t('view',language) : t('readOnly',language)}</span>{#if !editing && (writable || editor.managed)}<button type="button" onclick={() => editing = true}>{t('edit',language)}</button>{/if}</div></div><p class="muted">{recipe.active === false ? t('inactive',language) : t('active',language)} · Recipe v{recipe.schema_version}</p></div>
-  {#if !editing}<div class="tabs recipe-levels" role="group" aria-label="Recipe sections"><button class="active" type="button">{t('plan',language)}</button><button type="button" onclick={() => editing = true} disabled={!writable && !editor.managed}>{t('customize',language)}</button><button type="button" onclick={() => {const panel = document.querySelector('.recipe-advanced'); if (panel) {panel.open = true; panel.scrollIntoView();}}}>{t('advancedTab',language)}</button><button type="button" onclick={() => {const panel = document.querySelector('.recipe-json'); if (panel) {panel.open = true; panel.scrollIntoView();}}}>{t('expert',language)}</button></div>{/if}
-  <div class="recipe-run-actions" aria-busy={admissionBusy}>
-    <h3>{t('nextStep',language)}</h3>
-    <div class="actions">
-      <button type="button" onclick={() => launch(true)} disabled={runBlocked || admissionBusy || validating || saving}>{admissionState === 'validating_test' ? t('validating',language) : admissionState === 'starting_test' ? t('startingTest',language) : t('test',language)}</button>
-      <button type="button" onclick={() => launch(false)} disabled={runBlocked || admissionBusy || validating || saving}>{admissionState === 'validating_build' ? t('validating',language) : admissionState === 'starting_build' ? t('startingBuild',language) : t('buildAction',language)}</button>
-    </div>
-    <p class="muted">{t('testBuildHelp',language)}</p>
-    {#if createMode}<p class="muted">{t('saveBeforeRun',language)}</p>{:else if editor?.draft.active === false}<p class="muted">{t('enableBeforeRun',language)}</p>{/if}
-    {#if admissionState === 'admitted'}<div class="notice" role="status" aria-live="polite"><strong>{t(admittedMode === 'test' ? 'testQueued' : 'buildQueued',language)}</strong> <button type="button" onclick={() => navigate('runs',admittedRunId)}>{t('viewRun',language)}</button></div>{/if}
-    {#if admissionState === 'admission_error'}<div class="notice error" role="alert"><strong bind:this={admissionHeading} tabindex="-1">{t('runNotStarted',language)}</strong><p>{admissionError?.message}</p>{#if admissionError?.details?.path}<code>{admissionError.details.path}</code>{/if}{#if ['network','timeout','ambiguous'].includes(admissionError?.kind)}<p>{t('admissionUnknown',language)}</p><button type="button" onclick={() => navigate('runs')}>{t('viewRuns',language)}</button>{/if}</div>{/if}
-  </div>
+<div class="recipe-main" class:editing>
+  <div class="editor-head recipe-identity"><div><p class="detail-breadcrumb">{t('recipes',language)} / <strong>{recipe.name}</strong></p><h2>{recipe.name}</h2><p class="muted">{recipe.active === false ? t('inactive',language) : t('active',language)} · Recipe v{recipe.schema_version}</p></div><div class="editor-actions identity-actions"><span class="chip">{editing ? (changed || createMode ? t('unsaved',language) : t('editing',language)) : writable ? t('view',language) : t('readOnly',language)}</span>{#if !editing && (writable || editor.managed)}<button class="button secondary" type="button" onclick={() => editing = true}>{t('edit',language)}</button>{/if}</div></div>
+  <nav class="recipe-levels" aria-label="Recipe sections"><button class:active={editing ? section==='plan' : true} type="button" onclick={() => editing ? section='plan' : undefined}>{t('plan',language)}</button><button class:active={editing && section==='customize'} type="button" onclick={() => {editing=true;section='customize';}} disabled={!writable && !editor.managed}>{t('customize',language)}</button><button class:active={editing && section==='advanced'} type="button" onclick={() => {if (editing) section='advanced'; else {const panel = document.querySelector('.recipe-advanced'); if (panel) {panel.open = true; panel.scrollIntoView();}}}}>{t('advancedTab',language)}</button><button class:active={editing && section==='expert'} type="button" onclick={() => {if (editing) section='expert'; else {const panel = document.querySelector('.recipe-json'); if (panel) {panel.open = true; panel.scrollIntoView();}}}}>{t('expert',language)}</button></nav>
   {#if editing}
-    <div class="actions"><button type="button" onclick={validate} disabled={validating || saving || admissionBusy}>{validating ? t('validating',language) : t('validate',language)}</button><button type="button" onclick={save} disabled={!canSave}>{saveState === 'validating' ? t('validating',language) : saveState === 'saving' ? t('saving',language) : t('save',language)}</button><button type="button" onclick={reset} disabled={saving || admissionBusy}>{t('cancel',language)}</button></div>
+    <div class="recipe-savebar" role="status"><strong>{t('reviewChanges',language)}</strong><div class="actions"><button type="button" class="button secondary" onclick={() => section='review'}>{t('reviewChanges',language)}</button><button class="button secondary" type="button" onclick={validate} disabled={validating || saving || admissionBusy}>{validating ? t('validating',language) : t('validate',language)}</button><button class="button primary" type="button" onclick={save} disabled={!canSave}>{saveState === 'validating' ? t('validating',language) : saveState === 'saving' ? t('saving',language) : t('save',language)}</button><button class="button secondary" type="button" onclick={reset} disabled={saving || admissionBusy}>{t('cancel',language)}</button></div></div>
     <p class="sr-only" role="status" aria-live="polite">{saveStatus}</p>
     {#if !createMode && !currentRevision}<p class="notice error">{t('revisionUnavailable',language)}</p>{/if}
     {#if conflict}<div class="notice error" role="alert"><p>{t('conflictPreserved',language)}</p><button type="button" onclick={() => {conflictDialog.showModal(); conflictHeading.focus();}}>{t('reviewChanges',language)}</button></div>{/if}
@@ -169,13 +161,22 @@
     {#if errors}<div class="notice error" role="alert"><strong>{errors.sections ? Object.keys(errors.sections).join(', ') : ''}</strong><p>{errors.global[0]?.message || Object.values(errors.sections)[0]?.[0]?.message}</p><small>{errors.global[0]?.path || Object.values(errors.sections)[0]?.[0]?.path || '$'}</small></div>{/if}
     <fieldset class="recipe-save-fields" disabled={saving}><RecipeEditor {editor} {update} {language} {errors} bind:section/></fieldset>
   {:else}
-  <div class="plan-card"><div class="section-head"><div><h3>{t('effectivePackagePlan',language)}</h3><p class="muted">{t('noMatchingEvidence',language)} · {t('testRequired',language)}</p></div></div>
-  <div class="plan-list">{#each planRows as [label,value,provenance]}<div class="plan-line"><span>{t(label,language)}</span><strong>{brief(value)}</strong><small>{t(provenance,language)}</small></div>{/each}</div></div>
-  {#if plan.mode === 'source_build'}<p>{t('sourceBuild',language)} · {plan.build.commands?.length || 0} {t('buildCommands',language)}</p>{:else}<p>{t('prebuilt',language)} · {plan.mode}</p>{/if}
-  {#if !plan.service.enabled}<p>{t('serviceNotConfigured',language)}</p>{/if}
+  <section class="panel recipe-plan plan-card"><div class="section-head"><div><h3>{t('effectivePackagePlan',language)}</h3><p class="muted">{t('testRequired',language)}</p></div></div>
+  <div class="recipe-pending">{t('noMatchingEvidence',language)} · {t('testRequired',language)}</div><div class="plan-rows">{#each planRows as [label,value,provenance]}<div><span>{t(label,language)}</span><strong>{brief(value,label)}</strong><Provenance kind={provenance} {language}/></div>{/each}</div></section>
   {#if plan.pkg.runtime_dependency_detection?.overrides?.length}<details><summary>{t('elfOverrides',language)}</summary><StructuredValue value={plan.pkg.runtime_dependency_detection.overrides}/></details>{/if}
   {/if}
-</section>
+  <section class="panel recipe-next recipe-run-actions" aria-busy={admissionBusy}>
+    <h3>{t('nextStep',language)}</h3>
+    <div class="actions">
+      <button class="button primary" type="button" onclick={() => launch(true)} disabled={runBlocked || admissionBusy || validating || saving}>{admissionState === 'validating_test' ? t('validating',language) : admissionState === 'starting_test' ? t('startingTest',language) : t('test',language)}</button>
+      <button class="button secondary" type="button" onclick={() => launch(false)} disabled={runBlocked || admissionBusy || validating || saving}>{admissionState === 'validating_build' ? t('validating',language) : admissionState === 'starting_build' ? t('startingBuild',language) : t('buildAction',language)}</button>
+    </div>
+    <p class="muted">{t('testBuildHelp',language)}</p>
+    {#if createMode}<p class="muted">{t('saveBeforeRun',language)}</p>{:else if editor?.draft.active === false}<p class="muted">{t('enableBeforeRun',language)}</p>{/if}
+    {#if admissionState === 'admitted'}<div class="notice" role="status" aria-live="polite"><strong>{t(admittedMode === 'test' ? 'testQueued' : 'buildQueued',language)}</strong> <button type="button" onclick={() => navigate('runs',admittedRunId)}>{t('viewRun',language)}</button></div>{/if}
+    {#if admissionState === 'admission_error'}<div class="notice error" role="alert"><strong bind:this={admissionHeading} tabindex="-1">{t('runNotStarted',language)}</strong><p>{admissionError?.message}</p>{#if admissionError?.details?.path}<code>{admissionError.details.path}</code>{/if}{#if ['network','timeout','ambiguous'].includes(admissionError?.kind)}<p>{t('admissionUnknown',language)}</p><button type="button" onclick={() => navigate('runs')}>{t('viewRuns',language)}</button>{/if}</div>{/if}
+  </section>
+</div>
 {#if !editing}
 <details class="panel recipe-secondary"><summary>{t('inspection',language)}</summary><ErrorNotice error={inspectionError} {language}/>{#if inspection}<StructuredValue value={inspection}/>{:else if !inspectionError}<p>{t('loading',language)}</p>{/if}</details>
 <details class="panel recipe-secondary"><summary>{t('automation',language)}</summary><ErrorNotice error={automationError} {language}/>{#if automation}<StructuredValue value={automation}/>{:else if !automationError}<p>{t('loading',language)}</p>{/if}</details>

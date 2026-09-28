@@ -4,12 +4,13 @@
   import {createPoller} from '../features/polling.js';
   import {navigate} from '../navigation/location.js';
   import {openRecipe} from '../navigation/recipe.js';
-  import {t,when} from '../i18n/i18n.js';
+  import {t,when,statusLabel} from '../i18n/i18n.js';
+  import StructuredValue from '../features/recipes/StructuredValue.svelte';
   import ErrorNotice from '../components/ErrorNotice.svelte';
   import Status from '../components/Status.svelte';
   export let id = '', language = 'en';
   let rows = [], run = null, logs = '', offset = 0, verbosity = 'normal', following = true;
-  let query = '', filter = 'all', error = null, detailError = null, logError = null, optionsOpen = false;
+  let query = '', filter = 'all', error = null, detailError = null, logError = null, logOptions, optionsTrigger;
   let navigationError = null;
   const stageNames = {
     en: {source:'Fetch source',detection:'Detect project',dependencies:'Check dependencies',source_changes:'Apply source changes',build:'Build',staging:'Stage package',debian_metadata:'Debian metadata',systemd:'Service',package:'Create package',artifact:'Artifact'},
@@ -39,9 +40,9 @@
     if (following) {await tick(); logNode?.scrollTo({top:logNode.scrollHeight});}
     if (!active(run)) detailPoller?.stop();
   }
-  function select(runId) {
+  function select(runId, preserveRun = false) {
     detailPoller?.stop(); detailController?.abort();
-    selectedId = runId; ++generation; run = null; logs = ''; offset = 0; detailError = null; logError = null; following = true;
+    selectedId = runId; ++generation; if (!preserveRun) run = null; logs = ''; offset = 0; detailError = null; logError = null; following = true;
     if (!runId) return;
     const token = generation;
     detailPoller = createPoller(signal => loadDetail(runId,signal), {
@@ -50,8 +51,10 @@
     });
     detailPoller.start();
   }
-  function changeVerbosity(value) {if (!['compact','normal','verbose','raw'].includes(value)) return; verbosity = value; logs = ''; offset = 0; select(id); optionsOpen = false;}
-  function outside(event) {if (optionsOpen && !event.target.closest('.log-options')) optionsOpen = false;}
+  function changeVerbosity(value) {if (!['compact','normal','verbose','raw'].includes(value)) return; verbosity = value; select(id,true);}
+  function closeOptions(restoreFocus=false) {if (!logOptions?.open) return; logOptions.open=false; if (restoreFocus) optionsTrigger?.focus();}
+  function outsideOptions(event) {if (logOptions?.open && !logOptions.contains(event.target)) closeOptions();}
+  function optionsKeydown(event) {if (event.key==='Escape' && logOptions?.open) {event.preventDefault();event.stopPropagation();closeOptions(true);}}
   onMount(() => {
     listPoller = createPoller(loadList, {interval:5000, onData:value => {rows = value; error = null;}, onError:caught => error = caught});
     listPoller.start();
@@ -61,16 +64,16 @@
   $: visible = rows.filter(row => (filter === 'all' || (filter === 'active' ? active(row) : (row.lifecycle_status || row.status) === filter)) && `${row.package || ''} ${row.id} ${row.action || ''}`.toLowerCase().includes(query.toLowerCase()));
   $: dependency = run?.steps?.find(step => step.name === 'staging')?.details?.runtime_dependency_detection;
 </script>
-<svelte:window onpointerdown={outside} onkeydown={(event) => {if(event.key === 'Escape') optionsOpen = false;}}/>
+<svelte:window onpointerdown={outsideOptions} onkeydown={optionsKeydown}/>
 <ErrorNotice {error} retry={refreshList} {language}/>
-<div class="split runs-layout"><section class="panel run-list"><div class="section-head"><h2>{t('runs',language)}</h2><small>{visible.length} / {rows.length}</small></div><div class="filters"><label>{t('search',language)} <input type="search" bind:value={query}></label><label>{t('status',language)} <select bind:value={filter}><option value="all">{t('all',language)}</option><option value="active">{t('activeWork',language)}</option><option value="failed">failed</option><option value="completed">completed</option><option value="cancelled">cancelled</option></select></label></div><div class="list">{#each visible as row (row.id)}<button class:active={id===row.id} class="row" onclick={() => navigate('runs',row.id)}><span><strong>{row.package || row.id}</strong><small>{when(row.updated,language)} · {row.id}</small></span><Status value={row.lifecycle_status || row.status} {language}/></button>{:else}<p>{t('noItems',language)}</p>{/each}</div></section>
-<div class="detail run-detail" class:no-selection={!id}>{#if id}<button class="back" onclick={() => navigate('runs')}>← {t('back',language)}</button>{/if}<ErrorNotice error={detailError} retry={() => select(id)} {language}/>{#if run}<section class="panel run-main"><h2>{run.package || run.id}</h2><p class="muted"><code>{run.id}</code> · {when(run.updated,language)}</p><Status value={run.lifecycle_status || run.status} {language}/>
-  {#if run.recipe_id || run.recipe}<p><button onclick={() => review(run.recipe_id || run.recipe)}>{t('reviewRecipe',language)} →</button></p><ErrorNotice error={navigationError} {language}/>{/if}
-  {#if run.recovery_blocker || run.validations?.at(-1)?.recovery_blocker}<div class="notice error"><strong>{t('recovery',language)}</strong><p>{run.recovery_blocker?.reason || run.recovery_blocker?.code || run.validations.at(-1).recovery_blocker.reason || run.validations.at(-1).recovery_blocker.code}</p></div>{/if}
+<div class="run-layout runs-layout" class:mobile-detail={Boolean(id)}><section class="panel run-list"><div class="section-head"><h2>{t('runs',language)}</h2><small>{visible.length} / {rows.length}</small></div><div class="filters run-filters"><label><span>{t('search',language)}</span><input type="search" bind:value={query}></label><label><span>{t('status',language)}</span><select bind:value={filter}><option value="all">{t('all',language)}</option><option value="active">{t('activeWork',language)}</option><option value="failed">failed</option><option value="completed">completed</option><option value="cancelled">cancelled</option></select></label></div><div class="selection-list run-selection">{#each visible as row (row.id)}<button class:selected={id===row.id} class="run-list-row" onclick={() => navigate('runs',row.id)}><span><strong>{row.package || row.id}</strong><small>{when(row.updated,language)} · {row.id}</small></span><Status value={row.lifecycle_status || row.status} {language}/></button>{:else}<p>{t('noItems',language)}</p>{/each}</div></section>
+<div class="detail run-detail" class:no-selection={!id}>{#if id}<button class="back-button mobile-only" onclick={() => navigate('runs')}>← {t('back',language)}</button>{/if}<ErrorNotice error={detailError} retry={() => select(id)} {language}/>{#if run}<section class="panel run-main"><p class="detail-breadcrumb">{t('runs',language)} / <strong>{run.id}</strong></p><div class="run-title"><div><h2>{run.package || run.id}</h2><p class="muted"><code>{run.id}</code> · {when(run.updated,language)}</p></div><Status value={run.lifecycle_status || run.status} {language}/></div><div class="detail-facts"><div><span>{t('started',language)}</span><strong>{when(run.created || run.started || run.updated,language)}</strong></div><div><span>{t('packages',language)}</span><strong>{run.package || '—'}</strong></div><div><span>{t('status',language)}</span><Status value={run.lifecycle_status || run.status} {language}/></div></div>
+  {#if run.recipe_id || run.recipe}<div class="detail-buttons"><button class="button secondary" onclick={() => review(run.recipe_id || run.recipe)}>{t('reviewRecipe',language)} →</button></div><ErrorNotice error={navigationError} {language}/>{/if}
+  {#if run.recovery_blocker || run.validations?.at(-1)?.recovery_blocker}<div class="inline-alert"><strong>{t('recovery',language)}</strong><p>{run.recovery_blocker?.reason || run.recovery_blocker?.code || run.validations.at(-1).recovery_blocker.reason || run.validations.at(-1).recovery_blocker.code}</p></div>{/if}
   {#if run.cancellation}<p>{run.cancellation.reason || run.cancellation.code}</p>{/if}
-  {#if run.diagnostic}<section class="subpanel diagnosis-panel"><h3>{t('diagnosis',language)}</h3><p>{run.diagnostic.title}</p><p>{run.diagnostic.next_action}</p>{#each run.diagnostic.facts || [] as fact}<p><strong>{fact.label}:</strong> {Array.isArray(fact.value) ? fact.value.join(', ') : fact.value}</p>{/each}</section>{/if}
-  {#if run.error}<div class="notice error"><strong>{run.error.code}</strong><p>{run.error.message}</p>{#if run.error.details?.path}<code>{run.error.details.path}</code>{/if}</div>{/if}
-  </section><section class="panel run-stages"><h3>{t('stages',language)}</h3><div class="stages">{#each run.steps || [] as step (step.name)}<div><span title={step.name}>{stageLabel(step.name)}</span><Status value={step.status} {language}/>{#if step.summary}<small>{step.summary}</small>{/if}{#if step.error}<small>{step.error.code}: {step.error.message}</small>{/if}</div>{/each}</div>
-  {#if dependency}<section class="subpanel"><h3>{t('dependencies',language)}</h3><p>{dependency.status} · {dependency.detected_count || 0} {t('detected',language)} · {dependency.bundled_count || 0} {t('bundled',language)} · {dependency.unresolved_count || 0} {t('unresolved',language)}</p><details><summary>{t('details',language)}</summary><p>{t('overrides',language)}: {dependency.overridden_count || 0}</p><p>{t('depends',language)}: {(dependency.effective_depends || []).join(', ') || '—'}</p></details></section>{/if}
-  </section><section class="panel run-logs"><div class="section-head"><h3>{t('logs',language)}</h3><div><button onclick={() => following = !following}>{following ? t('pause',language) : t('follow',language)}</button><span class="log-options"><button aria-expanded={optionsOpen} onclick={() => optionsOpen = !optionsOpen}>{t('options',language)}</button>{#if optionsOpen}<div class="popover">{#each ['compact','normal','verbose','raw'] as option}<button onclick={() => changeVerbosity(option)}>{t(option,language)}</button>{/each}</div>{/if}</span></div></div><ErrorNotice error={logError} {language}/><pre bind:this={logNode} class="log-output">{logs}</pre></section>
+  {#if run.error}<div class="inline-alert"><strong>{run.error.code}</strong><p>{run.error.message}</p>{#if run.error.details?.path}<code>{run.error.details.path}</code>{/if}</div>{/if}
+  {#if run.diagnostic}<details class="diagnosis-panel"><summary>{t('diagnosis',language)}</summary><p>{run.diagnostic.title}</p><p>{run.diagnostic.next_action}</p>{#each run.diagnostic.facts || [] as fact}<p><strong>{fact.label}:</strong> {Array.isArray(fact.value) ? fact.value.join(', ') : fact.value}</p>{/each}</details>{/if}  </section><section class="panel run-stages"><h3>{t('stages',language)}</h3><div class="stage-list">{#each run.steps || [] as step, index (step.name)}<div class:stage-current={step.status==='running'} class:stage-failed={step.status==='failed'}><span class="stage-number">{step.status==='failed'?'!':step.status==='running'?'◌':step.status==='success'||step.status==='completed'?'✓':index+1}</span><strong title={step.summary || step.name}>{stageLabel(step.name)}</strong><small>{statusLabel(step.status,language)}</small></div>{/each}</div>
+  </section>{#if dependency}<section class="panel"><details class="dependency-details"><summary><span><strong>{t('dependencies',language)}</strong><small>{dependency.status} · {dependency.unresolved_count || 0} {t('unresolved',language)}</small></span><span>⌄</span></summary><div class="dependency-grid"><div><span>{t('detected',language)}</span><strong>{dependency.detected_count || 0}</strong></div><div><span>{t('bundled',language)}</span><strong>{dependency.bundled_count || 0}</strong></div><div><span>{t('overrides',language)}</span><strong>{dependency.overridden_count || 0}</strong></div><div><span>{t('depends',language)}</span><strong>{(dependency.effective_depends || []).join(', ') || '—'}</strong></div></div></details></section>{/if}
+
+<section class="panel run-logs"><div class="section-head"><h2>{t('logs',language)}</h2><details bind:this={logOptions} class="log-options"><summary bind:this={optionsTrigger}>{t('options',language)}</summary><label class="log-verbosity">{t('options',language)} <select value={verbosity} onchange={event => changeVerbosity(event.currentTarget.value)}>{#each ['compact','normal','verbose','raw'] as option}<option value={option}>{t(option,language)}</option>{/each}</select></label></details></div>{#if active(run)}<div class="log-follow"><span role="status">{following ? t('follow',language) : t('pause',language)}</span><button class="text-button" onclick={() => following = !following}>{following ? t('pause',language) : t('follow',language)}</button></div>{/if}<ErrorNotice error={logError} {language}/><pre bind:this={logNode} class="log-output">{logs}</pre></section><details class="panel run-technical"><summary>{t('details',language)}</summary><StructuredValue value={run.steps || []}/></details>
 {:else if id && !detailError}<p>{t('loading',language)}</p>{:else}<p>{t('noRun',language)}</p>{/if}</div></div>

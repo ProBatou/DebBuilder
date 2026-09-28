@@ -56,7 +56,7 @@ try {
     await commands.getByRole('button',{name:'Move commands 1 down'}).click();
     await commands.getByRole('button',{name:'Remove commands 2'}).click();
     await page.getByRole('button',{name:'Cancel',exact:true}).click();
-    await page.locator('.section-head .chip').getByText('View',{exact:true}).waitFor();
+    await page.locator('.identity-actions .chip').getByText('View',{exact:true}).waitFor();
     await page.getByRole('button',{name:'Edit',exact:true}).click();
     await page.getByRole('button',{name:'Plan',exact:true}).click();
     await description.fill(`${original} changed again`);
@@ -81,7 +81,7 @@ try {
     await page.goto(`${base}/#/recipes/archive-agent`);
     await page.getByRole('heading',{name:'archive-agent'}).waitFor();
     await page.getByRole('button',{name:'Edit',exact:true}).click();
-    await page.getByRole('button',{name:'Advanced configuration'}).click();
+    await page.getByRole('button',{name:/Advanced/}).click();
     assert.equal(await page.locator('[data-recipe-path="package.runtime_dependency_detection.enabled"]').count(),1);
     await page.getByRole('button',{name:'Expert'}).click();
     assert.equal(await page.locator('[data-recipe-path="install.maintainer_scripts.postinst"]').count(),1);
@@ -98,7 +98,7 @@ try {
     await page.goto(`${base}/#/recipes/vendor-cli`);
     await page.getByRole('heading',{name:'vendor-cli'}).waitFor();
     await page.getByRole('button',{name:'Edit',exact:true}).click();
-    await page.getByRole('button',{name:'Advanced configuration'}).click();
+    await page.getByRole('button',{name:/Advanced/}).click();
     assert.equal(await page.locator('[data-recipe-path="package.runtime_dependency_detection.enabled"]').count(),0);
     await page.getByRole('button',{name:'Cancel',exact:true}).click();
     if (viewport.width < 600) await page.getByRole('button',{name:'Menu'}).click();

@@ -51,6 +51,7 @@ try {
       assert.ok(page.url().endsWith(`#/runs/run-${runBodies.length}-${viewport.width}`));
     }
     await page.goto(`${base}/#/recipes`);
+    if (viewport.width < 600) await page.getByRole('button',{name:/New Recipe/}).click();
     await page.getByLabel('Recipe ID').fill(`unsaved-${viewport.width}`);
     await page.getByLabel('GitHub repository').fill('example/unsaved');
     await page.getByRole('button',{name:'Continue'}).click();
@@ -134,7 +135,7 @@ try {
     await page.goto(`${base}/#/system/managed`);
     await page.getByRole('heading',{name:'debbuilder'}).waitFor();
     await page.getByRole('button',{name:'Edit',exact:true}).click();
-    await page.getByRole('button',{name:'Advanced configuration',exact:true}).click();
+    await page.getByRole('button',{name:/Advanced/}).click();
     const maintainer = page.locator('[data-recipe-path="package.maintainer"] input');
     const managedValue = `Managed Operator ${viewport.width} <operator@example.test>`;
     await maintainer.fill(managedValue);

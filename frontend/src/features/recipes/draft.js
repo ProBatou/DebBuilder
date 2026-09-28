@@ -88,15 +88,18 @@ export function move(editor, path, from, to) {
   next.splice(to, 0, next.splice(from, 1)[0]);
   return change(editor, path, next);
 }
-export function changedPaths(editor, a = editor.baseline, b = editor.draft, prefix = '$') {
+function diffPaths(a, b, prefix) {
   if (equal(a, b)) return [];
   if (Array.isArray(a) && Array.isArray(b)) {
     if (a.length !== b.length) return [prefix];
-    return a.flatMap((value, index) => changedPaths(editor, value, b[index], `${prefix}[${index}]`));
+    return a.flatMap((value, index) => diffPaths(value, b[index], `${prefix}[${index}]`));
   }
   if (a && b && typeof a === 'object' && typeof b === 'object')
-    return [...new Set([...Object.keys(a), ...Object.keys(b)])].flatMap(key => changedPaths(editor, a[key], b[key], `${prefix}.${key}`));
+    return [...new Set([...Object.keys(a), ...Object.keys(b)])].flatMap(key => diffPaths(a[key], b[key], `${prefix}.${key}`));
   return [prefix];
+}
+export function changedPaths(editor, a = editor.baseline, b = editor.draft, prefix = '$') {
+  return diffPaths(a,b,prefix);
 }
 
 export function validationErrors(error) {

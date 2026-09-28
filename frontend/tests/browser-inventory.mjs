@@ -11,14 +11,14 @@ try {
   page.on('request', request => {if (new URL(request.url()).pathname.startsWith('/api/') && request.method() !== 'GET') mutations.push(request.url());});
   await page.goto(base);
   await page.getByRole('button',{name:'Packages',exact:true}).click();
-  await page.getByRole('button',{name:'View repository inventory'}).click();
+  await page.getByRole('button',{name:/View repository inventory/}).click();
   if (expected === 'empty') {
     await page.getByRole('heading',{name:'Published entries'}).waitFor();
-    assert.equal(await page.locator('.table-wrap tbody tr').count(),0);
+    assert.equal(await page.locator('.repo-packages>div').count(),0);
     await page.getByText('No items').last().waitFor();
   } else {
     await page.getByText('Repository inventory is unavailable').waitFor();
-    assert.equal(await page.locator('.table-wrap tbody tr').count(),0);
+    assert.equal(await page.locator('.repo-packages>div').count(),0);
     await page.getByRole('button',{name:'Retry'}).click();
     await page.getByText('Repository inventory is unavailable').waitFor();
   }

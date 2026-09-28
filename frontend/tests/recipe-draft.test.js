@@ -47,6 +47,13 @@ test('one field changes only its requested path and restoring it clears dirty', 
   }
 });
 
+test('conflict paths handle fields added or removed on the server', () => {
+  const editor = hydrate(simple);
+  const baseline = {source:{repository:'example/repo'},management:{owner:'application'}};
+  const latest = {source:{repository:'example/repo',ref:'v2'}};
+  assert.deepEqual(changedPaths(editor,baseline,latest),['$.source.ref','$.management']);
+});
+
 test('structured environment keys remain literal, including punctuation', () => {
   const editor = hydrate(simple);
   const original = editor.draft.build.environment;

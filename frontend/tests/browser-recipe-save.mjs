@@ -66,8 +66,7 @@ try {
       await page.unroute('**/api/workflows/seerr',failSave);
     }
     await page.getByRole('button',{name:'Cancel',exact:true}).click();
-    await page.goto(`${base}/#/recipes`);
-    if (viewport.width < 600) await page.getByRole('button',{name:/New Recipe/}).click();
+    await page.goto(`${base}/#/recipes/_create`);
     await page.getByRole('heading',{name:'New Recipe'}).waitFor();
     const newId = `lab-new-${viewport.width}-${Date.now()}`;
     await page.getByLabel('Recipe ID').fill(newId);
@@ -79,8 +78,7 @@ try {
     await page.getByRole('button',{name:'Edit',exact:true}).waitFor();
     assert.equal(saves.at(-1).create_only,true);
     assert.ok((await (await page.request.get(`${api}/api/workflows/${newId}`)).json()).name === newId);
-    await page.goto(`${base}/#/recipes`);
-    if (viewport.width < 600) await page.getByRole('button',{name:/New Recipe/}).click();
+    await page.goto(`${base}/#/recipes/_create`);
     const collisionId = `lab-new-collision-${viewport.width}-${Date.now()}`;
     await page.getByLabel('Recipe ID').fill(collisionId);
     await page.getByLabel('GitHub repository').fill('example/collision');

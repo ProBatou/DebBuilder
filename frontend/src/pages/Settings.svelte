@@ -47,7 +47,9 @@
   const factLabel = (key,index,name) => factNames[language]?.[key]?.[index] || name;
   function value(path) {
     const result = path.split('.').reduce((current, part) => current?.[part], settings);
-    return typeof result === 'boolean' ? (result ? '✓' : '—') : result ?? '—';
+    if (path.endsWith('_configured')) return t(result ? 'configuredValue' : 'notConfiguredValue',language);
+    if (typeof result === 'boolean') return t(result ? 'enabledValue' : 'disabledValue',language);
+    return result === '' || result == null ? '—' : result;
   }
   async function select(next) {tab = next; await tick(); document.querySelector('.settings-nav button.active')?.scrollIntoView({block:'nearest',inline:'nearest'});}
   async function load() {
@@ -61,7 +63,6 @@
 <ErrorNotice {error} retry={load} {language}/>
 {#if settings}
 {#if tab==='general'}<section class="panel"><h2>{t('appearance',language)}</h2><div class="field-grid"><label><span>{t('theme',language)}</span><select value={$theme} onchange={event => setTheme(event.currentTarget.value)}><option value="system">{t('systemTheme',language)}</option><option value="light">{t('light',language)}</option><option value="dark">{t('dark',language)}</option></select></label><label><span>{t('language',language)}</span><select value={$locale} onchange={event => setLocale(event.currentTarget.value)}><option value="en">EN</option><option value="fr">FR</option><option value="de">DE</option><option value="es">ES</option></select></label></div><p class="field-help">{t('localPreferences',language)}</p></section>{/if}
-<section class="panel"><div class="section-head"><h2>{label(tab)}</h2></div><div class="settings-edit-fields">{#each facts[tab] as [name,path], index}<label class="settings-edit-field"><span>{factLabel(tab,index,name)}</span><input type="text" value={value(path)} readonly aria-readonly="true" /></label>{/each}</div></section>
-<div class="panel settings-savebar"><strong>{t('readOnly',language)}</strong><p class="muted">{t('availableLater',language)}</p></div>
+<section class="panel"><div class="section-head"><h2>{label(tab)}</h2><span class="count-label">{t('readOnly',language)}</span></div><div class="settings-facts">{#each facts[tab] as [name,path], index}<div><span>{factLabel(tab,index,name)}</span><strong>{value(path)}</strong></div>{/each}</div></section>
 {:else if !error}<p>{t('loading',language)}</p>{/if}
 </div></div>

@@ -1,5 +1,42 @@
 /* Real API and draft controls layered over the ported B6 presentation. */
 .recipe-main { display: contents; }
+.row-status.ready { background: var(--success-bg); color: var(--success); }
+.settings-facts>div { display:flex;justify-content:space-between;gap:16px;padding:12px 0;border-top:1px solid var(--line);font-size:12px; }
+.settings-facts span { color:var(--muted); }
+.settings-facts strong { max-width:65%;text-align:right;overflow-wrap:anywhere; }
+.run-log-controls { display:flex;align-items:center;gap:8px; }
+.run-log-controls select { min-width:105px;min-height:32px;border:1px solid var(--strong-line);border-radius:6px;padding:5px 9px;background:var(--surface);color:var(--ink);font-size:12px; }
+.run-diagnosis .inline-alert { margin:0; }
+.run-diagnosis h3,.run-dependencies h3 { margin:0 0 12px; }
+.run-error-technical { margin-top:12px;font-size:11px;color:var(--muted); }
+.run-error-technical code { display:block;margin-top:8px; }
+.developer-payload { margin-top:16px;border-top:1px solid var(--line);padding-top:12px; }
+.developer-payload pre { margin-top:12px; }
+.recipe-task-group { min-width:0; }
+.recipe-task-group>summary { display:grid;gap:4px;cursor:pointer;list-style:none; }
+.recipe-task-group>summary::-webkit-details-marker { display:none; }
+.recipe-task-group>summary strong { font-size:15px; }
+.recipe-task-group>summary small { color:var(--muted);font-size:11px;font-weight:400; }
+.recipe-task-group>summary::after { content:'⌄';justify-self:end;grid-row:1/3;grid-column:2;color:var(--muted); }
+.recipe-task-group[open]>summary::after { content:'⌃'; }
+.recipe-task-group[open]>.recipe-fields { margin-top:16px; }
+.recipe-field.collection { grid-column:1/-1; }
+.recipe-field.collection>fieldset { display:grid;gap:8px;padding:11px;border:1px solid var(--line);border-radius:7px;background:var(--subtle); }
+.recipe-field.collection>fieldset>legend { width:auto;border:0;padding:0 5px; }
+.recipe-field.collection .recipe-row { background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:9px; }
+.recipe-field.collection .recipe-empty { margin:0;font-size:11px;color:var(--muted); }
+.recipe-field .recipe-add { justify-self:start;width:auto;min-height:31px;padding:5px 10px;background:var(--surface);color:var(--accent);border-color:var(--strong-line);font-size:11px; }
+.recipe-json .facts { max-height:360px;white-space:pre;overflow:auto; }
+.recipe-json-actions { display:flex;align-items:center;gap:10px;margin:12px 0; }
+.recipe-review-facts>div { display:grid;grid-template-columns:minmax(145px,.8fr) minmax(0,1fr) minmax(0,1fr);gap:12px;padding:12px 0;border-top:1px solid var(--line);font-size:11px;overflow-wrap:anywhere; }
+.recipe-review-head { display:grid;grid-template-columns:minmax(145px,.8fr) minmax(0,1fr) minmax(0,1fr);gap:12px;padding:8px 0;color:var(--muted);font-size:11px; }
+.recipe-review-head span { grid-column:2; }
+.recipe-review-head strong { grid-column:3;color:var(--ink); }
+.recipe-review-facts span { color:var(--muted); }
+.recipe-review-facts small { display:none; }
+@media(max-width:600px) { .recipe-review-facts>div { grid-template-columns:1fr;gap:4px; } .recipe-review-head { display:none; } .recipe-review-facts small { display:block;color:var(--muted);font-weight:400; } }
+.recipe-secondary .detail-facts { margin-top:12px; }
+.curated-diagnostics strong { font-weight:600; }
 .recipe-fields-editor { min-width: 0; }
 .chip.good {
   background: var(--success-bg);

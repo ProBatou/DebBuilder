@@ -45,7 +45,7 @@
   <div class="workspace">
     <header class="mobile-top"><button bind:this={menuButton} class="icon-button" onclick={() => menu = !menu} aria-label={t('menu',$locale)} aria-expanded={menu}>☰</button><strong>DebBuilder</strong><span class="mobile-version">{appVersion}</span></header>
     <main id="main" class="content">
-      <div class="page-title"><div><h1 tabindex="-1">{t($location.page,$locale)}</h1><p>{t(`${$location.page}Subtitle`,$locale)}</p></div>{#if $location.page === 'overview' || $location.page === 'packages'}<button class="button primary" onclick={() => open('recipes')}>+ {t('newRecipe',$locale)}</button>{/if}</div>
+      <div class="page-title"><div><h1 tabindex="-1">{t($location.page,$locale)}</h1><p>{t(`${$location.page}Subtitle`,$locale)}</p></div></div>
       {#if loading}<p>{t('loading',$locale)}</p>
       {:else if error}
         <ErrorNotice {error} retry={bootstrap} language={$locale}/>

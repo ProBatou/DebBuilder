@@ -45,7 +45,7 @@ try {
     await page.unroute('**/api/recipes/validate',offline);
     await page.getByRole('button',{name:'Review changes'}).click();
     await page.getByText('$.package.description').waitFor();
-    await page.getByText('Current draft').waitFor();
+    assert.match(await page.locator('.recipe-review-facts strong').first().textContent(),/Current draft/);
     await page.getByRole('button',{name:'Customize'}).click();
     const commands = page.locator('[data-recipe-path="build.commands"]');
     await commands.getByRole('button',{name:'Add commands'}).click();

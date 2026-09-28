@@ -2,6 +2,18 @@
 
 C3 completed the route/HTTP audit and preserved the C1→C2D functional behavior. Its visual work was an approximation made with CSS overrides on the earlier frontend trees. The C3 screenshot harness captured stable rendering and checked errors and overflow, but did **not** compare B6 and real geometry. C3 therefore did not establish B6 visual parity. #24C3.1 ports B6 presentation structures into the real frontend and checks their geometry against the reference.
 
+## #24C3.2 operator review corrections
+
+C3.2 keeps the B6 shell and measured columns while applying the operator's post-B6 decisions:
+
+- Standalone **New Recipe** actions are removed from Overview, Packages and the Recipe selector. Canonical draft projection and `create_only` remain available to the existing regression path; Recipe creation will be surfaced through a future Package creation and association workflow.
+- Run logs expose verbosity directly. Run and System Health show curated explanations and facts instead of recursive API objects; raw diagnostic payloads require an explicit action in System → Developer.
+- Settings keeps local Theme and Language controls. Backend settings appear as read-only facts, including configured/not-configured secret state, without implying that Settings writes work.
+- Recipe Plan omits raw ELF overrides. Customize, Advanced and Expert group editable fields by task; Advanced groups disclose on demand, Expert collection actions are compact, and canonical JSON is collapsed under Expert. Inspection and Automation show operator summaries, and the duplicate raw Advanced configuration tree is removed.
+- One shared status mapping reserves **✓** for completed success. Ready and prepared states use a positive dot; warnings, active states and failures have distinct symbols. The backend and route contracts remain unchanged.
+
+The operator corrections to standalone creation and log Options intentionally supersede those two B6 interactions. `frontend/tests/capture-operator-c32.mjs` produces the review states and an error/overflow manifest.
+
 ## #24C3.1 measured presentation port
 
 The real shell now uses the B6 sidebar head, mark, navigation icon wrappers, footer, mobile header and drawer composition. Overview uses compact B6 panels; Packages uses B6 list and detail facts; Recipes uses B6 selector, editor head, levels, plan, save bar and next action panel around the existing draft logic; Runs uses the B6 list, summary, numbered stages and logs composition; System limits its initial diagnostics to four and discloses additional real checks; Settings retains all seven B6 groups and read-only real settings. The backend and B6 visual prototype are unchanged. `frontend/src/styles.css` imports `styles/b6.css` for the directly ported B6 tokens, primitives and page rules, then `styles/real.css` for the real API/editor controls absent from the prototype. The prior pre-C3 and C3 override layers were removed.

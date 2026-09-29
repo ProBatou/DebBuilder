@@ -28,14 +28,13 @@ different branches can proceed in parallel once its own prerequisites are met.
 | [#25 Generic Git repositories and direct archive URLs](https://github.com/ProBatou/DebBuilder/issues/25) | **Deferred** | The source abstraction was audited, but implementation is intentionally postponed while real usage remains GitHub-only. Revisit when a concrete non-GitHub source need appears. |
 | [#30 Runtime shared-library dependencies for prebuilt binaries](https://github.com/ProBatou/DebBuilder/issues/30) | **Completed** | Bounded ELF inspection, Bookworm/amd64 Debian dependency resolution, opt-in Recipe packaging and offline Validation are integrated. |
 | [#31 Explicit empty output directories](https://github.com/ProBatou/DebBuilder/issues/31) | **Completed** | Declarative post-build directory preparation with fail-closed path handling, empty-directory staging and operator diagnostics is implemented. |
-| [#35 Reproducible Debian artifacts](https://github.com/ProBatou/DebBuilder/issues/35) | **Next / ready** | Make official `.deb` output byte-for-byte reproducible from identical tagged source and immutable inputs. |
+| [#35 Reproducible Debian artifacts](https://github.com/ProBatou/DebBuilder/issues/35) | **See Project** | Require byte-identical official `.deb` candidates from identical tagged source and immutable inputs under the supported release toolchain. |
 
 ## Current development direction
 
-The next bounded release-engineering task is
-[#35](https://github.com/ProBatou/DebBuilder/issues/35): establish a stable
-`SOURCE_DATE_EPOCH`, normalize package/archive timestamps and compression, and
-prove two clean builds produce the same `.deb` SHA-256.
+The [#35](https://github.com/ProBatou/DebBuilder/issues/35) release-engineering
+track defines a stable `SOURCE_DATE_EPOCH`, normalizes package/archive timestamps
+and compression, and requires two clean builds to produce the same `.deb` SHA-256.
 
 After that, the integration/client tracks can advance independently:
 
@@ -87,7 +86,7 @@ flowchart TD
     I12["#12 v1 release — completed"]
     I20["#20 API/diagnostics — completed"]
     I24["#24 Svelte UI/UX — completed"]
-    I35["#35 reproducible .deb — next"]
+    I35["#35 reproducible .deb"]
     I21["#21 Linux artifacts"]
     I23["#23 credentials/webhooks"]
     I22["#22 CLI"]

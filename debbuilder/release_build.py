@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -94,6 +95,21 @@ def release_plan(tag: str) -> dict:
         "definition": definition,
         "recipe": recipe,
     }
+
+
+def _source_date_epoch(source_root: Path) -> int:
+    """Use the tagged checkout's committer time, as specified by SOURCE_DATE_EPOCH."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(source_root), "show", "-s", "--format=%ct", "HEAD"],
+            capture_output=True, text=True, timeout=15, check=True,
+        )
+        value = result.stdout.strip()
+        if not re.fullmatch(r"[0-9]+", value):
+            raise ValueError("invalid commit timestamp")
+        return int(value)
+    except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise ReleaseBuildError("release_epoch_unavailable", "Release source commit timestamp is unavailable") from exc
 
 
 def _safe_source_input(source_root: Path, relative_value: str) -> Path:
@@ -324,12 +340,16 @@ def build_release_artifacts(
     *, tag: str, source_root: str | Path, output_directory: str | Path,
     temporary_parent: str | Path | None = None, validation_images: str | Path | None = None,
     _allow_test_image_fixture: bool = False,
+    reuse_verified_images: bool = False,
 ) -> dict:
     """Build checked Release assets without touching DebBuilder runtime state."""
     plan = release_plan(tag)
     source = Path(source_root).resolve(strict=True)
     if not source.is_dir():
         raise ReleaseBuildError("invalid_release_source", f"Release source is not a directory: {source}")
+    epoch = _source_date_epoch(source)
+    recipe = copy.deepcopy(plan["recipe"])
+    recipe["build"]["environment"]["SOURCE_DATE_EPOCH"] = str(epoch)
     output = _safe_output_directory(output_directory)
     if validation_images is None:
         raise ReleaseBuildError("release_validation_images_missing", "Release build requires verified immutable Validation image descriptors")
@@ -343,7 +363,7 @@ def build_release_artifacts(
         workspace = Path(temporary)
         for name in ("source", "staging", "artifacts", "logs"):
             (workspace / name).mkdir()
-        if not _allow_test_image_fixture:
+        if not _allow_test_image_fixture and not reuse_verified_images:
             _prove_public_images(images, workspace)
         _copy_source_inputs(plan, source, workspace / "source")
         image_target = workspace / "source" / "debbuilder" / MANIFEST_NAME
@@ -356,14 +376,14 @@ def build_release_artifacts(
                 raise ReleaseBuildError("release_validation_images_conflict", "Source Validation image manifest differs from verified descriptors")
         else:
             image_target.write_text(json.dumps(images, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
-        detection = project_detection.detect_project(workspace / "source", working_directory=plan["recipe"]["build"]["working_directory"])
-        build = build_executor.execute_build(plan["recipe"], detection, workspace / "source", dry_run=False)
+        detection = project_detection.detect_project(workspace / "source", working_directory=recipe["build"]["working_directory"])
+        build = build_executor.execute_build(recipe, detection, workspace / "source", dry_run=False)
         staging = debian_packaging.prepare_staging(
-            plan["recipe"], {**build, "version": plan["debian_version"]}, workspace,
+            recipe, {**build, "version": plan["debian_version"]}, workspace,
         )
         debian_packaging.validate_staging(staging)
         artifact = debian_packaging.build_deb(
-            plan["recipe"], staging, workspace, inspector=deb_inspector.inspect_deb,
+            recipe, staging, workspace, inspector=deb_inspector.inspect_deb, source_date_epoch=epoch,
         )
         if artifact["name"] != plan["filename"] or Path(artifact["path"]).parent != workspace / "artifacts":
             raise ReleaseBuildError("release_artifact_mismatch", "Packaging returned an unexpected artifact path")
@@ -387,6 +407,7 @@ def build_release_artifacts(
         "debian_revision": plan["debian_revision"],
         "architecture": plan["architecture"],
         "definition_version": plan["definition_version"],
+        "source_date_epoch": epoch,
         "artifact": {
             "name": plan["filename"], "path": str(output / plan["filename"]),
             "size": artifact["size"], "sha256": artifact["sha256"],
@@ -402,11 +423,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source-root", default=".", help="Checked-out tagged source tree")
     parser.add_argument("--output-dir", default="release-assets", help="New directory for the .deb and SHA256SUMS")
     parser.add_argument("--validation-images", required=True, help="Verified GHCR digest manifest from the release image step")
+    parser.add_argument("--reuse-verified-images", action="store_true", help="Reuse the first candidate's public image proof for an independent comparison build")
     arguments = parser.parse_args(argv)
     try:
         result = build_release_artifacts(
             tag=arguments.tag, source_root=arguments.source_root, output_directory=arguments.output_dir,
             validation_images=arguments.validation_images,
+            reuse_verified_images=arguments.reuse_verified_images,
         )
     except (ReleaseBuildError, debian_packaging.PackagingError, build_executor.BuildError, project_detection.DetectionError, OSError, ValueError) as exc:
         parser.exit(1, f"release build failed: {exc}\n")

@@ -1,7 +1,9 @@
 import hashlib
+import io
 import json
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -82,6 +84,46 @@ class ReleasePlanTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("dpkg-deb"), "dpkg-deb unavailable")
 class RealReleaseBuildTests(unittest.TestCase):
+    def test_two_isolated_release_builds_are_byte_identical(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            results = []
+            for name in ("a", "b"):
+                parent = root / f"temporary-{name}"
+                parent.mkdir()
+                with mock.patch("debbuilder.release_build._prove_public_images"):
+                    results.append(release_build.build_release_artifacts(
+                        tag=CURRENT_TAG, source_root=REPOSITORY_ROOT,
+                        output_directory=root / f"assets-{name}", temporary_parent=parent,
+                        validation_images=REPOSITORY_ROOT / "debbuilder/validation_images.json",
+                    ))
+                self.assertEqual(list(parent.iterdir()), [])
+            first, second = (Path(row["artifact"]["path"]) for row in results)
+            first_bytes, second_bytes = first.read_bytes(), second.read_bytes()
+            if first_bytes != second_bytes:
+                listings = [subprocess.run(["ar", "tv", str(path)], capture_output=True, text=True, check=True).stdout
+                            for path in (first, second)]
+                self.fail(f"Release artifacts differ: {[row['artifact']['sha256'] for row in results]}\n"
+                          f"ar A:\n{listings[0]}\nar B:\n{listings[1]}")
+            self.assertEqual(results[0]["artifact"]["sha256"], results[1]["artifact"]["sha256"])
+            self.assertEqual(results[0]["source_date_epoch"], results[1]["source_date_epoch"])
+            self.assertEqual(results[0]["checks"], results[1]["checks"])
+            epoch = results[0]["source_date_epoch"]
+            self.assertTrue(first_bytes.startswith(b"!<arch>\n"))
+            offset = 8
+            while offset < len(first_bytes):
+                header = first_bytes[offset:offset + 60]
+                self.assertEqual(header[58:60], b"`\n")
+                self.assertEqual(int(header[16:28].strip()), epoch)
+                size = int(header[48:58].strip())
+                offset += 60 + size + size % 2
+            self.assertEqual(offset, len(first_bytes))
+            for option in ("--ctrl-tarfile", "--fsys-tarfile"):
+                archive_bytes = subprocess.check_output(["dpkg-deb", option, str(first)])
+                with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:*") as archive:
+                    self.assertTrue(archive.getmembers())
+                    self.assertEqual({member.mtime for member in archive}, {epoch})
+
     def test_checked_in_manifest_must_match_verified_release_descriptors(self):
         source_manifest = REPOSITORY_ROOT / "debbuilder/validation_images.json"
         with tempfile.TemporaryDirectory() as temporary, mock.patch("debbuilder.release_build._prove_public_images") as public_proof:

@@ -283,6 +283,28 @@ jobs:
               handle.write(f"deb_name={name}\n")
           PY
 
+      - name: Prove independent Debian artifact reproducibility
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.release_tag.outputs.tag }}
+          DEB_NAME: ${{ steps.release_result.outputs.deb_name }}
+        run: |
+          set -euo pipefail
+          comparison_source="$RUNNER_TEMP/debbuilder-repro-source"
+          comparison_assets="$RUNNER_TEMP/debbuilder-repro-assets"
+          git worktree add --detach "$comparison_source" HEAD
+          python3 -m debbuilder.release_build \
+            --tag "$RELEASE_TAG" \
+            --source-root "$comparison_source" \
+            --validation-images "$GITHUB_WORKSPACE/debbuilder/validation_images.json" \
+            --reuse-verified-images \
+            --output-dir "$comparison_assets" \
+            > "$RUNNER_TEMP/debbuilder-repro-build.json"
+          echo "Official candidate SHA256: $(sha256sum "release-assets/$DEB_NAME")"
+          echo "Independent candidate SHA256: $(sha256sum "$comparison_assets/$DEB_NAME")"
+          cmp "release-assets/$DEB_NAME" "$comparison_assets/$DEB_NAME"
+          echo "Independent candidate is byte-identical"
+
       - name: Preserve checked assets for Release creation
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

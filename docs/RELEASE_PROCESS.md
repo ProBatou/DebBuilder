@@ -37,6 +37,26 @@ Git as rollback reference. `index.html` and referenced hashed JS/CSS are
 verified in the extracted package. Rollback of this frontend cutover uses the
 previous known-good `.deb`, subject to any unrelated release data migrations.
 
+## Reproducibility contract
+
+The release helper derives `SOURCE_DATE_EPOCH` from the tagged checkout's HEAD
+**committer** timestamp (`git show -s --format=%ct HEAD`). The release workflow
+verifies that HEAD is the exact tag commit before building. The helper passes
+the epoch to the frontend build and `dpkg-deb`, and sets the mtime of every
+package staging file, directory and symlink to that epoch. Modes and package
+ownership stay as specified by the Recipe; `dpkg-deb --root-owner-group`
+records root ownership. Generated control files, maintainer scripts, unit and
+environment template have no wall-clock or workspace values.
+
+Official packages use `dpkg-deb` with xz compression, level 6 and uniform
+compression for control and data members. `SOURCE_DATE_EPOCH` also fixes the
+outer `ar` member timestamps. The byte-identity guarantee covers identical
+tagged source and Validation descriptors under the same supported release
+toolchain: Debian `dpkg-deb` and its xz implementation, Node 24, npm 11.20.0,
+and the locked frontend dependencies. Cross-version or cross-distribution byte
+identity has not been qualified. Local qualification for #35 used `dpkg-deb`
+1.22.22; the release workflow records its installed version in the build log.
+
 ## GitHub workflow boundary
 
 The Release workflow checks out the exact tag with persisted Git credentials
@@ -56,8 +76,13 @@ Validation directory are not fingerprinted unless an image build actually
 consumes them.
 
 The build job runs the packaging-focused test suite, builds and inspects the
-`.deb`, verifies its checksum, and passes only the checked `.deb` and
-`SHA256SUMS` to a separate publication job. That job alone receives repository
+`.deb`, verifies its checksum, then builds a second candidate from an independent
+detached worktree and temporary package workspace. The first candidate performs
+the full anonymous OCI image proof; the second reuses that proof while checking
+the same checked-in descriptor manifest. CI prints both SHA-256 values and
+requires `cmp` byte identity before it passes only the checked first `.deb` and
+`SHA256SUMS` to a separate publication job. A mismatch fails the build before
+publication. That job alone receives repository
 contents-write permission. It creates a draft Release, verifies both remote
 asset names, and only then makes the Release public and latest. Package
 filenames and expected metadata are derived from the canonical Recipe rather

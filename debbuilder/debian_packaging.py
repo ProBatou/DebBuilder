@@ -519,13 +519,29 @@ def validate_staging(staging_result: dict) -> dict:
     return {"valid": True, "required_paths": [str(path) for path in required]}
 
 
-def build_deb(recipe: dict, staging_result: dict, workspace: str | Path, *, runner=run_command, inspector=None, cancellation_event=None, on_cancel=None, before_inspection=None) -> dict:
+def normalize_staging_timestamps(staging_result: dict, epoch: int) -> None:
+    """Set package-owned tar member times without changing modes or ownership."""
+    if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 0:
+        raise PackagingError("invalid_source_date_epoch", "SOURCE_DATE_EPOCH must be a nonnegative integer")
+    staging = Path(staging_result["staging_directory"])
+    entries = [staging, *staging.rglob("*")]
+    for path in sorted(entries, key=lambda entry: (entry.is_dir(), str(entry))):
+        os.utime(path, (epoch, epoch), follow_symlinks=False)
+
+
+def build_deb(recipe: dict, staging_result: dict, workspace: str | Path, *, runner=run_command, inspector=None, cancellation_event=None, on_cancel=None, before_inspection=None, source_date_epoch: int | None = None) -> dict:
     workspace = Path(workspace).resolve()
     validate_staging(staging_result)
     package, version, architecture = recipe["package"]["name"], staging_result["version"], recipe["package"]["architecture"]
     filename = f"{package}_{version}_{architecture}.deb"
     artifact = workspace / "artifacts" / filename
-    result = runner(f"dpkg-deb --build --root-owner-group staging artifacts/{filename}", workspace=workspace, working_directory=".", environment={"LC_ALL":"C"}, timeout=120, cancellation_event=cancellation_event, on_cancel=on_cancel)
+    environment = {"LC_ALL": "C"}
+    command = f"dpkg-deb --build --root-owner-group staging artifacts/{filename}"
+    if source_date_epoch is not None:
+        normalize_staging_timestamps(staging_result, source_date_epoch)
+        environment["SOURCE_DATE_EPOCH"] = str(source_date_epoch)
+        command = f"dpkg-deb --build --root-owner-group --compression=xz --compression-level=6 --uniform-compression staging artifacts/{filename}"
+    result = runner(command, workspace=workspace, working_directory=".", environment=environment, timeout=120, cancellation_event=cancellation_event, on_cancel=on_cancel)
     raise_for_cancelled_result(result)
     if result["status"] != "success" or not artifact.is_file():
         raise PackagingError(result.get("error_code") or "deb_build_failed", result["stderr"] or "dpkg-deb failed", details={"command": result})

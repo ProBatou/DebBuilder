@@ -6,7 +6,7 @@ DebBuilder is a self-hosted web console for turning GitHub-hosted projects into
 Debian packages, validating their install lifecycle, and publishing them to a
 signed personal APT repository.
 
-The current public release is **v1.0.0**. The [roadmap](docs/ROADMAP.md) tracks
+The current public release is **v1.1.0**. The [roadmap](docs/ROADMAP.md) tracks
 ongoing post-v1 development.
 
 ## What it does
@@ -25,6 +25,7 @@ artifacts.
 - opt-in ELF runtime dependency detection for supported prebuilt amd64 Release
   assets, with Bookworm resolution and manual/detected dependency overrides
 - Podman-based install, upgrade, restart, removal, and purge validation
+- Svelte-based administration UI with responsive desktop/mobile layouts
 - system diagnostics, Recipe and Run inspectors, bounded support bundles, and a
   documented OpenAPI contract
 - signed `reprepro` publication with exact package reconciliation
@@ -52,7 +53,7 @@ for the deeper model.
 
 ## Installation
 
-> **Release status:** The current public release is **v1.0.0**. The badge above
+> **Release status:** The current public release is **v1.1.0**. The badge above
 > always reports the latest public release.
 
 The currently qualified installation target is Debian 13 on amd64, with
@@ -60,7 +61,7 @@ systemd and cgroup v2. The host needs network access for normal APT dependency
 installation, GitHub source acquisition, and the first pull of each selected
 Validation image.
 
-Download the v1.0.0 Debian package and `SHA256SUMS` from
+Download the v1.1.0 Debian package and `SHA256SUMS` from
 [GitHub Releases](https://github.com/ProBatou/DebBuilder/releases), verify the
 checksum, then install the local package with APT:
 
@@ -202,26 +203,32 @@ set +a
 python3 server.py
 ```
 
-Run the core checks with:
+Run the core backend checks with:
 
 ```bash
 python3 -m py_compile server.py debbuilder/*.py
 python3 -m unittest discover -s tests -v
-for file in $(find static -name '*.js' -type f); do node --check "$file"; done
 git diff --check
 ```
 
-The admin sidebar's **System** view provides read-only diagnostics, a bounded
-support-bundle download, and the raw OpenAPI contract. Selected Recipes and
-Runs also offer read-only inspection and contextual bundle downloads; see
-[the API documentation](docs/API.md) for scope and excluded data.
+The production admin frontend lives under `frontend/` and is compiled into the
+packaged `static/` tree. Its qualified build toolchain is Node 24 and npm 11:
 
-Browser tests use Playwright: `npm install`, `npx playwright install chromium`,
-then `npm run test:ui`. Development scenarios and contributor rules are in the
-[development guide](docs/DEVELOPMENT.md).
+```bash
+cd frontend
+npm ci
+npm run check
+npm test
+npm run build
+```
+
+The admin sidebar's **System** view provides diagnostics, a bounded support-bundle
+download, and Developer inspection surfaces including the OpenAPI contract.
+Selected Recipes and Runs also offer contextual inspection; see
+[the API documentation](docs/API.md) for scope and excluded data.
 
 ## Version and release status
 
 The badge at the top of this page reads the latest public release directly from
-GitHub. The current public release is **v1.0.0**, and post-v1 development is
+GitHub. The current public release is **v1.1.0**, and post-v1 development is
 ongoing.

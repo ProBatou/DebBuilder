@@ -11,16 +11,29 @@ const browser = await chromium.launch({headless:true});
 try {
   for (const viewport of [{width:1440,height:900},{width:390,height:844}]) {
     const page = await browser.newPage({viewport});
-    const errors = [], saves = [], mutations = [];
+    const errors = [], saves = [], mutations = [], recipeLists = [];
     page.on('pageerror', error => errors.push(error.message));
     page.on('request', request => {
+      if (request.method() === 'GET' && new URL(request.url()).pathname === '/api/recipes') recipeLists.push(request.url());
       if (request.method() !== 'GET' && new URL(request.url()).pathname.startsWith('/api/'))
         mutations.push(`${request.method()} ${new URL(request.url()).pathname}`);
       if (request.method() === 'POST' && new URL(request.url()).pathname.startsWith('/api/workflows/'))
         saves.push(JSON.parse(request.postData()));
     });
-    await page.goto(`${base}/#/recipes/seerr`);
+    await page.goto(`${base}/#/recipes${viewport.width < 600 ? '' : '/seerr'}`);
+    const picker = page.locator('.recipe-picker');
+    const search = picker.locator('input[type="search"]');
+    const expectedSearch = viewport.width < 600 ? 'seerr' : 'e';
+    await search.fill(expectedSearch);
+    const selectedRow = picker.locator('.selection-list button[aria-current="true"]');
+    if (viewport.width < 600) await picker.locator('.selection-list button').first().click();
     await page.getByRole('heading',{name:'seerr'}).waitFor();
+    await page.waitForFunction(() => document.querySelector('.recipe-picker .selection-list button[aria-current="true"]'));
+    assert.equal(await selectedRow.count(),1);
+    const selectionList = picker.locator('.selection-list');
+    if (viewport.width >= 600) await selectionList.evaluate(element => {element.style.maxHeight='36px'; element.style.overflow='auto'; element.scrollTop=24;});
+    const savedScroll = await selectionList.evaluate(element => element.scrollTop);
+    const listRequestsBeforeSave = recipeLists.length;
     await page.getByRole('button',{name:'Customize',exact:true}).click();
     await expandField(page,'package.description');
     const description = page.locator('[data-recipe-path="package.description"] textarea');
@@ -36,6 +49,11 @@ try {
     assert.equal(await page.getByRole('button',{name:'Saving…'}).isDisabled(),true);
     releaseSave();
     await page.locator('.recipe-plan').waitFor();
+    assert.equal(await search.inputValue(),expectedSearch);
+    assert.equal(await selectedRow.count(),1);
+    assert.equal(await picker.locator('.selection-list p').count(),0);
+    assert.equal(await selectionList.evaluate(element => element.scrollTop),savedScroll);
+    assert.equal(recipeLists.length,listRequestsBeforeSave);
     await page.unroute('**/api/workflows/seerr',delaySave);
     assert.match(saves.at(-1).expected_revision,/^[0-9a-f]{64}$/);
     assert.equal(saves.at(-1).workflow.package.description,`${original} saved ${viewport.width}`);

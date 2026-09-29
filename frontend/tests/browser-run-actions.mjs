@@ -11,11 +11,16 @@ const runs = {
   validationFailed:{id:'validationFailed',package:'example',recipe_id:'recipe-one',mode:'build',status:'success',lifecycle_status:'validation_failed',allowed_actions:{validate:true,publish:false},steps:[]},
   publicationFailed:{id:'publicationFailed',package:'example',recipe_id:'recipe-one',mode:'build',status:'success',lifecycle_status:'publication_failed',allowed_actions:{validate:true,publish:true},steps:[]},
   running:{id:'running',package:'example',recipe_id:'recipe-one',mode:'build',status:'running',lifecycle_status:'building',allowed_actions:{validate:false,publish:false},steps:[]},
+  queued:{id:'queued',package:'example',recipe_id:'recipe-one',mode:'build',status:'queued',lifecycle_status:'queued',automation:{policy:'full'},allowed_actions:{validate:false,publish:false},steps:[]},
+  cancelling:{id:'cancelling',package:'example',status:'cancelling',lifecycle_status:'cancelling',steps:[]},
+  activeValidation:{id:'activeValidation',package:'example',status:'success',lifecycle_status:'validating',validation_status:'running',validations:[{id:'attempt-one',status:'running'}],steps:[]},
   completed:{id:'completed',package:'example',status:'completed',lifecycle_status:'published',allowed_actions:{validate:false,publish:false},steps:[]},
   cancelled:{id:'cancelled',package:'example',status:'cancelled',lifecycle_status:'cancelled',allowed_actions:{validate:false,publish:false},steps:[]},
 };
 const writes = [];
 let recipeRevision = 'a'.repeat(64);
+let cancelRace = false;
+let releaseCancellation;
 const browser = await chromium.launch({headless:true});
 try {
   const page = await browser.newPage({viewport:{width:1440,height:900}});
@@ -28,6 +33,16 @@ try {
     const respond = (body,status=200,headers={}) => route.fulfill({status,contentType:'application/json',headers,body:JSON.stringify(body)});
     if (request.method() === 'POST') {
       writes.push({path,body:request.postDataJSON()});
+      if (path === '/api/executions/queued/cancel') {
+        if (cancelRace) return respond({error:{code:'execution_not_cancellable',message:'Run finished'}},409);
+        if (releaseCancellation) return releaseCancellation().then(() => {runs.queued.status='cancelling'; runs.queued.lifecycle_status='cancelling'; return respond({accepted:true},202);});
+        runs.queued.status='cancelled'; runs.queued.lifecycle_status='cancelled';
+        return respond({accepted:true},200);
+      }
+      if (path === '/api/executions/activeValidation/validations/attempt-one/cancel') {
+        runs.activeValidation.validation_status='cancelling'; runs.activeValidation.validations[0].status='cancelling';
+        return respond({accepted:true},202);
+      }
       if (path === '/api/executions/validate/validate') {
         runs.validate.lifecycle_status = 'validating'; runs.validate.allowed_actions.validate = false;
         return respond({validation:{attempt_id:'validation-one',status:'queued'}},202);
@@ -63,7 +78,7 @@ try {
   await statusFilter.selectOption('cancelled');
   assert.equal(await page.locator('.run-selection .run-list-row').count(),1);
   await statusFilter.selectOption('active');
-  assert.equal(await page.locator('.run-selection .run-list-row').count(),1);
+  assert.equal(await page.locator('.run-selection .run-list-row').count(),4);
   await statusFilter.selectOption('all');
   await page.locator('.run-filters input').fill('no-such-run');
   await page.locator('.run-selection .empty-state').getByText('No items').waitFor();
@@ -136,7 +151,55 @@ try {
   await buttons.getByRole('button',{name:/Publish to APT/}).waitFor();
   await page.goto(`${base}/#/runs/running`);
   await buttons.getByRole('button',{name:'Review Recipe'}).waitFor();
-  assert.equal(await buttons.locator('button').count(),1);
+  await buttons.getByRole('button',{name:'Cancel run'}).waitFor();
+  assert.equal(await buttons.locator('button').count(),2);
+  await page.goto(`${base}/#/runs/queued`);
+  const cancelButton = buttons.getByRole('button',{name:'Cancel run'});
+  await cancelButton.waitFor();
+  const listSearch = page.locator('.run-filters input');
+  await listSearch.fill('example');
+  const selectionList = page.locator('.run-selection');
+  await selectionList.evaluate(element => {element.style.maxHeight='90px'; element.style.overflow='auto'; element.scrollTop=100;});
+  const savedScroll = await selectionList.evaluate(element => element.scrollTop);
+  const cancelDialog = page.getByRole('dialog',{name:'Cancel run?'});
+  await cancelButton.click();
+  await cancelDialog.getByRole('button',{name:'Keep running'}).click();
+  assert.equal(writes.filter(write => write.path.endsWith('/cancel')).length,0);
+  await cancelButton.click();
+  let release;
+  const pending = new Promise(resolve => {release = resolve;});
+  releaseCancellation = () => pending;
+  await cancelDialog.getByRole('button',{name:'Cancel run',exact:true}).click();
+  await cancelDialog.getByRole('button',{name:'Cancelling…'}).waitFor();
+  assert.equal(await cancelDialog.getByRole('button',{name:'Cancelling…'}).isDisabled(),true);
+  assert.equal(writes.filter(write => write.path === '/api/executions/queued/cancel').length,1);
+  release(); releaseCancellation = null;
+  await cancelDialog.waitFor({state:'hidden'});
+  await page.locator('.run-main .run-title').getByText('Cancelling',{exact:false}).waitFor();
+  assert.equal(await cancelButton.count(),0);
+  assert.equal(runs.queued.automation.policy,'full');
+  assert.equal(await listSearch.inputValue(),'example');
+  assert.equal(await selectionList.evaluate(element => element.scrollTop),savedScroll);
+  assert.match(page.url(),/#\/runs\/queued$/);
+  assert.equal(writes.filter(write => write.path.startsWith('/api/workflows/')).length,0);
+  runs.queued.status='queued'; runs.queued.lifecycle_status='queued';
+  await page.reload(); await cancelButton.waitFor();
+  cancelRace = true;
+  await cancelButton.click();
+  await cancelDialog.getByRole('button',{name:'Cancel run',exact:true}).click();
+  await cancelDialog.getByText('This Run is no longer cancellable. Its status has been refreshed.').waitFor();
+  await cancelDialog.getByRole('button',{name:'Keep running'}).click();
+  cancelRace = false;
+  await page.goto(`${base}/#/runs/activeValidation`);
+  await buttons.getByRole('button',{name:'Cancel validation'}).click();
+  const validationDialog = page.getByRole('dialog',{name:'Cancel validation?'});
+  await validationDialog.getByRole('button',{name:'Cancel validation',exact:true}).click();
+  await validationDialog.waitFor({state:'hidden'});
+  assert.equal(writes.filter(write => write.path === '/api/executions/activeValidation/validations/attempt-one/cancel').length,1);
+  await page.locator('.run-main .run-title').getByText('Validating',{exact:false}).waitFor();
+  assert.equal(await buttons.getByRole('button',{name:'Cancel validation'}).count(),0);
+  await page.goto(`${base}/#/runs/cancelled`);
+  assert.equal(await buttons.getByRole('button',{name:'Cancel run'}).count(),0);
   await page.setViewportSize({width:390,height:844});
   await page.goto(`${base}/#/runs/failed`);
   await buttons.getByRole('button',{name:/Start Build/}).click();

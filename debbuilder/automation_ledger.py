@@ -377,7 +377,7 @@ class AutomationLedger:
     def claim_current_recipe(
         self, recipe_path: str | Path, recipe_id: str, identity: dict,
         recipe_sha256: str, desired_policy: str, *, detect_only: bool = False,
-        detected_at: str | None = None,
+        detected_at: str | None = None, baseline_on_first: bool = False,
     ) -> ClaimResult:
         """CAS a detection against the live Recipe and ledger in one lease.
 
@@ -418,10 +418,16 @@ class AutomationLedger:
                     if sum(entry["recipe_id"] == recipe_id for entry in document["attempts"].values()) >= self.max_attempts_per_recipe:
                         raise AutomationLedgerError("automation_ledger_bounds_exceeded", "Recipe automation history is full")
                     entry = self._new_entry(key, recipe_id, recipe_sha256, normalized_identity, desired_policy, detected)
-                    if detect_only:
+                    # A missing history is an observation, not evidence of a new release.
+                    # The first identity for this exact Recipe revision is a durable baseline.
+                    baseline = baseline_on_first and not any(
+                        previous["recipe_id"] == recipe_id and previous["recipe_sha256"] == recipe_sha256.lower()
+                        for previous in document["attempts"].values()
+                    )
+                    if detect_only or baseline:
                         entry["generations"][0].update({
                             "state": "terminal", "terminal_classification": "success",
-                            "diagnostic": "detect_only_handled", "updated_at": utc_now(),
+                            "diagnostic": "initial_baseline" if baseline else "detect_only_handled", "updated_at": utc_now(),
                             "stage": "terminal",
                         })
                     document["attempts"][key] = entry

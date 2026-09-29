@@ -90,6 +90,8 @@ def _tool_check(name: str, requirement: str, *, workspace: str | Path, working_d
         status = "unusable"
     elif satisfies is False:
         status = "version_mismatch"
+    elif satisfies is None and requirement:
+        status = "unsupported_requirement"
     else:
         status = "available"
     return {

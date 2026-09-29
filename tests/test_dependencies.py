@@ -161,6 +161,15 @@ class DependencyCheckerTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "missing_build_tools")
         self.assertEqual(raised.exception.details["tool_checks"][0]["status"], "version_mismatch")
 
+    def test_unsupported_node_range_is_not_accepted_as_available(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            tool = Path(workspace) / "node"
+            tool.write_text("#!/bin/sh\necho 'v26.9.0'\n")
+            tool.chmod(0o755)
+            with self.assertRaises(DependencyError) as raised:
+                check_dependencies([], [], tools=["node"], tool_version_requirements={"node": "^22.19.0"}, workspace=workspace, environment={"PATH": workspace})
+        self.assertEqual(raised.exception.details["tool_checks"][0]["status"], "unsupported_requirement")
+
     def test_missing_tool_records_where_path_resolution_was_attempted(self):
         with tempfile.TemporaryDirectory() as workspace:
             with self.assertRaises(DependencyError) as raised:

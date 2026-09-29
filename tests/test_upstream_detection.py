@@ -232,10 +232,10 @@ class DetectionServiceTests(unittest.TestCase):
         self.save(recipe(policy="detect"))
         first = self.service.check("demo", detector=self.detector())
         second = self.service.check("demo", detector=self.detector())
-        self.assertEqual(first["classification"], "detected")
+        self.assertEqual(first["classification"], "baseline")
         self.assertEqual(first["attempt_state"], "terminal")
         self.assertFalse(first["claim_eligible"])
-        self.assertEqual(second["classification"], "suppressed_terminal")
+        self.assertEqual(second["classification"], "no_change")
         self.assertEqual(len(self.ledger.read()["attempts"]), 1)
         self.assertFalse((self.root / "data/builds").exists())
 
@@ -245,8 +245,8 @@ class DetectionServiceTests(unittest.TestCase):
         second = self.detection_service(AutomationLedger(self.root / "data")).check(
             "demo", detector=self.detector(),
         )
-        self.assertEqual(first["classification"], "detected")
-        self.assertTrue(first["claim_eligible"])
+        self.assertEqual(first["classification"], "baseline")
+        self.assertFalse(first["claim_eligible"])
         self.assertEqual(second["classification"], "no_change")
         self.assertEqual(first["attempt_key"], second["attempt_key"])
 
@@ -279,7 +279,7 @@ class DetectionServiceTests(unittest.TestCase):
         for thread in threads:
             thread.join(5)
         self.assertEqual(len(results), 2)
-        self.assertEqual(sum(row["change"] == "new" for row in results), 1)
+        self.assertEqual(sum(row["change"] == "baseline" for row in results), 1)
         self.assertEqual(len(self.ledger.read()["attempts"]), 1)
 
     def test_recipe_edit_disable_and_policy_change_during_network_never_claim_stale_snapshot(self):

@@ -11,7 +11,15 @@
   let rows = [], workflowRows = [], listingErrors = [], listError = null, listLoading = true, detailError = null, recipe = null;
   let query = '', listController, detailController, generation = 0, listGeneration = 0, revision = null, defaultRecipeId = '';
   function onSaved({recipe:stored, revision:fresh, newer}) {
-    revision = fresh; load();
+    revision = fresh;
+    if (!newer) {
+      rows = rows.map(row => row.id === stored.name ? {
+        ...row,
+        repository: stored.source?.repository || row.repository,
+        source: stored.source?.repository || row.source,
+        package: stored.package?.name || row.package,
+      } : row);
+    }
     if (!newer) recipe = stored;
   }
   async function load() {

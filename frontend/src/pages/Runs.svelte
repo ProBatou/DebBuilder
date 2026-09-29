@@ -13,9 +13,74 @@
   export let id = '', language = 'en';
   let rows = [], run = null, logs = '', offset = 0, verbosity = 'normal', following = true;
   let query = '', filter = 'all', error = null, detailError = null, logError = null;
+  let refreshingLogs = false, detachedPosition = null, verbosityPagePosition = null, suppressLogScroll = false;
+  const logText = {
+    en:{live:'● Live',liveLabel:'Live log following',jump:'↓ Jump to latest',jumpLabel:'Jump to latest log output'},
+    fr:{live:'● Direct',liveLabel:'Suivi des journaux en direct',jump:'↓ Aller au plus récent',jumpLabel:'Aller à la fin des journaux'},
+    de:{live:'● Live',liveLabel:'Live-Protokollverfolgung',jump:'↓ Zum neuesten Eintrag',jumpLabel:'Zum neuesten Protokolleintrag springen'},
+    es:{live:'● En directo',liveLabel:'Seguimiento del registro en directo',jump:'↓ Ir al más reciente',jumpLabel:'Ir al final del registro'},
+  };
+  const logCopy = key => (logText[language] || logText.en)[key];
   let navigationError = null;
   let actionDialog, actionCloseButton, actionTrigger, actionContext = null, actionError = null, actionResult = null;
   let actionLoading = false, actionPending = false, publishConfirmed = false, admittedRunId = '', actionController, actionRevision = 0;
+  let cancelDialog, cancelTrigger, cancelContext = null, cancelPending = false, cancelError = null, cancelRace = false;
+  const cancelText = {
+    en: {run:'Cancel run',validation:'Cancel validation',runTitle:'Cancel run?',validationTitle:'Cancel validation?',runInfo:'This will stop the queued or running work for:',validationInfo:'The active validation attempt will be stopped.',keep:'Keep running',pending:'Cancelling…',race:'This Run is no longer cancellable. Its status has been refreshed.',validationRace:'This validation is no longer cancellable. Its status has been refreshed.'},
+    fr: {run:'Annuler l’exécution',validation:'Annuler la validation',runTitle:'Annuler l’exécution ?',validationTitle:'Annuler la validation ?',runInfo:'Cela arrêtera le travail en attente ou en cours pour :',validationInfo:'La validation active sera arrêtée.',keep:'Laisser continuer',pending:'Annulation…',race:'Cette exécution ne peut plus être annulée. Son état a été actualisé.',validationRace:'Cette validation ne peut plus être annulée. Son état a été actualisé.'},
+    de: {run:'Lauf abbrechen',validation:'Validierung abbrechen',runTitle:'Lauf abbrechen?',validationTitle:'Validierung abbrechen?',runInfo:'Dies stoppt die wartende oder laufende Arbeit für:',validationInfo:'Die aktive Validierung wird gestoppt.',keep:'Weiterlaufen lassen',pending:'Wird abgebrochen…',race:'Dieser Lauf kann nicht mehr abgebrochen werden. Sein Status wurde aktualisiert.',validationRace:'Diese Validierung kann nicht mehr abgebrochen werden. Ihr Status wurde aktualisiert.'},
+    es: {run:'Cancelar ejecución',validation:'Cancelar validación',runTitle:'¿Cancelar ejecución?',validationTitle:'¿Cancelar validación?',runInfo:'Esto detendrá el trabajo en cola o en curso de:',validationInfo:'Se detendrá el intento de validación activo.',keep:'Mantener en curso',pending:'Cancelando…',race:'Esta ejecución ya no se puede cancelar. Su estado se ha actualizado.',validationRace:'Esta validación ya no se puede cancelar. Su estado se ha actualizado.'},
+  };
+  const cancellationCopy = key => (cancelText[language] || cancelText.en)[key];
+  function cancellationTarget(value) {
+    if (!value?.id) return null;
+    if (['queued','running'].includes(value.status)) return {kind:'run',runId:value.id};
+    const attempt = value.validations?.at(-1);
+    if (['queued','running'].includes(attempt?.status) && attempt?.id) return {kind:'validation',runId:value.id,attemptId:attempt.id};
+    return null;
+  }
+  async function openCancellation(trigger) {
+    const target = cancellationTarget(run);
+    if (!target || cancelPending) return;
+    cancelTrigger = trigger; cancelContext = {...target,package:run.package || run.id};
+    cancelError = null; cancelRace = false;
+    await tick(); cancelDialog.showModal();
+  }
+  function closeCancellation() {if (!cancelPending) cancelDialog.close();}
+  function resetCancellation() {
+    cancelContext = null; cancelError = null; cancelRace = false;
+    if (cancelTrigger?.isConnected) cancelTrigger.focus();
+    cancelTrigger = null;
+  }
+  async function submitCancellation() {
+    const context = cancelContext;
+    if (!context || cancelPending || cancelRace) return;
+    cancelPending = true; cancelError = null;
+    try {
+      const current = (await api.run(context.runId)).execution;
+      const target = cancellationTarget(current);
+      if (!target || target.kind !== context.kind || target.attemptId !== context.attemptId) {
+        cancelRace = true;
+      } else if (context.kind === 'run') {
+        await api.cancelRun(context.runId);
+      } else {
+        const outcome = await api.cancelValidation(context.runId,context.attemptId);
+        if (outcome.accepted === false) cancelRace = true;
+      }
+      if (!cancelRace) cancelDialog.close();
+    } catch (caught) {
+      if ((context.kind === 'run' && caught.code === 'execution_not_cancellable') ||
+          (context.kind === 'validation' && caught.status === 409)) cancelRace = true;
+      else cancelError = caught;
+    } finally {
+      cancelPending = false;
+      if (selectedId === context.runId) {
+        try {run = (await api.run(context.runId)).execution; detailError = null;}
+        catch (caught) {detailError = caught;}
+      }
+      await refreshList();
+    }
+  }
   const stageNames = {
     en: {source:'Fetch source',detection:'Detect project',dependencies:'Check dependencies',source_changes:'Apply source changes',build:'Build',staging:'Stage package',debian_metadata:'Debian metadata',systemd:'Service',package:'Create package',artifact:'Artifact',validation:'Validation',publication:'APT publication'},
     fr: {source:'Obtenir la source',detection:'Détecter le projet',dependencies:'Vérifier les dépendances',source_changes:'Appliquer les changements',build:'Construire',staging:'Préparer le paquet',debian_metadata:'Métadonnées Debian',systemd:'Service',package:'Créer le paquet',artifact:'Artéfact',validation:'Validation',publication:'Publication APT'},
@@ -140,20 +205,45 @@
     const next = response.execution;
     // The cursor refers to the backend's rendered representation for this verbosity.
     // Fetch only its suffix, even after the Run becomes terminal.
-    const chunk = (await api.logs(runId, verbosity, offset, {signal})).log;
+    const chunk = (await api.logs(runId, verbosity, refreshingLogs ? 0 : offset, {signal})).log;
     return {next, chunk};
   }
   async function applyDetail(value, token) {
     run = value.next;
-    logs += value.chunk?.text || '';
+    const replace = refreshingLogs;
+    const followIntent = following;
+    if (replace) suppressLogScroll = true;
+    if (replace) refreshingLogs = false;
+    logs = replace ? value.chunk?.text || '' : logs + (value.chunk?.text || '');
     offset = value.chunk?.offset ?? offset;
     detailError = null; logError = null;
     if (!active(run)) detailPoller?.stop();
-    if (following) {await tick(); if (token === generation) logNode?.scrollTo({top:logNode.scrollHeight});}
+    await tick();
+    if (token !== generation || !logNode) return;
+    if (following) logNode.scrollTop = logNode.scrollHeight;
+    else if (replace && detachedPosition) {
+      const maximum = Math.max(0,logNode.scrollHeight-logNode.clientHeight);
+      logNode.scrollTop = Math.min(maximum,detachedPosition.ratio*maximum);
+    }
+    if (replace && verbosityPagePosition) window.scrollTo(verbosityPagePosition.x,verbosityPagePosition.y);
+    if (replace) detachedPosition = null;
+    if (replace) verbosityPagePosition = null;
+    if (replace) requestAnimationFrame(() => {
+      if (token === generation) {following = followIntent; suppressLogScroll = false;}
+    });
+  }
+  function onLogScroll() {
+    if (!logNode || refreshingLogs || suppressLogScroll) return;
+    following = logNode.scrollHeight-logNode.clientHeight-logNode.scrollTop <= 24;
+  }
+  async function jumpToLatest() {
+    following = true;
+    await tick();
+    if (logNode) logNode.scrollTop = logNode.scrollHeight;
   }
   function select(runId, preserveRun = false) {
     detailPoller?.stop();
-    selectedId = runId; ++generation; if (!preserveRun) run = null; logs = ''; offset = 0; detailError = null; logError = null; if (!preserveRun) following = true;
+    selectedId = runId; ++generation; if (!preserveRun) run = null; logs = ''; offset = 0; detailError = null; logError = null; refreshingLogs = false; detachedPosition = null; verbosityPagePosition = null; suppressLogScroll = false; if (!preserveRun) following = true;
     if (!runId) return;
     const token = generation;
     detailPoller = createPoller(signal => loadDetail(runId,signal), {
@@ -162,7 +252,22 @@
     });
     detailPoller.start();
   }
-  function changeVerbosity(value) {if (!['compact','normal','verbose','raw'].includes(value)) return; verbosity = value; select(selectedId,true);}
+  function changeVerbosity(value) {
+    if (!['compact','normal','verbose','raw'].includes(value) || value === verbosity || !selectedId) return;
+    detachedPosition = following || !logNode ? null : {
+      ratio: logNode.scrollTop / Math.max(1,logNode.scrollHeight-logNode.clientHeight),
+    };
+    verbosityPagePosition = {x:window.scrollX,y:window.scrollY};
+    detailPoller?.stop();
+    const token = ++generation;
+    verbosity = value;
+    refreshingLogs = true;
+    detailPoller = createPoller(signal => loadDetail(selectedId,signal), {
+      onData: result => {if (token === generation) applyDetail(result,token);},
+      onError: caught => {if (token === generation) logError = caught;},
+    });
+    detailPoller.start();
+  }
   onMount(() => {
     listPoller = createPoller(loadList, {interval:5000, onData:updateList, onError:caught => error = caught});
     listPoller.start();
@@ -174,6 +279,7 @@
   $: dependency = run?.steps?.find(step => step.name === 'staging')?.details?.runtime_dependency_detection;
   $: failedStep = run?.steps?.find(step => step.status === 'failed');
   $: nextAction = runAction(run);
+  $: cancelTarget = cancellationTarget(run);
   $: visibleSteps = [
     ...(run?.steps || []).filter(step => step.status !== 'skipped').map(step => step.status === 'pending' && stoppedBeforeCompletion(run) ? {...step,status:'not_reached'} : step),
     ...lifecycleStages(run),
@@ -192,12 +298,12 @@
         <div><span>{t('started',language)}</span><strong>{when(run.started_at || run.created_at || run.updated,language)}</strong></div>
         {#if run.recipe_id || run.recipe}<div><span>{t('recipeFact',language)}</span><strong>{run.recipe_id || run.recipe}</strong></div>{/if}
       </div>
-      {#if run.recipe_id || run.recipe || nextAction}<div class="detail-buttons">{#if run.recipe_id || run.recipe}<button class="button secondary" onclick={() => review(run.recipe_id || run.recipe)}>{t('reviewRecipe',language)}</button>{/if}{#if nextAction}<button class="button primary" onclick={event => openAction(nextAction,event.currentTarget)}>{t(nextAction === 'build' ? 'overviewStartBuild' : nextAction === 'validation' ? 'overviewStartValidation' : 'overviewPublishToApt',language)}</button>{/if}</div><ErrorNotice error={navigationError} {language}/>{/if}
+      {#if run.recipe_id || run.recipe || nextAction || cancelTarget}<div class="detail-buttons">{#if run.recipe_id || run.recipe}<button class="button secondary" onclick={() => review(run.recipe_id || run.recipe)}>{t('reviewRecipe',language)}</button>{/if}{#if nextAction}<button class="button primary" onclick={event => openAction(nextAction,event.currentTarget)}>{t(nextAction === 'build' ? 'overviewStartBuild' : nextAction === 'validation' ? 'overviewStartValidation' : 'overviewPublishToApt',language)}</button>{/if}{#if cancelTarget}<button class="button secondary" onclick={event => openCancellation(event.currentTarget)}>{cancellationCopy(cancelTarget.kind)}</button>{/if}</div><ErrorNotice error={navigationError} {language}/>{/if}
     </section>
     <section class="panel run-stages"><h3>{t('stages',language)}</h3><div class="stage-list">{#each visibleSteps as step, index (step.name)}<div class:stage-current={['queued','running','cancelling'].includes(step.status)} class:stage-failed={step.status==='failed'} class:stage-complete={step.status==='success'} class:stage-action={['validation_needed','ready_to_publish'].includes(step.status)} class:stage-not-reached={step.status==='not_reached'}><span class="stage-number">{step.status==='failed'?'!':['queued','running','cancelling'].includes(step.status)?'◌':step.status==='success'||step.status==='completed'?'✓':index+1}</span><strong title={step.summary || step.name}>{stageLabel(step.name)}</strong><small>{statusLabel(step.status,language)}</small></div>{/each}</div></section>
     {#if dependency}<section class="panel run-dependencies"><div class="section-head"><h3>{t('dependencies',language)}</h3><Status value={dependency.status} {language} semantic={operatorStatusSemantics}/></div><div class="detail-facts"><div><span>{t('detected',language)}</span><strong>{dependency.detected_count || 0}</strong></div><div><span>{t('bundled',language)}</span><strong>{dependency.bundled_count || 0}</strong></div>{#if dependency.unresolved_count}<div><span>{t('unresolved',language)}</span><strong>{dependency.unresolved_count}</strong></div>{/if}{#if dependency.effective_depends?.length}<div><span>{t('depends',language)}</span><strong>{dependency.effective_depends.join(', ')}</strong></div>{/if}</div></section>{/if}
     {#if run.error || run.diagnostic || failedStep || run.recovery_blocker}<section class="panel run-diagnosis"><h3>{t('diagnosis',language)}</h3><div class="inline-alert"><strong>{run.diagnostic?.title || failedStep?.summary || run.error?.message || run.recovery_blocker?.reason || t('unavailable',language)}</strong>{#if failedStep}<p>{t('failureStage',language)}: {stageLabel(failedStep.name)}</p>{/if}{#if run.diagnostic?.next_action}<p>{t('remediation',language)}: {run.diagnostic.next_action}</p>{/if}{#if run.recovery_blocker?.reason}<p>{run.recovery_blocker.reason}</p>{/if}</div>{#if run.error?.code || run.error?.message}<details class="run-error-technical"><summary>{t('errorDetail',language)}</summary>{#if run.error.code}<code>{run.error.code}</code>{/if}{#if run.error.message}<p>{run.error.message}</p>{/if}</details>{/if}</section>{/if}
-    <section class="panel run-logs"><div class="section-head"><h2>{t('logs',language)}</h2><div class="run-log-controls"><label class="log-verbosity"><span class="sr-only">{t('verbosity',language)}</span><select aria-label={t('verbosity',language)} value={verbosity} onchange={event => changeVerbosity(event.currentTarget.value)}>{#each ['compact','normal','verbose','raw'] as option}<option value={option}>{t(option,language)}</option>{/each}</select></label>{#if active(run)}<button class="button secondary" onclick={() => following = !following}>{following ? t('pause',language) : t('follow',language)}</button>{/if}</div></div><ErrorNotice error={logError} {language}/><pre bind:this={logNode} class="log-output">{logs}</pre></section>
+    <section class="panel run-logs"><div class="section-head"><h2>{t('logs',language)}</h2><div class="run-log-controls"><label class="log-verbosity"><span class="sr-only">{t('verbosity',language)}</span><select aria-label={t('verbosity',language)} value={verbosity} onchange={event => changeVerbosity(event.currentTarget.value)}>{#each ['compact','normal','verbose','raw'] as option}<option value={option}>{t(option,language)}</option>{/each}</select></label>{#if active(run) && following}<span class="run-live-badge" aria-label={logCopy('liveLabel')}>{logCopy('live')}</span>{:else if !following}<button class="button secondary" aria-label={logCopy('jumpLabel')} onclick={jumpToLatest}>{logCopy('jump')}</button>{/if}</div></div><ErrorNotice error={logError} {language}/><pre bind:this={logNode} class="log-output" onscroll={onLogScroll}>{logs}</pre></section>
     <details class="panel run-technical"><summary>{t('technicalFacts',language)}</summary><div class="detail-facts"><div><span>{t('runId',language)}</span><strong><code>{run.id}</code></strong></div>{#if run.mode}<div><span>{t('runMode',language)}</span><strong>{run.mode}</strong></div>{/if}{#if run.finished_at}<div><span>{t('finished',language)}</span><strong>{when(run.finished_at,language)}</strong></div>{/if}{#if run.duration != null}<div><span>{t('duration',language)}</span><strong>{run.duration} s</strong></div>{/if}{#if run.source?.ref}<div><span>{t('sourceRef',language)}</span><strong>{run.source.ref}</strong></div>{/if}{#if run.artifact?.path}<div><span>{t('artifactFact',language)}</span><strong>{run.artifact.path}</strong></div>{/if}</div></details>
   {:else if displayId && !detailError}<p>{t('loading',language)}</p>{:else}<p>{t('noRun',language)}</p>{/if}
 </div></div>
@@ -215,5 +321,14 @@
     {/if}
     {#if actionResult}<p class="overview-action-result" role="status">{t(actionResult === 'build' ? 'overviewBuildQueued' : actionResult === 'validation' ? 'runValidationStarted' : 'runPublicationDone',language)}</p>{/if}
     <div class="modal-actions"><button type="button" class="button secondary" disabled={actionPending} onclick={closeAction}>{t('close',language)}</button>{#if actionContext.kind === 'build' && (admittedRunId || ['network','timeout','ambiguous'].includes(actionError?.kind))}<button type="button" class="button secondary" disabled={actionPending} onclick={visitBuildRun}>{t(admittedRunId ? 'viewRun' : 'viewRuns',language)}</button>{/if}{#if actionContext.target && !actionError && !actionResult}<button type="button" class="button primary" disabled={actionPending || (actionContext.kind === 'publication' && !publishConfirmed)} onclick={submitAction}>{actionPending ? t('overviewActionWorking',language) : t(actionContext.kind === 'build' ? 'overviewStartBuild' : actionContext.kind === 'validation' ? 'overviewStartValidation' : 'overviewPublishToApt',language)}</button>{/if}</div>
+  {/if}
+</dialog>
+<dialog class="run-action-dialog" bind:this={cancelDialog} aria-labelledby="run-cancel-title" oncancel={event => {if (cancelPending) event.preventDefault();}} onclose={resetCancellation}>
+  {#if cancelContext}
+    <div class="modal-head"><h2 id="run-cancel-title">{cancellationCopy(cancelContext.kind === 'run' ? 'runTitle' : 'validationTitle')}</h2><button type="button" class="icon-button" aria-label={t('close',language)} disabled={cancelPending} onclick={closeCancellation}>×</button></div>
+    <p class="modal-copy">{cancellationCopy(cancelContext.kind === 'run' ? 'runInfo' : 'validationInfo')} {#if cancelContext.kind === 'run'}<strong>{cancelContext.package}</strong>{/if}</p>
+    {#if cancelRace}<p role="status">{cancellationCopy(cancelContext.kind === 'run' ? 'race' : 'validationRace')}</p>{/if}
+    <ErrorNotice error={cancelError} {language}/>
+    <div class="modal-actions"><button type="button" class="button secondary" disabled={cancelPending} onclick={closeCancellation}>{cancellationCopy('keep')}</button>{#if !cancelRace}<button type="button" class="button primary" disabled={cancelPending} onclick={submitCancellation}>{cancellationCopy(cancelPending ? 'pending' : cancelContext.kind)}</button>{/if}</div>
   {/if}
 </dialog>

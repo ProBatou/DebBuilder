@@ -7,16 +7,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from debbuilder import recipe_store, source_acquisition, upstream_archive, upstream_artifact
+from debbuilder import build_pipeline, recipe_store, source_acquisition, upstream_archive, upstream_artifact
 from debbuilder.automation_identity import normalize_upstream_identity
 from debbuilder.automation_ledger import AutomationLedger, AutomationLedgerError
+from debbuilder.automation_orchestrator import AutomationOrchestrator
 from debbuilder.automation_scheduler import (
     MAX_BACKOFF_SECONDS,
     AutomationRetryStore,
     AutomationScheduler,
     AutomationSchedulerError,
 )
-from debbuilder.build_store import canonical_recipe_sha256
+from debbuilder.build_store import BuildStore, canonical_recipe_sha256
 from debbuilder.lifecycle import MutationGate, MutationGateClosed
 from debbuilder.recipe_schema import recipe_for_storage
 from debbuilder.upstream_detection import AutomationDetectionService, UpstreamDetectionError, detect_upstream
@@ -133,6 +134,42 @@ class AutomationSchedulerTests(unittest.TestCase):
             ),
         )
 
+    def test_recreated_tracking_baselines_multiple_recipes_then_only_changed_recipe_queues(self):
+        for name in ("demo1", "demo2", "demo3"):
+            self.save(recipe(name, policy="full"))
+        store = BuildStore(self.data / "builds")
+        queued = []
+        chosen = {name: identity() for name in ("demo1", "demo2", "demo3")}
+        def detector(configured, token=""):
+            return {"identity": chosen[configured["name"]], "display_version":"1.2.3", "display_ref":"v1.2.3"}
+        def admit(_manager, workflow, **kwargs):
+            run = build_pipeline.create_pipeline_run(
+                workflow, store=store, dry_run=kwargs["dry_run"], recipe_id=workflow["name"],
+                run_id=kwargs["run_id"], origin=kwargs["origin"], automation=kwargs["automation"],
+            )
+            kwargs["created_callback"](run)
+            run["status"] = "queued"
+            store.save(run)
+            queued.append(run["recipe_id"])
+            return {"run_id":run["id"], "status":"queued"}
+        owner = AutomationOrchestrator(
+            self.recipes, self.ledger, store, execution_manager=lambda:object(), enqueue_run=admit,
+            validation_manager=lambda:None, publish=lambda _run, _payload:{},
+            notify_completion=lambda _result:None, admission_open=lambda:True,
+        )
+        base = self.detection_service()
+        scheduler = self.scheduler(InjectedDetectionService(base, detector), orchestrator=owner)
+        first = scheduler.run_pass()
+        self.assertEqual({row["change"] for row in first}, {"baseline"})
+        self.assertEqual(queued, [])
+        self.assertEqual({row["change"] for row in scheduler.run_pass()}, {"existing"})
+        self.assertEqual(queued, [])
+        chosen["demo2"] = identity("21")
+        scheduler.run_pass()
+        scheduler.run_pass()
+        self.assertEqual(queued, ["demo2"])
+        self.assertEqual(len(store.list()), 1)
+
     def scheduler(self, service, **kwargs):
         scheduler = AutomationScheduler(
             self.recipes, service, self.ledger, self.retry,
@@ -175,7 +212,8 @@ class AutomationSchedulerTests(unittest.TestCase):
         self.assertEqual(len(list(entries)), 5)
         states = {entry["recipe_id"]: entry["generations"][0]["state"] for entry in entries}
         self.assertEqual(states["demo0"], "terminal")
-        self.assertTrue(all(states[f"demo{i}"] == "claimed" for i in range(1, 5)))
+        self.assertTrue(all(states[f"demo{i}"] == "terminal" for i in range(1, 5)))
+        self.assertTrue(all(row["change"] == "baseline" for row in results if row["recipe_id"].startswith("demo")))
         self.assertFalse((self.data / "builds").exists())
         self.assertFalse(any(self.data.rglob("run.json")))
 
@@ -295,7 +333,7 @@ class AutomationSchedulerTests(unittest.TestCase):
         ):
             result = service.check("demo", detector=observation_service.resolver)
         self.assertIsNotNone(result["identity"])
-        self.assertEqual(result["change"], "new")
+        self.assertEqual(result["change"], "baseline")
         self.assertEqual(len(self.ledger.read()["attempts"]), 1)
 
     def test_persisted_observation_never_authorizes_automation_when_fresh_resolution_fails(self):
@@ -726,7 +764,7 @@ class AutomationSchedulerTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertFalse(internal_thread.is_alive())
         self.assertEqual(len(self.ledger.read()["attempts"]), 1)
-        self.assertEqual({internal_results[0]["change"], scheduled[0]["change"]}, {"new", "existing"})
+        self.assertEqual({internal_results[0]["change"], scheduled[0]["change"]}, {"baseline", "existing"})
 
     def test_transient_retry_is_persisted_bounded_jittered_and_restart_safe(self):
         now = [2_000_000_000.0]

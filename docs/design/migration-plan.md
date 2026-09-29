@@ -1,6 +1,6 @@
 # #24A — Migration and functional parity plan
 
-This is the historical #24A plan. The current API-backed Svelte candidate and
+This is the historical #24A plan. The cutover-ready Svelte source and
 remaining work are recorded in the [migration parity matrix](24c1-parity.md).
 The checklist below is retained as the original planning record, not as a
 statement that these features are still unimplemented.

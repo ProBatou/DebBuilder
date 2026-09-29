@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import mimetypes
 import re
 import sys
 import time
@@ -24,6 +25,12 @@ from .support_bundle import SupportBundleError, build_support_bundle
 
 LOGGER = logging.getLogger(__name__)
 _SUPPORT_SELECTION_ID = re.compile(r"[A-Za-z0-9_.+-]{1,128}\Z")
+_STATIC_MIME = {
+    ".html": "text/html", ".js": "text/javascript", ".css": "text/css",
+    ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png",
+    ".ico": "image/vnd.microsoft.icon", ".webp": "image/webp",
+    ".webmanifest": "application/manifest+json",
+}
 
 
 def create_handler(api):
@@ -363,6 +370,11 @@ def create_handler(api):
 
         def _serve_static(self, path: str):
             path = "/index.html" if path == "/" else path
+            if (not path.startswith("/") or path.startswith("//") or "%" in path or "\\" in path
+                    or any(part in {".", ".."} for part in path.split("/"))
+                    or path.startswith("/api/") or path.startswith("/auth/")):
+                api.text_response(self, "not found", 404)
+                return
             static_root = api.STATIC.resolve()
             static_file = (static_root / path.lstrip("/")).resolve()
             try:
@@ -373,8 +385,22 @@ def create_handler(api):
             if not static_file.is_file():
                 api.text_response(self, "not found", 404)
                 return
-            content_type = "text/html; charset=utf-8" if static_file.suffix == ".html" else "application/javascript; charset=utf-8" if static_file.suffix == ".js" else "text/css; charset=utf-8"
-            api.text_response(self, static_file.read_text(), 200, content_type, "no-cache, must-revalidate")
+            content_type = _STATIC_MIME.get(static_file.suffix) or mimetypes.guess_type(static_file.name)[0] or "application/octet-stream"
+            if static_file.suffix in {".html", ".js", ".css", ".json", ".svg", ".webmanifest"}:
+                content_type += "; charset=utf-8"
+            cache_control = (
+                "no-cache" if static_file.name == "index.html" else
+                "public, max-age=31536000, immutable" if path.startswith("/assets/") and re.search(r"-[A-Za-z0-9_-]{8,}\.", static_file.name) else
+                "no-cache, must-revalidate"
+            )
+            body = static_file.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", cache_control)
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(body)
 
         def do_POST(self):
             if not self._authorized():

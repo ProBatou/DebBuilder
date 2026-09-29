@@ -6,6 +6,12 @@ source and publishes the package together with `SHA256SUMS`.
 
 ## Local package proof
 
+Provision Node 24.x and npm 11.x on the build host first. These are build-time
+tools only; they are not Debian runtime dependencies. The release workflow
+uses `actions/setup-node` for Node 24 and installs pinned npm 11.20.0. Local
+builds must provide the same toolchain without adding an APT source to the
+installed application.
+
 From the source revision being released, run:
 
 ```sh
@@ -24,6 +30,12 @@ normal DebBuilder build. Intermediate source, staging, extraction, and control
 data live in temporary directories. The only retained outputs are the checked
 `.deb` and `SHA256SUMS` in a newly created output directory. Production paths
 under `/opt/debbuilder` and `/var/lib/debbuilder` are refused as output targets.
+The Recipe runs `npm ci` and Vite in the temporary source tree, replacing its
+legacy `static/` copy with compiled Svelte files before Debian staging. The
+package contains only the generated frontend tree; source `static/` stays in
+Git as rollback reference. `index.html` and referenced hashed JS/CSS are
+verified in the extracted package. Rollback of this frontend cutover uses the
+previous known-good `.deb`, subject to any unrelated release data migrations.
 
 ## GitHub workflow boundary
 

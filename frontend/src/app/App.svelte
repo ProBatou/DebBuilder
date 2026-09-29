@@ -15,7 +15,7 @@
   import Settings from '../pages/Settings.svelte';
 
   let session = null, status = null, error = null, loading = true, menu = false, collapsed = false;
-  const loginHref = import.meta.env.VITE_DEBBUILDER_AUTH_ORIGIN || '/';
+  const loginHref = '/';
   const appVersion = `v${__DEBBUILDER_VERSION__}`;
   let controller, menuButton;
   async function bootstrap() {

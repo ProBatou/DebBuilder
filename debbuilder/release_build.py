@@ -120,6 +120,14 @@ def _copy_source_inputs(plan: dict, source_root: Path, workspace_source: Path) -
     if output.get("mode") != "paths" or not output.get("paths"):
         raise ReleaseBuildError("unsupported_release_output", "Official Release builds require explicit canonical output paths")
     relative_inputs = list(output["paths"])
+    # The managed Recipe compiles frontend/ into static/ in the isolated build
+    # workspace. Only static/ is selected for the installed package.
+    if plan["package"] == "debbuilder":
+        relative_inputs.extend((
+            "frontend/package.json", "frontend/package-lock.json",
+            "frontend/vite.config.js", "frontend/index.html",
+            "frontend/jsconfig.json", "frontend/src", "frontend/scripts",
+        ))
     relative_inputs.extend(mapping["source"] for mapping in plan["recipe"]["install"]["config_files"])
     for relative_value in dict.fromkeys(relative_inputs):
         source = _safe_source_input(source_root, relative_value)
@@ -128,7 +136,7 @@ def _copy_source_inputs(plan: dict, source_root: Path, workspace_source: Path) -
         if source.is_dir():
             shutil.copytree(
                 source, destination, copy_function=shutil.copy2,
-                ignore=shutil.ignore_patterns("__pycache__", "*.py[cod]"),
+                ignore=shutil.ignore_patterns("__pycache__", "*.py[cod]", "node_modules", "dist", "tests"),
             )
         else:
             shutil.copy2(source, destination)
@@ -222,6 +230,10 @@ def _extract_and_verify(plan: dict, staging: dict, artifact: dict, workspace: Pa
         raise ReleaseBuildError("mutable_payload_in_package", "Generated package contains mutable application data")
     if any("/__pycache__/" in path or path.endswith((".pyc", ".pyo")) for path in inventory):
         raise ReleaseBuildError("generated_cache_in_package", "Generated package contains Python cache files")
+    if any("/node_modules/" in path or path.startswith("./opt/debbuilder/frontend/") for path in inventory):
+        raise ReleaseBuildError("frontend_source_in_package", "Generated package contains frontend build inputs")
+    if {"nodejs", "npm"} & actual_dependencies:
+        raise ReleaseBuildError("frontend_runtime_dependency", "Frontend build tools cannot be runtime dependencies")
 
     extract_root = workspace / "inspection-root"
     command = f"dpkg-deb --extract artifacts/{plan['filename']} inspection-root"
@@ -234,6 +246,17 @@ def _extract_and_verify(plan: dict, staging: dict, artifact: dict, workspace: Pa
             extracted["stderr"] or "Unable to extract generated package",
             details={"command": extracted},
         )
+
+    static_root = extract_root / "opt/debbuilder/static"
+    index = static_root / "index.html"
+    if not index.is_file() or (static_root / "app.js").exists():
+        raise ReleaseBuildError("release_frontend_missing", "Package must contain the Svelte entry without legacy app.js")
+    asset_names = re.findall(r'(?:src|href)="(\./assets/[^"?#]+)"', index.read_text(encoding="utf-8"))
+    if not any(name.endswith(".js") for name in asset_names) or not any(name.endswith(".css") for name in asset_names):
+        raise ReleaseBuildError("release_frontend_missing", "Svelte entry must reference built JS and CSS")
+    for name in asset_names:
+        if not (static_root / name.removeprefix("./")).is_file():
+            raise ReleaseBuildError("release_frontend_missing", f"Svelte asset is missing: {name}")
 
     unit_relative = Path(staging["systemd"]["path"].lstrip("/"))
     unit_path = extract_root / unit_relative

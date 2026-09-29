@@ -96,6 +96,19 @@ jobs:
       - name: Verify packaging tools
         run: dpkg-deb --version
 
+      - name: Set up frontend build toolchain
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install qualified npm
+        run: |
+          npm install --global npm@11.20.0
+          node --version
+          npm --version
+
       - name: Verify qualified Validation image inputs and descriptors
         run: |
           python3 -m tests.release_validation_inputs \

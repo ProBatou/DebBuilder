@@ -1,14 +1,15 @@
-# API-backed admin frontend candidate
+# Admin frontend source
 
-`frontend/` contains the Svelte admin UI under review for Issue #24. The
-shipped admin UI remains `static/`. The public APT landing is separate from
-both admin frontends. See the [current parity matrix](../docs/design/24c1-parity.md)
-for migrated and deferred behavior.
+`frontend/` is the Svelte admin source for the cutover-ready DebBuilder
+package. The public APT landing uses a separate listener and template. This
+source change does not mean the candidate has been deployed.
 
 ## Build and test
 
-Use Node 24.x and npm 11.x. Svelte, Vite and their build dependencies are
-pinned in `package-lock.json` and do not enter the runtime package.
+Use Node 24.x and npm 11.x on the build host. Svelte, Vite and their build
+dependencies are pinned in `package-lock.json` and do not enter the runtime
+package. Provision this toolchain before running the managed self-build; the
+runtime Debian package does not install Node or npm.
 
 ```sh
 cd frontend
@@ -80,10 +81,17 @@ scripts intercept `/api` and only require Vite; others require an isolated
 Behavior Lab scenario. Each script names its scenario and URL environment
 variables. Never direct development tests at the production installation.
 
-## Package integration boundary
+## Production package build
 
-Vite emits `dist/index.html`, hashed assets and a manifest. HTML references
-assets relatively. A separate reviewed cutover must place only the compiled
-tree at its intended static path, verify asset references and HTTP MIME/cache
-behavior, and qualify authentication and routing. Do not copy Node, npm, Vite,
-Svelte or `node_modules` into the runtime package.
+`npm run build` emits ignored `dist/index.html` and hashed assets.
+The managed DebBuilder Recipe runs `npm ci` and Vite in its isolated build
+workspace, directing the output into `static/`. Vite replaces the copied
+legacy tree there; the Debian package installs only the compiled tree under
+`/opt/debbuilder/static`. The release workflow provisions Node 24 and npm 11
+before invoking the same managed Recipe. No manual asset copy is needed.
+
+The Python admin listener serves `/` from that tree. Hash navigation stays in
+the browser; `/api/*` and OIDC callback routes retain backend ownership. The
+public repository listener remains separate. To roll back the frontend,
+reinstall the previous known-good DebBuilder package after checking any
+unrelated backend or data migrations in that release.

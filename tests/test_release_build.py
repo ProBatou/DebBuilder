@@ -122,6 +122,12 @@ class RealReleaseBuildTests(unittest.TestCase):
                 "package": "debbuilder", "version": CURRENT_DEBIAN_VERSION, "architecture": "all",
             })
             self.assertEqual(result["checks"]["depends"], "python3, python3-dbus, reprepro, gnupg, gpgv, podman, kmod, ca-certificates, binutils")
+            contents = subprocess.run(["dpkg-deb", "--contents", str(artifact)], capture_output=True, text=True, check=True).stdout
+            self.assertIn("./opt/debbuilder/static/index.html", contents)
+            self.assertRegex(contents, r"\./opt/debbuilder/static/assets/index-[A-Za-z0-9_-]+\.js")
+            self.assertRegex(contents, r"\./opt/debbuilder/static/assets/index-[A-Za-z0-9_-]+\.css")
+            for unwanted in ("./opt/debbuilder/static/app.js", "./opt/debbuilder/static/.vite/", "./opt/debbuilder/frontend/", "/node_modules/"):
+                self.assertNotIn(unwanted, contents)
             control_dir = root / "control"
             subprocess.run(["dpkg-deb", "-e", str(artifact), str(control_dir)], check=True)
             postinst = (control_dir / "postinst").read_text()

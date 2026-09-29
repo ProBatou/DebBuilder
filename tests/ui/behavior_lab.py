@@ -290,7 +290,7 @@ def _behavior_lab_error(handler, scenario_name: str) -> None:
     }}, 403)
 
 
-def serve(selected: Scenario, *, host: str = "127.0.0.1", port: int = 8765) -> None:
+def serve(selected: Scenario, *, host: str = "127.0.0.1", port: int = 8765, frontend_root: Path | None = None) -> None:
     runtime = create_isolated_runtime(selected)
     http_server = state = None
     try:
@@ -307,6 +307,9 @@ def serve(selected: Scenario, *, host: str = "127.0.0.1", port: int = 8765) -> N
             canonical_recipe = None
         configure_environment(runtime, host=host, port=port)
         from debbuilder import app
+        original_static = app.STATIC
+        if frontend_root is not None:
+            app.STATIC = frontend_root
         state = selected.setup(app, runtime) if selected.setup else ScenarioState()
         state.canonical_recipe = canonical_recipe
 
@@ -428,6 +431,8 @@ def serve(selected: Scenario, *, host: str = "127.0.0.1", port: int = 8765) -> N
             summary = [{"id": row["id"], "status": row["status"], "reason": (row.get("cancellation") or {}).get("reason")} for row in runs]
             print("Graceful shutdown Runs: " + json.dumps(summary, sort_keys=True), flush=True)
     finally:
+        if "app" in locals() and "original_static" in locals():
+            app.STATIC = original_static
         if state and state.cleanup:
             state.cleanup()
         runtime.cleanup()
@@ -458,14 +463,21 @@ def main(argv=None) -> None:
     parser.add_argument("--port", type=tcp_port, default=8765, help="TCP port (1-65535; default: 8765)")
     parser.add_argument("--host", default="127.0.0.1", help="bind address (default: 127.0.0.1)")
     parser.add_argument("--list-scenarios", action="store_true")
+    parser.add_argument("--frontend-root", type=Path, help="Serve a compiled frontend tree through the production static handler")
     args = parser.parse_args(argv)
     if args.list_scenarios:
         for item in SCENARIOS.values():
             print(f"{item.name}: {item.description}")
         return
     try:
+        if args.frontend_root is not None:
+            frontend_root = args.frontend_root.resolve(strict=True)
+            if not (frontend_root / "index.html").is_file():
+                parser.error("--frontend-root must contain index.html")
+        else:
+            frontend_root = None
         preflight_bind(args.host, args.port)
-        serve(scenario(args.scenario), host=args.host, port=args.port)
+        serve(scenario(args.scenario), host=args.host, port=args.port, frontend_root=frontend_root)
     except OSError as exc:
         parser.exit(2, f"{exc}\n")
 

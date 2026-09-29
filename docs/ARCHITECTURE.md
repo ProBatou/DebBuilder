@@ -35,11 +35,8 @@ rules are documented in [Operations](OPERATIONS.md).
 
 ```text
 debbuilder/          Python backend package
-static/              Browser UI
-static/js/pages/     Page controllers
-static/js/recipe/    Recipe-specific browser behavior
-static/css/          Page-specific styles
-frontend/            API-backed Svelte admin candidate; not yet shipped
+static/              Legacy admin source, retained for package rollback reference
+frontend/            Svelte admin source; builds into packaged static/
 prototypes/issue-24/  Historical fixture/design reference
 tests/               Unit, integration, static UI, and release gates
 examples/            Public examples
@@ -51,6 +48,15 @@ Environment parsing and runtime paths live in `debbuilder/runtime.py`. HTTP
 routing is separated from package projection, execution, automation,
 Validation, Publication, settings, and repository services. The application
 module wires those boundaries to the standard-library HTTP server.
+
+The admin HTTP listener serves the cutover-ready Svelte build from
+`/opt/debbuilder/static` in a package installation. The managed self-build and
+official release build run
+`npm ci` and Vite with Node 24/npm 11 in an isolated build workspace; only
+compiled `static/` assets enter the package. Node is not a runtime dependency.
+The admin listener owns the Svelte shell and API/auth routes, while the public
+APT listener and landing template remain separate. This describes candidate
+source and package behavior, not a production deployment.
 
 `debbuilder/api_routes.py` is the canonical inventory for named admin API
 operations. Its immutable descriptors define each method, path template,

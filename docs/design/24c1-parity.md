@@ -2,8 +2,9 @@
 
 ## Current state
 
-The Svelte app under `frontend/` is an API-backed production candidate. The
-shipped admin entry remains `static/`; production cutover has not happened.
+The Svelte app under `frontend/` is the cutover-ready admin source. The managed
+package build compiles it into the installed `static/` tree. Production
+deployment has not happened.
 The isolated `prototypes/issue-24` app and its B6 screenshots are historical
 design references. Operator-reviewed Svelte behavior takes precedence over
 older prototype interactions. "Migrated" below describes the Svelte candidate,
@@ -28,7 +29,13 @@ not the deployed admin UI.
 | Settings | Partially migrated: local Theme/Language and bounded backend settings forms, including secret configured state | Full legacy settings/secret parity and cutover qualification |
 | Automation | Partially migrated: authored Recipe policy through guarded Recipe Save and global Settings fields | Dedicated automation actions and observation refresh deferred |
 | Public APT landing | Not started in production | Separate public listener/template deployment |
-| Production cutover | Not started | Explicit integration, packaging and release decision |
+| Production packaging integration | Migrated: managed Recipe and release workflow compile Svelte | Production deployment |
+| Production static serving | Migrated: admin handler serves compiled assets with MIME and cache policy | Production deployment |
+| Vite dev-server dependency | No | None |
+| Runtime Node dependency | No | Build hosts need Node 24/npm 11 |
+| Fresh install and upgrade qualification | Passed in disposable Debian container with `dpkg -i`, post-install bootstrap, obsolete-file removal and configuration preservation; packaged handler and API routes passed separately | systemd restart on a supported host |
+| Public APT isolation | Passed in focused routing tests | Production deployment |
+| Production deployment | Not done | Explicit operator deployment checkpoint |
 
 ## Contracts and deferred actions
 
@@ -40,9 +47,9 @@ The current public Run DTO does not prove that a prior Run used the current
 Recipe revision, so Plan does not claim matching evidence.
 
 The Svelte candidate does not expose Recipe Delete or Rename, Run cancellation,
-direct Recipe import persistence, observation refresh, dedicated automation
-mutations, or production cutover. Existing backend support is not itself a
-frontend migration. The separate public APT landing remains a reference.
+direct Recipe import persistence, observation refresh, or dedicated automation
+mutations. Existing backend support is not itself a frontend migration. The
+separate public APT landing remains a reference.
 
 Earlier C1/C2/C3 checkpoints are documented in the Git history and
 [C3 visual audit](visual-parity-c3.md); their old feature lists are historical.

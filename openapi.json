@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "DebBuilder API",
-    "version": "1.1.1",
+    "version": "1.1.2",
     "description": "Authenticated admin API. Success bodies retain their existing shapes; non-2xx JSON uses ApiError. HTTP methods outside this named registry and the public APT listener are outside this contract."
   },
   "paths": {

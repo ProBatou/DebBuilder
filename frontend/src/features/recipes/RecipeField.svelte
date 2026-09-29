@@ -1,11 +1,12 @@
 <script>
   import {tick} from 'svelte';
   import {readPath, change, remove, move} from './draft.js';
+  import {recipeOptionLabel} from './reviewLabels.js';
   import {t} from '../../i18n/i18n.js';
   export let entry, editor, update, disabled = false, fieldError = null, language = 'en';
   let root;
-  $: value = readPath(editor.draft, entry.path);
-  $: label = entry.path.split('.').at(-1).replaceAll('_',' ');
+  $: value = entry.path === 'automation.policy' && !editor.draft.automation?.enabled ? 'manual' : readPath(editor.draft, entry.path);
+  $: label = entry.path === 'automation.policy' ? t('automation',language) : entry.label?.[language] || entry.label?.en || entry.path.split('.').at(-1).replaceAll('_',' ');
   $: errorId = `recipe-error-${entry.path.replace(/[^A-Za-z0-9]/g,'-')}`;
   const templates = {
     'build.source_changes': {operation:'replace',path:'',search:'',content:''},
@@ -14,7 +15,18 @@
     'package.runtime_dependency_detection.overrides': {soname:'',action:'ignore',reason:'',relation:''},
     'runtime_apt_repositories': {id:'',uri:'',suite:'',components:[],signing_key:{armored:''}},
   };
-  function set(path, next) {update(change(editor,path,next));}
+  function set(path, next) {
+    if (path === 'automation.policy') {
+      update(change(change(editor,'automation.policy',next),'automation.enabled',next !== 'manual'));
+      return;
+    }
+    update(change(editor,path,next));
+  }
+  function finishServiceName(raw) {
+    const name = raw.trim();
+    const normalized = name && /^[A-Za-z0-9_.@-]+$/.test(name) && !name.endsWith('.service') ? `${name}.service` : name;
+    if (normalized !== raw) set(entry.path,normalized);
+  }
   async function addRow() {set(entry.path,[...(value || []), structuredClone(templates[entry.path] || '')]); await tick(); root.querySelector('.recipe-row:last-of-type input, .recipe-row:last-of-type textarea')?.focus();}
   async function removeRow(index) {update(remove(editor,`${entry.path}[${index}]`)); await tick(); (root.querySelectorAll('.recipe-row input')[Math.min(index, (value || []).length - 1)] || root.querySelector('button'))?.focus();}
   function editObject(index, key, next) {set(`${entry.path}[${index}].${key}`,next);}
@@ -27,8 +39,9 @@
 <div class="recipe-field" class:collection={entry.type === 'strings' || entry.type === 'objects' || entry.type === 'environment'} data-recipe-path={entry.path} bind:this={root}>
   {#if entry.type === 'boolean'}
     <label><input type="checkbox" checked={value === true} {disabled} aria-invalid={Boolean(fieldError)} aria-describedby={fieldError ? errorId : undefined} onchange={e => set(entry.path,e.currentTarget.checked)}> {label}</label>
+    {#if entry.path === 'service.enabled' && value === false && (editor.draft.service?.name || editor.draft.service?.command)}<small class="muted">{t('serviceDisabledKeepsDetails',language)}</small>{/if}
   {:else if entry.type === 'select'}
-    <label>{label}<select value={value ?? ''} {disabled} aria-invalid={Boolean(fieldError)} aria-describedby={fieldError ? errorId : undefined} onchange={e => set(entry.path,e.currentTarget.value)}>{#each entry.options as option}<option value={option}>{option}</option>{/each}</select></label>
+    <label>{label}<select value={value ?? ''} {disabled} aria-invalid={Boolean(fieldError)} aria-describedby={fieldError ? errorId : undefined} onchange={e => set(entry.path,e.currentTarget.value)}>{#each entry.options as option}<option value={option}>{recipeOptionLabel(entry.path,option,language)}</option>{/each}</select></label>
   {:else if entry.type === 'multiline'}
     <label>{label}<textarea value={value ?? ''} {disabled} aria-invalid={Boolean(fieldError)} aria-describedby={fieldError ? errorId : undefined} oninput={e => set(entry.path,e.currentTarget.value)}></textarea></label>
   {:else if entry.type === 'nullable-number'}
@@ -59,6 +72,9 @@
       {#each Object.entries(value || {}) as [key, item] (key)}<div class="recipe-row"><label>{t('key',language)}<input value={key} {disabled} onchange={e => editEnvironment(key,e.currentTarget.value,item)}></label><label>{t('value',language)}<input value={item} {disabled} oninput={e => editEnvironment(key,key,e.currentTarget.value)}></label>{#if !disabled}<button type="button" onclick={() => removeEnvironment(key)} aria-label={`${t('remove',language)} ${key}`}>×</button>{/if}</div>{/each}
       {#if !disabled}<button type="button" class="button secondary recipe-add" onclick={addEnvironment}>+ {t('add',language)} {label}</button>{/if}
     </fieldset>
+  {:else if entry.path === 'service.name'}
+    <label>{label}<input value={value ?? ''} {disabled} aria-invalid={Boolean(fieldError)} aria-describedby={fieldError ? errorId : undefined} oninput={e => set(entry.path,e.currentTarget.value)} onblur={e => finishServiceName(e.currentTarget.value)}></label>
+    <small class="muted">{t('serviceNameSuffixHint',language)}</small>
   {:else}
     <label>{label}<input value={value ?? ''} {disabled} aria-invalid={Boolean(fieldError)} aria-describedby={fieldError ? errorId : undefined} oninput={e => set(entry.path,e.currentTarget.value)}></label>
   {/if}

@@ -1,5 +1,8 @@
 # Design system — interactions and state (#24B3)
 
+Historical prototype interaction reference. The current Svelte implementation
+and deferred scope are recorded in the [parity matrix](../24c1-parity.md).
+
 ## Navigation
 
 Desktop navigation is persistent within the viewport. Collapse changes width, labels and tooltip visibility, and persists in browser storage. Mobile has a separate overlay; Escape closes it and returns focus. The six top-level pages have no redundant breadcrumb. Object detail uses `Packages / package`, `Recipes / recipe` or `Runs / run`. Repository inventory is reached from a compact Packages summary. The secondary view shows reprepro facts and published package inventory only, with a link to the separate public landing. Installation steps and Copy controls live on that public page. System Health covers only operational state.

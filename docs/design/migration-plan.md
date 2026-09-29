@@ -1,5 +1,10 @@
 # #24A — Migration and functional parity plan
 
+This is the historical #24A plan. The current API-backed Svelte candidate and
+remaining work are recorded in the [migration parity matrix](24c1-parity.md).
+The checklist below is retained as the original planning record, not as a
+statement that these features are still unimplemented.
+
 No implementation begins until #24A review resolves the visual direction, default/advanced boundary, happy path and frontend architecture. The plan below preserves backend authority and gives #24B measurable checkpoints.
 
 ## Phases

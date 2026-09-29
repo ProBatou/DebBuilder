@@ -50,8 +50,9 @@ context. Authored values in the Svelte Plan are Configured or Default. The
 current public Run DTO does not expose an immutable Recipe snapshot relation,
 so the Plan reports no matching current evidence and Test required.
 Application-managed self-build is identified by management metadata and shown
-under System. C2B sends only ephemeral `POST /api/recipes/validate`; it does
-not save, import, Test, Build, or send a durable Recipe mutation.
+under System. The earlier C2B editor sent only ephemeral validation; the
+current Svelte candidate also performs guarded Recipe Save/Create, Test/Build,
+and selected lifecycle actions. Direct import persistence remains deferred.
 
 Workflow GET returns the canonical Recipe body with `ETag: "<sha256>"`, the
 SHA-256 of exact persisted bytes read under the Recipe lease. A Svelte edit
@@ -66,13 +67,15 @@ Legacy callers may omit the revision and keep their existing behavior.
 `POST /api/recipes/draft` accepts `{ "name": "<safe Recipe ID>",
 "repository": "<GitHub owner/name>" }` and returns `{ "recipe": <canonical
 v5 draft> }` without writing state. All defaults come from the backend v5
-schema. The UI requires both inputs before opening the normal editor.
+schema. The Package creation form requires both inputs before validation and
+create-only Save; the new Recipe is then available for editing.
 `POST /api/workflows/{id}` with `{ "workflow": <draft>, "create_only": true }`
 atomically requires an absent target. A collision returns 409 `recipe_exists`
 without changing either Recipe. `create_only` cannot be combined with
 `expected_revision` or `previous_id` (422 `invalid_create_precondition`).
-Guarded Svelte saves do not create a Package association; unguarded legacy
-saves retain their prior Package projection behavior. Revision preconditions
+Create-only Svelte Save makes the new Recipe visible in the managed Package
+projection without adding a Package override. Unguarded legacy saves retain
+their prior projection behavior. Revision preconditions
 with `previous_id` rename remain rejected, and the Svelte editor keeps Recipe
 identity read only after creation.
 

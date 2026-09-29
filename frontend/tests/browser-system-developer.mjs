@@ -1,0 +1,65 @@
+import assert from 'node:assert/strict';
+import {chromium} from '@playwright/test';
+
+const base = process.env.DEBBUILDER_FRONTEND_URL || 'http://127.0.0.1:5182';
+const requests = [];
+let releaseSecondRecipe;
+const browser = await chromium.launch({headless:true});
+try {
+  const page = await browser.newPage({viewport:{width:1440,height:900},acceptDownloads:true});
+  const errors = [];
+  page.on('pageerror',error => errors.push(error.message));
+  await page.route('**/api/**',route => {
+    const request = route.request(), url = new URL(request.url()), path = url.pathname;
+    if (!path.startsWith('/api/')) return route.continue();
+    requests.push(`${request.method()} ${path}${url.search}`);
+    const respond = (body,status=200) => route.fulfill({status,contentType:'application/json',body:JSON.stringify(body)});
+    if (path === '/api/auth/status') return respond({ok:true,auth_mode:'none'});
+    if (path === '/api/status') return respond({ok:true,suite_default:'stable',component_default:'main',arch_default:'amd64'});
+    if (path === '/api/system/diagnostics') return respond({schema_version:1,status:'ok',checks:[]});
+    if (path === '/api/storage') return respond({storage:{state:'ready',bytes:{managed_total:0},runs:{count:0}}});
+    if (path === '/api/workflows') return respond({workflows:[{id:'example-recipe'},{id:'second-recipe'}],errors:[]});
+    if (path === '/api/executions') return respond({executions:[{id:'run-1'},{id:'run-2'}]});
+    if (path === '/api/recipes/example-recipe/inspect') return respond({inspection:{identity:{recipe_id:'example-recipe',package:'sample',active:true},build:{command_count:2}}});
+    if (path === '/api/recipes/second-recipe/inspect') {releaseSecondRecipe = () => respond({inspection:{identity:{recipe_id:'second-recipe',package:'second',active:true},build:{command_count:3}}}); return;}
+    if (path === '/api/executions/run-1/inspect') return respond({inspection:{identity:{run_id:'run-1',status:'failed'},lifecycle:{step_count:2,steps:[{id:'build',status:'failed'}]}}});
+    if (path === '/api/executions/run-2/inspect') return respond({error:{code:'run_inspection_unavailable',message:'Inspection unavailable'}},409);
+    if (path === '/api/support-bundle') return route.fulfill({status:200,headers:{'Content-Type':'application/zip','Content-Disposition':'attachment; filename="debbuilder-support.zip"'},body:Buffer.from('PK\x03\x04')});
+    return respond({error:{code:'unexpected_request',message:path}},404);
+  });
+  await page.goto(`${base}/#/system`);
+  await page.getByRole('button',{name:'Developer',exact:true}).click();
+  await page.locator('#developer-recipe option[value="example-recipe"]').waitFor({state:'attached'});
+  assert.equal(await page.getByText('Available in a later migration').count(),0);
+  assert.equal(await page.getByRole('button',{name:'Inspect',exact:true}).count(),0);
+  await page.locator('#developer-recipe').selectOption('example-recipe');
+  await page.getByRole('heading',{name:'Recipe inspection · example-recipe'}).waitFor();
+  await page.getByText('sample',{exact:true}).waitFor();
+  assert.equal(await page.getByText('2',{exact:true}).count(),1);
+  await page.locator('#developer-recipe').selectOption('second-recipe');
+  await page.getByRole('heading',{name:'Recipe inspection · second-recipe'}).waitFor();
+  assert.equal(await page.locator('.developer-inspection').count(),1);
+  assert.equal(await page.getByText('sample',{exact:true}).count(),0);
+  await page.locator('.developer-inspection').getByRole('status').getByText('Loading…').waitFor();
+  assert.equal(await page.getByRole('heading',{name:'Recipe inspection · example-recipe'}).count(),0);
+  assert.ok(releaseSecondRecipe);
+  releaseSecondRecipe();
+  await page.getByText('second',{exact:true}).waitFor();
+  await page.locator('#developer-run').selectOption('run-1');
+  await page.getByRole('heading',{name:'Run inspection · run-1'}).waitFor();
+  await page.getByText('build: failed').waitFor();
+  const download = page.waitForEvent('download');
+  await page.getByRole('button',{name:'Download support bundle'}).click();
+  assert.equal((await download).suggestedFilename(),'debbuilder-support.zip');
+  assert.ok(requests.includes('GET /api/support-bundle?recipe_id=second-recipe&run_id=run-1'));
+  await page.locator('#developer-run').selectOption('run-2');
+  await page.getByRole('heading',{name:'Run inspection · run-2'}).waitFor();
+  await page.getByText('Inspection unavailable').waitFor();
+  assert.equal(await page.getByRole('heading',{name:'Run inspection · run-1'}).count(),0);
+  assert.equal(await page.locator('.developer-inspection').count(),2);
+  assert.equal(requests.some(item => !item.startsWith('GET ')),false);
+  await page.setViewportSize({width:390,height:844});
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false);
+  assert.deepEqual(errors,[]);
+  console.log('System developer checks passed');
+} finally {await browser.close();}

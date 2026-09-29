@@ -39,6 +39,8 @@ static/              Browser UI
 static/js/pages/     Page controllers
 static/js/recipe/    Recipe-specific browser behavior
 static/css/          Page-specific styles
+frontend/            API-backed Svelte admin candidate; not yet shipped
+prototypes/issue-24/  Historical fixture/design reference
 tests/               Unit, integration, static UI, and release gates
 examples/            Public examples
 data/workflows/      Runtime/user Recipes in source deployments

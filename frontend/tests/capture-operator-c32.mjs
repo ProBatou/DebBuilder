@@ -25,7 +25,7 @@ try {
     const errors=[];page.on('pageerror',error=>errors.push(error.message));
     await page.goto(`${base}/#/${route}`);
     await page.getByRole('heading',{level:1}).waitFor();
-    if(route.startsWith('recipes/')){await page.locator('.recipe-identity').waitFor();await page.getByRole('button',{name:'Edit',exact:true}).waitFor();}
+    if(route.startsWith('recipes/')){await page.locator('.recipe-identity').waitFor();await page.getByRole('button',{name:'Customize',exact:true}).waitFor();}
     if(route.startsWith('runs/'))await page.locator('.run-main').waitFor();
     if(route==='system')await page.locator('.system-grid').waitFor();
     if(route==='settings')await page.locator('.settings-content .panel').first().waitFor();
@@ -40,7 +40,7 @@ try {
     const page=await browser.newPage({viewport:{width:390,height:844},reducedMotion:'reduce'});
     const errors=[];page.on('pageerror',error=>errors.push(error.message));
     await page.goto(`${base}/#/${route}`);
-    if(route.startsWith('recipes/')){await page.locator('.recipe-identity').waitFor();await page.getByRole('button',{name:'Edit',exact:true}).waitFor();}
+    if(route.startsWith('recipes/')){await page.locator('.recipe-identity').waitFor();await page.getByRole('button',{name:'Customize',exact:true}).waitFor();}
     else if(route.startsWith('runs/'))await page.locator('.run-main').waitFor();
     else if(route==='overview')await page.locator('.overview-grid').waitFor();
     else await page.locator('.settings-content .panel').first().waitFor();

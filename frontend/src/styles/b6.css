@@ -592,7 +592,7 @@ code {
 .filters label:last-child {
   width: 190px;
 }
-.filters input,.filters select,.search-label input,.field-grid input,.field-grid select,.prototype-tools select {
+.filters input,.filters select,.search-label input,.field-grid input,.field-grid select {
   width: 100%;
   min-height: 38px;
   padding: 8px 10px;
@@ -746,11 +746,6 @@ code {
   font-size: 11px;
   color: var(--muted);
 }
-.editor-actions {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
 .field-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -796,11 +791,7 @@ code {
   color: var(--muted);
   margin: 5px 0 9px;
 }
-.next-step .button {
-  width: 100%;
-  margin-top: 8px;
-}
-.advanced-panel .field-help,.field-help {
+.field-help {
   margin-top: 13px;
   color: var(--muted);
   font-size: 11px;
@@ -858,46 +849,6 @@ code {
   border-color: var(--info);
   color: var(--info);
 }
-.dependency-details summary {
-  cursor: pointer;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-.dependency-details summary strong,.dependency-details summary small {
-  display: block;
-}
-.dependency-details summary strong {
-  font-size: 14px;
-}
-.dependency-details summary small {
-  font-size: 11px;
-  color: var(--muted);
-  margin-top: 4px;
-}
-.dependency-grid {
-  display: grid;
-  grid-template-columns: repeat(3,1fr);
-  gap: 8px;
-  margin-top: 16px;
-}
-.dependency-grid>div {
-  padding: 10px;
-  border: 1px solid var(--line);
-  background: var(--subtle);
-  border-radius: 6px;
-}
-.dependency-grid span,.dependency-grid strong {
-  display: block;
-  font-size: 10px;
-  overflow-wrap: anywhere;
-}
-.dependency-grid span {
-  color: var(--muted);
-}
-.dependency-grid strong {
-  margin-top: 5px;
-}
 .log-output {
   padding: 15px;
   border-radius: 7px;
@@ -907,41 +858,11 @@ code {
   line-height: 1.6;
   overflow: auto;
 }
-.system-grid,.repository-layout {
+.system-grid {
   display: grid;
   grid-template-columns: minmax(0,1.4fr) minmax(240px,.7fr);
   gap: 16px;
   align-items: start;
-}
-.diagnostic-list>div {
-  display: grid;
-  grid-template-columns: 1fr minmax(140px,1fr) auto;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 0;
-  border-top: 1px solid var(--line);
-  font-size: 11px;
-}
-.diagnostic-list span {
-  color: var(--muted);
-}
-.diagnostic-list strong {
-  overflow-wrap: anywhere;
-}
-.developer-list {
-  margin-top: 13px;
-}
-.developer-list button {
-  display: flex;
-  justify-content: space-between;
-  width: 100%;
-  padding: 13px 0;
-  border: 0;
-  border-top: 1px solid var(--line);
-  background: transparent;
-  color: var(--ink);
-  font-size: 12px;
-  text-align: left;
 }
 .settings-layout {
   display: grid;
@@ -1095,7 +1016,7 @@ dialog::backdrop {
     overflow: auto;
     white-space: nowrap;
   }
-  .system-grid,.repository-layout {
+  .system-grid {
     grid-template-columns: 1fr;
   }
 }
@@ -1177,10 +1098,7 @@ dialog::backdrop {
   .editor-head {
     display: block;
   }
-  .editor-actions {
-    margin-top: 12px;
-  }
-  .field-grid,.detected-grid,.advanced-fields,.stage-list,.dependency-grid {
+  .field-grid,.stage-list {
     grid-template-columns: 1fr;
   }
   .plan-rows>div {
@@ -1189,17 +1107,6 @@ dialog::backdrop {
   }
   .plan-rows .provenance {
     grid-column: 2;
-  }
-  .diagnostic-list>div {
-    grid-template-columns: 1fr auto;
-  }
-  .diagnostic-list strong {
-    grid-column: 1;
-    grid-row: 2;
-  }
-  .diagnostic-list .status-chip {
-    grid-column: 2;
-    grid-row: 1/3;
   }
 }
 @media (prefers-reduced-motion:reduce) {
@@ -1264,12 +1171,6 @@ dialog::backdrop {
 .inventory-view .repo-packages>div {
   gap: 10px;
 }
-.health-repository {
-  margin-top: 16px;
-}
-.health-repository .detail-facts {
-  margin-bottom: 0;
-}
 @media (max-width:600px) {
   .repository-summary {
     display: block;
@@ -1283,23 +1184,9 @@ dialog::backdrop {
     display: none;
   }
 }
-.repository-hero .section-head {
-  margin: 5px 0;
-}
-.repository-hero .repo-line {
-  margin: 8px 0 3px;
-}
 .repository-note {
   font-size: 11px;
   margin-top: 9px;
-}
-.repository-resources .text-button {
-  white-space: normal;
-}
-@media (max-width:600px) {
-  .copy-row .button {
-    align-self: stretch;
-  }
 }
 .inventory-rows>div {
   display: grid;
@@ -1314,58 +1201,6 @@ dialog::backdrop {
   grid-template-columns: repeat(2,minmax(0,1fr));
   gap: 16px;
 }
-.settings-edit-field {
-  display: grid;
-  align-content: start;
-  gap: 6px;
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 700;
-}
-.settings-edit-field input:not([type=checkbox]),.settings-edit-field select {
-  width: 100%;
-  min-height: 39px;
-  padding: 8px 10px;
-  border: 1px solid var(--strong-line);
-  border-radius: 6px;
-  background: var(--surface);
-  color: var(--ink);
-  font-size: 12px;
-}
-.settings-edit-field input[type=checkbox] {
-  width: 19px;
-  height: 19px;
-  accent-color: var(--accent);
-}
-.settings-edit-field small {
-  font-size: 11px;
-  font-weight: 400;
-  line-height: 1.4;
-}
-.settings-savebar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-.settings-savebar strong {
-  font-size: 12px;
-  color: var(--success);
-}
-.settings-savebar strong.dirty {
-  color: var(--warning);
-}
-.settings-savebar p {
-  font-size: 11px;
-  flex: 1;
-}
-.settings-savebar>div {
-  display: flex;
-  gap: 8px;
-}
-.settings-savebar .button {
-  margin: 0;
-}
 .settings-content .button {
   margin-top: 0;
 }
@@ -1373,14 +1208,8 @@ dialog::backdrop {
   .settings-edit-fields {
     grid-template-columns: 1fr;
   }
-  .settings-savebar>div {
-    width: 100%;
-  }
-  .settings-savebar .button {
-    flex: 1;
-  }
 }
-.brand-mark,.public-mark {
+.brand-mark {
   display: grid;
   place-items: center;
   background: none;
@@ -1441,17 +1270,6 @@ dialog::backdrop {
 .stage-list>div {
   min-width: 0;
 }
-.diagnosis-panel {
-  border: 1px solid var(--danger);
-  border-radius: 8px;
-  padding: 16px;
-  margin-top: 13px;
-  background: var(--subtle);
-}
-.diagnosis-panel p {
-  font-size: 12px;
-  line-height: 1.5;
-}
 .log-verbosity {
   display: flex;
   align-items: center;
@@ -1464,17 +1282,6 @@ dialog::backdrop {
   border: 1px solid var(--line);
   border-radius: 5px;
   padding: 6px;
-}
-.log-follow {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  font-size: 11px;
-  margin-bottom: 9px;
-  color: var(--muted);
-}
-.log-follow .text-button {
-  margin: 0;
 }
 @media (max-width:1000px) {
   .run-layout {
@@ -1498,12 +1305,6 @@ dialog::backdrop {
   .stage-list {
     grid-template-columns: 1fr;
   }
-}
-.capability-actions .button {
-  margin: 0;
-}
-.capability-save-status.dirty {
-  color: var(--warning);
 }
 .stage-list {
   grid-template-columns: 1fr;
@@ -1529,60 +1330,6 @@ dialog::backdrop {
   max-width: none !important;
   width: 100% !important;
 }
-.log-options {
-  position: relative;
-  font-size: 11px;
-}
-.log-options summary {
-  cursor: pointer;
-  color: var(--accent);
-  font-weight: 700;
-}
-.log-options[open] .log-verbosity {
-  position: absolute;
-  right: 0;
-  top: 24px;
-  z-index: 3;
-  background: var(--surface);
-  padding: 12px;
-  border: 1px solid var(--line);
-  box-shadow: 0 8px 24px #0002;
-  border-radius: 6px;
-  white-space: nowrap;
-}
-.diagnosis-panel dl {
-  display: grid;
-  grid-template-columns: repeat(3,minmax(0,1fr));
-  gap: 8px;
-  margin: 12px 0;
-}
-.diagnosis-panel dl div {
-  display: grid;
-  gap: 4px;
-  min-width: 0;
-}
-.diagnosis-panel dt {
-  font-size: 10px;
-  color: var(--muted);
-}
-.diagnosis-panel dd {
-  margin: 0;
-  font-size: 11px;
-  overflow-wrap: anywhere;
-}
-.diagnosis-panel pre {
-  white-space: pre-wrap;
-  background: var(--ink);
-  color: var(--surface);
-  padding: 9px;
-  border-radius: 4px;
-  font-size: 11px;
-}
-@media (max-width:600px) {
-  .diagnosis-panel dl {
-    grid-template-columns: 1fr;
-  }
-}
 .stage-list .stage-failed {
   color: var(--danger);
 }
@@ -1598,9 +1345,10 @@ dialog::backdrop {
 .recipe-editor .editor-head {
   margin-bottom: 0;
 }
-.recipe-create {
-  width: 100%;
-  margin-top: 13px;
+.package-create-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 .recipe-levels {
   display: flex;
@@ -1639,6 +1387,16 @@ dialog::backdrop {
   background: var(--warning-bg);
   font-size: 12px;
 }
+.recipe-validation-success {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px;
+  border: 1px solid var(--success);
+  border-radius: 999px;
+  background: var(--success-bg);
+  color: var(--success);
+}
 .recipe-savebar>div,.recipe-next>div,.recipe-json-actions {
   display: flex;
   gap: 8px;
@@ -1670,19 +1428,19 @@ dialog::backdrop {
 .modal-head { display:flex;align-items:center;justify-content:space-between;gap:10px; }
 .modal-copy { color:var(--muted);font-size:12px;margin-top:15px; }
 .modal-actions { display:flex;justify-content:flex-end;margin-top:20px; }
-.recipe-next p,.recipe-context {
+.recipe-next p {
   font-size: 11px;
   line-height: 1.5;
   color: var(--muted);
   margin: 6px 0 13px;
 }
-.recipe-form-grid,.recipe-hook-grid {
+.recipe-form-grid {
   display: grid;
   grid-template-columns: repeat(2,minmax(0,1fr));
   gap: 12px;
   margin-top: 13px;
 }
-.recipe-form-grid>label,.recipe-form-grid fieldset label,.recipe-hook-grid label,.recipe-label,.recipe-row-fields label {
+.recipe-form-grid>label,.recipe-form-grid fieldset label {
   display: grid;
   align-content: start;
   gap: 6px;
@@ -1705,7 +1463,7 @@ dialog::backdrop {
   color: var(--ink);
   padding: 0 5px;
 }
-.recipe-form-grid input:not([type=checkbox]),.recipe-form-grid select,.recipe-hook-grid textarea,.recipe-row-fields input,.recipe-row-fields select,.recipe-row-fields textarea,.recipe-label input,.recipe-label select,.recipe-json-box textarea {
+.recipe-form-grid input:not([type=checkbox]),.recipe-form-grid select {
   width: 100%;
   min-width: 0;
   min-height: 37px;
@@ -1716,10 +1474,6 @@ dialog::backdrop {
   color: var(--ink);
   font: inherit;
   font-size: 12px;
-}
-.recipe-list-head .button {
-  padding: 7px 10px;
-  white-space: nowrap;
 }
 .recipe-row-actions {
   display: flex;
@@ -1781,7 +1535,7 @@ select option {
     font-size: 11px;
     padding: 9px 11px;
   }
-  .recipe-form-grid,.recipe-hook-grid,.recipe-relation-grid {
+  .recipe-form-grid {
     grid-template-columns: 1fr;
   }
   .recipe-plan .plan-rows>div {
@@ -1807,36 +1561,8 @@ select option {
 .segmented-tabs button {
   flex: none;
 }
-.managed-self-build {
-  display: grid;
-  grid-template-columns: minmax(0,1fr) minmax(0,1.2fr);
-  gap: 16px;
-  align-items: start;
-}
-.managed-self-build .plan-rows>div {
-  grid-template-columns: 125px minmax(0,1fr);
-}
 .managed-self-build .recipe-section h3:not(:first-child) {
   margin-top: 22px;
-}
-.managed-self-build .recipe-savebar {
-  margin-top: 16px;
-}
-@media (max-width:1000px) {
-  .managed-self-build {
-    grid-template-columns: 1fr;
-  }
-}
-@media (max-width:600px) {
-  .recipe-editor .recipe-advanced-group {
-    display: none;
-  }
-  .recipe-editor .recipe-advanced-group.active {
-    display: block;
-  }
-  .recipe-advanced-navigation .back-button {
-    margin-bottom: 5px;
-  }
 }
 .page-title h1:focus {
   outline: none;
@@ -1856,12 +1582,12 @@ select option {
   --code-ink: #dcebee;
   --code-border: #3e5963;
 }
-.log-output,.diagnosis-panel pre,.recipe-json-box textarea,.copy-row code {
+.log-output {
   background: var(--code-bg);
   color: var(--code-ink);
   border: 1px solid var(--code-border);
 }
-.diagnosis-panel code,.repo-packages code {
+.repo-packages code {
   color: var(--code-ink);
 }
 .maintenance-layout {
@@ -1904,9 +1630,6 @@ select option {
   width: 100%;
   max-width: none;
   min-width: 0;
-}
-.settings-edit-field input:not([type=checkbox]),.settings-edit-field select {
-  max-width: 460px;
 }
 .package-detail-wrap {
   position: sticky;
@@ -2017,20 +1740,5 @@ select option {
   }
   .settings-nav {
     max-width: 100%;
-  }
-}
-@media (max-width:600px) {
-  .managed-self-build .section-head {
-    flex-wrap: wrap;
-  }
-}
-@media (max-width:600px) {
-  .settings-savebar>div {
-    flex-wrap: wrap;
-  }
-  .settings-savebar .button {
-    flex: 1 1 135px;
-    min-width: 0;
-    white-space: normal;
   }
 }

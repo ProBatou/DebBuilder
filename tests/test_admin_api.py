@@ -1232,6 +1232,9 @@ class AdminApiTests(AdminApiCase):
         self.assertFalse((server.USER_WORKFLOWS / "fresh.json").exists())
         recipe = draft["recipe"]
         self.assertEqual(recipe, server.recipe_document_for_storage(recipe))
+        status, checked = self.request("POST", "/api/recipes/validate", {"recipe": recipe})
+        self.assertEqual(status, 200)
+        self.assertIsNone(checked["collision"])
         request = urllib.request.Request(self.base_url + "/api/workflows/fresh",
             data=json.dumps({"workflow": recipe, "create_only": True}).encode(),
             headers={"Content-Type": "application/json"}, method="POST")
@@ -1242,6 +1245,11 @@ class AdminApiTests(AdminApiCase):
         self.assertEqual(etag, '"' + receipt["revision"] + '"')
         self.assertEqual(receipt["revision"], hashlib.sha256((server.USER_WORKFLOWS / "fresh.json").read_bytes()).hexdigest())
         self.assertNotIn("fresh", server.package_projection_service().load_overrides())
+        status, package_list = self.request("GET", "/api/packages")
+        self.assertEqual(status, 200)
+        fresh_package = next(package for package in package_list["packages"] if package["name"] == "fresh")
+        self.assertEqual(fresh_package["recipe"], "fresh")
+        self.assertFalse(fresh_package.get("apt_version"))
         with self.assertRaises(urllib.error.HTTPError) as collision:
             self.request("POST", "/api/workflows/fresh", {"workflow": {**recipe, "active": False}, "create_only": True})
         self.assertEqual(collision.exception.code, 409)

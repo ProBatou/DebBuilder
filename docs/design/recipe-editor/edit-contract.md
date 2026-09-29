@@ -1,5 +1,13 @@
 # #24C2B Recipe editor contract
 
+The sections below record the C2B/C2C/C2D implementation sequence. For the
+current operator UI, Package creation opens a backend-generated Recipe v5
+draft and persists it with create-only Save; standalone New Recipe is hidden.
+Expert JSON can be imported or edited, validated and applied to the local
+draft, then saved separately. Direct import persistence, Delete and Rename
+remain deferred. The [current parity matrix](../24c1-parity.md) distinguishes
+today's behavior from the historical checkpoints.
+
 Authority is `debbuilder/recipe_schema.py` v5 and `recipe_document_for_storage()`.
 `recipe_store.py` returns the compact persisted representation. The old
 `static/recipe_serialization.js` reconstructs authored data from form state;

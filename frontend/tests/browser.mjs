@@ -18,7 +18,7 @@ try {
       await page.getByRole('button',{name,exact:true}).first().click();
     }
     await openNavigation('Packages');
-    await page.locator('.package-rows .package-row').first().click();
+    await page.locator('.package-rows .package-row').filter({hasText:'bashrc'}).first().click();
     const packageId = await page.locator('.package-detail h2').textContent();
     assert.ok(packageId);
     assert.ok(page.url().includes(encodeURIComponent(packageId)));
@@ -37,19 +37,17 @@ try {
     await page.getByRole('button',{name:'Expert',exact:true}).click();
     await page.getByText('View canonical JSON').waitFor();
     await page.getByRole('button',{name:'Plan',exact:true}).click();
-    await page.getByRole('button',{name:'Cancel',exact:true}).click();
+    assert.equal(await page.locator('.recipe-savebar').count(),0);
     await page.getByText('Lifecycle hooks').first().waitFor();
     await page.goto(`${base}/#/recipes/archive-agent`);
     await page.getByText('Prebuilt artifact').first().waitFor();
     assert.equal(await page.getByText('Existing ELF overrides').count(),0);
-    await page.getByRole('button',{name:'Edit',exact:true}).click();
     await page.getByRole('button',{name:'Advanced',exact:true}).click();
     assert.equal(await page.locator('[data-recipe-path="package.runtime_dependency_detection.enabled"]').count(),1);
     assert.equal(await page.getByText('build commands').count(),0);
     await page.goto(`${base}/#/recipes/vendor-cli`);
     await page.getByText('Prebuilt artifact').first().waitFor();
     await page.getByText('Service not configured').waitFor();
-    await page.getByRole('button',{name:'Edit',exact:true}).click();
     await page.getByRole('button',{name:'Advanced',exact:true}).click();
     assert.equal(await page.locator('[data-recipe-path="package.runtime_dependency_detection.enabled"]').count(),0);
     await page.goto(`${base}/#/recipes/seerr`);
@@ -57,8 +55,8 @@ try {
     await page.getByText('postinst configured').waitFor();
     await openNavigation('Packages');
     await page.locator('.package-rows .package-row').filter({hasText:'debbuilder'}).first().click();
-    await page.getByRole('button',{name:'Review Recipe'}).click();
-    await page.getByText('Managed identity',{exact:true}).waitFor();
+    await page.goto(`${base}/#/recipes/debbuilder`);
+    await page.getByText('GitHub source',{exact:true}).waitFor();
     assert.ok(page.url().includes('#/system/managed'));
     await openNavigation('Runs');
     await page.locator('.run-selection .run-list-row').first().click();
@@ -86,7 +84,7 @@ try {
     assert.equal(runRequests,stoppedCount);
     assert.ok(await page.locator('.system-grid .panel').count() >= 1);
     await page.getByRole('button',{name:'System-managed self-build',exact:true}).click();
-    await page.getByText('Managed identity',{exact:true}).waitFor();
+    await page.getByText('GitHub source',{exact:true}).waitFor();
     await page.getByText('Definition version',{exact:true}).waitFor();
     await openNavigation('Settings');
     const theme = page.getByLabel('Theme');

@@ -34,9 +34,9 @@
 
 <svelte:window onkeydown={(event) => {if (event.key === 'Escape' && menu) closeMobileMenu();}} />
 <div class="shell" class:sidebar-collapsed={collapsed}>
-  <aside class:mobile-open={menu} class="sidebar" aria-label="Navigation">
-    <div class="sidebar-head"><div class="brand-mark"><BrandMark/></div><div class="brand-copy"><strong>DebBuilder</strong><small>DebBuilder {appVersion}</small></div><button class="collapse-button" aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'} aria-expanded={!collapsed} onclick={toggleSidebar}>{collapsed ? '»' : '«'}</button></div>
-    <nav aria-label="Main">
+  <aside class:mobile-open={menu} class="sidebar" aria-label={t('navigation',$locale)}>
+    <div class="sidebar-head"><div class="brand-mark"><BrandMark/></div><div class="brand-copy"><strong>DebBuilder</strong><small>DebBuilder {appVersion}</small></div><button class="collapse-button" aria-label={t(collapsed ? 'expandSidebar' : 'collapseSidebar',$locale)} aria-expanded={!collapsed} onclick={toggleSidebar}>{collapsed ? '»' : '«'}</button></div>
+    <nav aria-label={t('mainNavigation',$locale)}>
       {#each pages as page}<button class:active={$location.page === page} aria-label={t(page,$locale)} title={t(page,$locale)} aria-current={$location.page === page ? 'page' : undefined} onclick={() => open(page)}><span class="nav-icon"><NavIcon name={page}/></span><span class="nav-text">{t(page,$locale)}</span></button>{/each}
     </nav>
     <div class="sidebar-bottom"><div class="repo-indicator"><span class="repo-dot" aria-hidden="true"></span><div class="repo-copy"><strong>{t('repository',$locale)}</strong><small>{status ? `${status.suite_default || '—'} · ${status.component_default || '—'} · ${status.arch_default || '—'}` : '—'}</small></div></div><span class="version">DebBuilder {appVersion}</span></div>

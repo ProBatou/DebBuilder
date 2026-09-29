@@ -1,58 +1,89 @@
-# Production admin frontend source (#24C2C)
+# API-backed admin frontend candidate
 
-This is the future authenticated admin UI source. The shipped `static/` tree is still the production entry. The separate public APT landing remains `debbuilder/repository_templates/index.html` and is outside this build.
+`frontend/` contains the Svelte admin UI under review for Issue #24. The
+shipped admin UI remains `static/`. The public APT landing is separate from
+both admin frontends. See the [current parity matrix](../docs/design/24c1-parity.md)
+for migrated and deferred behavior.
 
-## Build contract
+## Build and test
 
-Use Node 24 LTS and npm 11 (the checked build used Node 24.21.0 and npm 11.20.0). Svelte 5.57.1, Vite 8.3.1 and all build tools are pinned in `package-lock.json`; they are build dependencies only. From `frontend/`:
+Use Node 24.x and npm 11.x. Svelte, Vite and their build dependencies are
+pinned in `package-lock.json` and do not enter the runtime package.
 
 ```sh
+cd frontend
 npm ci
 npm run check
 npm test
 npm run build
 ```
 
-`src/app` owns the shell and bootstrap, `src/api` owns HTTP requests, `src/features` owns polling and Recipe draft/projections, `src/pages` owns view-local state, and `src/navigation`, `src/theme`, `src/i18n` own small browser preferences. The Recipe draft adapter preserves canonical v5 fields and can send only ephemeral validation; Save is inactive. The common semantic tokens and layout are in `src/styles.css`; the fixture prototype remains under `prototypes/issue-24` for design reference only.
+`src/app` owns the shell and authentication bootstrap; `src/api` owns HTTP
+requests; `src/features` owns polling and canonical Recipe drafts; `src/pages`
+owns view-local state. Navigation, theme and locale have small dedicated
+modules. `styles.css` imports the B6-derived base and real-application rules.
+The separate fixture prototype remains a design reference.
 
-## API and auth
+## Current API behavior
 
-The client calls existing GET routes and ephemeral `POST /api/recipes/validate` only. `GET /api/auth/status` bootstraps the configured server auth mode; requests use same-origin credentials, so the server remains responsible for OIDC, trusted proxy headers, and local mode. 401, 403 and structured backend errors retain status, code, message and details. Network errors, aborts and 20-second timeouts are distinct. No token or secret is stored in browser storage. The auth bootstrap link on 401 points to the server root. For an isolated Vite/OIDC run, set `VITE_DEBBUILDER_AUTH_ORIGIN` to the isolated backend admin origin before starting Vite; sign in there, then return to the Vite URL. The Vite proxy preserves `/api` same-origin requests; it does not implement OIDC itself. A trusted proxy must still supply its configured identity header on the proxied API path.
+The client uses same-origin credentials and the server's local, trusted-proxy
+or OIDC authentication mode. HTTP errors retain backend status, code, message
+and details. Abort, timeout and network failures are distinct. Theme and
+language are stored locally; no auth token or secret is stored in browser
+storage. A browser error on `/api/settings` does not disable local appearance
+controls.
 
-Runs list polling is view-scoped and uses 5-second intervals. Selected Run detail/log polling uses 1.5 seconds, retries after 5 seconds, and stops on terminal state or navigation. The poller serializes requests, aborts on teardown and ignores stale results. Logs use the backend's rendered-character `after` offset separately for compact/normal/verbose/raw; changing mode resets the cursor. Pause stops automatic scroll while log collection continues. Previously rendered data remains visible after a transient error.
+Packages lists DebBuilder-managed packages. Repository inventory is an
+independent on-demand read from reprepro. Package creation obtains a canonical
+Recipe v5 draft from the backend, validates it, then uses create-only Recipe
+Save. Existing Recipe Save uses its strong ETag revision. A 409 conflict keeps
+the local draft and cannot force an overwrite. Managed Recipe overrides remain
+backend-controlled. Expert JSON import/edit applies only to the draft after
+backend validation; Save is separate. Standalone New Recipe is intentionally
+hidden in the current operator UI.
 
-Theme (`System`, `Light`, `Dark`) and locale (`EN`, `FR`, `DE`, `ES`) are local browser preferences. English is the fallback. Browser `Intl` formats dates and numbers. IDs, package names, versions, technical values, errors, logs and backend-authored prose remain untranslated.
+Test and Build validate the exact same frozen current draft submitted for Run
+admission. Test sends `dry_run: true`; Build sends `dry_run: false`. Neither
+implicitly saves the Recipe. The returned `run_id` is the navigation target.
+An ambiguous network outcome is not automatically retried. Run selection owns
+detail/log polling; requests do not overlap, stale selection responses are
+ignored, the log cursor is per verbosity, and terminal detail polling stops.
+The list continues to refresh while Runs is open.
 
-Packages uses `/api/packages` for DebBuilder-managed package state and opens
-`/api/repository/inventory` on demand for exact reprepro entries. Inventory
-errors retain their own retry state; they never fall back to package data.
-Recipes uses `/api/recipes` for list projections and `/api/workflows/{id}` for
-the authored v5 document. Inspection and automation GETs are optional scoped
-context. The Plan labels authored values Configured/Default; it never treats
-Run history as evidence for the current Recipe without an immutable snapshot
-match. No such relation is present in the public Run DTO, so the Plan says
-No matching current evidence / Test required. Managed self-build is selected
-from backend management metadata and shown under System. Package and Run links
-fetch the canonical Recipe first and route by its metadata. C2C adds manual
-guarded Recipe Save, canonical Create, conflict review, and managed override
-Save. Rename remains read only; Delete, Import persistence, Test/Build, and
-automation mutations remain outside this checkpoint. The edit contract is in
-`docs/design/recipe-editor/edit-contract.md`.
+Eligible Run, Package and Overview actions recheck current state before
+Validation, Publication or Build update. Publication requires confirmation of
+the current package/version identity. System includes curated Health,
+preview-confirmed execution-history deletion, managed self-build settings and
+Developer inspectors/support bundle. Settings can write bounded backend
+fields; secrets display only configured state and accept replacement values.
+Run cancellation, Recipe Delete/Rename, direct import persistence and
+production cutover remain deferred.
 
-## Isolated development and browser check
+The public Run DTO does not establish an immutable match to the current Recipe
+revision, so the Recipe Plan does not present prior Runs as matching proof.
 
-In one terminal from the repository root, run `python3 -m tests.ui.behavior_lab --scenario showcase --host 127.0.0.1 --port 8765`. In another, from `frontend/`, run `npm run dev -- --port 5174`; Vite proxies `/api` to the Lab. Set `DEBBUILDER_DEV_API` to another isolated backend origin if needed. `npm run test:browser` checks real Lab data and local Recipe editing at 1440px and 390px while both servers run. For inventory empty/error states use the `inventory-empty` and `inventory-error` Lab scenarios with `DEBBUILDER_EXPECT_INVENTORY=empty` or `error` and run `node tests/browser-inventory.mjs`. The Lab creates and removes disposable data; never target the production `/opt/debbuilder` installation.
+## Isolated browser checks
 
-## Future package integration
+Run the Behavior Lab on an isolated data directory and port, then run Vite
+with `DEBBUILDER_DEV_API` pointing at that Lab. For example:
 
-Vite builds `dist/index.html`, `dist/assets/index-<hash>.js`, `dist/assets/index-<hash>.css`, and `.vite/manifest.json`. HTML refers to assets relatively, so a future reviewed integration can place the compiled tree at a dedicated path below the Python static root before the official Recipe stages `static`. The current handler serves HTML/JS/CSS with suitable MIME types and `no-cache, must-revalidate` for all files. Immutable caching would require a separate reviewed handler change; the current policy is safe though less efficient. Do not copy `node_modules`, Node, npm, Vite or Svelte into the runtime package. The official Recipe and release builder remain unchanged in C1.
+```sh
+python3 -m tests.ui.behavior_lab --scenario showcase --host 127.0.0.1 --port 8765
+cd frontend
+npm run dev -- --port 5174
+```
 
-The C1 build produced 353 B HTML (about 260 B gzip), 81,750 B JS (28.88 kB gzip), 6,944 B CSS (2.24 kB gzip), and a 185 B manifest. Two successive builds from the same lockfile/source produced identical file hashes. A disposable `/tmp/debbuilder-24c1-stage.*` tree was populated with only those compiled files under `opt/debbuilder/admin-candidate/`; manifest references resolved and no Node toolchain or `node_modules` was staged.
+`npm run test:browser` checks representative API-backed desktop/mobile paths.
+Other focused `tests/browser-*.mjs` scripts cover admission, guarded Recipe
+Save/conflicts, actions, Settings, System, polling and error states. Some
+scripts intercept `/api` and only require Vite; others require an isolated
+Behavior Lab scenario. Each script names its scenario and URL environment
+variables. Never direct development tests at the production installation.
 
-The exact feature state and cutover blockers are in [the parity matrix](../docs/design/24c1-parity.md).
+## Package integration boundary
 
-For guarded Recipe Save/Create/conflict browser checks, run Behavior Lab with
-`--scenario recipe-save` on an isolated port, point Vite at it with
-`DEBBUILDER_DEV_API`, then run `npm run test:browser:save` with
-`DEBBUILDER_FRONTEND_URL` and `DEBBUILDER_DEV_API` set to those local URLs.
-The scenario uses disposable Recipe storage and real ETag headers.
+Vite emits `dist/index.html`, hashed assets and a manifest. HTML references
+assets relatively. A separate reviewed cutover must place only the compiled
+tree at its intended static path, verify asset references and HTTP MIME/cache
+behavior, and qualify authentication and routing. Do not copy Node, npm, Vite,
+Svelte or `node_modules` into the runtime package.

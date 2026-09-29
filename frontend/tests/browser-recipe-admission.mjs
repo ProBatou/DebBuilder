@@ -3,6 +3,10 @@ import {chromium} from '@playwright/test';
 
 const base = process.env.DEBBUILDER_FRONTEND_URL || 'http://127.0.0.1:5175';
 const api = process.env.DEBBUILDER_DEV_API || 'http://127.0.0.1:8875';
+async function expandField(page,path) {
+  const group = page.locator(`[data-recipe-path="${path}"]`).locator('xpath=ancestor::details[1]');
+  if (!await group.evaluate(node => node.open)) await group.locator('summary').click();
+}
 const browser = await chromium.launch({headless:true});
 try {
   for (const viewport of [{width:1440,height:900},{width:390,height:844}]) {
@@ -25,7 +29,8 @@ try {
       const persisted = await page.request.get(`${api}/api/workflows/seerr`);
       const baseline = await persisted.json();
       const etag = persisted.headers()['etag'];
-      await page.getByRole('button',{name:'Edit',exact:true}).click();
+      await page.getByRole('button',{name:'Customize',exact:true}).click();
+      await expandField(page,'package.description');
       const description = page.locator('[data-recipe-path="package.description"] textarea');
       const edited = `${baseline.package.description} ${action} unsaved ${viewport.width}`;
       await description.fill(edited);
@@ -38,7 +43,7 @@ try {
       assert.equal(runBodies.at(-1).workflow.package.description,edited);
       assert.equal(runBodies.at(-1).dry_run,dryRun);
       assert.equal(await description.inputValue(),edited);
-      await page.getByText('Unsaved changes',{exact:true}).waitFor();
+      await page.locator('.recipe-savebar').waitFor();
       const persistedAfter = await page.request.get(`${api}/api/workflows/seerr`);
       assert.equal(persistedAfter.headers()['etag'],etag);
       assert.deepEqual(await persistedAfter.json(),baseline);
@@ -50,17 +55,10 @@ try {
       await page.getByRole('dialog').getByRole('button',{name:'Discard draft'}).click();
       assert.ok(page.url().endsWith(`#/runs/run-${runBodies.length}-${viewport.width}`));
     }
-    await page.goto(`${base}/#/recipes/_create`);
-    await page.getByLabel('Recipe ID').fill(`unsaved-${viewport.width}`);
-    await page.getByLabel('GitHub repository').fill('example/unsaved');
-    await page.getByRole('button',{name:'Continue'}).click();
-    await page.getByText('Save the Recipe once before running it.').waitFor();
-    assert.equal(await page.getByRole('button',{name:'Test',exact:true}).isDisabled(),true);
-    assert.equal(await page.getByRole('button',{name:'Build',exact:true}).isDisabled(),true);
-    await page.evaluate(() => {location.hash = '/recipes/seerr';});
-    await page.getByRole('dialog').getByRole('button',{name:'Discard draft'}).click();
+    await page.goto(`${base}/#/recipes/seerr`);
     await page.getByRole('heading',{name:'seerr'}).waitFor();
-    await page.getByRole('button',{name:'Edit',exact:true}).click();
+    await page.getByRole('button',{name:'Customize',exact:true}).click();
+    await expandField(page,'active');
     await page.locator('[data-recipe-path="active"] input').uncheck();
     await page.getByText('Enable this Recipe before running it.').waitFor();
     assert.equal(await page.getByRole('button',{name:'Test',exact:true}).isDisabled(),true);
@@ -132,17 +130,12 @@ try {
     await page.unroute('**/api/run',disconnected);
     await page.route('**/api/run',routeRun);
     await page.goto(`${base}/#/system/managed`);
-    await page.getByRole('heading',{name:'debbuilder'}).waitFor();
-    await page.getByRole('button',{name:'Edit',exact:true}).click();
-    await page.getByRole('button',{name:/Advanced/}).click();
-    await page.getByText('Package details',{exact:true}).click();
+    await page.getByRole('heading',{name:'System-managed self-build'}).last().waitFor();
     const maintainer = page.locator('[data-recipe-path="package.maintainer"] input');
     const managedValue = `Managed Operator ${viewport.width} <operator@example.test>`;
     await maintainer.fill(managedValue);
-    await page.getByRole('button',{name:'Test',exact:true}).click();
-    await page.getByText('Test queued',{exact:true}).waitFor();
-    assert.equal(runBodies.at(-1).workflow.management.owner,'application');
-    assert.equal(runBodies.at(-1).workflow.package.maintainer,managedValue);
+    assert.equal(await page.getByRole('button',{name:'Test',exact:true}).count(),0);
+    assert.equal(await page.getByRole('button',{name:'Build',exact:true}).count(),0);
     assert.equal(await maintainer.inputValue(),managedValue);
     assert.deepEqual(mutations.filter(path => !['/api/recipes/draft','/api/recipes/validate','/api/run'].includes(path)),[]);
     assert.deepEqual(pageErrors,[]);

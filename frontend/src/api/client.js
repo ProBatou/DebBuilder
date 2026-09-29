@@ -59,8 +59,13 @@ export const api = {
   automation: (recipeId, opts) => request(`/api/recipes/${id(recipeId)}/automation`, opts),
   runs: opts => request('/api/executions', opts),
   run: (runId, opts) => request(`/api/executions/${id(runId)}`, opts),
+  runInspection: (runId, opts) => request(`/api/executions/${id(runId)}/inspect`, opts),
+  startValidation: (runId, opts) => request(`/api/executions/${id(runId)}/validate`, {...opts,method:'POST',body:{}}),
+  publishArtifact: (runId, confirmation, opts) => request(`/api/executions/${id(runId)}/publish`, {...opts,method:'POST',body:{confirm:confirmation}}),
   logs: (runId, verbosity, after, opts) => request(`/api/executions/${id(runId)}/logs?verbosity=${id(verbosity)}&after=${after}`, opts),
   diagnostics: opts => request('/api/system/diagnostics', opts),
   storage: opts => request('/api/storage', opts),
+  deleteExecutionLogs: (selection, opts) => request('/api/executions/delete-logs', {...opts,method:'POST',body:selection}),
   settings: opts => request('/api/settings', opts),
+  updateSettings: (changes, opts) => request('/api/settings', {...opts, method:'POST', body:changes}),
 };

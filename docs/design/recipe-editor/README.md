@@ -1,5 +1,9 @@
 # Recipe editor UX architecture audit (#24B4)
 
+This directory preserves the #24B4 design audit and subsequent historical
+prototype notes. The current API-backed editor is in `frontend/src/features/recipes/`;
+the [migration parity matrix](../24c1-parity.md) records its present scope.
+
 This documentation is the proposed operator-review architecture for Recipe v5. It is grounded in current code and does not modify or authorize a Recipe editor implementation.
 
 1. [Exhaustive authored/persisted schema inventory](schema-inventory.md): types, defaults, validation, current UI and runtime effects.

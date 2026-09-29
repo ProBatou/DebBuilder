@@ -1,5 +1,11 @@
 # #24C3 API audit and visual approximation
 
+This document records C3/C3.1/C3.2 history. Subsequent operator page reviews
+changed the real Svelte frontend, which is now the visual and interaction
+authority for the production candidate. The B6 prototype remains a reference,
+not a strict parity target. Current functional coverage is in the
+[migration parity matrix](24c1-parity.md).
+
 C3 completed the route/HTTP audit and preserved the C1→C2D functional behavior. Its visual work was an approximation made with CSS overrides on the earlier frontend trees. The C3 screenshot harness captured stable rendering and checked errors and overflow, but did **not** compare B6 and real geometry. C3 therefore did not establish B6 visual parity. #24C3.1 ports B6 presentation structures into the real frontend and checks their geometry against the reference.
 
 ## #24C3.2 operator review corrections
@@ -45,7 +51,7 @@ All measured Package, System and Settings desktop column coordinates also matche
 B6 labels are retained only where they match current product meaning. The real primary action creates a Recipe, not a Package; Repository health comes from diagnostics, not the B6 fixture; managed Recipe remains under System. Settings writes, Delete, Import, Cancel, Validation, Publication, Automation writes and cutover remain outside this checkpoint.
 
 
-The [B6 prototype](../../prototypes/issue-24/) and its [reference images](references/README.md) are the visual and interaction authority. The DebBuilder backend and route registry remain the functional authority. `static/` remains the production frontend. No public APT landing or backend contract was changed in C3.
+At C3, the [B6 prototype](../../prototypes/issue-24/) and its [reference images](references/README.md) were the visual and interaction reference. Later operator page reviews supersede specific B6 choices. The DebBuilder backend and route registry remain the functional authority. `static/` remains the production frontend. No public APT landing or backend contract was changed in C3.
 
 ## Reproduce the comparison
 

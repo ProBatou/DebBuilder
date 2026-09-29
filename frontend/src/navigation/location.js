@@ -1,8 +1,9 @@
 import {writable} from 'svelte/store';
 
 const pages = new Set(['overview', 'packages', 'runs', 'recipes', 'system', 'settings']);
+function decodeSegment(segment) {try {return decodeURIComponent(segment);} catch {return '';}}
 export function parseLocation(hash = '') {
-  const [page, id = ''] = hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
+  const [page, id = ''] = hash.replace(/^#\/?/, '').split('/').map(decodeSegment);
   return {page: pages.has(page) ? page : 'overview', id};
 }
 export const location = writable(parseLocation(typeof window === 'undefined' ? '' : window.location.hash));

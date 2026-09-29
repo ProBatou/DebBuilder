@@ -14,7 +14,9 @@ try {
   for (const [action,mode,terminal] of [['Test','dry_run','prepared'],['Build','build','success']]) {
     await page.goto(`${base}/#/recipes/seerr`);
     await page.getByRole('heading',{name:'seerr'}).waitFor();
-    await page.getByRole('button',{name:'Edit',exact:true}).click();
+    await page.getByRole('button',{name:'Customize',exact:true}).click();
+    const group = page.locator('[data-recipe-path="package.description"]').locator('xpath=ancestor::details[1]');
+    if (!await group.evaluate(node => node.open)) await group.locator('summary').click();
     const description = page.locator('[data-recipe-path="package.description"] textarea');
     const local = `${await description.inputValue()} ${action} real admission`;
     await description.fill(local);

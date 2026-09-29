@@ -1,5 +1,8 @@
 # #24A — Information architecture and normal path
 
+Historical design proposal. The [parity matrix](24c1-parity.md) records the
+current Svelte implementation and remaining scope.
+
 ## Product objects and navigation
 
 Keep the backend chain **GitHub Source → Recipe → Run → Package artifact → Validation → Publication → APT repository**. Show the chain as a package journey with explicit links and version/ref/proof, not seven permanent top-level pages. A Source is a resolved immutable identity for a particular Run; a Recipe is a reusable plan; a Run is an immutable execution snapshot; a Package is the managed name/projection plus artifacts. Validation belongs to an artifact/Run, publication belongs to an exact validated artifact. Never imply Build success means publishable.

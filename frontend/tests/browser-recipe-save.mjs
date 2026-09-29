@@ -3,6 +3,10 @@ import {chromium} from '@playwright/test';
 
 const base = process.env.DEBBUILDER_FRONTEND_URL || 'http://127.0.0.1:5175';
 const api = process.env.DEBBUILDER_DEV_API || 'http://127.0.0.1:8875';
+async function expandField(page,path) {
+  const group = page.locator(`[data-recipe-path="${path}"]`).locator('xpath=ancestor::details[1]');
+  if (!await group.evaluate(node => node.open)) await group.locator('summary').click();
+}
 const browser = await chromium.launch({headless:true});
 try {
   for (const viewport of [{width:1440,height:900},{width:390,height:844}]) {
@@ -17,7 +21,8 @@ try {
     });
     await page.goto(`${base}/#/recipes/seerr`);
     await page.getByRole('heading',{name:'seerr'}).waitFor();
-    await page.getByRole('button',{name:'Edit',exact:true}).click();
+    await page.getByRole('button',{name:'Customize',exact:true}).click();
+    await expandField(page,'package.description');
     const description = page.locator('[data-recipe-path="package.description"] textarea');
     const original = await description.inputValue();
     await description.fill(`${original} saved ${viewport.width}`);
@@ -30,13 +35,14 @@ try {
     assert.equal(await description.isDisabled(),true);
     assert.equal(await page.getByRole('button',{name:'Saving…'}).isDisabled(),true);
     releaseSave();
-    await page.getByRole('button',{name:'Edit',exact:true}).waitFor();
+    await page.locator('.recipe-plan').waitFor();
     await page.unroute('**/api/workflows/seerr',delaySave);
     assert.match(saves.at(-1).expected_revision,/^[0-9a-f]{64}$/);
     assert.equal(saves.at(-1).workflow.package.description,`${original} saved ${viewport.width}`);
     const afterSave = await (await page.request.get(`${api}/api/workflows/seerr`)).json();
     assert.equal(afterSave.package.description,`${original} saved ${viewport.width}`);
-    await page.getByRole('button',{name:'Edit',exact:true}).click();
+    await page.getByRole('button',{name:'Customize',exact:true}).click();
+    await expandField(page,'package.description');
     await description.fill(`${original} local ${viewport.width}`);
     const serverVersion = {...afterSave, active: !afterSave.active};
     const latestResponse = await page.request.get(`${api}/api/workflows/seerr`);
@@ -51,8 +57,9 @@ try {
     assert.equal(await page.getByRole('button',{name:'Save',exact:true}).isDisabled(),true);
     await page.getByRole('alert').getByRole('button',{name:'Review changes'}).click();
     await page.getByRole('button',{name:'Discard my draft and reload'}).click();
-    await page.getByRole('button',{name:'Edit',exact:true}).waitFor();
-    await page.getByRole('button',{name:'Edit',exact:true}).click();
+    await page.locator('.recipe-plan').waitFor();
+    await page.getByRole('button',{name:'Customize',exact:true}).click();
+    await expandField(page,'package.description');
     await description.fill(`${original} rejected ${viewport.width}`);
     for (const [status,message] of [[401,'Sign in required'],[403,'Access denied'],[422,'Server rejected field'],[503,'Temporary server failure']]) {
       const failSave = async route => {
@@ -66,43 +73,32 @@ try {
       await page.unroute('**/api/workflows/seerr',failSave);
     }
     await page.getByRole('button',{name:'Cancel',exact:true}).click();
-    await page.goto(`${base}/#/recipes/_create`);
-    await page.getByRole('heading',{name:'New Recipe'}).waitFor();
+    await page.goto(`${base}/#/packages`);
+    await page.getByRole('button',{name:'Add package'}).click();
     const newId = `lab-new-${viewport.width}-${Date.now()}`;
-    await page.getByLabel('Recipe ID').fill(newId);
+    await page.getByLabel('Package name').fill(newId);
     await page.getByLabel('GitHub repository').fill('example/new-recipe');
-    await page.getByRole('button',{name:'Continue'}).click();
-    await page.getByRole('heading',{name:newId}).waitFor();
-    await page.getByRole('button',{name:'Save',exact:true}).click();
-    await page.getByRole('heading',{name:newId}).waitFor();
-    await page.getByRole('button',{name:'Edit',exact:true}).waitFor();
+    await page.getByRole('button',{name:'Create package'}).click();
+    await page.locator('.package-detail h2').getByText(newId).waitFor();
     assert.equal(saves.at(-1).create_only,true);
     assert.ok((await (await page.request.get(`${api}/api/workflows/${newId}`)).json()).name === newId);
-    await page.goto(`${base}/#/recipes/_create`);
-    const collisionId = `lab-new-collision-${viewport.width}-${Date.now()}`;
-    await page.getByLabel('Recipe ID').fill(collisionId);
+    const saveCount = saves.length;
+    if (viewport.width < 600) await page.locator('.package-detail-back').click();
+    await page.getByRole('button',{name:'Add package'}).click();
+    await page.getByLabel('Package name').fill(newId);
     await page.getByLabel('GitHub repository').fill('example/collision');
-    await page.getByRole('button',{name:'Continue'}).click();
-    await page.getByRole('heading',{name:collisionId}).waitFor();
-    const competingDraft = await (await page.request.post(`${api}/api/recipes/draft`,{data:{name:collisionId,repository:'example/competitor'}})).json();
-    assert.equal((await page.request.post(`${api}/api/workflows/${collisionId}`,{data:{workflow:competingDraft.recipe,create_only:true}})).status(),200);
-    await page.getByRole('button',{name:'Save',exact:true}).click();
-    await page.getByRole('heading',{name:'Recipe conflict'}).waitFor();
-    assert.equal((await (await page.request.get(`${api}/api/workflows/${collisionId}`)).json()).source.repository,'example/competitor');
-    await page.getByLabel('Change Recipe ID').fill(`${collisionId}-retry`);
-    await page.getByRole('button',{name:'Change Recipe ID'}).click();
-    await page.getByRole('button',{name:'Save',exact:true}).click();
-    await page.getByRole('button',{name:'Edit',exact:true}).waitFor();
-    assert.equal((await (await page.request.get(`${api}/api/workflows/${collisionId}-retry`)).json()).source.repository,'example/collision');
+    await page.getByRole('button',{name:'Create package'}).click();
+    await page.getByText('A package with this name already exists.').waitFor();
+    assert.equal(saves.length,saveCount);
+    await page.locator('.package-create-dialog').getByRole('button',{name:'Cancel'}).click();
     await page.goto(`${base}/#/system/managed`);
-    await page.getByRole('heading',{name:'debbuilder'}).waitFor();
-    await page.getByRole('button',{name:'Edit',exact:true}).click();
-    assert.equal(await page.locator('[data-recipe-path="source.repository"] input').isDisabled(),true);
+    await page.getByRole('heading',{name:'System-managed self-build'}).last().waitFor();
+    assert.equal(await page.locator('[data-recipe-path="source.repository"]').count(),0);
     await page.locator('[data-recipe-path="active"] input').click();
+    const managedSaveRequest = page.waitForRequest(request => request.method() === 'POST' && request.url().endsWith('/api/workflows/debbuilder'));
     await page.getByRole('button',{name:'Save',exact:true}).click();
-    await page.getByRole('button',{name:'Edit',exact:true}).waitFor();
+    await managedSaveRequest;
     assert.match(saves.at(-1).expected_revision,/^[0-9a-f]{64}$/);
-    await page.getByRole('button',{name:'Edit',exact:true}).click();
     await page.locator('[data-recipe-path="active"] input').click();
     const localManaged = await page.locator('[data-recipe-path="active"] input').isChecked();
     const remoteManaged = await page.request.get(`${api}/api/workflows/debbuilder`);

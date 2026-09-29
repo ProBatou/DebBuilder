@@ -105,6 +105,7 @@ class _Scan:
         self.run_bytes: dict[str, int] = {}
         self.run_artifact_counts: dict[str, int] = {}
         self.run_metadata: dict[str, dict] = {}
+        self.hidden_runs: set[str] = set()
         self.run_revisions: dict[str, tuple[int, int, int, int]] = {}
         self.artifact_count = 0
         self.artifact_bytes = 0
@@ -165,6 +166,9 @@ def _read_run_metadata(data_root: Path, run_id: str, scan: _Scan) -> None:
         if Path(str(run.get("workspace") or "")) != path.parent:
             raise ValueError("Run workspace is not canonical")
         scan.run_metadata[run_id] = run
+        if BuildStore(data_root / "builds").execution_history_deleted(run_id, run):
+            scan.hidden_runs.add(run_id)
+            return
         active = run.get("status") in {"pending", "queued", "running", "cancelling"}
         active = active or any(step.get("status") == "running" for step in run.get("steps") or [])
         from .validation_service import ACTIVE_STATUSES, list_attempts
@@ -333,7 +337,8 @@ def collect_storage_snapshot(
     test_count = 0
     pruned_artifact_count = 0
     pruned_artifact_bytes = 0
-    for run in scan.run_metadata.values():
+    visible_runs = {run_id: run for run_id, run in scan.run_metadata.items() if run_id not in scan.hidden_runs}
+    for run in visible_runs.values():
         mode = str(run.get("mode") or "unknown")
         status = str(run.get("status") or "unknown")
         by_mode[mode] = by_mode.get(mode, 0) + 1
@@ -352,7 +357,7 @@ def collect_storage_snapshot(
             "status": str(scan.run_metadata.get(run_id, {}).get("status") or "unknown"),
         }
         for run_id, size in sorted(
-            ((run_id, scan.run_bytes.get(run_id, 0)) for run_id in scan.run_metadata),
+            ((run_id, scan.run_bytes.get(run_id, 0)) for run_id in visible_runs),
             key=lambda row: (-row[1], row[0]),
         )[:MAX_LARGEST_RUNS]
     ]
@@ -376,7 +381,7 @@ def collect_storage_snapshot(
         },
         "categories": scan.categories,
         "runs": {
-            "count": len(scan.run_metadata),
+            "count": len(visible_runs),
             "by_mode": by_mode,
             "by_status": by_status,
             "failed_count": failed_count,
@@ -440,15 +445,31 @@ class StorageInventory:
         self._snapshot = _initial_snapshot()
         self._measured_monotonic: float | None = None
         self._collecting = False
+        self._revision = 0
+        self._completed_revision = 0
+
+    def invalidate(self) -> None:
+        with self._lock:
+            self._revision += 1
+
+    def needs_refresh(self) -> bool:
+        with self._lock:
+            return self._revision != self._completed_revision
 
     def snapshot(self) -> dict:
         with self._lock:
             result = deepcopy(self._snapshot)
             measured = self._measured_monotonic
             collecting = self._collecting
-        if collecting:
+            pending = self._revision != self._completed_revision
+        if collecting or pending:
             result["state"] = "collecting"
             result["partial"] = True
+            result["bytes"] = {key: None for key in result["bytes"]}
+            result["categories"] = {key: None for key in result["categories"]}
+            result["runs"] = {**result["runs"], "count": None, "by_mode": {}, "by_status": {},
+                              "failed_count": None, "test_count": None, "artifact_count": None,
+                              "artifact_bytes": None, "largest": []}
         elif measured is not None and time.monotonic() - measured > self.stale_after:
             result["state"] = "stale"
             result["partial"] = True
@@ -457,6 +478,7 @@ class StorageInventory:
     def collect(self) -> dict:
         with self._lock:
             self._collecting = True
+            revision = self._revision
         try:
             snapshot = collect_storage_snapshot(
                 self.data_root,
@@ -471,6 +493,8 @@ class StorageInventory:
                 previous["diagnostics"] = [f"Storage inventory failed: {exc}"[:300]]
                 self._snapshot = previous
                 self._collecting = False
+                if revision == self._revision:
+                    self._completed_revision = revision
                 return deepcopy(previous)
         with self._lock:
             if snapshot.get("last_successful_measurement") is None:
@@ -480,4 +504,6 @@ class StorageInventory:
             self._snapshot = deepcopy(snapshot)
             self._measured_monotonic = time.monotonic()
             self._collecting = False
+            if revision == self._revision:
+                self._completed_revision = revision
             return deepcopy(snapshot)

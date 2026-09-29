@@ -1,6 +1,7 @@
 <script>
   import {onMount, tick} from 'svelte';
   import {api} from '../api/client.js';
+  import {cached, remember} from '../features/sessionCache.js';
   import {admitDraftRun} from '../features/recipes/admission.js';
   import {loadRecipe} from '../features/recipes/persistence.js';
   import {navigate} from '../navigation/location.js';
@@ -10,7 +11,7 @@
   import StatusChip from '../components/StatusChip.svelte';
   import {operatorStatusSemantics as overviewStatus} from '../components/statusSemantics.js';
   export let language = 'en';
-  let dashboard = null, diagnostics = null, error = null, loading = true, controller;
+  let dashboard = cached('overview')?.dashboard || null, diagnostics = cached('overview')?.diagnostics || null, error = null, loading = !dashboard, controller;
   let actionDialog, dialogTitle, dialogTrigger, actionContext = null;
   let actionLoading = false, actionPending = false, actionError = null, actionResult = null, publishConfirmed = false, admittedRunId = '';
   let actionRevision = 0, actionController;
@@ -117,11 +118,12 @@
     else if (row) navigate('packages',row.name);
   }
   async function load() {
-    controller?.abort(); const current = new AbortController(); controller = current; loading = true; error = null;
+    controller?.abort(); const current = new AbortController(); controller = current; loading = !dashboard; error = null;
     const [summary,health] = await Promise.allSettled([api.dashboard({signal:current.signal}),api.diagnostics({signal:current.signal})]);
     if (current.signal.aborted) return;
     if (summary.status === 'fulfilled') dashboard = summary.value.dashboard;
     if (health.status === 'fulfilled') diagnostics = health.value;
+    if (summary.status === 'fulfilled') remember('overview',{dashboard,diagnostics});
     error = [summary,health].find(result => result.status === 'rejected' && result.reason?.name !== 'AbortError')?.reason || null;
     loading = false;
   }

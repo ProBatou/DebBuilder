@@ -216,16 +216,16 @@ class PackageService:
         runs_by_package: dict[str, list[dict]] = {}
         build_store = BuildStore(self.data_dir / "builds")
         for stored_run in build_store.list(limit=1000):
+            # Maintenance keeps the Run record and artifact for safe retention,
+            # but its durable deletion marker removes it from operator history.
+            if build_store.execution_history_deleted(str(stored_run["id"]), stored_run):
+                continue
             if self._run_projector is not None:
                 stored_run = self._run_projector(stored_run, build_store)
-            run = {
-                **stored_run,
-                "_execution_history_deleted": build_store.execution_history_deleted(str(stored_run["id"]), stored_run),
-            }
-            key = normalized_package_name(build_run_package(run))
+            key = normalized_package_name(build_run_package(stored_run))
             if key:
                 packages.setdefault(key, self._empty_package(key))
-                runs_by_package.setdefault(key, []).append(run)
+                runs_by_package.setdefault(key, []).append(stored_run)
 
         apt = self._repo_settings()
         enriched = []
@@ -266,6 +266,9 @@ class PackageService:
             }
         run_state = package_store.summarize_runs(runs, execution_projection.public_summary, include_history=include_history)
         successful, resolved = run_state["successful"], run_state["resolved"]
+        # An override may contain a legacy last_build summary. The Run store is
+        # authoritative for history, including durable Maintenance tombstones.
+        package["last_build"] = execution_projection.public_summary(successful) if successful else None
         candidate = (successful.get("version") or {}).get("debian", "") if successful else ""
         latest_validation = run_state["latest_validation"]
         latest_publication = run_state["latest_publication"]
@@ -345,6 +348,8 @@ class PackageService:
             candidate_is_newer=candidate_newer,
         )
         item["build"].update({
+            "last_build_id": (successful or {}).get("id", ""),
+            "last_status": (successful or {}).get("status", ""),
             "validated": verified,
             "latest_run": run_state["last_real"],
             "latest_run_id": (run_state["last_real"] or {}).get("id", ""),

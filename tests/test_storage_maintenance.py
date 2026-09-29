@@ -24,6 +24,41 @@ class FakeInventory:
 
 
 class StorageMaintenanceTests(unittest.TestCase):
+    def test_history_cleanup_refreshes_inventory_without_restart(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            data, repo = base / "data", base / "repo"
+            data.mkdir()
+            repo.mkdir()
+            (repo / "published.deb").write_bytes(b"published")
+            store = BuildStore(data / "builds")
+            run = store.create({
+                "schema_version": 5, "name": "history", "active": True,
+                "package": {"name": "history", "maintainer": "A <a@example.test>", "description": "History"},
+                "source": {"repository": "owner/history"},
+            }, mode="build", run_id="history")
+            run["status"] = "failed"
+            store.save(run)
+            inventory = StorageInventory(data, repo)
+            before = inventory.collect()
+            self.assertEqual(before["runs"]["count"], 1)
+            service = maintenance.MaintenanceService(inventory, refresh_interval=3600)
+            service.start()
+            try:
+                store.clear_log_history(run["id"])
+                service.request(refresh=True)
+                self.assertEqual(inventory.snapshot()["state"], "collecting")
+                deadline = time.monotonic() + 3
+                while inventory.snapshot()["runs"]["count"] != 0 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                after = inventory.snapshot()
+                self.assertEqual(after["runs"]["count"], 0)
+                self.assertEqual(after["bytes"]["repository"], before["bytes"]["repository"])
+                self.assertFalse(inventory.needs_refresh())
+            finally:
+                service.stop()
+                service.join(2)
+
     def test_application_maintenance_holds_mutation_lease_before_cleanup(self):
         inventory = FakeInventory()
         gate = MutationGate()

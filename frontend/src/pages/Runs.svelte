@@ -1,6 +1,7 @@
 <script>
   import {onMount, tick} from 'svelte';
   import {api} from '../api/client.js';
+  import {cached, remember, invalidate, uiState, rememberUi} from '../features/sessionCache.js';
   import {admitDraftRun} from '../features/recipes/admission.js';
   import {loadRecipe} from '../features/recipes/persistence.js';
   import {createPoller} from '../features/polling.js';
@@ -11,8 +12,8 @@
   import Status from '../components/Status.svelte';
   import {operatorStatusSemantics} from '../components/statusSemantics.js';
   export let id = '', language = 'en';
-  let rows = [], run = null, logs = '', offset = 0, verbosity = 'normal', following = true;
-  let query = '', filter = 'all', error = null, detailError = null, logError = null;
+  let rows = cached('runs') || [], run = null, logs = '', offset = 0, verbosity = 'normal', following = true;
+  let query = uiState('runs').query || '', filter = uiState('runs').filter || 'all', error = null, detailError = null, logError = null;
   let refreshingLogs = false, detachedPosition = null, verbosityPagePosition = null, suppressLogScroll = false;
   const logText = {
     en:{live:'● Live',liveLabel:'Live log following',jump:'↓ Jump to latest',jumpLabel:'Jump to latest log output'},
@@ -89,7 +90,7 @@
   };
   const stageLabel = name => stageNames[language]?.[name] || name;
   async function review(recipeId) {navigationError = null; try {await openRecipe(recipeId);} catch(caught) {navigationError = caught;}}
-  let listController, listPoller, detailPoller, selectedId = '', defaultRunId = '', generation = 0, logNode;
+  let listController, listPoller, detailPoller, selectedId = '', defaultRunId = uiState('runs').selected || rows[0]?.id || '', generation = 0, logNode;
   const active = row => row?.lifecycle_active === true || ['queued','running','cancelling'].includes(row?.status);
   const completedStates = new Set(['completed','published','validated','success']);
   function matchesStatusFilter(row, selectedFilter) {
@@ -198,10 +199,12 @@
     return stages;
   }
   async function loadList(signal) {const response = await api.runs({signal}); return response.executions || [];}
-  function updateList(value) {rows = value; error = null; if (!defaultRunId && value.length) defaultRunId = value[0].id;}
+  function updateList(value) {rows = value; remember('runs',value); error = null; if (!value.some(row => row.id === defaultRunId)) defaultRunId = value[0]?.id || '';}
   async function refreshList() {listController?.abort(); listController = new AbortController(); try {updateList(await loadList(listController.signal));} catch(caught) {if(caught.name !== 'AbortError') error = caught;}}
   async function loadDetail(runId, signal) {
-    const response = await api.run(runId, {signal});
+    let response;
+    try {response = await api.run(runId, {signal});}
+    catch (caught) {if (caught.status === 404) caught.missingRun = true; throw caught;}
     const next = response.execution;
     // The cursor refers to the backend's rendered representation for this verbosity.
     // Fetch only its suffix, even after the Run becomes terminal.
@@ -209,7 +212,7 @@
     return {next, chunk};
   }
   async function applyDetail(value, token) {
-    run = value.next;
+    run = value.next; remember(`runs:${run.id}`,run);
     const replace = refreshingLogs;
     const followIntent = following;
     if (replace) suppressLogScroll = true;
@@ -243,12 +246,12 @@
   }
   function select(runId, preserveRun = false) {
     detailPoller?.stop();
-    selectedId = runId; ++generation; if (!preserveRun) run = null; logs = ''; offset = 0; detailError = null; logError = null; refreshingLogs = false; detachedPosition = null; verbosityPagePosition = null; suppressLogScroll = false; if (!preserveRun) following = true;
+    selectedId = runId; ++generation; if (!preserveRun) run = cached(`runs:${runId}`) || null; logs = ''; offset = 0; detailError = null; logError = null; refreshingLogs = false; detachedPosition = null; verbosityPagePosition = null; suppressLogScroll = false; if (!preserveRun) following = true;
     if (!runId) return;
     const token = generation;
     detailPoller = createPoller(signal => loadDetail(runId,signal), {
       onData: value => {if (token === generation && selectedId === runId) applyDetail(value, token);},
-      onError: caught => {if (token === generation) detailError = caught;},
+      onError: caught => {if (token === generation) {detailError = caught; if (caught.missingRun) {invalidate('runs'); run = null; logs = ''; detailPoller?.stop(); if (id === runId) navigate('runs');}}},
     });
     detailPoller.start();
   }
@@ -271,7 +274,7 @@
   onMount(() => {
     listPoller = createPoller(loadList, {interval:5000, onData:updateList, onError:caught => error = caught});
     listPoller.start();
-    return () => {++actionRevision; listPoller.stop(); detailPoller?.stop(); listController?.abort(); actionController?.abort();};
+    return () => {rememberUi('runs',{query,filter,selected:displayId}); ++actionRevision; listPoller.stop(); detailPoller?.stop(); listController?.abort(); actionController?.abort();};
   });
   $: displayId = id || defaultRunId;
   $: if (displayId !== selectedId) select(displayId);

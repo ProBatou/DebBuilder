@@ -1,3 +1,5 @@
+import {invalidateForMutation} from '../features/sessionCache.js';
+
 export class ApiError extends Error {
   constructor({status = 0, code = 'request_failed', message = 'Request failed', details = {}, kind = 'http'} = {}) {
     super(message);
@@ -31,6 +33,7 @@ export async function request(path, {signal, timeout = 20000, fetchImpl = fetch,
     const type = response.headers.get('content-type') || '';
     const payload = type.includes('json') ? await response.json() : await response.text();
     if (!response.ok) throw canonicalError(response.status, payload);
+    if (method !== 'GET') invalidateForMutation(path);
     return withHeaders ? {payload, headers: response.headers} : payload;
   } catch (error) {
     if (error instanceof ApiError) throw error;

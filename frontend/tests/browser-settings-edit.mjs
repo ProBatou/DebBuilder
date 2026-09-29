@@ -66,6 +66,7 @@ try {
   await page.getByLabel('GitHub token').fill('replacement-token');
   await page.getByRole('button',{name:'Save changes'}).click();
   assert.deepEqual(writes[3],{github:{token:'replacement-token'}});
+  assert.equal(await page.evaluate(() => JSON.stringify({...localStorage,...sessionStorage}).includes('replacement-token')),false);
   assert.equal(await page.getByLabel('GitHub token').inputValue(),'');
   await page.getByRole('button',{name:'Authentication',exact:true}).click();
   await page.getByLabel('Authentication mode').selectOption('oidc');

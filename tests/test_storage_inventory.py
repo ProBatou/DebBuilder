@@ -200,6 +200,28 @@ class StorageInventoryTests(unittest.TestCase):
         self.assertIn(ready["state"], {"ready", "partial"})
         self.assertEqual(inventory.snapshot()["state"], "stale")
 
+    def test_history_deletion_invalidates_count_without_losing_repository_bytes(self):
+        run, _root = self.make_run("history-to-clear")
+        (self.repo / "published.deb").write_bytes(b"published")
+        inventory = storage_inventory.StorageInventory(self.data, self.repo)
+        before = inventory.collect()
+        self.assertEqual(before["runs"]["count"], 1)
+        repository_bytes = before["bytes"]["repository"]
+
+        self.store.clear_log_history(run["id"])
+        inventory.invalidate()
+        pending = inventory.snapshot()
+        self.assertEqual(pending["state"], "collecting")
+        self.assertIsNone(pending["runs"]["count"])
+        self.assertIsNone(pending["bytes"]["managed_total"])
+        after = inventory.collect()
+        self.assertEqual(after["runs"]["count"], 0)
+        self.assertEqual(after["bytes"]["repository"], repository_bytes)
+        self.assertEqual(after["bytes"]["managed_total"], after["bytes"]["data_root"] + repository_bytes)
+        # History is hidden, while an artifact left on disk is still measured.
+        self.assertEqual(after["runs"]["artifact_bytes"], len(b"artifact"))
+        self.assertEqual(inventory.snapshot()["runs"]["count"], 0)
+
     def test_retention_projection_reports_fixed_active_schedule(self):
         result = self.collect()
 

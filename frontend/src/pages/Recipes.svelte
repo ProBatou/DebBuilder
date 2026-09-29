@@ -1,6 +1,7 @@
 <script>
   import {onMount} from 'svelte';
   import {api} from '../api/client.js';
+  import {cached, remember, uiState, rememberUi} from '../features/sessionCache.js';
   import {loadRecipe} from '../features/recipes/persistence.js';
   import {navigate} from '../navigation/location.js';
   import {t} from '../i18n/i18n.js';
@@ -8,8 +9,8 @@
   import RecipeDetail from '../features/recipes/RecipeDetail.svelte';
   import ErrorNotice from '../components/ErrorNotice.svelte';
   export let id = '', language = 'en';
-  let rows = [], workflowRows = [], listingErrors = [], listError = null, listLoading = true, detailError = null, recipe = null;
-  let query = '', listController, detailController, generation = 0, listGeneration = 0, revision = null, defaultRecipeId = '';
+  let rows = cached('recipes')?.rows || [], workflowRows = cached('recipes')?.workflowRows || [], listingErrors = cached('recipes')?.listingErrors || [], listError = null, listLoading = !cached('recipes'), detailError = null, recipe = null;
+  let query = uiState('recipes').query || '', listController, detailController, generation = 0, listGeneration = 0, revision = null, defaultRecipeId = uiState('recipes').selected || rows[0]?.id || '';
   function onSaved({recipe:stored, revision:fresh, newer}) {
     revision = fresh;
     if (!newer) {
@@ -21,28 +22,29 @@
       } : row);
     }
     if (!newer) recipe = stored;
+    if (!newer) {remember('recipes',{rows,workflowRows,listingErrors}); remember(`recipes:${stored.name}`,{recipe:stored,revision:fresh});}
   }
   async function load() {
-    listController?.abort(); listController = new AbortController(); const token = ++listGeneration; listError = null; listLoading = true; rows = []; listingErrors = [];
+    listController?.abort(); listController = new AbortController(); const token = ++listGeneration; listError = null; listLoading = !cached('recipes');
     try {
       const [list, workflows] = await Promise.all([api.recipes({signal:listController.signal}), api.workflows({signal:listController.signal})]);
-      if (token === listGeneration) {rows = (list.recipes || []).filter(row => !row.managed); if (!defaultRecipeId && rows.length) defaultRecipeId = rows[0].id; workflowRows = workflows.workflows || []; listingErrors = workflows.errors || [];}
+      if (token === listGeneration) {rows = (list.recipes || []).filter(row => !row.managed); if (!rows.some(row => row.id === defaultRecipeId)) defaultRecipeId = rows[0]?.id || ''; workflowRows = workflows.workflows || []; listingErrors = workflows.errors || []; remember('recipes',{rows,workflowRows,listingErrors});}
     } catch (caught) {if (caught.name !== 'AbortError' && token === listGeneration) listError = caught;}
     finally {if (token === listGeneration) listLoading = false;}
   }
   async function detail(recipeId) {
     detailController?.abort(); detailController = new AbortController(); const token = ++generation;
-    recipe = null; revision = null; detailError = null;
+    const prior = cached(`recipes:${recipeId}`); recipe = prior?.recipe || null; revision = prior?.revision || null; detailError = null;
     if (!recipeId) return;
     if (recipeId === '_create' || recipeId === '_create-package') {navigate('packages'); return;}
     try {
       const loaded = await loadRecipe(recipeId,{signal:detailController.signal});
       if (token !== generation) return;
       if (isManaged(loaded.recipe)) {navigate('system','managed'); return;}
-      recipe = loaded.recipe; revision = loaded.revision;
+      recipe = loaded.recipe; revision = loaded.revision; remember(`recipes:${recipeId}`,loaded);
     } catch (caught) {if (caught.name !== 'AbortError' && token === generation) detailError = caught; return;}
   }
-  onMount(() => {load(); return () => {listController?.abort(); detailController?.abort();};});
+  onMount(() => {load(); return () => {rememberUi('recipes',{query,selected:displayId}); listController?.abort(); detailController?.abort();};});
   $: displayId = id || defaultRecipeId;
   $: detail(displayId);
   $: visible = rows.filter(row => `${row.id} ${row.package || ''} ${row.repository || ''}`.toLowerCase().includes(query.toLowerCase()));

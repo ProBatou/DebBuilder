@@ -1,13 +1,14 @@
 <script>
   import {onMount, tick} from 'svelte';
   import {api} from '../api/client.js';
+  import {cached, remember, uiState, rememberUi} from '../features/sessionCache.js';
   import {locale, setLocale, t} from '../i18n/i18n.js';
   import {theme, setTheme} from '../theme/theme.js';
   import ErrorNotice from '../components/ErrorNotice.svelte';
 
   export let language = 'en';
-  let settings = null, draft = null, error = null, saveError = null;
-  let tab = 'general', saving = false, savedTab = null, controller;
+  let settings = cached('settings') || null, draft = settings ? structuredClone(settings) : null, error = null, saveError = null;
+  let tab = uiState('settings').tab || 'general', saving = false, savedTab = null, controller;
   let dirty = {}, secrets = {github:'', notifications:'', auth:''};
   const tabs = ['general','repository','github','auth','notifications','automation','advanced'];
   const names = {
@@ -106,23 +107,24 @@
     saving = true; saveError = null; savedTab = null;
     try {
       settings = (await api.updateSettings(changes)).settings;
+      remember('settings',settings);
       draft = {...draft,...Object.fromEntries(Object.keys(changes).filter(key => key !== 'github').map(key => [key,structuredClone(settings[key])]))};
       if (activeTab in secrets) secrets = {...secrets,[activeTab]:''};
       dirty = {...dirty,[activeTab]:false}; savedTab = activeTab;
     } catch (caught) {saveError = caught;}
     finally {saving = false;}
   }
-  async function select(next) {tab = next; saveError = null; await tick(); document.querySelector('.settings-nav button.active')?.scrollIntoView({block:'nearest',inline:'nearest'});}
+  async function select(next) {tab = next; rememberUi('settings',{tab}); saveError = null; await tick(); document.querySelector('.settings-nav button.active')?.scrollIntoView({block:'nearest',inline:'nearest'});}
   async function load() {
     controller?.abort(); controller = new AbortController(); error = null;
     try {
       const received = (await api.settings({signal:controller.signal})).settings;
       if (!received || typeof received !== 'object' || Array.isArray(received)) throw new Error(t('unavailable',language));
-      settings = received; draft = structuredClone(received); dirty = {}; secrets = {github:'',notifications:'',auth:''};
+      settings = received; remember('settings',received); draft = structuredClone(received); dirty = {}; secrets = {github:'',notifications:'',auth:''};
     }
     catch (caught) {if (caught.name !== 'AbortError') error = caught;}
   }
-  onMount(() => {load(); return () => controller?.abort();});
+  onMount(() => {load(); return () => {rememberUi('settings',{tab}); controller?.abort();};});
 </script>
 <div class="settings-layout"><nav class="settings-nav" aria-label={t('settings',language)}>{#each tabs as key}<button class:active={tab===key} aria-current={tab===key?'page':undefined} onclick={() => select(key)}>{label(key)}{#if dirty[key]} <span class="settings-unsaved" aria-label={copy('unsaved')}>●</span>{/if}</button>{/each}</nav><div class="settings-content">
 <ErrorNotice {error} retry={load} {language}/>

@@ -11,7 +11,7 @@ try {
     other:{id:'other',package:'other',status:'running',lifecycle_status:'building',steps:[]},
   };
   const lines = prefix => Array.from({length:100},(_,index) => `${prefix} line ${index}\n`).join('');
-  const content = {active:{normal:lines('NORMAL'),raw:lines('RAW'),compact:Array.from({length:35},(_,index) => `COMPACT line ${index}\n`).join('')},other:{normal:lines('OTHER')}};
+  const content = {active:{normal:lines('NORMAL'),verbose:lines('VERBOSE'),raw:lines('RAW'),compact:'COMPACT line 0\n'},other:{normal:lines('OTHER'),compact:'OTHER compact\n',verbose:lines('OTHER VERBOSE'),raw:lines('OTHER RAW')}};
   page.on('pageerror',error => errors.push(error.message));
   await page.route('**/api/**',route => {
     const url = new URL(route.request().url());
@@ -41,6 +41,22 @@ try {
   await waitLog('NORMAL line 99');
   await live.waitFor();
   const atBottom = () => terminal.evaluate(element => element.scrollHeight-element.clientHeight-element.scrollTop <= 24);
+  const viewportHeight = async () => (await terminal.boundingBox()).height;
+  const factsTop = async () => (await page.locator('.run-technical').boundingBox()).y;
+  const verbosity = page.getByRole('combobox',{name:'Log detail'});
+  const initialHeight = await viewportHeight();
+  const initialFactsTop = await factsTop();
+  for (const [level,lastLine] of [['compact','COMPACT line 0'],['verbose','VERBOSE line 99'],['raw','RAW line 99']]) {
+    await verbosity.selectOption(level);
+    await waitLog(lastLine);
+    assert.ok(Math.abs(await viewportHeight()-initialHeight) <= 1,`${level} changed log viewport height`);
+    assert.ok(Math.abs(await factsTop()-initialFactsTop) <= 1,`${level} moved following content`);
+    if (level !== 'compact') assert.equal(await terminal.evaluate(element => element.scrollHeight > element.clientHeight),true,`${level} needs internal scrolling`);
+    assert.equal(await atBottom(),true);
+  }
+  await verbosity.selectOption('normal');
+  await waitLog('NORMAL line 99');
+  content.active.compact = Array.from({length:35},(_,index) => `COMPACT line ${index}\n`).join('');
   assert.equal(await atBottom(),true);
   await page.evaluate(() => window.scrollTo(0,120));
   const pageY = await page.evaluate(() => window.scrollY);
@@ -57,7 +73,6 @@ try {
   await jump.click();
   await live.waitFor();
   assert.equal(await atBottom(),true);
-  const verbosity = page.getByRole('combobox',{name:'Log detail'});
   const beforeRawY = await page.evaluate(() => window.scrollY);
   await verbosity.selectOption('raw');
   await waitLog('RAW line 99');
@@ -81,9 +96,20 @@ try {
   assert.equal(await live.count(),0);
   assert.equal(await terminal.evaluate(element => element.scrollTop),0);
   await page.goto(`${base}/#/runs/other`);
+  await waitLog('OTHER compact');
+  await verbosity.selectOption('normal');
   await waitLog('OTHER line 99');
   await live.waitFor();
   assert.equal(await atBottom(),true);
+  await page.setViewportSize({width:390,height:640});
+  const mobileHeight = await viewportHeight();
+  assert.ok(mobileHeight >= 160 && mobileHeight <= 320,`mobile log viewport height ${mobileHeight}`);
+  assert.notEqual(mobileHeight,initialHeight,'log viewport should respond to viewport height');
+  for (const [level,lastLine] of [['compact','OTHER compact'],['verbose','OTHER VERBOSE line 99'],['raw','OTHER RAW line 99']]) {
+    await verbosity.selectOption(level);
+    await waitLog(lastLine);
+    assert.ok(Math.abs(await viewportHeight()-mobileHeight) <= 1,`${level} changed mobile log viewport height`);
+  }
   assert.ok(requests.some(row => row.runId === 'active' && row.level === 'raw' && row.after === 0));
   assert.ok(requests.some(row => row.runId === 'active' && row.level === 'compact' && row.after === 0));
   assert.deepEqual(errors,[]);

@@ -34,3 +34,19 @@ test('GET route identity is escaped and log cursor is explicit', async () => {
   try {await api.logs('run/a','raw',8); assert.equal(paths[0],'/api/executions/run%2Fa/logs?verbosity=raw&after=8');}
   finally {globalThis.fetch=original;}
 });
+
+test('cancellation uses canonical encoded Run and validation attempt routes', async () => {
+  const original = globalThis.fetch; const calls=[];
+  globalThis.fetch = async (path, options) => {
+    calls.push({path,method:options.method,body:options.body});
+    return response(202,{accepted:true});
+  };
+  try {
+    await api.cancelRun('run/a');
+    await api.cancelValidation('run/a','attempt/b');
+  } finally {globalThis.fetch=original;}
+  assert.deepEqual(calls,[
+    {path:'/api/executions/run%2Fa/cancel',method:'POST',body:'{}'},
+    {path:'/api/executions/run%2Fa/validations/attempt%2Fb/cancel',method:'POST',body:'{}'},
+  ]);
+});

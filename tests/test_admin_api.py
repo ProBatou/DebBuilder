@@ -1,6 +1,8 @@
 import json
 import hashlib
 import os
+import subprocess
+import sys
 import time
 import urllib.error
 import http.client
@@ -682,7 +684,7 @@ class AdminApiTests(AdminApiCase):
         self.assertIn("Compiling two", tail["log"]["text"])
         self.assertNotIn("Compiling one", tail["log"]["text"])
 
-    def test_delete_execution_log_preserves_package_lifecycle_and_artifact(self):
+    def test_delete_execution_log_clears_run_backed_package_state_but_retains_artifact(self):
         store = BuildStore(server.DATA / "builds")
         run = store.create({
             "schema_version": 5,
@@ -718,9 +720,7 @@ class AdminApiTests(AdminApiCase):
         restarted_store = BuildStore(server.DATA / "builds")
         self.assertTrue(restarted_store.execution_history_deleted("cleanup-run", restarted_store.load("cleanup-run")))
         package = server.get_package("cleanup")
-        self.assertEqual(package["build"]["latest_run_id"], "cleanup-run")
-        self.assertEqual(package["lifecycle_display_status"], "validation_needed")
-        self.assertNotIn("cleanup-run", [row["id"] for row in package.get("history", [])])
+        self.assertIsNone(package)
         status, execution_list = self.request("GET", "/api/executions")
         self.assertEqual(status, 200)
         self.assertNotIn("cleanup-run", [row["id"] for row in execution_list["executions"]])
@@ -735,7 +735,7 @@ class AdminApiTests(AdminApiCase):
         self.assertTrue(repeated["deletion"]["already_deleted"])
         self.assertFalse(repeated["deletion"]["visible"])
 
-    def test_clear_all_execution_logs_preserves_lifecycle_and_artifacts(self):
+    def test_clear_all_execution_logs_removes_lifecycle_but_preserves_artifacts(self):
         store = BuildStore(server.DATA / "builds")
         for run_id in ("batch-one", "batch-two"):
             run = store.create({"schema_version": 5, "name": run_id, "package": {"name": run_id}, "source": {"repository": f"example/{run_id}"}, "active": True}, mode="dry_run", run_id=run_id)
@@ -770,7 +770,7 @@ class AdminApiTests(AdminApiCase):
         self.assertTrue(artifact.exists())
         self.assertEqual(cleaned["artifact"]["path"], str(artifact))
         self.assertNotIn("validations", cleaned)
-        self.assertEqual(server.get_package("global-cleanup")["lifecycle_display_status"], "validation_needed")
+        self.assertIsNone(server.get_package("global-cleanup"))
 
         store.save(stale_batch_one)
         restarted_store = BuildStore(server.DATA / "builds")
@@ -780,13 +780,90 @@ class AdminApiTests(AdminApiCase):
         visible_ids = [row["id"] for row in execution_list["executions"]]
         for run_id in ("batch-one", "batch-two", "global-cleanup-run"):
             self.assertNotIn(run_id, visible_ids)
-        self.assertNotIn("global-cleanup-run", [row["id"] for row in server.get_package("global-cleanup").get("history", [])])
+        self.assertIsNone(server.get_package("global-cleanup"))
         with self.assertRaises(urllib.error.HTTPError) as detail_error:
             self.request("GET", "/api/executions/batch-one")
         self.assertEqual(detail_error.exception.code, 404)
         status, second_preview = self.request("POST", "/api/executions/delete-logs", {"all": True, "dry_run": True})
         self.assertEqual(status, 200)
         self.assertEqual(second_preview["count"], 0)
+
+    def test_maintenance_history_deletion_reconciles_dashboard_and_published_package_after_restart(self):
+        store = BuildStore(server.DATA / "builds")
+        failed_recipe = {
+            "schema_version": 5, "name": "failed-cleanup-recipe", "active": True,
+            "source": {"repository": "example/failed-cleanup"},
+            "package": {"name": "failed-cleanup", "maintainer": "Test <test@example.test>", "description": "Cleanup"},
+        }
+        (server.USER_WORKFLOWS / "failed-cleanup-recipe.json").write_text(json.dumps(failed_recipe))
+        failed = store.create(failed_recipe, recipe_id="failed-cleanup-recipe", mode="build", run_id="failed-cleanup-run")
+        failed["status"] = "failed"
+        store.save(failed)
+        storage.save_json(server.DATA / "packages.json", [{
+            "name": "failed-cleanup", "recipe": "failed-cleanup-recipe",
+            "status": "build_failed", "last_build": {"id": failed["id"], "status": "failed"},
+        }])
+        _, validation, artifact = self.successful_build_run(
+            run_id="validation-cleanup-run", package="monitoring-app", version="117",
+        )
+
+        _, before = self.request("GET", "/api/dashboard")
+        rows = {row["name"]: row for row in before["dashboard"]["package_rows"]}
+        self.assertEqual(rows["failed-cleanup"]["lifecycle_display_status"], "build_failed")
+        self.assertEqual(rows["failed-cleanup"]["build"]["latest_run_id"], failed["id"])
+        self.assertEqual(rows["monitoring-app"]["lifecycle_display_status"], "validation_needed")
+        self.assertEqual(rows["monitoring-app"]["build"]["latest_run_id"], validation["id"])
+        self.assertTrue(server.get_package("monitoring-app")["allowed_actions"]["validate"])
+
+        with mock.patch.object(server, "APPLICATION_MAINTENANCE_SERVICE") as maintenance_service:
+            status, single = self.request("DELETE", f"/api/executions/{failed['id']}/logs")
+        maintenance_service.request.assert_called_once_with(refresh=True, cleanup=False)
+        self.assertEqual(status, 200)
+        self.assertTrue(single["deletion"]["history_deleted"])
+        _, after_single = self.request("GET", "/api/dashboard")
+        self.assertNotIn(failed["id"], json.dumps(after_single))
+        self.assertIsNone(next(row for row in server.list_packages() if row["name"] == "failed-cleanup")["last_build"])
+        self.assertNotEqual(
+            next(row for row in after_single["dashboard"]["package_rows"] if row["name"] == "failed-cleanup")["lifecycle_display_status"],
+            "build_failed",
+        )
+
+        with mock.patch.object(server, "APPLICATION_MAINTENANCE_SERVICE") as maintenance_service:
+            status, batch = self.request("POST", "/api/executions/delete-logs", {"all": True})
+        maintenance_service.request.assert_called_once_with(refresh=True, cleanup=False)
+        self.assertEqual(status, 200)
+        self.assertEqual(batch["errors"], [])
+        self.assertTrue(artifact.exists())
+        self.assertEqual(store.load(validation["id"])["status"], "success")
+        _, executions = self.request("GET", "/api/executions")
+        self.assertEqual(executions["executions"], [])
+        _, after = self.request("GET", "/api/dashboard")
+        self.assertEqual(after["dashboard"]["latest_operations"], [])
+        self.assertNotIn(failed["id"], json.dumps(after))
+        self.assertNotIn(validation["id"], json.dumps(after))
+        rows = {row["name"]: row for row in after["dashboard"]["package_rows"]}
+        self.assertEqual(rows["monitoring-app"]["apt_version"], "117")
+        self.assertEqual(rows["monitoring-app"]["build"]["latest_run_id"], "")
+        self.assertNotIn(rows["monitoring-app"]["lifecycle_display_status"], {"validation_needed", "build_failed"})
+        package = server.get_package("monitoring-app")
+        self.assertTrue(package["repository"]["published"])
+        self.assertFalse(package["allowed_actions"]["validate"])
+        self.assertEqual(package["build"]["latest_run_id"], "")
+
+        environment = {**os.environ,
+            "DEBBUILDER_DATA_DIR": str(server.DATA),
+            "DEBBUILDER_REPO_ROOT": str(server.REPOSITORY_ROOT),
+            "DEBBUILDER_SUITE": "stable", "DEBBUILDER_COMPONENT": "main", "DEBBUILDER_AUTH_MODE": "none",
+        }
+        restarted = subprocess.run(
+            [sys.executable, "-c", "import json; from debbuilder.app import dashboard_summary; print(json.dumps(dashboard_summary()))"],
+            capture_output=True, text=True, check=True, env=environment,
+        )
+        restored = json.loads(restarted.stdout)
+        self.assertEqual(restored["latest_operations"], [])
+        self.assertNotIn(failed["id"], restarted.stdout)
+        self.assertNotIn(validation["id"], restarted.stdout)
+        self.assertEqual(next(row for row in restored["package_rows"] if row["name"] == "monitoring-app")["apt_version"], "117")
 
     def test_repo_settings_can_be_updated_and_are_persisted(self):
         body = {

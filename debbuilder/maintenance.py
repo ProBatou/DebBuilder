@@ -48,6 +48,10 @@ class MaintenanceService:
         with self._condition:
             if self._stop_requested:
                 return
+            if refresh or cleanup:
+                invalidate = getattr(self.inventory, "invalidate", None)
+                if invalidate is not None:
+                    invalidate()
             # One pass may retain one coalesced follow-up. Requests received
             # during that follow-up are already represented by the work in
             # progress and are left to the fixed periodic sweep.
@@ -115,6 +119,12 @@ class MaintenanceService:
                         cleanup = self._cleanup_requested
                         self._refresh_requested = False
                         self._cleanup_requested = False
+                        self._accept_followup = False
+                        continue
+                    needs_refresh = getattr(self.inventory, "needs_refresh", None)
+                    if needs_refresh is not None and needs_refresh():
+                        refresh = True
+                        cleanup = False
                         self._accept_followup = False
                         continue
                     # Bound a request burst to the active pass and one

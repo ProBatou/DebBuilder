@@ -269,7 +269,7 @@ class AutomationDetectionService:
             with lease:
                 claim = self.ledger.claim_current_recipe(
                     path, recipe_id, detection["identity"], recipe_sha, policy,
-                    detect_only=policy == "detect",
+                    detect_only=policy == "detect", baseline_on_first=True,
                 )
         except (AutomationLedgerError, UpstreamIdentityError) as exc:
             return self._failure(recipe_id, recipe_sha, policy, _convert_error(exc))
@@ -279,12 +279,13 @@ class AutomationDetectionService:
             return self._failure(recipe_id, recipe_sha, policy, _convert_error(exc))
         entry = self.ledger.read()["attempts"][claim.attempt_key]
         row = entry["generations"][claim.generation]
-        classification = "detected" if claim.created else "no_change"
+        baseline = row.get("diagnostic") == "initial_baseline"
+        classification = "baseline" if baseline and claim.created else "detected" if claim.created else "no_change"
         if not claim.created and row["state"] == "retry_delayed":
             classification = "retry_delayed"
         elif not claim.created and row["state"] == "blocked":
             classification = "blocked"
-        elif not claim.created and row["state"] == "terminal":
+        elif not claim.created and row["state"] == "terminal" and not baseline:
             classification = "suppressed_terminal"
         return {
             "recipe_id": recipe_id,
@@ -294,7 +295,7 @@ class AutomationDetectionService:
             "display_version": str(detection.get("display_version") or "")[:200],
             "display_ref": str(detection.get("display_ref") or "")[:200],
             "classification": classification,
-            "change": "new" if claim.created else "existing",
+            "change": "baseline" if baseline and claim.created else "new" if claim.created else "existing",
             "attempt_key": claim.attempt_key,
             "generation": claim.generation,
             "attempt_state": row["state"],

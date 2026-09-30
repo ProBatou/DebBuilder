@@ -1,6 +1,7 @@
 <script>
   import {onMount, tick} from 'svelte';
   import {api} from '../api/client.js';
+  import {cached, remember, uiState, rememberUi} from '../features/sessionCache.js';
   import {loadRecipe} from '../features/recipes/persistence.js';
   import {t, statusLabel} from '../i18n/i18n.js';
   import ErrorNotice from '../components/ErrorNotice.svelte';
@@ -15,6 +16,8 @@
     es:{storage:'Almacenamiento',history:'Historial de ejecuciones',failedRuns:'Ejecuciones fallidas',testRuns:'Pruebas',repositoryStorage:'Repositorio APT',disposable:'Espacio temporal',runArtifacts:'Artefactos de ejecuciones',retention:'Retención y limpieza',policy:'Limpieza automática de espacios',enabled:'Activada',disabled:'Desactivada',retained:'Espacios fallidos que conservar',clear:'Borrar historial de ejecuciones',checking:'Comprobando…',deleting:'Borrando…',none:'No hay ejecuciones terminadas que borrar.',preview:'Ejecuciones terminadas seleccionadas para borrar',clearDescription:'Elimina su historial visible, registros detallados y archivos temporales. Excluye ejecuciones activas, recetas, paquetes y publicaciones APT.',confirm:'Confirmar borrado',cancel:'Cancelar',cleared:'Historial de ejecuciones borrado.',partial:'No se pudieron borrar algunas ejecuciones.',refreshFailed:'Cambió el historial, pero no se pudo actualizar el almacenamiento.',recoveryReady:'No se ha comunicado un bloqueo de recuperación para nuevos trabajos.',recoveryBlocked:'La recuperación bloquea nuevas compilaciones y pruebas.',recoveryUnknown:'Estado de recuperación no disponible.',viewRuns:'Ver ejecuciones',unknown:'Desconocido',lastMeasured:'Medido'},
   };
   const maintenanceCopy = key => maintenanceText[language]?.[key] || maintenanceText.en[key];
+  const refreshingStorageText = {en:'Refreshing storage…',fr:'Actualisation du stockage…',de:'Speicher wird aktualisiert…',es:'Actualizando almacenamiento…'};
+  const refreshingStorageCopy = () => refreshingStorageText[language] || refreshingStorageText.en;
   const failureText = {
     en: {invalidPreview:'Invalid execution history preview',unconfirmedDelete:'Execution history deletion was not confirmed',managedUnavailable:'Managed Recipe metadata unavailable',supportUnavailable:'Support bundle unavailable'},
     fr: {invalidPreview:'Aperçu de l’historique invalide',unconfirmedDelete:'La suppression de l’historique n’a pas été confirmée',managedUnavailable:'Métadonnées de la recette gérée indisponibles',supportUnavailable:'Archive de support indisponible'},
@@ -75,7 +78,31 @@
   const inspectionValue = value => typeof value === 'boolean' ? (value ? ({fr:'Oui',de:'Ja',es:'Sí'})[language] || 'Yes' : ({fr:'Non',de:'Nein',es:'No'})[language] || 'No') : String(value);
   const inspectionLabel = value => inspectionTerms[language]?.[value] || value.replaceAll('_',' ');
   export let id = '', language = 'en';
-  let snapshot = null, storage = null, error = null, controller, tab = 'health';
+  let snapshot = cached('system')?.snapshot || null, storage = cached('system')?.storage || null, error = null, controller, tab = uiState('system').tab || 'health';
+  let storageRefreshing = false, storageRefreshToken = 0;
+  async function refreshStorage(previousMeasurement = '') {
+    const token = ++storageRefreshToken;
+    const deadline = Date.now() + 30000;
+    storageRefreshing = true;
+    storage = null;
+    try {
+      while (token === storageRefreshToken) {
+        const next = (await api.storage()).storage;
+        if (token !== storageRefreshToken) return;
+        if (next?.state !== 'collecting' && (!previousMeasurement || next?.measured_at !== previousMeasurement)) {
+          storage = next;
+          remember('system',{snapshot,storage});
+          return;
+        }
+        if (Date.now() >= deadline) throw new Error(maintenanceCopy('refreshFailed'));
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    } catch (caught) {
+      if (token === storageRefreshToken) clearError = caught;
+    } finally {
+      if (token === storageRefreshToken) storageRefreshing = false;
+    }
+  }
   let clearDialog, clearTitle, clearPreview = null, clearLoading = false, clearError = null, clearResult = null;
   $: recoveryCheck = snapshot?.checks?.find(check => check.id === 'execution.admission');
   $: recoveryBlocked = recoveryCheck?.details?.recovery_blocked;
@@ -91,7 +118,7 @@
     finally {clearLoading = false;}
   }
   async function confirmClear() {
-    if (!clearPreview || clearLoading) return;
+    if (!clearPreview || clearLoading || storageRefreshing) return;
     clearLoading = true; clearError = null;
     try {
       const selected = clearPreview.ids;
@@ -100,7 +127,7 @@
       if (!Array.isArray(result.deleted) || !Array.isArray(result.errors) || result.deleted.some(row => row.history_deleted !== true || row.visible !== false) || reported.length !== selected.length || new Set(reported).size !== selected.length || reported.some(id => !selected.includes(id))) throw new Error(failureCopy('unconfirmedDelete'));
       clearPreview = null;
       clearResult = result.errors.length ? `${maintenanceCopy('partial')} ${result.deleted.length}/${result.deleted.length + result.errors.length}` : `${maintenanceCopy('cleared')} ${result.deleted.length}`;
-      try {storage = (await api.storage()).storage;} catch {clearResult += ` ${maintenanceCopy('refreshFailed')}`;}
+      void refreshStorage(storage?.measured_at || '');
     } catch (caught) {clearError = caught; clearPreview = null;}
     finally {clearLoading = false;}
   }
@@ -182,16 +209,20 @@
     } catch(caught) {if (timedOut) supportError = new Error(failureCopy('supportUnavailable')); else if (!current.signal.aborted) supportError = caught;}
     finally {clearTimeout(timeout); if (supportController === current) supportController = null; supportLoading = false;}
   }
-  async function selectTab(next) {tab = next; if (next === 'managed') loadManaged(); if (next === 'developer') loadDeveloper(); await tick(); document.querySelector('.system-tabs button.active')?.scrollIntoView({block:'nearest',inline:'nearest'});}
+  async function selectTab(next) {tab = next; rememberUi('system',{tab}); if (next === 'managed') loadManaged(); if (next === 'developer') loadDeveloper(); await tick(); document.querySelector('.system-tabs button.active')?.scrollIntoView({block:'nearest',inline:'nearest'});}
   async function load() {
     controller?.abort(); const current = new AbortController(); controller = current; error = null;
     const [diagnostics,stored] = await Promise.allSettled([api.diagnostics({signal:current.signal}),api.storage({signal:current.signal})]);
     if (current.signal.aborted) return;
     if (diagnostics.status === 'fulfilled') snapshot = diagnostics.value;
-    if (stored.status === 'fulfilled') storage = stored.value.storage;
+    if (stored.status === 'fulfilled') {
+      if (stored.value.storage?.state === 'collecting') void refreshStorage();
+      else storage = stored.value.storage;
+    }
+    if (diagnostics.status === 'fulfilled' || stored.status === 'fulfilled') remember('system',{snapshot,storage});
     error = [diagnostics,stored].find(result => result.status === 'rejected' && result.reason?.name !== 'AbortError')?.reason || null;
   }
-  onMount(() => {load(); return () => {controller?.abort(); managedController?.abort(); developerController?.abort(); developerInspectControllers.recipe?.abort(); developerInspectControllers.run?.abort(); supportController?.abort();};});
+  onMount(() => {load(); if (tab === 'developer') loadDeveloper(); if (tab === 'managed') loadManaged(); return () => {rememberUi('system',{tab}); ++storageRefreshToken; controller?.abort(); managedController?.abort(); developerController?.abort(); developerInspectControllers.recipe?.abort(); developerInspectControllers.run?.abort(); supportController?.abort();};});
   $: if (id === 'managed') {tab = 'managed'; loadManaged(); tick().then(() => document.querySelector('.system-tabs button.active')?.scrollIntoView({block:'nearest',inline:'nearest'}));}
 </script>
 <div class="segmented-tabs system-tabs" role="group" aria-label={t('system',language)}>{#each ['health','maintenance','developer','managed'] as key}<button class:active={tab===key} aria-current={tab===key?'page':undefined} onclick={() => selectTab(key)}>{key==='managed'?t('managedSelfBuild',language):t(key,language)}</button>{/each}</div>
@@ -206,7 +237,7 @@
   <div class="maintenance-layout">
     <section class="panel maintenance-card">
       <div class="section-head"><h2>{maintenanceCopy('storage')}</h2>{#if storage}<StatusChip label={maintenanceState(storage.state)} tone={storageTone(storage.state)} icon="●"/>{/if}</div>
-      {#if storage}<div class="detail-facts">
+      {#if storageRefreshing}<p role="status">{refreshingStorageCopy()}</p>{:else if storage}<div class="detail-facts">
         <div><span>{maintenanceCopy('history')}</span><strong>{storage.runs?.count == null ? '—' : new Intl.NumberFormat(language).format(storage.runs.count)}</strong></div>
         <div><span>{t('managedStorage',language)}</span><strong>{size(storage.bytes?.managed_total)}</strong></div>
         <div><span>{maintenanceCopy('repositoryStorage')}</span><strong>{size(storage.bytes?.repository)}</strong></div>
@@ -220,7 +251,7 @@
         <div><span>{maintenanceCopy('policy')}</span><strong>{storage?.retention_policy?.enabled == null ? '—' : maintenanceCopy(storage.retention_policy.enabled ? 'enabled' : 'disabled')}</strong></div>
         <div><span>{maintenanceCopy('retained')}</span><strong>{storage?.retention_policy?.failed_workspaces_to_retain ?? '—'}</strong></div>
       </div>
-      <button class="button secondary maintenance-clear" type="button" disabled={clearLoading} onclick={previewClear}>{clearLoading && !clearPreview ? maintenanceCopy('checking') : maintenanceCopy('clear')}</button>
+      <button class="button secondary maintenance-clear" type="button" disabled={clearLoading || storageRefreshing} onclick={previewClear}>{clearLoading && !clearPreview ? maintenanceCopy('checking') : maintenanceCopy('clear')}</button>
       {#if clearResult}<p class="maintenance-feedback" role="status">{clearResult}</p>{/if}
       {#if clearError && !clearDialog?.open}<ErrorNotice error={clearError} {language}/>{/if}
     </section>
@@ -251,5 +282,6 @@
   {#if clearPreview}<p class="system-clear-count"><strong>{clearPreview.count}</strong> {maintenanceCopy('preview')}</p><p class="modal-copy">{maintenanceCopy('clearDescription')}</p>{/if}
   <ErrorNotice error={clearError} {language}/>
   {#if clearResult}<p class="maintenance-feedback" role="status">{clearResult}</p>{/if}
+  {#if storageRefreshing}<p role="status">{refreshingStorageCopy()}</p>{/if}
   <div class="modal-actions"><button type="button" class="button secondary" disabled={clearLoading} onclick={() => clearDialog.close()}>{clearResult ? t('close',language) : maintenanceCopy('cancel')}</button>{#if clearPreview}<button type="button" class="button primary" disabled={clearLoading} onclick={confirmClear}>{clearLoading ? maintenanceCopy('deleting') : maintenanceCopy('confirm')}</button>{/if}</div>
 </dialog>

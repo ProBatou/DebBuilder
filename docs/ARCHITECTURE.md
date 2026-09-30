@@ -20,6 +20,12 @@ identity; `test` creates a dry Run; `build` stops after a successful Build;
 Publication. Disabling automation, deactivating a Recipe, or lowering its
 policy can stop a stage that has not yet been admitted. An already queued or
 running canonical stage reaches its normal terminal state.
+The first exact upstream identity observed after enabling automation or
+recreating its tracking ledger is stored as a baseline and creates no Run.
+Only a later identity change can admit automatic work. Manual Test or Build
+is the way to process the current baseline immediately. Existing Runs with
+the same durable exact source identity also block duplicate automatic Build
+admission; a package version alone never establishes that identity.
 
 ## Recipes and persisted contracts
 

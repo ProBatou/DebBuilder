@@ -1,6 +1,7 @@
 <script>
   import {onMount, tick} from 'svelte';
   import {api} from '../api/client.js';
+  import {cached, remember, uiState, rememberUi} from '../features/sessionCache.js';
   import {admitDraftRun} from '../features/recipes/admission.js';
   import {createRecipe, loadRecipe, newRecipeDraft, validateRecipe} from '../features/recipes/persistence.js';
   import {navigate} from '../navigation/location.js';
@@ -10,7 +11,7 @@
   import Status from '../components/Status.svelte';
   import {operatorStatusSemantics} from '../components/statusSemantics.js';
   export let id = '', language = 'en';
-  let rows = [], selected = null, error = null, detailError = null, query = '', filter = 'all', controller, detailController, revision = 0;
+  let rows = cached('packages') || [], selected = null, error = null, detailError = null, query = uiState('packages').query || '', filter = uiState('packages').filter || 'all', controller, detailController, revision = 0;
   let inventoryOpen = false, inventory = null, inventoryError = null, inventoryLoading = false, inventoryQuery = '', inventoryController, inventoryRevision = 0, navigationError = null;
   let actionDialog, actionCloseButton, actionTrigger, actionContext = null, actionError = null, actionResult = null;
   let actionLoading = false, actionPending = false, publishConfirmed = false, admittedRunId = '', actionController, actionRevision = 0;
@@ -147,10 +148,10 @@
   async function loadInventory() {inventoryController?.abort(); inventoryController = new AbortController(); const token = ++inventoryRevision; inventoryLoading = true; inventoryError = null; inventory = null; try {const result = await api.inventory({signal:inventoryController.signal}); if(token === inventoryRevision) inventory = result;} catch(caught) {if(caught.name !== 'AbortError' && token === inventoryRevision) inventoryError = caught;} finally {if(token === inventoryRevision) inventoryLoading = false;}}
   function toggleInventory() {inventoryOpen = !inventoryOpen; if(inventoryOpen && !inventory) loadInventory();}
   async function review(recipeId) {navigationError = null; try {await openRecipe(recipeId);} catch(caught) {navigationError = caught;}}
-  async function load() {controller?.abort(); controller = new AbortController(); error = null; try {rows = (await api.packages({signal:controller.signal})).packages || [];} catch (caught) {if(caught.name !== 'AbortError') error = caught;}}
-  async function detail(name) {detailController?.abort(); detailController = new AbortController(); const token = ++revision; detailError = null; selected = null; if (!name) return; try {const value = (await api.package(name,{signal:detailController.signal})).package; if(token === revision) selected = value;} catch(caught) {if(caught.name !== 'AbortError' && token === revision) detailError = caught;}}
-  onMount(() => {load(); return () => {++actionRevision; controller?.abort(); detailController?.abort(); inventoryController?.abort(); actionController?.abort();};});
-  $: detail(id || rows[0]?.name);
+  async function load() {controller?.abort(); controller = new AbortController(); error = null; try {rows = (await api.packages({signal:controller.signal})).packages || []; remember('packages',rows); if (selected && !rows.some(row => row.name === selected.name)) selected = null;} catch (caught) {if(caught.name !== 'AbortError') error = caught;}}
+  async function detail(name) {detailController?.abort(); detailController = new AbortController(); const token = ++revision; detailError = null; selected = cached(`packages:${name}`) || null; if (!name) return; try {const value = (await api.package(name,{signal:detailController.signal})).package; if(token === revision) {selected = value; remember(`packages:${name}`,value);}} catch(caught) {if(caught.name !== 'AbortError' && token === revision) detailError = caught;}}
+  onMount(() => {load(); return () => {rememberUi('packages',{query,filter,selected:selected?.name}); ++actionRevision; controller?.abort(); detailController?.abort(); inventoryController?.abort(); actionController?.abort();};});
+  $: detail(id || (rows.some(row => row.name === uiState('packages').selected) ? uiState('packages').selected : rows[0]?.name));
   $: filtered = rows.filter(row => row.name?.toLowerCase().includes(query.toLowerCase()) && (filter === 'all' || (row.lifecycle_display_status || row.lifecycle_state || row.status) === filter));
   $: statuses = [...new Set(rows.map(row => row.lifecycle_display_status || row.lifecycle_state || row.status).filter(Boolean))];
   $: inventoryRows = (inventory?.packages || []).filter(row => `${row.name} ${row.version} ${row.architecture} ${row.component}`.toLowerCase().includes(inventoryQuery.toLowerCase()));

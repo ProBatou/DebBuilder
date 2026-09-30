@@ -49,6 +49,8 @@
 @media (max-width:600px) { .settings-edit-fields { grid-template-columns:1fr; } }
 .run-log-controls { display:flex;align-items:center;gap:8px; }
 .run-log-controls select { min-width:105px;min-height:32px;border:1px solid var(--strong-line);border-radius:6px;padding:5px 9px;background:var(--surface);color:var(--ink);font-size:12px; }
+.run-logs .log-output { height:clamp(10rem,42dvh,26.875rem);max-height:none;overflow-y:auto;overscroll-behavior:contain; }
+.run-live-badge { color:var(--info);font-size:12px;font-weight:700;white-space:nowrap; }
 .run-diagnosis .inline-alert { margin:0; }
 .run-diagnosis h3,.run-dependencies h3 { margin:0 0 12px; }
 .run-error-technical { margin-top:12px;font-size:11px;color:var(--muted); }

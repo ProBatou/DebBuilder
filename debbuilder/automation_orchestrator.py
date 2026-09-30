@@ -406,18 +406,32 @@ class AutomationOrchestrator:
             self._finish(entry, row, "disabled", "recipe_unavailable", "stale_claim_suppressed")
             return
         stale_claim = False
+        owned_identity = False
         stale_code = "recipe_changed_before_run"
         try:
             with self.mutation_lease():
-                if not row["preallocated_run_id"]:
+                # Run state is authoritative when a ledger was recreated. Match
+                # only durable exact provenance; a display version is insufficient.
+                owned_identity = not row["preallocated_run_id"] and any(
+                    run.get("recipe_id") == entry["recipe_id"]
+                    and (run.get("automation") or {}).get("expected_upstream_identity", run.get("manual_source_provenance")) == entry["upstream_identity"]
+                    and (run.get("mode") == "build" or row["desired_policy"] == "test")
+                    and run.get("status") in {"pending", "queued", "running", "building", "prepared", "success"}
+                    for run in self.store.list(limit=1000000)
+                )
+                if owned_identity:
+                    pass
+                elif not row["preallocated_run_id"]:
                     row = self.ledger.preallocate_run(entry["key"], row["generation"])
                 else:
                     reconciled = self.ledger.reconcile_preallocated_run(
                         entry["key"], row["generation"], store=self.store,
                     )
                     row = reconciled["record"]
-                live_recipe = self._recipe(entry["recipe_id"])
-                if existing:
+                live_recipe = self._recipe(entry["recipe_id"]) if not owned_identity else None
+                if owned_identity:
+                    pass
+                elif existing:
                     if not self._downstream_authorized(live_recipe, row["desired_policy"]):
                         stale_claim = True
                         stale_code = "automation_run_admission_disabled"
@@ -425,7 +439,7 @@ class AutomationOrchestrator:
                     stale_claim = True
                 else:
                     recipe = live_recipe
-                if not stale_claim:
+                if not stale_claim and not owned_identity:
                     metadata = {
                         "attempt_key": entry["key"], "generation": row["generation"],
                         "policy": row["desired_policy"], "expected_upstream_identity": entry["upstream_identity"],
@@ -448,6 +462,9 @@ class AutomationOrchestrator:
                     self._schedule_retry(entry, row, code, "run_admission_delayed")
                 return
             self._finish(entry, row, "terminal_failure", code, "run_admission_failed")
+            return
+        if owned_identity:
+            self._finish(entry, row, "success", "existing_run_owns_identity", "existing_run_owns_identity")
             return
         if stale_claim:
             self._finish(

@@ -1,3 +1,5 @@
+import {invalidateForMutation} from '../features/sessionCache.js';
+
 export class ApiError extends Error {
   constructor({status = 0, code = 'request_failed', message = 'Request failed', details = {}, kind = 'http'} = {}) {
     super(message);
@@ -31,6 +33,7 @@ export async function request(path, {signal, timeout = 20000, fetchImpl = fetch,
     const type = response.headers.get('content-type') || '';
     const payload = type.includes('json') ? await response.json() : await response.text();
     if (!response.ok) throw canonicalError(response.status, payload);
+    if (method !== 'GET') invalidateForMutation(path);
     return withHeaders ? {payload, headers: response.headers} : payload;
   } catch (error) {
     if (error instanceof ApiError) throw error;
@@ -59,6 +62,8 @@ export const api = {
   automation: (recipeId, opts) => request(`/api/recipes/${id(recipeId)}/automation`, opts),
   runs: opts => request('/api/executions', opts),
   run: (runId, opts) => request(`/api/executions/${id(runId)}`, opts),
+  cancelRun: (runId, opts) => request(`/api/executions/${id(runId)}/cancel`, {...opts,method:'POST',body:{}}),
+  cancelValidation: (runId, attemptId, opts) => request(`/api/executions/${id(runId)}/validations/${id(attemptId)}/cancel`, {...opts,method:'POST',body:{}}),
   runInspection: (runId, opts) => request(`/api/executions/${id(runId)}/inspect`, opts),
   startValidation: (runId, opts) => request(`/api/executions/${id(runId)}/validate`, {...opts,method:'POST',body:{}}),
   publishArtifact: (runId, confirmation, opts) => request(`/api/executions/${id(runId)}/publish`, {...opts,method:'POST',body:{confirm:confirmation}}),

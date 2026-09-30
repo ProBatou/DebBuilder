@@ -169,6 +169,56 @@ class OrchestratorCase(unittest.TestCase):
         self.save_recipe(configured)
         return self.ledger.claim_current_recipe(self.recipes / "demo.json", "demo", identity(), canonical_recipe_sha256(configured), policy, detect_only=policy == "detect")
 
+    def test_first_observation_baselines_then_changed_identity_admits_once(self):
+        configured = recipe("full")
+        self.save_recipe(configured)
+        digest = canonical_recipe_sha256(configured)
+        first = self.ledger.claim_current_recipe(
+            self.recipes / "demo.json", "demo", identity("20"), digest, "full", baseline_on_first=True,
+        )
+        owner = self.orchestrator()
+        owner.advance(first.attempt_key, 0)
+        self.assertEqual(self.enqueue.calls, [])
+        self.assertFalse(self.ledger.may_create_run(first.attempt_key, 0))
+        restarted = AutomationLedger(self.data)
+        same = restarted.claim_current_recipe(
+            self.recipes / "demo.json", "demo", identity("20"), digest, "full", baseline_on_first=True,
+        )
+        self.assertFalse(same.created)
+        updated = restarted.claim_current_recipe(
+            self.recipes / "demo.json", "demo", identity("21"), digest, "full", baseline_on_first=True,
+        )
+        owner.advance(updated.attempt_key, 0)
+        owner.advance(updated.attempt_key, 0)
+        self.assertEqual(len(self.enqueue.calls), 1)
+
+    def test_existing_exact_identity_run_blocks_duplicate_admission(self):
+        first = self.claim("build")
+        owner = self.orchestrator()
+        owner.advance(first.attempt_key, 0)
+        self.assertEqual(len(self.enqueue.calls), 1)
+        configured = recipe("build")
+        digest = canonical_recipe_sha256(configured)
+        run_id = self.enqueue.calls[0]
+        for status in ("queued", "running", "success"):
+            with self.subTest(status=status):
+                with self.store.locked_run(run_id):
+                    run = self.store.load(run_id)
+                    run["status"] = status
+                    if status == "success":
+                        run["finished_at"] = utc_now()
+                    self.store.save(run)
+                self.ledger.path.unlink()
+                self.ledger.claim_current_recipe(
+                    self.recipes / "demo.json", "demo", identity("19"), digest, "build", baseline_on_first=True,
+                )
+                duplicate = self.ledger.claim_current_recipe(
+                    self.recipes / "demo.json", "demo", identity("20"), digest, "build", baseline_on_first=True,
+                )
+                owner.advance(duplicate.attempt_key, 0)
+                self.assertEqual(len(self.enqueue.calls), 1)
+                self.assertEqual(self.ledger.read()["attempts"][duplicate.attempt_key]["generations"][0]["diagnostic"], "existing_run_owns_identity")
+
     def terminal_run(self, claim, status=None):
         row = self.ledger.read()["attempts"][claim.attempt_key]["generations"][claim.generation]
         run_id = row["run_id"]

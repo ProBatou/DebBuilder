@@ -540,7 +540,7 @@ def build_deb(recipe: dict, staging_result: dict, workspace: str | Path, *, runn
     if source_date_epoch is not None:
         normalize_staging_timestamps(staging_result, source_date_epoch)
         environment["SOURCE_DATE_EPOCH"] = str(source_date_epoch)
-        command = f"dpkg-deb --build --root-owner-group --compression=xz --compression-level=6 --uniform-compression staging artifacts/{filename}"
+        command = f"dpkg-deb --build --root-owner-group -Zxz -z6 --uniform-compression staging artifacts/{filename}"
     result = runner(command, workspace=workspace, working_directory=".", environment=environment, timeout=120, cancellation_event=cancellation_event, on_cancel=on_cancel)
     raise_for_cancelled_result(result)
     if result["status"] != "success" or not artifact.is_file():

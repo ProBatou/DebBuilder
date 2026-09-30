@@ -83,6 +83,16 @@ try {
     await page.waitForTimeout(1800);
     assert.equal(runRequests,stoppedCount);
     assert.ok(await page.locator('.system-grid .panel').count() >= 1);
+    assert.equal(await page.locator('.system-tabs button.active').textContent(),'Health');
+    await openNavigation('Runs');
+    await page.locator('.run-selection .run-list-row').first().click();
+    await page.getByText('Stages',{exact:true}).waitFor();
+    await openNavigation('System');
+    assert.equal(await page.getByText('Application runtime',{exact:true}).count(),1);
+    assert.equal(await page.locator('#main').getByText('Loading…',{exact:true}).count(),0);
+    const revisitStoppedCount = runRequests;
+    await page.waitForTimeout(1800);
+    assert.equal(runRequests,revisitStoppedCount);
     await page.getByRole('button',{name:'System-managed self-build',exact:true}).click();
     await page.getByText('GitHub source',{exact:true}).waitFor();
     await page.getByText('Definition version',{exact:true}).waitFor();

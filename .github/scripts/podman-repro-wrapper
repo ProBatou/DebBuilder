@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${PODMAN_SHORT_ROOT:?}"
+: "${PODMAN_SHORT_RUNROOT:?}"
+[[ "$PODMAN_SHORT_ROOT" =~ ^/tmp/dbb-root-[0-9]+-[0-9]+$ ]] || exit 125
+[[ "$PODMAN_SHORT_RUNROOT" =~ ^/tmp/dbb-run-[0-9]+-[0-9]+$ ]] || exit 125
+
+args=("$@")
+root_seen=0
+runroot_seen=0
+for ((index = 0; index < ${#args[@]}; index++)); do
+  case "${args[$index]}" in
+    --root)
+      ((index + 1 < ${#args[@]})) || exit 125
+      args[$((index + 1))]="$PODMAN_SHORT_ROOT"
+      root_seen=1
+      index=$((index + 1))
+      ;;
+    --root=*)
+      args[$index]="--root=$PODMAN_SHORT_ROOT"
+      root_seen=1
+      ;;
+    --runroot)
+      ((index + 1 < ${#args[@]})) || exit 125
+      args[$((index + 1))]="$PODMAN_SHORT_RUNROOT"
+      runroot_seen=1
+      index=$((index + 1))
+      ;;
+    --runroot=*)
+      args[$index]="--runroot=$PODMAN_SHORT_RUNROOT"
+      runroot_seen=1
+      ;;
+  esac
+done
+((root_seen && runroot_seen)) || exit 125
+exec /usr/bin/podman "${args[@]}"

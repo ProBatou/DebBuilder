@@ -78,7 +78,8 @@
   const inspectionValue = value => typeof value === 'boolean' ? (value ? ({fr:'Oui',de:'Ja',es:'Sí'})[language] || 'Yes' : ({fr:'Non',de:'Nein',es:'No'})[language] || 'No') : String(value);
   const inspectionLabel = value => inspectionTerms[language]?.[value] || value.replaceAll('_',' ');
   export let id = '', language = 'en';
-  let snapshot = cached('system')?.snapshot || null, storage = cached('system')?.storage || null, error = null, controller, tab = uiState('system').tab || 'health';
+  let snapshot = cached('system')?.snapshot || null, storage = cached('system')?.storage || null, error = null, controller;
+  let routedId = id, tab = id === 'managed' ? 'managed' : uiState('system').tab || 'health';
   let storageRefreshing = false, storageRefreshToken = 0;
   async function refreshStorage(previousMeasurement = '') {
     const token = ++storageRefreshToken;
@@ -222,8 +223,13 @@
     if (diagnostics.status === 'fulfilled' || stored.status === 'fulfilled') remember('system',{snapshot,storage});
     error = [diagnostics,stored].find(result => result.status === 'rejected' && result.reason?.name !== 'AbortError')?.reason || null;
   }
-  onMount(() => {load(); if (tab === 'developer') loadDeveloper(); if (tab === 'managed') loadManaged(); return () => {rememberUi('system',{tab}); ++storageRefreshToken; controller?.abort(); managedController?.abort(); developerController?.abort(); developerInspectControllers.recipe?.abort(); developerInspectControllers.run?.abort(); supportController?.abort();};});
-  $: if (id === 'managed') {tab = 'managed'; loadManaged(); tick().then(() => document.querySelector('.system-tabs button.active')?.scrollIntoView({block:'nearest',inline:'nearest'}));}
+  onMount(() => {load(); if (tab === 'developer') loadDeveloper(); if (tab === 'managed') loadManaged(); return () => {++storageRefreshToken; controller?.abort(); managedController?.abort(); developerController?.abort(); developerInspectControllers.recipe?.abort(); developerInspectControllers.run?.abort(); supportController?.abort();};});
+  $: if (id !== routedId) {
+    routedId = id;
+    tab = id === 'managed' ? 'managed' : uiState('system').tab || 'health';
+    if (tab === 'managed') loadManaged();
+    tick().then(() => document.querySelector('.system-tabs button.active')?.scrollIntoView({block:'nearest',inline:'nearest'}));
+  }
 </script>
 <div class="segmented-tabs system-tabs" role="group" aria-label={t('system',language)}>{#each ['health','maintenance','developer','managed'] as key}<button class:active={tab===key} aria-current={tab===key?'page':undefined} onclick={() => selectTab(key)}>{key==='managed'?t('managedSelfBuild',language):t(key,language)}</button>{/each}</div>
 <ErrorNotice {error} retry={load} {language}/>

@@ -66,20 +66,20 @@ def _safe_temporary_parent(temporary_parent: str | Path | None) -> Path | None:
     return parent
 
 
-def release_plan(tag: str) -> dict:
-    """Resolve Release identity entirely from the application and built-in Recipe."""
-    if not RELEASE_TAG.fullmatch(str(tag or "")):
-        raise ReleaseBuildError("invalid_release_tag", "Release tag must be v followed by a Debian-compatible version")
+def _artifact_plan(source_version: str, *, tag: str | None) -> dict:
+    """Resolve package identity from the application and built-in Recipe."""
     definition = builtin_recipe.load_builtin_definition()
     recipe = validate_recipe_metadata(definition)
     try:
-        upstream_version, debian_version = version_from_resolution(recipe, {"tag": tag, "ref": tag})
+        upstream_version, debian_version = version_from_resolution(
+            recipe, {"tag": source_version, "ref": source_version},
+        )
     except SourceError as exc:
         raise ReleaseBuildError(exc.code, str(exc)) from exc
     if upstream_version != __version__:
         raise ReleaseBuildError(
             "release_version_mismatch",
-            f"Release tag version {upstream_version} does not match debbuilder.__version__ {__version__}",
+            f"Source version {upstream_version} does not match debbuilder.__version__ {__version__}",
         )
     package = recipe["package"]
     filename = f"{package['name']}_{debian_version}_{package['architecture']}.deb"
@@ -95,6 +95,18 @@ def release_plan(tag: str) -> dict:
         "definition": definition,
         "recipe": recipe,
     }
+
+
+def release_plan(tag: str) -> dict:
+    """Resolve Release identity from an explicit version tag."""
+    if not RELEASE_TAG.fullmatch(str(tag or "")):
+        raise ReleaseBuildError("invalid_release_tag", "Release tag must be v followed by a Debian-compatible version")
+    return _artifact_plan(tag, tag=tag)
+
+
+def check_plan() -> dict:
+    """Resolve the same package identity for an untagged commit check."""
+    return _artifact_plan(__version__, tag=None)
 
 
 def _source_date_epoch(source_root: Path) -> int:
@@ -337,13 +349,16 @@ def _extract_and_verify(plan: dict, staging: dict, artifact: dict, workspace: Pa
 
 
 def build_release_artifacts(
-    *, tag: str, source_root: str | Path, output_directory: str | Path,
+    *, tag: str | None, source_root: str | Path, output_directory: str | Path,
     temporary_parent: str | Path | None = None, validation_images: str | Path | None = None,
     _allow_test_image_fixture: bool = False,
     reuse_verified_images: bool = False,
+    check_only: bool = False,
 ) -> dict:
     """Build checked Release assets without touching DebBuilder runtime state."""
-    plan = release_plan(tag)
+    if check_only and tag is not None:
+        raise ReleaseBuildError("invalid_check_source", "An untagged check cannot specify a release tag")
+    plan = check_plan() if check_only else release_plan(tag)
     source = Path(source_root).resolve(strict=True)
     if not source.is_dir():
         raise ReleaseBuildError("invalid_release_source", f"Release source is not a directory: {source}")
@@ -419,8 +434,10 @@ def build_release_artifacts(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tag", required=True, help="Release tag, for example vX.Y.Z")
-    parser.add_argument("--source-root", default=".", help="Checked-out tagged source tree")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--tag", help="Existing Release tag, for example vX.Y.Z")
+    source.add_argument("--check-only", action="store_true", help="Build the current untagged commit for a non-publishing CI check")
+    parser.add_argument("--source-root", default=".", help="Checked-out source tree")
     parser.add_argument("--output-dir", default="release-assets", help="New directory for the .deb and SHA256SUMS")
     parser.add_argument("--validation-images", required=True, help="Verified GHCR digest manifest from the release image step")
     parser.add_argument("--reuse-verified-images", action="store_true", help="Reuse the first candidate's public image proof for an independent comparison build")
@@ -430,6 +447,7 @@ def main(argv: list[str] | None = None) -> int:
             tag=arguments.tag, source_root=arguments.source_root, output_directory=arguments.output_dir,
             validation_images=arguments.validation_images,
             reuse_verified_images=arguments.reuse_verified_images,
+            check_only=arguments.check_only,
         )
     except (ReleaseBuildError, debian_packaging.PackagingError, build_executor.BuildError, project_detection.DetectionError, OSError, ValueError) as exc:
         parser.exit(1, f"release build failed: {exc}\n")

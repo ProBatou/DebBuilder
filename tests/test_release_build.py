@@ -30,6 +30,23 @@ def fixture_images(root: Path) -> Path:
 
 
 class ReleasePlanTests(unittest.TestCase):
+    def test_untagged_check_uses_current_release_package_identity(self):
+        release = release_build.release_plan(CURRENT_TAG)
+        check = release_build.check_plan()
+        self.assertIsNone(check["tag"])
+        for field in ("package", "upstream_version", "debian_version", "debian_revision",
+                      "architecture", "definition_version", "filename"):
+            self.assertEqual(check[field], release[field])
+
+    def test_untagged_check_rejects_a_release_tag(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(release_build.ReleaseBuildError) as raised:
+                release_build.build_release_artifacts(
+                    tag=CURRENT_TAG, check_only=True, source_root=REPOSITORY_ROOT,
+                    output_directory=Path(temporary) / "assets",
+                )
+        self.assertEqual(raised.exception.code, "invalid_check_source")
+
     def test_plan_uses_canonical_recipe_for_all_artifact_identity(self):
         plan = release_build.release_plan(CURRENT_TAG)
 
@@ -84,6 +101,21 @@ class ReleasePlanTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("dpkg-deb"), "dpkg-deb unavailable")
 class RealReleaseBuildTests(unittest.TestCase):
+    def test_untagged_check_build_matches_release_build(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            results = []
+            for name, arguments in (("check", {"tag": None, "check_only": True}),
+                                    ("release", {"tag": CURRENT_TAG})):
+                results.append(release_build.build_release_artifacts(
+                    **arguments, source_root=REPOSITORY_ROOT,
+                    output_directory=root / name,
+                    validation_images=REPOSITORY_ROOT / "debbuilder/validation_images.json",
+                    _allow_test_image_fixture=True,
+                ))
+            self.assertEqual(results[0]["artifact"]["sha256"], results[1]["artifact"]["sha256"])
+            self.assertEqual(results[0]["checks"], results[1]["checks"])
+
     def test_two_isolated_release_builds_are_byte_identical(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

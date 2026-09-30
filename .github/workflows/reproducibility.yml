@@ -1,0 +1,130 @@
+name: Debian reproducibility check
+
+"on":
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reproducibility:
+    name: Compare two checked Debian builds
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the exact candidate commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify candidate identity and packaging tools
+        env:
+          EXPECTED_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
+          test -z "$(git status --porcelain)"
+          dpkg-deb --version
+
+      - name: Set up qualified frontend toolchain
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install qualified npm
+        run: |
+          npm install --global npm@11.20.0
+          node --version
+          npm --version
+
+      - name: Verify immutable Validation image inputs
+        run: |
+          python3 -m tests.release_validation_inputs \
+            --repository-root "$GITHUB_WORKSPACE" \
+            --lock "$GITHUB_WORKSPACE/validation/validation_images.lock.json" \
+            --manifest "$GITHUB_WORKSPACE/debbuilder/validation_images.json"
+
+      - name: Run release and packaging checks
+        run: |
+          python3 -m py_compile server.py debbuilder/*.py
+          python3 -m unittest -v \
+            tests.test_builtin_recipe \
+            tests.test_debian_packaging \
+            tests.test_release_build \
+            tests.test_release_validation_inputs \
+            tests.test_runtime_storage \
+            tests.test_source_acquisition \
+            tests.test_systemd_unit
+
+      - name: Install OCI verification tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman
+
+      - name: Build independent candidates and compare bytes
+        shell: bash
+        env:
+          STORAGE_DRIVER: vfs
+          PODMAN_SHORT_ROOT: /tmp/dbb-root-${{ github.run_id }}-${{ github.run_attempt }}
+          PODMAN_SHORT_RUNROOT: /tmp/dbb-run-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          [[ "$PODMAN_SHORT_ROOT" =~ ^/tmp/dbb-root-[0-9]+-[0-9]+$ ]]
+          [[ "$PODMAN_SHORT_RUNROOT" =~ ^/tmp/dbb-run-[0-9]+-[0-9]+$ ]]
+          proof_root="$(mktemp -d "$RUNNER_TEMP/debbuilder-repro.XXXXXX")"
+          cleanup() {
+            status=$?
+            trap - EXIT
+            set +e
+            cleanup_failed=0
+            for source in "$proof_root/source-A" "$proof_root/source-B"; do
+              if [[ -d "$source" ]]; then
+                git worktree remove --force "$source" || cleanup_failed=1
+              fi
+            done
+            sudo rm -rf -- "$PODMAN_SHORT_ROOT" "$PODMAN_SHORT_RUNROOT" || cleanup_failed=1
+            rm -rf -- "$proof_root" || cleanup_failed=1
+            if ((status == 0 && cleanup_failed != 0)); then status=1; fi
+            exit "$status"
+          }
+          trap cleanup EXIT
+          mkdir -p "$proof_root/bin"
+          cp .github/scripts/podman-repro-wrapper "$proof_root/bin/podman"
+          chmod 700 "$proof_root/bin/podman"
+          git worktree add --detach "$proof_root/source-A" HEAD
+          git worktree add --detach "$proof_root/source-B" HEAD
+          test "$(git -C "$proof_root/source-A" rev-parse HEAD)" = "$(git rev-parse HEAD)"
+          test "$(git -C "$proof_root/source-B" rev-parse HEAD)" = "$(git rev-parse HEAD)"
+
+          PATH="$proof_root/bin:$PATH" python3 -m debbuilder.release_build \
+            --check-only \
+            --source-root "$proof_root/source-A" \
+            --validation-images "$proof_root/source-A/debbuilder/validation_images.json" \
+            --output-dir "$proof_root/assets-A" > "$proof_root/result-A.json"
+          python3 -m debbuilder.release_build \
+            --check-only \
+            --source-root "$proof_root/source-B" \
+            --validation-images "$proof_root/source-B/debbuilder/validation_images.json" \
+            --reuse-verified-images \
+            --output-dir "$proof_root/assets-B" > "$proof_root/result-B.json"
+
+          (cd "$proof_root/assets-A" && sha256sum --check --strict SHA256SUMS)
+          (cd "$proof_root/assets-B" && sha256sum --check --strict SHA256SUMS)
+          shopt -s nullglob
+          candidate_a=("$proof_root/assets-A/"*.deb)
+          candidate_b=("$proof_root/assets-B/"*.deb)
+          test "${#candidate_a[@]}" -eq 1
+          test "${#candidate_b[@]}" -eq 1
+          test "${candidate_a[0]##*/}" = "${candidate_b[0]##*/}"
+          sha_a="$(sha256sum "${candidate_a[0]}" | cut -d ' ' -f 1)"
+          sha_b="$(sha256sum "${candidate_b[0]}" | cut -d ' ' -f 1)"
+          echo "Candidate A SHA256: $sha_a"
+          echo "Candidate B SHA256: $sha_b"
+          test "$sha_a" = "$sha_b"
+          cmp "${candidate_a[0]}" "${candidate_b[0]}"
+          echo "Candidate packages are byte-identical"

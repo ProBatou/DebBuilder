@@ -39,9 +39,10 @@ previous known-good `.deb`, subject to any unrelated release data migrations.
 
 ## Reproducibility contract
 
-The release helper derives `SOURCE_DATE_EPOCH` from the tagged checkout's HEAD
+The build helper derives `SOURCE_DATE_EPOCH` from the source checkout's HEAD
 **committer** timestamp (`git show -s --format=%ct HEAD`). The release workflow
-verifies that HEAD is the exact tag commit before building. The helper passes
+verifies that HEAD is the exact tag commit; the check-only workflow verifies the
+exact candidate commit. The helper passes
 the epoch to the frontend build and `dpkg-deb`, and sets the mtime of every
 package staging file, directory and symlink to that epoch. Modes and package
 ownership stay as specified by the Recipe; `dpkg-deb --root-owner-group`
@@ -87,6 +88,16 @@ contents-write permission. It creates a draft Release, verifies both remote
 asset names, and only then makes the Release public and latest. Package
 filenames and expected metadata are derived from the canonical Recipe rather
 than repeated in workflow shell.
+
+The separate Debian reproducibility check runs on pull requests and can be
+dispatched manually for a branch. It checks out the exact candidate commit,
+verifies the locked Validation image inputs, and runs the same canonical builder
+twice from detached worktrees. `--check-only` derives package identity from the
+current application version and Recipe without supplying or creating a Git tag.
+The first build proves the public image descriptors; the second reuses that
+proof. The check requires matching SHA-256 values and `cmp` byte identity. It
+has read-only repository permission and no publication job. Official Release
+builds continue to require an existing, verified tag.
 
 GitHub-hosted CI intentionally does not perform the complete installed-package
 lifecycle gate. That gate installs packages in a disposable,

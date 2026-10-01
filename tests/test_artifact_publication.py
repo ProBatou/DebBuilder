@@ -12,7 +12,7 @@ from copy import deepcopy
 from pathlib import Path
 from unittest import mock
 
-from debbuilder import artifact_publication, build_pipeline, execution_projection, storage, validation_service, workspace_cleanup
+from debbuilder import apt_repo, artifact_publication, build_pipeline, execution_projection, storage, validation_service, workspace_cleanup
 from debbuilder.build_store import BuildStore
 from debbuilder.repository_lock import repository_lease
 from tests.validation_helpers import record_canonical_validation
@@ -52,6 +52,37 @@ class RepreproRunner:
         else:
             stdout = ""
         return {"command": command, "arguments": [], "working_directory": str(kwargs.get("workspace")), "status": "success", "exit_code": 0, "stdout": stdout, "stderr": "", "duration": 0.01, "timed_out": False}
+
+
+class RemovalRunner:
+    def __init__(self, repo, *, fail=False, fail_post_query=False):
+        self.repo = Path(repo)
+        self.published = True
+        self.fail = fail
+        self.fail_post_query = fail_post_query
+
+    def __call__(self, command, **kwargs):
+        if " list " in command:
+            stdout = "bookworm|main|amd64: demo 2.0-1\n" if self.published else ""
+            status, code, stderr = (
+                ("failed", 1, "query failed")
+                if self.fail_post_query and not self.published else ("success", 0, "")
+            )
+        elif " remove " in command:
+            if self.fail:
+                stdout, status, code, stderr = "", "failed", 1, "remove failed"
+            else:
+                self.published = False
+                index = self.repo / "dists/bookworm/main/binary-amd64/Packages.gz"
+                unrelated = (
+                    "Package: other\nVersion: 9.0-1\nArchitecture: all\n"
+                    "Filename: pool/main/o/other/other_9.0-1_all.deb\n\n"
+                )
+                index.write_bytes(gzip.compress(unrelated.encode()))
+                stdout, status, code, stderr = "removed\n", "success", 0, ""
+        else:
+            stdout, status, code, stderr = "", "success", 0, ""
+        return {"command": command, "arguments": [], "working_directory": str(kwargs.get("workspace")), "status": status, "exit_code": code, "stdout": stdout, "stderr": stderr, "duration": 0.01, "timed_out": False}
 
 
 class ArtifactPublicationTests(unittest.TestCase):
@@ -97,6 +128,42 @@ class ArtifactPublicationTests(unittest.TestCase):
             self.assertEqual(len(result["proof"]["targets"]), 2)
             self.assertTrue((repo / result["proof"]["targets"][0]["pool"]["path"]).is_file())
             self.assertTrue({"database_architecture", "database_architectures", "index", "pool"}.isdisjoint(result["proof"]))
+
+    @unittest.skipUnless(shutil.which("reprepro") and shutil.which("dpkg-deb"), "Debian repository tools unavailable")
+    def test_real_reprepro_package_removal_updates_database_and_index(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            repo = base / "repo"
+            (repo / "conf").mkdir(parents=True)
+            (repo / "conf/distributions").write_text(
+                "Suite: stable\nCodename: bookworm\nArchitectures: amd64\nComponents: main\n"
+            )
+            package = base / "package"
+            (package / "DEBIAN").mkdir(parents=True)
+            (package / "usr/share/demo").mkdir(parents=True)
+            (package / "DEBIAN/control").write_text(
+                "Package: demo\nVersion: 2.0-1\nArchitecture: all\nSection: utils\n"
+                "Priority: optional\nMaintainer: Demo <demo@example.test>\nDescription: test\n"
+            )
+            (package / "usr/share/demo/data").write_text("payload")
+            artifact = base / "demo_2.0-1_all.deb"
+            subprocess.run(["dpkg-deb", "--build", str(package), str(artifact)], check=True, capture_output=True)
+            subprocess.run(
+                ["reprepro", "--basedir", str(repo), "--component", "main", "includedeb", "bookworm", str(artifact)],
+                check=True, capture_output=True,
+            )
+            for name in ("db", "dists", "pool", "lists", "logs", "morgue"):
+                (repo / name).mkdir(exist_ok=True)
+
+            result = artifact_publication.remove_published_package(
+                "demo", repo_root=repo, distribution="bookworm", component="main",
+            )
+
+            self.assertEqual(result["removed_versions"], ["2.0-1"])
+            self.assertFalse(any(
+                row.get("Package") == "demo"
+                for row in (apt_repo.local_packages_index(repo, "bookworm", "main", "amd64") or [])
+            ))
 
     def test_publication_after_workspace_cleanup_uses_retained_artifact_and_holds_lease(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -155,6 +222,55 @@ class ArtifactPublicationTests(unittest.TestCase):
             f"SHA256: {hashlib.sha256(content).hexdigest() if sha256 is None else sha256}\n\n"
         )
         (index / "Packages.gz").write_bytes(gzip.compress((paragraph * (2 if duplicate else 1)).encode()))
+
+    def removal_repo(self, root):
+        repo, _config = self.make_repo(root)
+        for name in ("db", "dists", "pool", "lists", "logs", "morgue"):
+            (repo / name).mkdir(exist_ok=True)
+        index = repo / "dists/bookworm/main/binary-amd64"
+        index.mkdir(parents=True, exist_ok=True)
+        rows = (
+            "Package: demo\nVersion: 2.0-1\nArchitecture: all\nFilename: pool/main/d/demo/demo.deb\n\n"
+            "Package: other\nVersion: 9.0-1\nArchitecture: all\nFilename: pool/main/o/other/other.deb\n\n"
+        )
+        (index / "Packages.gz").write_bytes(gzip.compress(rows.encode()))
+        return repo
+
+    def test_remove_published_package_is_leased_exact_and_proven_absent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = self.removal_repo(temporary)
+            result = artifact_publication.remove_published_package(
+                "demo", repo_root=repo, distribution="bookworm", component="main",
+                runner=RemovalRunner(repo),
+            )
+            self.assertEqual(result["removed_versions"], ["2.0-1"])
+            rows = apt_repo.local_packages_index(repo, "bookworm", "main", "amd64")
+            self.assertEqual([row["Package"] for row in rows], ["other"])
+
+    def test_remove_failure_does_not_claim_repository_success(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = self.removal_repo(temporary)
+            with self.assertRaises(artifact_publication.PublicationError) as captured:
+                artifact_publication.remove_published_package(
+                    "demo", repo_root=repo, distribution="bookworm", component="main",
+                    runner=RemovalRunner(repo, fail=True),
+                )
+            self.assertEqual(captured.exception.code, "reprepro_remove_failed")
+            self.assertEqual(
+                [row["Package"] for row in apt_repo.local_packages_index(repo, "bookworm", "main", "amd64")],
+                ["demo", "other"],
+            )
+
+    def test_remove_post_mutation_proof_failure_requires_recovery(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = self.removal_repo(temporary)
+            with self.assertRaises(artifact_publication.PublicationError) as captured:
+                artifact_publication.remove_published_package(
+                    "demo", repo_root=repo, distribution="bookworm", component="main",
+                    runner=RemovalRunner(repo, fail_post_query=True),
+                )
+            self.assertEqual(captured.exception.code, "package_removal_recovery_required")
+            self.assertEqual(captured.exception.details["cause"], "repository_query_failed")
 
     def test_requires_exact_confirmation_and_preserves_build_status(self):
         with tempfile.TemporaryDirectory() as temporary:

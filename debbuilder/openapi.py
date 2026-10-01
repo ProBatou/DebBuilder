@@ -448,6 +448,19 @@ SCHEMAS.update({
                                      ("ok", "id", "path", "recipe", "revision")),
     "DeleteResponse": _object({"ok": {"const": True}, "id": S,
                                "deleted_from_repository": B, "deleted_from_repo": B}, ("ok", "id")),
+    "PackageRemoval": _object({
+        "name": S, "publication_removed": B, "recipe_preserved": B,
+        "runs_preserved": {"const": True},
+        "repository": {"oneOf": [
+            {"type": "null"},
+            _object({"package": S, "distribution": S, "component": S,
+                     "removed_versions": STRINGS, "verified_at": S},
+                    ("package", "distribution", "component", "removed_versions", "verified_at")),
+        ]},
+    }, ("name", "publication_removed", "recipe_preserved", "runs_preserved", "repository")),
+    "PackageRemovalResponse": _object({
+        "ok": {"const": True}, "id": S, "removal": _ref("PackageRemoval"),
+    }, ("ok", "id", "removal")),
     "ExecutionLogDeleteResponse": _object({"ok": {"const": True}, "deletion": _ref("ExecutionLogDeletion")}, ("ok", "deletion")),
 })
 
@@ -529,7 +542,14 @@ OPERATION_DOCS = {
     "workflows.save": _doc(200, "WorkflowSaveResponse", "WorkflowSaveInput", errors={403: ("forbidden",), 409: ("builtin_recipe_managed_field", "builtin_recipe_reserved", "recipe_revision_conflict", "recipe_exists"), 422: ("invalid_recipe_json", "invalid_recipe_revision", "invalid_create_precondition", "recipe_identity_mismatch", "unsupported_version_source", "unknown_field", "post_build_directory_invalid_path")}),
     "workflows.delete": _doc(200, "DeleteResponse", errors={403: ("forbidden", "readonly_recipe"), 404: ("recipe_not_found",)}),
     "executions.logs.delete": _doc(200, "ExecutionLogDeleteResponse", errors={404: ("build_run_not_found",), 409: ("execution_active",)}),
-    "packages.delete": _doc(200, "DeleteResponse", errors={400: ("invalid_request",)}),
+    "packages.delete": _doc(200, "PackageRemovalResponse", errors={
+        400: ("invalid_request", "invalid_package_id"),
+        404: ("package_not_found",),
+        409: ("package_operation_conflict",),
+        422: ("repository_query_failed", "package_removal_proof_failed", "reprepro_remove_failed"),
+        500: ("package_removal_recovery_required",),
+        503: ("repository_mutation_busy", "repository_lock_invalid", "repository_root_invalid"),
+    }),
 }
 
 

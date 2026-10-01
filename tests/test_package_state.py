@@ -316,6 +316,86 @@ class PackageStoreTests(unittest.TestCase):
         self.assertIsNone(state["latest_validation"])
         self.assertIsNone(state["latest_publication"])
 
+    def test_new_artifact_and_active_validation_override_older_published_run(self):
+        def summary(run):
+            validation = (run.get("_validation_attempts") or [{}])[-1].get("status", "not_run")
+            publication = (run.get("publications") or [{}])[-1].get("status", "not_run")
+            lifecycle = package_store.derive_lifecycle_status(run["status"], validation, publication)
+            return {
+                "id": run["id"], "status": run["status"], "lifecycle_status": lifecycle,
+                "lifecycle_active": validation in {"queued", "running", "cancelling"},
+            }
+
+        runs = [
+            {"id": "new", "created_at": "2026-10-01T10:01:00+00:00", "created_at_epoch": 2,
+             "mode": "build", "status": "success", "version": {"debian": "6.1.2-1"},
+             "artifact": {"path": "new.deb", "inspection": {"version": "6.1.2-1"}},
+             "_validation_attempts": [{"status": "running"}], "publications": []},
+            {"id": "old", "created_at": "2026-10-01T10:00:00+00:00", "created_at_epoch": 1,
+             "mode": "build", "status": "success", "version": {"debian": "6.1.1-1"},
+             "artifact": {"path": "old.deb"}, "_validation_attempts": [{"status": "success"}],
+             "publications": [{"status": "success"}]},
+        ]
+        state = package_store.summarize_runs(list(reversed(runs)), summary)
+        self.assertEqual(state["successful"]["id"], "new")
+        self.assertEqual(state["current_real"]["id"], "new")
+        self.assertEqual(state["current_real"]["lifecycle_status"], "validating")
+
+        runs[0]["_validation_attempts"][-1]["status"] = "failed"
+        failed = package_store.summarize_runs(runs, summary)
+        self.assertEqual(failed["successful"]["version"]["debian"], "6.1.2-1")
+        self.assertEqual(failed["current_real"]["lifecycle_status"], "validation_failed")
+
+    def test_active_run_has_status_precedence_over_newer_terminal_run(self):
+        summary = lambda run: {
+            "id": run["id"], "status": run["status"],
+            "lifecycle_status": "building" if run["status"] == "running" else "validation_failed",
+            "lifecycle_active": run["status"] == "running",
+        }
+        state = package_store.summarize_runs([
+            {"id": "terminal", "created_at": "2026-10-01T10:02:00+00:00", "created_at_epoch": 2,
+             "mode": "build", "status": "success", "artifact": {"path": "new.deb"}},
+            {"id": "active", "created_at": "2026-10-01T10:01:00+00:00", "created_at_epoch": 1,
+             "mode": "build", "status": "running", "artifact": None},
+        ], summary)
+        self.assertEqual(state["last_real"]["id"], "terminal")
+        self.assertEqual(state["current_real"]["id"], "active")
+
+    def test_package_service_uses_debian_version_order_for_built_and_published(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            service = PackageService(
+                data_dir=Path(temporary), workspace_root=Path(temporary),
+                list_workflows=lambda: [], workflow_path=lambda _recipe_id: None,
+                read_workflow=lambda _path: {},
+                repo_settings=lambda: {
+                    "architecture": "amd64", "repository": "https://apt.example.test",
+                    "distribution": "stable", "component": "main",
+                },
+            )
+            rows = service.list_packages(live_rows=[
+                {"Package": "demo", "Version": "2.0-1", "Architecture": "all"},
+                {"Package": "demo", "Version": "10.0-1", "Architecture": "all"},
+                {"Package": "demo", "Version": "3.0-1", "Architecture": "all"},
+            ])
+            self.assertEqual(rows[0]["version"]["published"], "10.0-1")
+
+            projected = service._enrich_package(
+                {"name": "demo", "source": {}}, {}, [
+                {"id": "latest", "created_at": "2026-10-01T10:02:00+00:00", "created_at_epoch": 2,
+                     "recipe_id": "demo", "mode": "build", "status": "success",
+                     "version": {"debian": "3.0-1"}, "artifact": {"path": "three.deb", "inspection": {"version": "3.0-1"}}},
+                    {"id": "failed", "created_at": "2026-10-01T10:03:00+00:00", "created_at_epoch": 3,
+                     "recipe_id": "demo", "mode": "build", "status": "failed",
+                     "version": {"debian": "99.0-1"}, "artifact": {"path": "failed.deb", "inspection": {"version": "99.0-1"}}},
+                    {"id": "highest", "created_at": "2026-10-01T10:01:00+00:00", "created_at_epoch": 1,
+                     "recipe_id": "demo", "mode": "build", "status": "success",
+                     "version": {"debian": "10.0-1"}, "artifact": {"path": "ten.deb", "inspection": {"version": "10.0-1"}}},
+                ],
+                {"repository": "https://apt.example.test", "distribution": "stable", "component": "main"},
+                False,
+            )
+            self.assertEqual(projected["version"]["candidate"], "10.0-1")
+
     def test_publication_history_derives_version_and_fails_closed_without_proof(self):
         run = {
             "id": "proofless", "mode": "build", "status": "success", "artifact": {"path": "demo.deb"},

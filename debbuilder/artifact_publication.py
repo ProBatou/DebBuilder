@@ -762,6 +762,111 @@ def verify_source_artifact_fd(
     _verify_source_fd(source, source_fd, artifacts_fd, artifact_name)
 
 
+def remove_published_package(
+    package: str, *, repo_root: str | Path, distribution: str, component: str,
+    runner=None,
+) -> dict:
+    """Remove one package's binary publications and prove their absence."""
+    if not PACKAGE_RE.fullmatch(str(package or "")):
+        raise PublicationError("invalid_package_id", "Package identity is invalid")
+    try:
+        with repository_lease(repo_root, operation=f"remove:{package}") as lease:
+            config = _repository_config(lease, distribution, create_layout=False)
+            config["requested"] = distribution
+            component_path = safe_relative_path(component).as_posix()
+            if component_path != component or component not in config.get("components", []):
+                raise PublicationError("component_not_configured", f"Component {component!r} is not configured")
+            database = _database_query(
+                lease, codename=config["codename"], component=component,
+                package=package, runner=runner,
+            )
+            before = [
+                row for row in database["packages"]
+                if row.get("distribution") == config["codename"]
+                and row.get("component") == component
+                and row.get("package") == package
+            ]
+            if not before:
+                raise PublicationError(
+                    "package_removal_proof_failed",
+                    "The live APT index reports this package, but reprepro does not own it",
+                )
+            kwargs = {"lease": lease}
+            if runner is not None:
+                kwargs["runner"] = runner
+            try:
+                removed = apt_repo.reprepro_remove_package(
+                    lease.root, config["codename"], package, component, **kwargs,
+                )
+            except Exception as exc:
+                raise PublicationError(
+                    "package_removal_recovery_required",
+                    "The reprepro removal outcome is unknown and requires reconciliation",
+                ) from exc
+            command = removed.get("command") if isinstance(removed, dict) else None
+            if not isinstance(command, dict):
+                raise PublicationError(
+                    "package_removal_recovery_required",
+                    "The reprepro removal outcome is missing its command result",
+                )
+            try:
+                post_database = _database_query(
+                    lease, codename=config["codename"], component=component,
+                    package=package, runner=runner,
+                )
+                database_remaining = [
+                    row for row in post_database["packages"]
+                    if row.get("distribution") == config["codename"]
+                    and row.get("component") == component
+                    and row.get("package") == package
+                ]
+                index_remaining: dict[str, list[str]] = {}
+                for architecture in config.get("architectures", []):
+                    if architecture in {"all", "source"}:
+                        continue
+                    base = f"dists/{config['codename']}/{component}/binary-{architecture}/Packages"
+                    versions: list[str] = []
+                    for relative in (base + ".gz", base):
+                        result = _index_rows(lease, relative)
+                        if result is not None:
+                            rows, _info = result
+                            versions = sorted({
+                                str(row.get("Version") or "") for row in rows
+                                if row.get("Package") == package and row.get("Version")
+                            })
+                            break
+                    if versions:
+                        index_remaining[architecture] = versions
+            except PublicationError as exc:
+                raise PublicationError(
+                    "package_removal_recovery_required",
+                    "Repository mutation completed but its final state could not be proven",
+                    details={"cause": exc.code},
+                ) from exc
+            if command.get("status") != "success":
+                code = "package_removal_recovery_required" if not database_remaining else "reprepro_remove_failed"
+                raise PublicationError(
+                    code,
+                    command.get("stderr") or "reprepro could not remove the package",
+                    details={"database_remaining": len(database_remaining), "index_remaining": index_remaining},
+                )
+            if database_remaining or index_remaining:
+                raise PublicationError(
+                    "package_removal_recovery_required",
+                    "Package removal could not be proven across reprepro and exported APT indexes",
+                    details={"database_remaining": len(database_remaining), "index_remaining": index_remaining},
+                )
+            return {
+                "package": package,
+                "distribution": config["codename"],
+                "component": component,
+                "removed_versions": sorted({str(row.get("version") or "") for row in before}),
+                "verified_at": utc_now(),
+            }
+    except RepositoryLockError as exc:
+        raise PublicationError(exc.code, str(exc), details=exc.details) from exc
+
+
 def _attempt(
     run: dict,
     *,

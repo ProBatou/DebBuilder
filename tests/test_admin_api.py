@@ -535,6 +535,63 @@ class AdminApiTests(AdminApiCase):
         status, deleted = self.request("DELETE", "/api/packages/download-ui")
         self.assertTrue(deleted["ok"])
 
+    def test_remove_published_package_preserves_recipe_and_runs_then_allows_rebuild(self):
+        packages_path = server.REPOSITORY_ROOT / "dists/stable/main/binary-amd64/Packages"
+
+        def remove_repository_package(*_args, **_kwargs):
+            paragraphs = packages_path.read_text().strip().split("\n\n")
+            packages_path.write_text("\n\n".join(
+                paragraph for paragraph in paragraphs if not paragraph.startswith("Package: webapp\n")
+            ) + "\n\n")
+            return {
+                "package": "webapp", "removed_versions": ["3.4.1"],
+                "verified_at": "2026-10-01T12:00:00+00:00",
+            }
+
+        with mock.patch(
+            "debbuilder.app.artifact_publication.remove_published_package",
+            side_effect=remove_repository_package,
+        ) as remove:
+            status, deleted = self.request("DELETE", "/api/packages/webapp")
+        self.assertEqual(status, 200)
+        self.assertTrue(deleted["removal"]["publication_removed"])
+        remove.assert_called_once()
+        self.assertIsNone(server.get_package("webapp"))
+        self.assertTrue(server.workflow_path("webapp-recipe").is_file())
+        self.assertIsNotNone(BuildStore(server.DATA / "builds").load("20260822-031400"))
+
+        self.successful_build_run("webapp-rebuilt", package="webapp", version="3.4.2-1")
+        rebuilt = server.get_package("webapp")
+        self.assertEqual(rebuilt["version"]["candidate"], "3.4.2-1")
+
+    def test_remove_package_rejects_active_run(self):
+        store = BuildStore(server.DATA / "builds")
+        run = store.load("20260822-031400")
+        run["status"] = "running"
+        store.save(run)
+        with self.assertRaises(urllib.error.HTTPError) as captured:
+            self.request("DELETE", "/api/packages/webapp")
+        self.assertEqual(captured.exception.code, 409)
+        payload = json.loads(captured.exception.read())
+        self.assertEqual(payload["error"]["code"], "package_operation_conflict")
+
+    def test_remove_repository_failure_restores_catalog_state(self):
+        failure = server.artifact_publication.PublicationError(
+            "repository_query_failed", "reprepro query failed",
+        )
+        with mock.patch(
+            "debbuilder.app.artifact_publication.remove_published_package",
+            side_effect=failure,
+        ):
+            with self.assertRaises(urllib.error.HTTPError) as captured:
+                self.request("DELETE", "/api/packages/webapp")
+        self.assertEqual(captured.exception.code, 422)
+        payload = json.loads(captured.exception.read())
+        self.assertEqual(payload["error"]["code"], "repository_query_failed")
+        self.assertIsNotNone(server.get_package("webapp"))
+        overrides = server.package_projection_service().load_overrides()
+        self.assertNotIn("webapp", overrides)
+
     def test_recipe_list_logs_execution_detail_and_settings_are_available(self):
         status, recipes = self.request("GET", "/api/recipes")
         self.assertIn("webapp-recipe", [row["id"] for row in recipes["recipes"]])

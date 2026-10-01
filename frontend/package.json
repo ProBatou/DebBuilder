@@ -12,7 +12,7 @@
     "dev": "vite --host 127.0.0.1",
     "check": "svelte-check --tsconfig ./jsconfig.json",
     "test": "node --test tests/*.test.js",
-    "test:browser": "node tests/browser.mjs && node tests/browser-recipe-editor.mjs",
+    "test:browser": "node tests/browser.mjs && node tests/browser-recipe-editor.mjs && node tests/browser-package-lifecycle.mjs",
     "build": "vite build",
     "test:browser:save": "node tests/browser-recipe-save.mjs"
   },

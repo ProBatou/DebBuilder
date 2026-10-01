@@ -48,7 +48,7 @@ def _detect_node(source: Path, root: Path) -> dict | None:
             lock, package_manager = candidate, manager
             files.append(candidate)
             break
-    commands = {"pnpm": ["corepack enable", "pnpm install --frozen-lockfile"], "yarn": ["corepack enable", "yarn install --immutable"], "npm": ["npm ci" if lock.is_file() else "npm install"]}[package_manager]
+    commands = {"pnpm": ["pnpm install --frozen-lockfile"], "yarn": ["yarn install --immutable"], "npm": ["npm ci" if lock.is_file() else "npm install"]}[package_manager]
     warnings = []
     data = {}
     try:
@@ -63,11 +63,11 @@ def _detect_node(source: Path, root: Path) -> dict | None:
     scripts = data.get("scripts") if isinstance(data, dict) and isinstance(data.get("scripts"), dict) else {}
     strong_application = bool(scripts.get("build") or scripts.get("start") or data.get("main") or data.get("bin") or data.get("workspaces"))
     build_tools = ["node", package_manager]
-    if package_manager in {"pnpm", "yarn"}:
-        build_tools.insert(1, "corepack")
     tool_requirements = {}
     if engines.get("node"):
         tool_requirements["node"] = str(engines["node"])
+    if package_manager == "npm" and engines.get("npm"):
+        tool_requirements["npm"] = str(engines["npm"])
     if package_manager_spec.startswith(f"{package_manager}@"):
         tool_requirements[package_manager] = package_manager_spec.split("@", 1)[1]
     return {"project_type": "nodejs", "display_name": f"Node.js · {package_manager}", "detected_files": _relative(source, files), "build_dependencies": dependencies, "system_build_dependencies": [], "build_tools": build_tools, "tool_version_requirements": tool_requirements, "proposed_commands": commands, "warnings": warnings, "package_manager": package_manager, "package_manager_spec": package_manager_spec, "node_version": str(engines.get("node") or ""), "strong_application": strong_application}

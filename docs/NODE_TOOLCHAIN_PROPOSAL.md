@@ -1,34 +1,39 @@
-# Per-Run Node build toolchain proposal
+# Per-Run Node build toolchains
 
-The current project detector reads `engines.node` and `packageManager` from
-`package.json` and sends tool requirements to `dependency_checker`. The checker
-and `build_executor` use `command_runner` with the same controlled environment,
-but both resolve binaries from the host PATH. No per-Run Node resolver, verified
-download source, or isolated cache exists. A host Node 26 can therefore reach
-the Seerr `pnpm` step, while the managed DebBuilder self-build requires Node 24
-and npm 11. Build-time Node and package runtime dependencies are separate: a
-packaged service may still require Node at runtime.
+Node projects are detected from `package.json`. The detector records
+`engines.node`, the lockfile-selected package manager, and the version declared
+by `packageManager` or `engines.npm`. A missing Node range, unsupported range,
+or unsatisfied range fails closed; the host Node installation is not a
+fallback. npm without a declared version uses the npm version published in the
+selected Node release metadata.
 
-Implementation should add a resolver before dependency checking. For Node
-projects it should parse the upstream range with a maintained semver parser,
-reject unsupported syntax, and choose a pinned compatible version from an
-operator-approved inventory. The inventory must bind each Node archive to an
-upstream provenance URL and SHA-256 checksum. Download into a bounded cache,
-verify before extraction, reject unsafe archive paths, and promote atomically.
-The Run records the selected exact version and digest. An explicit cache lease
-keeps the chosen toolchain available through cancellation and recovery.
+During the network-enabled dependencies step, DebBuilder reads the official
+Node release index, selects the highest stable compatible binary for the host
+platform and architecture, and verifies the archive against that release's
+official `SHASUMS256.txt`. npm and pnpm versions are resolved from abbreviated
+npm registry metadata and their archives are verified using the published SRI
+identity. Corepack is not enabled or modified.
 
-The resolver should create a Run-owned bin directory or environment prefix and
-prepend it to PATH only for dependency checks and build commands. It should
-prepare the `packageManager` version from `package.json` under the same Node
-toolchain, with a verified source and pinned version. `pnpm@10.24.0` must not
-be upgraded implicitly; the managed self-build must resolve npm 11.x. Both
-checks and execution must use the existing command runner, timeout, cancellation,
-and systemd containment path. Diagnostics should report required, selected,
-and failure versions without revealing internal cache paths.
+Verified files are promoted under the data directory's `toolchains` cache.
+The cache key includes Node version/platform/architecture or package-manager
+name/version/integrity. Cross-process file locks, private staging directories,
+and atomic rename prevent concurrent partial entries. Cache manifests and
+critical executable hashes are checked before reuse. Extracted cache files are
+read-only; the cache remains an optimization because current upstream metadata
+and integrity identities are consulted before every preparation.
 
-This checkpoint has no trusted Node archive inventory, checksum catalog,
-cache lifecycle, or tested semver resolver. Introducing unverified downloads
-or a new broad package repository would violate the toolchain safety condition,
-so the resolver remains a follow-up design task. Unsupported range syntax now
-fails the availability check instead of silently accepting host Node.
+Each Run receives `toolchain/bin` entry points that refer to the selected
+immutable cache entries. Its absolute bin path is prepended only to that Run's
+controlled command environment, so dependency checks, npm/pnpm scripts, and
+build subprocesses all resolve the same Node binary. HOME, npm's cache, and any
+Corepack state also point inside the Run workspace. The Run manifest records
+the requested range, exact versions, platform/architecture, distribution
+SHA-256, package-manager SRI, and durable source URLs without exposing cache
+paths. Workspace cleanup removes the Run-local entry points but never removes
+the shared cache.
+
+After preparation, validation of the Run-local entry points is local-only.
+Missing prepared files fail with `prepared_node_toolchain_missing`; no Node,
+npm, pnpm, or Corepack acquisition is attempted by the offline execution path.
+Existing command containment, cancellation checkpoints, and workspace cleanup
+remain authoritative.

@@ -1669,8 +1669,77 @@ def inspect_upstream_archive(workflow: dict) -> dict:
     return upstream_archive.inspect(recipe, token=github_token(DATA))
 
 
-def delete_package(name: str) -> None:
-    package_projection_service().mark_deleted(name)
+def delete_package(name: str) -> dict:
+    """Retire a package while preserving its Recipe and complete Run history."""
+    require_safe_name(name, "package")
+    service = package_projection_service()
+    # Serialize the metadata intent/finalization around the repository lease so
+    # two administrative removals cannot restore stale pending state over a
+    # completed retirement.
+    with storage.locked_path(service.packages_file):
+        return _delete_package_locked(name, service)
+
+
+def _delete_package_locked(name: str, service: package_service.PackageService) -> dict:
+    package = get_package(name)
+    if package is None:
+        raise FileNotFoundError("package not found")
+    active_run_id = str((package.get("build") or {}).get("active_run_id") or "")
+    if active_run_id:
+        raise artifact_publication.PublicationError(
+            "package_operation_conflict",
+            "Package removal is unavailable while the package has an active Run",
+            details={"run_id": active_run_id},
+        )
+    canonical_name = str(package.get("name") or name)
+    published = any(
+        package_service.normalized_package_name(row.get("Package"))
+        == package_service.normalized_package_name(canonical_name)
+        for row in live_published_index()
+    )
+    try:
+        previous = service.begin_removal(canonical_name)
+    except OSError as exc:
+        raise artifact_publication.PublicationError(
+            "package_removal_recovery_required",
+            "Package removal intent could not be persisted",
+        ) from exc
+    repository_removal = None
+    try:
+        if published:
+            apt = repo_settings()
+            repository_removal = artifact_publication.remove_published_package(
+                package_service.normalized_package_name(canonical_name),
+                repo_root=REPOSITORY_ROOT,
+                distribution=apt["distribution"],
+                component=apt["component"],
+            )
+        service.mark_deleted(canonical_name, repository_removal=repository_removal)
+    except artifact_publication.PublicationError as exc:
+        # A command/proof failure may have changed repository state.  Retain
+        # the durable pending marker so a retry can reconcile live APT truth.
+        if exc.code not in {"reprepro_remove_failed", "package_removal_recovery_required"}:
+            try:
+                service.restore_after_failed_removal(canonical_name, previous)
+            except OSError as restore_error:
+                raise artifact_publication.PublicationError(
+                    "package_removal_recovery_required",
+                    "Package removal failed and its metadata intent could not be restored",
+                    details={"cause": exc.code},
+                ) from restore_error
+        raise
+    except OSError as exc:
+        raise artifact_publication.PublicationError(
+            "package_removal_recovery_required",
+            "Repository removal completed but package retirement metadata could not be committed",
+        ) from exc
+    return {
+        "name": canonical_name,
+        "publication_removed": published,
+        "recipe_preserved": bool(package.get("recipe")),
+        "runs_preserved": True,
+        "repository": repository_removal,
+    }
 
 
 def list_recipes() -> list[dict]:

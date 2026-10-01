@@ -24,6 +24,11 @@
 .overview-action-result { padding: 10px 12px; border: 1px solid var(--success); border-radius: 6px; background: var(--success-bg); color: var(--success); }
 .package-detail-action { max-width: 100%; white-space: normal; text-align: center; }
 .package-action-dialog .modal-copy { line-height: 1.5; }
+.package-detail-actions { display:flex; flex-wrap:wrap; gap:10px; }
+.package-remove-action, .package-remove-confirm { color:var(--danger); border-color:var(--danger); }
+.package-remove-confirm { background:var(--danger-bg); }
+.package-remove-dialog .modal-copy { line-height:1.5; }
+.package-remove-effects { color:var(--muted); font-size:12px; line-height:1.7; padding-left:20px; }
 .package-action-dialog .modal-actions { gap: 8px; flex-wrap: wrap; }
 .package-create-dialog .modal-copy { line-height: 1.5; }
 .package-create-dialog .package-create-fields { display: grid; gap: 14px; margin-top: 18px; }

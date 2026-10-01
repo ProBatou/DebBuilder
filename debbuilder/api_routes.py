@@ -127,7 +127,7 @@ ADMIN_API_ROUTES: tuple[ApiRoute, ...] = (
     _route("POST", "/api/workflows/{workflow_id}", "workflows.save", "_post_workflow_save", D, "workflows", "Save a workflow"),
     _route("DELETE", "/api/workflows/{workflow_id}", "workflows.delete", "_delete_workflow", D, "workflows", "Delete a workflow"),
     _route("DELETE", "/api/executions/{run_id}/logs", "executions.logs.delete", "_delete_execution_log", D, "executions", "Delete execution logs"),
-    _route("DELETE", "/api/packages/{name}", "packages.delete", "_delete_package", D, "packages", "Delete a package"),
+    _route("DELETE", "/api/packages/{name}", "packages.delete", "_delete_package", D, "packages", "Remove a package publication"),
 )
 
 

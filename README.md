@@ -6,7 +6,7 @@ DebBuilder is a self-hosted web console for turning GitHub-hosted projects into
 Debian packages, validating their install lifecycle, and publishing them to a
 signed personal APT repository.
 
-The current public release is **v1.1.0**. The [roadmap](docs/ROADMAP.md) tracks
+The current public release is **v1.2.0**. The [roadmap](docs/ROADMAP.md) tracks
 ongoing post-v1 development.
 
 ## What it does
@@ -53,7 +53,7 @@ for the deeper model.
 
 ## Installation
 
-> **Release status:** The current public release is **v1.1.0**. The badge above
+> **Release status:** The current public release is **v1.2.0**. The badge above
 > always reports the latest public release.
 
 The currently qualified installation target is Debian 13 on amd64, with
@@ -61,7 +61,7 @@ systemd and cgroup v2. The host needs network access for normal APT dependency
 installation, GitHub source acquisition, and the first pull of each selected
 Validation image.
 
-Download the v1.1.0 Debian package and `SHA256SUMS` from
+Download the v1.2.0 Debian package and `SHA256SUMS` from
 [GitHub Releases](https://github.com/ProBatou/DebBuilder/releases), verify the
 checksum, then install the local package with APT:
 
@@ -230,5 +230,5 @@ Selected Recipes and Runs also offer contextual inspection; see
 ## Version and release status
 
 The badge at the top of this page reads the latest public release directly from
-GitHub. The current public release is **v1.1.0**, and post-v1 development is
+GitHub. The current public release is **v1.2.0**, and post-v1 development is
 ongoing.

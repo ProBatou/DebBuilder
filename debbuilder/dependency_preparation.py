@@ -691,7 +691,7 @@ def _canonical_lifecycle_result(attempt: dict, prepared: dict, validation: dict)
         checks.append({
             "name": str(row.get("name") or "validation_check")[:256],
             "status": "success" if row.get("status") == "success" else "failed",
-            "error": "Validation check failed" if row.get("error") else "",
+            "error": str(row.get("error") or "")[:1000],
         })
     if not checks:
         checks = [{"name": "lifecycle_execution", "status": "failed", "error": "Validation lifecycle did not produce checks"}]

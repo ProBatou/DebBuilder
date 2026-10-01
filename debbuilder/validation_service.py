@@ -372,7 +372,7 @@ def _public_checks(result: dict) -> list[dict]:
         checks.append({
             "name": str(row.get("name") or "")[:128],
             "status": str(row.get("status") or "")[:32],
-            "error": "Validation check failed" if row.get("error") else "",
+            "error": str(row.get("error") or "")[:1000],
         })
         if len(checks) >= 100:
             break

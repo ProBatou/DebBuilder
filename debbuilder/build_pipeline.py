@@ -463,15 +463,20 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
                 summary = f"{len(dependencies.get('available_tools', []))} tools available; {len(dependencies['available'])} system dependencies installed, {len(dependencies['missing'])} missing"
                 _finish_step(run, store, dependencies_step, dependencies_started, status="success", summary=summary, details=dependencies)
             except (dependency_checker.DependencyError, node_toolchain.NodeToolchainError) as exc:
-                state = exc.details
+                project_requirement = {
+                    key: detection.get(key, "")
+                    for key in ("project_type", "package_manager", "package_manager_spec", "node_version")
+                    if detection.get(key)
+                }
+                state = {**exc.details, "project_requirement": project_requirement}
                 store.append_event(run, f"Build tools available: {', '.join(state.get('available_tools', [])) or 'none'}")
                 store.append_event(run, f"Build tools unavailable: {', '.join(state.get('missing_tools', [])) or 'none'}", level="error" if state.get("missing_tools") else "info")
                 store.append_event(run, f"Dependencies detected: {', '.join(state.get('detected', [])) or 'none'}")
                 store.append_event(run, f"Dependencies manually added: {', '.join(state.get('manually_added', [])) or 'none'}")
                 store.append_event(run, f"Dependencies available: {', '.join(state.get('available', [])) or 'none'}")
                 store.append_event(run, f"Dependencies missing: {', '.join(state.get('missing', [])) or 'none'}", level="error")
-                error = {"stage": "dependencies", "code": exc.code, "message": str(exc), "details": exc.details}
-                _finish_step(run, store, dependencies_step, dependencies_started, status="failed", summary=str(exc), details=exc.details, error=error)
+                error = {"stage": "dependencies", "code": exc.code, "message": str(exc), "details": state}
+                _finish_step(run, store, dependencies_step, dependencies_started, status="failed", summary=str(exc), details=state, error=error)
                 run.update({"status": "failed", "error": error})
     if run["status"] != "failed":
         changes_step, changes_started = _start_step(run, store, "source_changes")

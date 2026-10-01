@@ -44,7 +44,7 @@ _RUN_ERROR_CODES = STABLE_ERROR_CODES | frozenset({
     "node_toolchain_metadata_invalid", "node_integrity_missing", "node_integrity_mismatch",
     "node_toolchain_archive_unsafe", "node_toolchain_invalid",
     "package_manager_requirement_missing", "package_manager_range_unsupported",
-    "package_manager_range_unsatisfied", "package_manager_metadata_invalid",
+    "package_manager_range_unsatisfied", "package_manager_acquisition_failed", "package_manager_metadata_invalid",
     "package_manager_integrity_invalid", "package_manager_integrity_mismatch",
     "package_manager_archive_invalid", "prepared_node_toolchain_missing",
     "post_build_directory_invalid_path", "post_build_directory_escape",

@@ -216,11 +216,18 @@ def resolve(requirements: dict[str, str], *, package_manager: str = "npm", opene
     if len(managers) != 1 or managers[0] != package_manager:
         raise NodeToolchainError("package_manager_requirement_missing", "Node projects must declare one supported package-manager version", details={"requirements": requirements})
     name = managers[0]
-    metadata = manager_metadata if manager_metadata is not None else _json_url(
-        f"{NPM_REGISTRY_URL}/{name}", opener=opener,
-        headers={"Accept": "application/vnd.npm.install-v1+json"},
-        checkpoint=checkpoint,
-    )
+    try:
+        metadata = manager_metadata if manager_metadata is not None else _json_url(
+            f"{NPM_REGISTRY_URL}/{name}", opener=opener,
+            headers={"Accept": "application/vnd.npm.install-v1+json"},
+            checkpoint=checkpoint,
+        )
+    except NodeToolchainError as exc:
+        code = "package_manager_metadata_invalid" if exc.code == "node_toolchain_metadata_invalid" else "package_manager_acquisition_failed"
+        raise NodeToolchainError(
+            code, f"{name} registry metadata could not be acquired",
+            details={**exc.details, "package_manager": name, "requested_range": requirements[name]},
+        ) from exc
     manager = _resolve_manager(name, str(requirements[name]), metadata)
     node["host_architecture"] = host_arch
     return {"node": node, "package_manager": manager}
@@ -368,7 +375,15 @@ def _prepare_manager(resolution: dict, cache: Path, *, opener=None, checkpoint=N
         staging = Path(tempfile.mkdtemp(prefix=f".{integrity_key}.", dir=root.parent))
         try:
             archive = staging / "package.tgz"
-            _download(manager["tarball"], archive, limit=MAX_ARCHIVE_BYTES, opener=opener, checkpoint=checkpoint)
+            try:
+                _download(manager["tarball"], archive, limit=MAX_ARCHIVE_BYTES, opener=opener, checkpoint=checkpoint)
+            except NodeToolchainError as exc:
+                if exc.code != "node_toolchain_acquisition_failed":
+                    raise
+                raise NodeToolchainError(
+                    "package_manager_acquisition_failed", f"The {name} archive could not be acquired",
+                    details={**exc.details, "package_manager": name, "version": exact},
+                ) from exc
             algorithm, expected_digest = _integrity_digest(manager["integrity"])
             actual_digest = bytes.fromhex(_digest(archive, algorithm))
             if actual_digest != expected_digest:

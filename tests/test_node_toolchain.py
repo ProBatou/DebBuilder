@@ -100,6 +100,21 @@ class NodeToolchainTests(unittest.TestCase):
             node_toolchain.resolve_node("^22.19.0", releases, platform_name="linux", node_arch="x64")
         self.assertEqual(unsatisfied.exception.code, "node_range_unsatisfied")
 
+    def test_registry_acquisition_failure_is_package_manager_specific(self):
+        releases = [{"version": "v24.12.0", "npm": "11.7.0", "files": ["linux-x64"]}]
+
+        def unavailable(_request, timeout=0):
+            raise OSError("registry unavailable")
+
+        with self.assertRaises(node_toolchain.NodeToolchainError) as raised:
+            node_toolchain.resolve(
+                {"node": "24.x", "npm": "11.x"}, package_manager="npm",
+                releases=releases, opener=unavailable,
+            )
+        self.assertEqual(raised.exception.code, "package_manager_acquisition_failed")
+        self.assertEqual(raised.exception.details["package_manager"], "npm")
+        self.assertEqual(raised.exception.details["requested_range"], "11.x")
+
     def test_prepare_is_run_local_cached_and_offline_afterward(self):
         network = FixtureNetwork()
         resolution = node_toolchain.resolve({"node": "24.x", "npm": "11.x"}, package_manager="npm", releases=network.releases, manager_metadata=network.manager_metadata)

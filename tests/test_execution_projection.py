@@ -267,6 +267,21 @@ class ExecutionProjectionTests(unittest.TestCase):
             self.assertNotIn(marker, encoded)
         self.assertIn("[redacted", encoded.lower())
 
+    def test_validation_check_reason_is_bounded_and_sanitized(self):
+        validation = execution_projection.public_validation({
+            "id": "validation-one", "status": "failed", "phase": "lifecycle",
+            "profile": {"name": "bookworm"},
+            "checks": [{
+                "name": "package_install", "status": "failed",
+                "error": "failed at /private/work with token=private-token " + "x" * 500,
+            }],
+        })
+        reason = validation["checks"][0]["error"]
+        self.assertLessEqual(len(reason), 240)
+        self.assertNotIn("/private/work", reason)
+        self.assertNotIn("private-token", reason)
+        self.assertIn("[redacted", reason.lower())
+
     def test_log_diagnostics_filter_secrets_at_every_verbosity(self):
         run = self.populated_run()
         run["events"] = [{"message": "Build command token=event-secret-marker"}]

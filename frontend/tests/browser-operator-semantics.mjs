@@ -38,6 +38,12 @@ try {
     await page.goto(`${base}/#/runs/ui-04-build-failed`);
     await page.locator('.run-main').waitFor();
     await page.locator('.run-diagnosis').waitFor();
+    await page.getByText('Prepared toolchain command failed',{exact:true}).waitFor();
+    assert.equal(await page.locator('.run-diagnosis .inline-alert').getByText('pnpm build',{exact:false}).count(),0);
+    await page.locator('.run-technical summary').click();
+    await page.locator('.run-technical').getByText('Resolved Node',{exact:true}).waitFor();
+    assert.ok((await page.locator('.run-technical').innerText()).includes('22.21.1'));
+    assert.ok((await page.locator('.run-technical').innerText()).includes('pnpm 10.24.0'));
     assert.equal(await page.locator('.run-technical .structured').count(),0);
     assert.equal(await page.locator('.log-options').count(),0);
     const rawLogs = page.waitForResponse(response => response.url().includes('/api/executions/ui-04-build-failed/logs?verbosity=raw'));

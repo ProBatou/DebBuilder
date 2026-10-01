@@ -500,7 +500,7 @@ def public_validation(validation) -> dict:
         checks.append({key: value for key, value in {
             "name": safe_text(row.get("name"), limit=128),
             "status": safe_text(row.get("status"), limit=32),
-            "error": safe_text(row.get("error"), limit=240),
+            "error": _safe_error_message(row.get("error"))[:240],
         }.items() if _present(value)})
     diagnostics = []
     for row in (validation.get("diagnostics") or [])[:MAX_ITEMS]:

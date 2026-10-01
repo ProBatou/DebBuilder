@@ -53,6 +53,11 @@
 .run-live-badge { color:var(--info);font-size:12px;font-weight:700;white-space:nowrap; }
 .run-diagnosis .inline-alert { margin:0; }
 .run-diagnosis h3,.run-dependencies h3 { margin:0 0 12px; }
+.run-diagnostic-facts { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 16px;margin-top:14px; }
+.run-diagnostic-facts div { min-width:0;border-top:1px solid var(--line);padding-top:8px; }
+.run-diagnostic-facts span,.run-diagnostic-facts strong { display:block;overflow-wrap:anywhere;white-space:pre-wrap; }
+.run-diagnostic-facts span { color:var(--muted);font-size:10px;font-weight:700;text-transform:uppercase; }
+.run-diagnostic-facts strong { margin-top:3px;font:600 12px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
 .run-error-technical { margin-top:12px;font-size:11px;color:var(--muted); }
 .run-error-technical code { display:block;margin-top:8px; }
 .developer-payload { margin-top:16px;border-top:1px solid var(--line);padding-top:12px; }
@@ -71,6 +76,7 @@
 .managed-recipe-actions .button { margin:0; }
 .managed-recipe-actions span { color:var(--warning);font-size:11px; }
 @media(max-width:650px) { .managed-recipe-fields { grid-template-columns:1fr; } .managed-recipe-summary .section-head { flex-wrap:wrap; } }
+@media(max-width:600px) { .run-diagnostic-facts { grid-template-columns:1fr; } }
 .system-developer { display:grid;gap:16px; }
 .developer-tools .section-head { margin-bottom:10px; }
 .developer-selector-grid { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:18px; }

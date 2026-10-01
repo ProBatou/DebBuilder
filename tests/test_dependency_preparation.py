@@ -568,13 +568,17 @@ class DependencyPreparationUnitTests(unittest.TestCase):
                 persist(path, value)
 
             with mock.patch("debbuilder.dependency_preparation._persist", side_effect=recording_persist):
+                evidence = self.lifecycle_evidence(prepared, status="failed", code="modeled_state_drift")
+                evidence["checks"][0].update({"status": "failed", "error": "route probe observed an unexpected default route"})
                 terminal = complete_lifecycle_attempt(
                     store, run["id"], attempt_id,
-                    self.lifecycle_evidence(prepared, status="failed", code="modeled_state_drift"),
+                    evidence,
                 )
             self.assertEqual(writes, ["result.json", "attempt.json"])
             self.assertEqual(terminal["status"], "failed")
             self.assertEqual(terminal["error"]["code"], "modeled_state_drift")
+            persisted_result = storage.load_json(attempt_root / "result.json", {})
+            self.assertEqual(persisted_result["checks"][0]["error"], "route probe observed an unexpected default route")
 
             terminal.update({"status": "running", "finished_at": None, "result": None, "error": None})
             storage.save_json(attempt_root / "attempt.json", terminal)

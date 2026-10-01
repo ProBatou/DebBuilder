@@ -1,7 +1,9 @@
 """Build plan validation, ordered execution, and output resolution."""
 from __future__ import annotations
 
+import json
 import os
+import re
 import stat
 from pathlib import Path, PurePosixPath
 
@@ -27,6 +29,44 @@ class BuildError(RuntimeError):
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _MAX_ENSURE_DIRECTORIES = 256
 _MAX_ENSURE_DIRECTORY_LENGTH = 1024
+_COMMAND_DIAGNOSTIC_PREFIX = "DEBBUILDER_DIAGNOSTIC_V1="
+_DIAGNOSTIC_TOOL = re.compile(r"^[A-Za-z][A-Za-z0-9 ._+-]{0,31}$")
+_DIAGNOSTIC_REQUIREMENT = re.compile(r"^[0-9vVxX*^~<>=|&.+ -]{1,64}$")
+_DIAGNOSTIC_VERSION = re.compile(r"^[vV]?[0-9]+(?:\.[0-9A-Za-z]+)*(?:[-+][0-9A-Za-z.-]+)?$")
+
+
+def _command_diagnostic(result: dict) -> dict | None:
+    """Accept a deliberately small, bounded diagnostic emitted by a command."""
+    candidates = []
+    for stream in (result.get("stderr"), result.get("stdout")):
+        for line in str(stream or "").splitlines():
+            if line.startswith(_COMMAND_DIAGNOSTIC_PREFIX):
+                candidates.append(line[len(_COMMAND_DIAGNOSTIC_PREFIX):])
+    if len(candidates) != 1 or len(candidates[0]) > 2048:
+        return None
+    try:
+        value = json.loads(candidates[0])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict) or set(value) != {"code", "requirements"}:
+        return None
+    if value.get("code") != "toolchain_requirement_mismatch":
+        return None
+    requirements = value.get("requirements")
+    if not isinstance(requirements, list) or not 1 <= len(requirements) <= 8:
+        return None
+    normalized = []
+    for row in requirements:
+        if not isinstance(row, dict) or set(row) != {"tool", "required", "detected"}:
+            return None
+        if not (
+            isinstance(row.get("tool"), str) and _DIAGNOSTIC_TOOL.fullmatch(row["tool"])
+            and isinstance(row.get("required"), str) and _DIAGNOSTIC_REQUIREMENT.fullmatch(row["required"])
+            and isinstance(row.get("detected"), str) and _DIAGNOSTIC_VERSION.fullmatch(row["detected"])
+        ):
+            return None
+        normalized.append({key: row[key] for key in ("tool", "required", "detected")})
+    return {"code": value["code"], "requirements": normalized}
 
 
 def _post_build_parts(value, *, index: int) -> tuple[str, ...]:
@@ -346,10 +386,14 @@ def execute_build(recipe: dict, detection: dict, source_directory: str | Path, *
         if result.get("cancellation_requested") or result.get("status") == "cancelled":
             raise ExecutionCancelled(result.get("cancellation"), command_result=result)
         if result["status"] != "success":
-            code = result.get("error_code") or ("build_command_timeout" if result.get("timed_out") else "build_command_failed")
+            diagnostic = _command_diagnostic(result)
+            code = result.get("error_code") or ("build_command_timeout" if result.get("timed_out") else diagnostic["code"] if diagnostic else "build_command_failed")
             timeout_reason = result.get("timeout_reason")
-            message = f"Build command {index} timed out ({timeout_reason})" if result.get("timed_out") and timeout_reason else f"Build command {index} timed out" if result.get("timed_out") else f"Build command {index} failed with exit code {result.get('exit_code')}"
-            raise BuildError(code, message, details={"plan": plan, "commands": results, "failed_command": result})
+            message = "Build environment does not meet the command's declared requirements" if diagnostic else f"Build command {index} timed out ({timeout_reason})" if result.get("timed_out") and timeout_reason else f"Build command {index} timed out" if result.get("timed_out") else f"Build command {index} failed with exit code {result.get('exit_code')}"
+            details = {"plan": plan, "commands": results, "failed_command": result}
+            if diagnostic:
+                details["command_diagnostic"] = diagnostic
+            raise BuildError(code, message, details=details)
         if cancellation_event is not None and cancellation_event.is_set():
             cancellation = on_cancel() if callable(on_cancel) else {}
             raise ExecutionCancelled(cancellation)

@@ -134,14 +134,34 @@ def execution_diagnostic(run: dict) -> dict | None:
     recipe_step = {"source": "source", "detection": "build", "dependencies": "build", "source_changes": "build", "build": "build", "staging": "install", "debian_metadata": "install", "systemd": "service", "package": "install", "artifact": "install"}.get(stage, "")
     where.append(_fact("Step", STAGE_LABELS.get(stage, stage.replace("_", " ").title())))
 
-    if code == "missing_build_tools":
+    if code == "toolchain_requirement_mismatch":
+        title = "Build environment incompatible"
+        command = _failed_command(details)
+        command_diagnostic = details.get("command_diagnostic") if isinstance(details.get("command_diagnostic"), dict) else {}
+        requirements = command_diagnostic.get("requirements") if isinstance(command_diagnostic.get("requirements"), list) else []
+        for row in requirements:
+            if not isinstance(row, dict):
+                continue
+            facts += filter(None, [
+                _fact(f"Required {row.get('tool', 'tool')}", row.get("required")),
+                _fact(f"Detected {row.get('tool', 'tool')}", row.get("detected")),
+            ])
+        facts += filter(None, [
+            _fact("Command", _command_text(command)), _fact("Exit code", command.get("exit_code")),
+        ])
+        next_action = "Use a build environment that satisfies every listed tool requirement, then run Test again."
+    elif code == "missing_build_tools":
         title = "Required build tool unavailable"
         tool_checks = details.get("tool_checks") if isinstance(details.get("tool_checks"), list) else []
         rows = [row for row in tool_checks if isinstance(row, dict) and not row.get("available")]
+        project = details.get("project_requirement") if isinstance(details.get("project_requirement"), dict) else {}
         facts += filter(None, [
             _fact("Tools", [row.get("tool") for row in rows]),
             _fact("Status", [f"{row.get('tool')}: {row.get('status')}" for row in rows]),
             _fact("Required version", [f"{row.get('tool')} {row.get('requirement')}" for row in rows if row.get("requirement")]),
+            _fact("Detected version", [f"{row.get('tool')} {row.get('version') or 'not found'}" for row in rows]),
+            _fact("Package manager", project.get("package_manager")),
+            _fact("Project requirement", project.get("package_manager_spec") or project.get("node_version")),
         ])
         next_action = "Install or expose the required tool in the build PATH, then run Test again."
     elif code == "missing_build_dependencies":
@@ -201,9 +221,10 @@ def execution_diagnostic(run: dict) -> dict | None:
         failed_checks = [row for row in checks if isinstance(row, dict) and row.get("status") == "failed"]
         command = _failed_command(record)
         profile = record.get("profile") if isinstance(record.get("profile"), dict) else {}
-        title = "Package validation failed"
+        lifecycle = safe_text(record.get("phase") or "lifecycle", limit=64)
+        title = "Offline lifecycle validation failed" if lifecycle == "lifecycle" else "Package validation failed"
         where += filter(None, [_fact("Profile", profile.get("name")), _fact("Failed checks", [row.get("name") for row in failed_checks])])
-        facts += filter(None, [_fact("Command", _command_text(command)), _fact("Exit code", command.get("exit_code")), _fact("Reason", next((row.get("error") or row.get("summary") for row in failed_checks if row.get("error") or row.get("summary")), "")), _fact("Last command output", _output_excerpt(command))])
+        facts += filter(None, [_fact("Lifecycle phase", lifecycle), _fact("Command", _command_text(command)), _fact("Exit code", command.get("exit_code")), _fact("Reason", next((row.get("error") or row.get("summary") for row in failed_checks if row.get("error") or row.get("summary")), "")), _fact("Last command output", _output_excerpt(command))])
         next_action = "Review the failed validation check in the selected profile, then revalidate the same artifact."
         recipe_step = ""
     elif phase == "publication":

@@ -163,6 +163,35 @@ class BuildExecutorTests(unittest.TestCase):
         self.assertEqual(calls, ["first"])
         self.assertEqual(raised.exception.details["failed_command"]["stderr"], "specific failure")
 
+    def test_command_can_report_bounded_structured_toolchain_mismatch(self):
+        diagnostic = 'DEBBUILDER_DIAGNOSTIC_V1={"code":"toolchain_requirement_mismatch","requirements":[{"tool":"Node","required":"24.x","detected":"26.9.0"},{"tool":"npm","required":"11.x","detected":"9.7.2"}]}'
+        result = {"command":"check-toolchain","arguments":["check-toolchain"],"working_directory":"/source","configured_working_directory":".","status":"failed","exit_code":1,"stdout":"","stderr":diagnostic,"duration":0.1,"timed_out":False}
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(BuildError) as raised:
+                execute_build(recipe(["check-toolchain"]), {}, temporary, dry_run=False, runner=lambda *_a, **_k: result)
+        self.assertEqual(raised.exception.code, "toolchain_requirement_mismatch")
+        self.assertEqual(raised.exception.details["command_diagnostic"]["requirements"][0], {
+            "tool": "Node", "required": "24.x", "detected": "26.9.0",
+        })
+
+    def test_unknown_or_oversized_command_diagnostic_uses_generic_fallback(self):
+        marker = 'DEBBUILDER_DIAGNOSTIC_V1={"code":"unknown","requirements":[]}'
+        result = {"command":"build","arguments":["build"],"working_directory":"/source","configured_working_directory":".","status":"failed","exit_code":2,"stdout":"","stderr":marker,"duration":0.1,"timed_out":False}
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(BuildError) as raised:
+                execute_build(recipe(["build"]), {}, temporary, dry_run=False, runner=lambda *_a, **_k: result)
+        self.assertEqual(raised.exception.code, "build_command_failed")
+        self.assertNotIn("command_diagnostic", raised.exception.details)
+
+    def test_command_diagnostic_rejects_non_version_secret_values(self):
+        marker = 'DEBBUILDER_DIAGNOSTIC_V1={"code":"toolchain_requirement_mismatch","requirements":[{"tool":"Node","required":"24.x","detected":"token=private-value"}]}'
+        result = {"command":"build","arguments":["build"],"working_directory":"/source","configured_working_directory":".","status":"failed","exit_code":2,"stdout":"","stderr":marker,"duration":0.1,"timed_out":False}
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(BuildError) as raised:
+                execute_build(recipe(["build"]), {}, temporary, dry_run=False, runner=lambda *_a, **_k: result)
+        self.assertEqual(raised.exception.code, "build_command_failed")
+        self.assertNotIn("command_diagnostic", raised.exception.details)
+
     def test_timeout_is_a_distinct_build_error(self):
         result = {"command":"slow","arguments":["slow"],"working_directory":"/source","configured_working_directory":".","status":"failed","exit_code":None,"stdout":"","stderr":"timed out","duration":1.0,"timed_out":True}
         with tempfile.TemporaryDirectory() as temporary:

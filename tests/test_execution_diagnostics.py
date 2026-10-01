@@ -34,12 +34,33 @@ class ExecutionDiagnosticTests(unittest.TestCase):
 
     def test_missing_tool_distinguishes_path_tool_from_debian_dependency(self):
         diagnostic = self.failed_run("missing_build_tools", "Required build tools are unavailable", stage="dependencies", details={
-            "tool_checks": [{"tool": "cargo", "status": "version_mismatch", "available": False, "requirement": ">=1.80", "working_directory": "/runs/demo/source", "search_path": "/usr/local/bin:/usr/bin"}],
+            "tool_checks": [{"tool": "cargo", "status": "version_mismatch", "available": False, "requirement": ">=1.80", "version": "1.79.0", "working_directory": "/runs/demo/source", "search_path": "/usr/local/bin:/usr/bin"}],
+            "project_requirement": {"package_manager": "pnpm", "package_manager_spec": "pnpm@10.0.0", "node_version": "^22.19.0"},
         })
         self.assertEqual(diagnostic["title"], "Required build tool unavailable")
         self.assertIn("cargo: version_mismatch", [row["value"] for row in diagnostic["facts"]])
         self.assertEqual(diagnostic["recipe_step"], "build")
         self.assertIn("build PATH", diagnostic["next_action"])
+        facts = {row["label"]: row["value"] for row in diagnostic["facts"]}
+        self.assertEqual(facts["Detected version"], "cargo 1.79.0")
+        self.assertEqual(facts["Package manager"], "pnpm")
+        self.assertEqual(facts["Project requirement"], "pnpm@10.0.0")
+
+    def test_structured_command_requirement_has_required_and_detected_versions(self):
+        command = {"command": "node frontend/scripts/check-toolchain.mjs", "exit_code": 1, "status": "failed"}
+        diagnostic = self.failed_run("toolchain_requirement_mismatch", "Environment mismatch", details={
+            "failed_command": command,
+            "command_diagnostic": {"code": "toolchain_requirement_mismatch", "requirements": [
+                {"tool": "Node", "required": "24.x", "detected": "26.9.0"},
+                {"tool": "npm", "required": "11.x", "detected": "9.7.2"},
+            ]},
+        })
+        facts = {row["label"]: row["value"] for row in diagnostic["facts"]}
+        self.assertEqual(diagnostic["title"], "Build environment incompatible")
+        self.assertEqual(facts["Required Node"], "24.x")
+        self.assertEqual(facts["Detected Node"], "26.9.0")
+        self.assertEqual(facts["Required npm"], "11.x")
+        self.assertEqual(facts["Detected npm"], "9.7.2")
 
     def test_missing_debian_dependencies_keep_detected_and_manual_origins(self):
         diagnostic = self.failed_run("missing_build_dependencies", "Missing system packages", stage="dependencies", details={
@@ -137,6 +158,9 @@ class ExecutionDiagnosticTests(unittest.TestCase):
         self.assertEqual(rows["Profile"], "bookworm-node22")
         self.assertEqual(rows["Failed checks"], "systemd_active")
         self.assertEqual(rows["Command"], "systemctl is-active demo")
+        self.assertEqual(rows["Reason"], "unit exited")
+        self.assertEqual(rows["Lifecycle phase"], "lifecycle")
+        self.assertEqual(diagnostic["title"], "Offline lifecycle validation failed")
 
     def test_publication_failure_uses_preflight_repository_and_command(self):
         run = self.store.create(recipe(), mode="build")

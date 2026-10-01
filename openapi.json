@@ -5554,6 +5554,14 @@
               }
             },
             "additionalProperties": false
+          },
+          "toolchain": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Resolved per-Run Node and package-manager identity when applicable.",
+            "additionalProperties": true
           }
         },
         "additionalProperties": true,

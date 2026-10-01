@@ -7,6 +7,16 @@ from debbuilder.project_detection import DetectionError, detect_project
 
 
 class ProjectDetectionTests(unittest.TestCase):
+    def test_debbuilder_fixture_declares_node_24_and_npm_11(self):
+        repository = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "package.json").write_bytes((repository / "package.json").read_bytes())
+            (root / "package-lock.json").write_bytes((repository / "package-lock.json").read_bytes())
+            result = detect_project(root)
+        self.assertEqual(result["project_type"], "nodejs")
+        self.assertEqual(result["tool_version_requirements"], {"node": ">=24 <25", "npm": ">=11 <12"})
+
     def test_node_detection_uses_lock_and_build_script(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -268,7 +278,7 @@ class ProjectDetectionTests(unittest.TestCase):
             (root / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
             result = detect_project(root)
         self.assertEqual(result["build_dependencies"], ["nodejs"])
-        self.assertEqual(result["proposed_commands"], ["corepack enable", "pnpm install --frozen-lockfile", "pnpm build"])
+        self.assertEqual(result["proposed_commands"], ["pnpm install --frozen-lockfile", "pnpm build"])
         self.assertEqual((result["package_manager_spec"], result["node_version"]), ("pnpm@10.24.0", "^22.19.0"))
 
     def test_rust_detection(self):

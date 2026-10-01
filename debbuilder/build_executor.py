@@ -303,7 +303,7 @@ def validate_build_plan(recipe: dict, detection: dict, source_directory: str | P
     }
 
 
-def execute_build(recipe: dict, detection: dict, source_directory: str | Path, *, dry_run: bool, runner=run_command, inactivity_timeout: float | None = None, maximum_runtime: float | None = None, on_result=None, on_output=None, on_directory_result=None, cancellation_event=None, on_cancel=None) -> dict:
+def execute_build(recipe: dict, detection: dict, source_directory: str | Path, *, dry_run: bool, runner=run_command, environment: dict[str, str] | None = None, inactivity_timeout: float | None = None, maximum_runtime: float | None = None, on_result=None, on_output=None, on_directory_result=None, cancellation_event=None, on_cancel=None) -> dict:
     plan = validate_build_plan(recipe, detection, source_directory, dry_run=dry_run)
     if dry_run:
         return {"executed": False, "reason": "dry_run", "plan": plan, "commands": [], "output": plan["output"]}
@@ -319,7 +319,7 @@ def execute_build(recipe: dict, detection: dict, source_directory: str | Path, *
         kwargs = {
             "workspace": source_directory,
             "working_directory": recipe["build"]["working_directory"],
-            "environment": recipe["build"]["environment"],
+            "environment": environment if environment is not None else recipe["build"]["environment"],
             "inactivity_timeout": inactivity_timeout,
             "maximum_runtime": maximum_runtime,
         }

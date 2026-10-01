@@ -37,6 +37,11 @@ class ExecutionProjectionTests(unittest.TestCase):
             "status": "success",
             "version": {"upstream": "1.0", "debian": "1.0-1"},
             "future_secret": "top-secret-marker",
+            "toolchain": {
+                "schema_version": 1, "requested_node_range": "^22.19.0",
+                "node": {"version": "22.23.3", "platform": "linux", "architecture": "x64", "sha256": "b" * 64, "source": "https://nodejs.org/dist/example", "cache_path": "/private/toolchain"},
+                "package_manager": {"name": "pnpm", "requested_range": "10.24.0", "version": "10.24.0", "integrity": "sha512-safe", "source": "https://registry.npmjs.org/example"},
+            },
             "artifact": {
                 "path": str(artifact_path), "size": 3, "sha256": "a" * 64,
                 "future_internal": "artifact-secret-marker",
@@ -196,6 +201,11 @@ class ExecutionProjectionTests(unittest.TestCase):
         self.assertEqual(detail["publications"][0]["proof"]["verified_at"], "2026-09-21T10:00:00Z")
         self.assertEqual(detail["publications"][0]["proof"]["artifact"]["sha256"], "a" * 64)
         self.assertEqual(detail["automation"], {"policy": "full"})
+        self.assertEqual(detail["toolchain"], {
+            "node": {"requested_range": "^22.19.0", "version": "22.23.3", "platform": "linux", "architecture": "x64", "sha256": "b" * 64},
+            "package_manager": {"name": "pnpm", "requested_range": "10.24.0", "version": "10.24.0", "integrity": "sha512-safe"},
+        })
+        self.assertNotIn("cache_path", encoded)
         self.assertEqual(detail["error"], {
             "code": "example_failure", "stage": "build",
             "message": "Safe failure at [redacted-path] and [redacted-url]",

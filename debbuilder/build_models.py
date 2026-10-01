@@ -214,6 +214,7 @@ def new_run(run_id: str, recipe_id: str, mode: str, workspace: str, recipe_sha25
         "version": {"upstream": "", "debian": ""},
         "steps": [new_step(name) for name in STEP_NAMES],
         "artifact": None,
+        "toolchain": None,
         "error": None,
         "events": [],
         "resource_limits": validate_contract(resource_contract or default_contract()),

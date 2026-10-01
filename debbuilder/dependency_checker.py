@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .command_runner import controlled_environment, resolve_working_directory, run_command
 from .execution_cancellation import raise_for_cancelled_result
+from .node_toolchain import version_satisfies as node_version_satisfies
 
 DEBIAN_PACKAGE_NAME = re.compile(r"^[a-z0-9][a-z0-9+.-]*$")
 TOOL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+-]*$")
@@ -33,6 +34,8 @@ def _version_tuple(value: str) -> tuple[int, ...] | None:
 
 def _version_satisfies(version: str, requirement: str) -> bool | None:
     """Evaluate simple numeric constraints; return None for unsupported syntax."""
+    if any(marker in str(requirement) for marker in ("^", "~", "x", "X", "*", "||", " - ")):
+        return node_version_satisfies(version, requirement)
     actual = _version_tuple(version)
     clauses = [clause for clause in re.split(r"\s*,\s*|\s+", str(requirement or "").strip()) if clause]
     if not clauses or actual is None:

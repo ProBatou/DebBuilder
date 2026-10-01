@@ -748,8 +748,27 @@ def create_handler(api):
             if parsed.query:
                 api.json_response(self, {"error": "package deletion does not accept repository operations"}, 400)
                 return
-            api.delete_package(name)
-            api.json_response(self, {"ok": True, "id": name, "deleted_from_repo": False})
+            try:
+                removal = api.delete_package(name)
+            except FileNotFoundError:
+                api.json_response(self, {"error": {
+                    "code": "package_not_found", "message": "Package was not found", "details": {},
+                }}, 404)
+                return
+            except api.artifact_publication.PublicationError as exc:
+                if exc.code == "package_operation_conflict":
+                    status = 409
+                elif exc.code in {"repository_mutation_busy", "repository_lock_invalid", "repository_root_invalid"}:
+                    status = 503
+                elif exc.code == "package_removal_recovery_required":
+                    status = 500
+                else:
+                    status = 422
+                api.json_response(self, {"error": {
+                    "code": exc.code, "message": str(exc), "details": exc.details,
+                }}, status)
+                return
+            api.json_response(self, {"ok": True, "id": name, "removal": removal})
 
         def _delete_execution_log(self, variables, _parsed):
             run_id = variables["run_id"]

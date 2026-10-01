@@ -18,6 +18,24 @@ STAGE_LABELS = {
     "artifact": "Artifact",
 }
 
+_NODE_REQUIREMENT_ERRORS = {"node_requirement_missing", "node_range_unsupported", "node_range_unsatisfied"}
+_NODE_INTEGRITY_ERRORS = {"node_integrity_missing", "node_integrity_mismatch"}
+_NODE_PREPARATION_ERRORS = {
+    "node_toolchain_acquisition_failed", "node_toolchain_metadata_invalid", "node_toolchain_platform_unsupported",
+    "node_toolchain_archive_unsafe", "node_toolchain_invalid", "prepared_node_toolchain_missing",
+}
+_PACKAGE_MANAGER_REQUIREMENT_ERRORS = {
+    "package_manager_requirement_missing", "package_manager_range_unsupported", "package_manager_range_unsatisfied",
+}
+_PACKAGE_MANAGER_PREPARATION_ERRORS = {
+    "package_manager_acquisition_failed", "package_manager_metadata_invalid", "package_manager_integrity_invalid",
+    "package_manager_integrity_mismatch", "package_manager_archive_invalid",
+}
+_NODE_TOOLCHAIN_ERRORS = (
+    _NODE_REQUIREMENT_ERRORS | _NODE_INTEGRITY_ERRORS | _NODE_PREPARATION_ERRORS
+    | _PACKAGE_MANAGER_REQUIREMENT_ERRORS | _PACKAGE_MANAGER_PREPARATION_ERRORS
+)
+
 
 def _private_environment_values(run: dict) -> tuple[str, ...]:
     """Collect configured build-environment values for output-only redaction."""
@@ -134,8 +152,55 @@ def execution_diagnostic(run: dict) -> dict | None:
     recipe_step = {"source": "source", "detection": "build", "dependencies": "build", "source_changes": "build", "build": "build", "staging": "install", "debian_metadata": "install", "systemd": "service", "package": "install", "artifact": "install"}.get(stage, "")
     where.append(_fact("Step", STAGE_LABELS.get(stage, stage.replace("_", " ").title())))
 
-    if code == "toolchain_requirement_mismatch":
-        title = "Build environment incompatible"
+    if code in _NODE_TOOLCHAIN_ERRORS:
+        project = details.get("project_requirement") if isinstance(details.get("project_requirement"), dict) else {}
+        requirements = details.get("requirements") if isinstance(details.get("requirements"), dict) else {}
+        manager = details.get("package_manager") or project.get("package_manager")
+        node_requirement = (
+            details.get("requested_range") if code in _NODE_REQUIREMENT_ERRORS
+            else project.get("node_version") or requirements.get("node")
+        )
+        manager_requirement = (
+            details.get("requested_range") if code in _PACKAGE_MANAGER_REQUIREMENT_ERRORS
+            else project.get("package_manager_spec") or requirements.get(manager)
+        )
+        facts += filter(None, [
+            _fact("Node requirement", node_requirement),
+            _fact("Package manager", manager),
+            _fact("Package manager requirement", manager_requirement),
+            _fact("Selected Node", details.get("node_version") or (details.get("version") if code in _NODE_INTEGRITY_ERRORS else "")),
+            _fact("Selected package manager", details.get("version") if code in _PACKAGE_MANAGER_PREPARATION_ERRORS else ""),
+            _fact("Platform", details.get("platform")), _fact("Architecture", details.get("architecture")),
+            _fact("Archive", details.get("archive")), _fact("Source", details.get("source")),
+            _fact("Expected SHA-256", details.get("expected_sha256")),
+            _fact("Integrity identity", details.get("integrity")),
+        ])
+        if code == "node_range_unsupported":
+            title = "Unsupported Node requirement"
+            next_action = "Use a supported explicit Node version range in engines.node, then run Test again."
+        elif code in {"node_requirement_missing", "node_range_unsatisfied"}:
+            title = "No compatible Node release available"
+            next_action = "Declare a supported Node range with an available compatible release, then run Test again."
+        elif code == "node_toolchain_platform_unsupported":
+            title = "Node toolchain platform unsupported"
+            next_action = "Run the build on a supported Linux architecture with an official Node binary distribution."
+        elif code in _NODE_INTEGRITY_ERRORS:
+            title = "Node toolchain integrity verification failed"
+            next_action = "Retry acquisition from the official Node distribution; do not bypass checksum verification."
+        elif code == "prepared_node_toolchain_missing":
+            title = "Prepared Run-local toolchain unavailable"
+            next_action = "Restart the Run so its isolated toolchain is prepared again before offline Build execution."
+        elif code in _PACKAGE_MANAGER_REQUIREMENT_ERRORS:
+            title = "Package-manager requirement cannot be resolved"
+            next_action = "Declare one supported npm or pnpm version that can be resolved, then run Test again."
+        elif code in _PACKAGE_MANAGER_PREPARATION_ERRORS:
+            title = "Package-manager toolchain preparation failed"
+            next_action = "Retry registry acquisition and verify published package-manager integrity metadata."
+        else:
+            title = "Run-local Node toolchain preparation failed"
+            next_action = "Review acquisition details, then retry preparation without bypassing integrity checks."
+    elif code == "toolchain_requirement_mismatch":
+        title = "Prepared toolchain does not satisfy command requirements"
         command = _failed_command(details)
         command_diagnostic = details.get("command_diagnostic") if isinstance(details.get("command_diagnostic"), dict) else {}
         requirements = command_diagnostic.get("requirements") if isinstance(command_diagnostic.get("requirements"), list) else []
@@ -149,7 +214,7 @@ def execution_diagnostic(run: dict) -> dict | None:
         facts += filter(None, [
             _fact("Command", _command_text(command)), _fact("Exit code", command.get("exit_code")),
         ])
-        next_action = "Use a build environment that satisfies every listed tool requirement, then run Test again."
+        next_action = "Review the detected project requirements and prepared Run-local toolchain, then run Test again."
     elif code == "missing_build_tools":
         title = "Required build tool unavailable"
         tool_checks = details.get("tool_checks") if isinstance(details.get("tool_checks"), list) else []
@@ -176,7 +241,10 @@ def execution_diagnostic(run: dict) -> dict | None:
         direct_command = details.get("failed_command")
         command = direct_command if isinstance(direct_command, dict) else _failed_command(details)
         plan = details.get("plan") if isinstance(details.get("plan"), dict) else {}
-        title = "Build command timed out" if code == "build_command_timeout" else "Build command failed"
+        toolchain = run.get("toolchain") if isinstance(run.get("toolchain"), dict) else {}
+        node = toolchain.get("node") if isinstance(toolchain.get("node"), dict) else {}
+        manager = toolchain.get("package_manager") if isinstance(toolchain.get("package_manager"), dict) else {}
+        title = "Build command timed out" if code == "build_command_timeout" else "Prepared toolchain command failed" if node else "Build command failed"
         where += filter(None, [_fact("Command index", command.get("index"))])
         facts += filter(None, [
             _fact("Command", _command_text(command)), _fact("Exit code", command.get("exit_code")),
@@ -184,6 +252,8 @@ def execution_diagnostic(run: dict) -> dict | None:
             _fact("Configured inactivity", plan.get("inactivity_timeout")),
             _fact("Configured maximum runtime", plan.get("maximum_runtime")),
             _fact("Last command output", _output_excerpt(command)),
+            _fact("Prepared Node", node.get("version")),
+            _fact("Prepared package manager", f"{manager.get('name')} {manager.get('version')}" if manager.get("name") and manager.get("version") else ""),
         ])
         if command.get("timeout_reason") == "inactivity":
             next_action = "Fix the command if it is hanging, or increase the inactivity timeout if silence is expected."

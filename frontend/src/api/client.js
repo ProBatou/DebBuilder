@@ -53,6 +53,7 @@ export const api = {
   dashboard: opts => request('/api/dashboard', opts),
   packages: opts => request('/api/packages', opts),
   package: (name, opts) => request(`/api/packages/${id(name)}`, opts),
+  removePackage: (name, opts) => request(`/api/packages/${id(name)}`, {...opts,method:'DELETE'}),
   inventory: opts => request('/api/repository/inventory', opts),
   recipes: opts => request('/api/recipes', opts),
   workflows: opts => request('/api/workflows', opts),

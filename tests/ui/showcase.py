@@ -166,6 +166,13 @@ def seed_run(
             {"at": timestamp, "level": "info", "message": "Dependencies: resolved from the isolated fixture"},
         ],
     })
+    if recipe["name"] in {"seerr", "worker-agent"}:
+        run["toolchain"] = {
+            "schema_version": 1,
+            "requested_node_range": "^22.19.0",
+            "node": {"version": "22.21.1", "platform": "linux", "architecture": "x64", "sha256": "b" * 64},
+            "package_manager": {"name": "pnpm", "requested_range": "10.24.0", "version": "10.24.0", "integrity": "sha512-safe"},
+        }
     run_step(run, "source")["details"] = {
         "repository": recipe["source"]["repository"], "strategy": recipe["source"].get("tracking", "latest_release"),
         "ref": f"v{upstream}", "tag": f"v{upstream}", "upstream_version": upstream,

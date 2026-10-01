@@ -150,6 +150,31 @@ def public_resource_limits(contract) -> dict:
     }
 
 
+def public_toolchain(value) -> dict | None:
+    """Expose immutable toolchain facts without cache or workspace paths."""
+    if not isinstance(value, dict):
+        return None
+    node = value.get("node") if isinstance(value.get("node"), dict) else {}
+    manager = value.get("package_manager") if isinstance(value.get("package_manager"), dict) else {}
+    if not node.get("version") or not manager.get("name") or not manager.get("version"):
+        return None
+    return {
+        "node": {
+            "requested_range": safe_text(value.get("requested_node_range"), limit=128),
+            "version": safe_text(node.get("version"), limit=64),
+            "platform": safe_text(node.get("platform"), limit=32),
+            "architecture": safe_text(node.get("architecture"), limit=32),
+            "sha256": safe_text(node.get("sha256"), limit=128),
+        },
+        "package_manager": {
+            "name": safe_text(manager.get("name"), limit=32),
+            "requested_range": safe_text(manager.get("requested_range"), limit=128),
+            "version": safe_text(manager.get("version"), limit=64),
+            "integrity": safe_text(manager.get("integrity"), limit=256),
+        },
+    }
+
+
 def _public_inspection(inspection) -> dict:
     inspection = inspection if isinstance(inspection, dict) else {}
     result = {
@@ -657,5 +682,6 @@ def public_detail(run: dict) -> dict:
         "publications": [public_publication(row, run=run) for row in (run.get("publications") or []) if isinstance(row, dict)][:MAX_ITEMS],
         "error": public_error(run.get("error")),
         "resources": public_resource_limits(run.get("resource_limits")),
+        "toolchain": public_toolchain(run.get("toolchain")),
     })
     return detail

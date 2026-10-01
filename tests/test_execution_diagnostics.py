@@ -24,10 +24,12 @@ class ExecutionDiagnosticTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def failed_run(self, code, message, *, stage="build", details=None):
+    def failed_run(self, code, message, *, stage="build", details=None, toolchain=None):
         run = self.store.create(recipe(), mode="build")
         error = {"stage": stage, "code": code, "message": message, "details": details or {}}
         run.update({"status": "failed", "error": error})
+        if toolchain:
+            run["toolchain"] = toolchain
         next(step for step in run["steps"] if step["name"] == stage).update({"status": "failed", "error": error})
         self.store.save(run)
         return execution_service.get_execution(self.store, run["id"])["diagnostic"]
@@ -56,11 +58,51 @@ class ExecutionDiagnosticTests(unittest.TestCase):
             ]},
         })
         facts = {row["label"]: row["value"] for row in diagnostic["facts"]}
-        self.assertEqual(diagnostic["title"], "Build environment incompatible")
+        self.assertEqual(diagnostic["title"], "Prepared toolchain does not satisfy command requirements")
         self.assertEqual(facts["Required Node"], "24.x")
         self.assertEqual(facts["Detected Node"], "26.9.0")
         self.assertEqual(facts["Required npm"], "11.x")
         self.assertEqual(facts["Detected npm"], "9.7.2")
+
+    def test_run_local_toolchain_error_families_are_actionable(self):
+        project = {"project_requirement": {
+            "project_type": "nodejs", "node_version": "^22.19.0",
+            "package_manager": "pnpm", "package_manager_spec": "pnpm@10.24.0",
+        }}
+        cases = (
+            ("node_range_unsupported", "Unsupported Node requirement", {"requested_range": "latest"}),
+            ("node_range_unsatisfied", "No compatible Node release available", {"requested_range": "^22.19.0"}),
+            ("node_toolchain_acquisition_failed", "Run-local Node toolchain preparation failed", {"source": "https://nodejs.org/dist/index.json"}),
+            ("node_integrity_mismatch", "Node toolchain integrity verification failed", {"version": "22.21.1", "archive": "node.tar.xz", "expected_sha256": "a" * 64}),
+            ("package_manager_acquisition_failed", "Package-manager toolchain preparation failed", {"package_manager": "pnpm", "requested_range": "10.24.0", "source": "https://registry.npmjs.org/pnpm"}),
+            ("package_manager_integrity_mismatch", "Package-manager toolchain preparation failed", {"package_manager": "pnpm", "version": "10.24.0", "integrity": "sha512-safe"}),
+            ("package_manager_range_unsatisfied", "Package-manager requirement cannot be resolved", {"package_manager": "pnpm", "requested_range": "99.x"}),
+            ("prepared_node_toolchain_missing", "Prepared Run-local toolchain unavailable", {}),
+        )
+        for code, title, detail in cases:
+            with self.subTest(code=code):
+                diagnostic = self.failed_run(code, "Toolchain failure", stage="dependencies", details={**project, **detail})
+                facts = {row["label"]: row["value"] for row in diagnostic["facts"]}
+                self.assertEqual(diagnostic["title"], title)
+                self.assertTrue(diagnostic["next_action"])
+                self.assertIn("Node requirement", facts)
+                self.assertEqual(facts["Package manager"], "pnpm")
+
+    def test_prepared_toolchain_execution_failure_includes_provenance(self):
+        toolchain = {
+            "requested_node_range": "^22.19.0",
+            "node": {"version": "22.21.1"},
+            "package_manager": {"name": "pnpm", "version": "10.24.0", "requested_range": "10.24.0"},
+        }
+        diagnostic = self.failed_run(
+            "build_command_failed", "Build failed",
+            details={"failed_command": {"command": "pnpm build", "exit_code": 2, "status": "failed"}},
+            toolchain=toolchain,
+        )
+        facts = {row["label"]: row["value"] for row in diagnostic["facts"]}
+        self.assertEqual(diagnostic["title"], "Prepared toolchain command failed")
+        self.assertEqual(facts["Prepared Node"], "22.21.1")
+        self.assertEqual(facts["Prepared package manager"], "pnpm 10.24.0")
 
     def test_missing_debian_dependencies_keep_detected_and_manual_origins(self):
         diagnostic = self.failed_run("missing_build_dependencies", "Missing system packages", stage="dependencies", details={

@@ -15,7 +15,7 @@ from .automation_identity import (
 from .build_store import BuildStore, canonical_recipe_sha256
 from .command_identity import clear_identity, persist_identity, recording_identities, update_identity
 from .execution_cancellation import SERVER_SHUTDOWN, CancellationControl, ExecutionCancelled
-from . import build_executor, deb_inspector, debian_packaging, dependency_checker, elf_toolchain, project_detection, source_acquisition, source_changes, upstream_archive, upstream_artifact
+from . import build_executor, deb_inspector, debian_packaging, dependency_checker, elf_toolchain, node_toolchain, project_detection, source_acquisition, source_changes, upstream_archive, upstream_artifact
 from .elf_dependency_resolution import ResolutionError
 from .dependency_preparation import DependencyPreparationError
 from .validation_oci import OciOwnershipError
@@ -364,6 +364,7 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
     archive_mode = canonical["artifact"]["mode"] == "upstream_archive"
     acquire = acquire or (upstream_archive.acquire if archive_mode else source_acquisition.acquire_source)
     detector = detector or project_detection.detect_project
+    prepare_detected_toolchain = dependency_check is None
     dependency_check = dependency_check or dependency_checker.check_dependencies
     change_applier = change_applier or source_changes.apply_changes
     source_step, source_started = _start_step(run, store, "source")
@@ -420,17 +421,35 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
     if run["status"] != "failed":
         dependencies_step, dependencies_started = _start_step(run, store, "dependencies")
         _cancellation_checkpoint(control, run, store, "dependencies")
+        build_environment = dict(canonical["build"]["environment"])
+        prepared_toolchain = None
         if archive_mode:
             dependencies = {"detected": [], "manually_added": [], "requested": [], "available": [], "missing": []}
             _finish_step(run, store, dependencies_step, dependencies_started, status="skipped", summary="No build dependencies: upstream release artifact", details={**dependencies, "reason": "upstream_archive"})
         else:
             try:
+                if detection.get("project_type") == "nodejs" and prepare_detected_toolchain:
+                    resolution = node_toolchain.resolve(
+                        detection.get("tool_version_requirements", {}),
+                        package_manager=detection.get("package_manager", "npm"),
+                        checkpoint=lambda: _cancellation_checkpoint(control, run, store, "dependencies"),
+                    )
+                    _cancellation_checkpoint(control, run, store, "dependencies")
+                    prepared_toolchain = node_toolchain.prepare(
+                        resolution, workspace=run["workspace"], cache=store.root.parent / "toolchains",
+                        checkpoint=lambda: _cancellation_checkpoint(control, run, store, "dependencies"),
+                    )
+                    _cancellation_checkpoint(control, run, store, "dependencies")
+                    build_environment.update(node_toolchain.validate_prepared(prepared_toolchain, workspace=run["workspace"]))
+                    run["toolchain"] = prepared_toolchain["identity"]
+                    dependencies_step.setdefault("details", {})["toolchain"] = prepared_toolchain["identity"]
+                    store.append_event(run, f"Prepared isolated Node {prepared_toolchain['identity']['node']['version']} with {prepared_toolchain['identity']['package_manager']['name']} {prepared_toolchain['identity']['package_manager']['version']}.")
                 dependencies = dependency_check(
                     detection["system_build_dependencies"],
                     canonical["build"]["extra_dependencies"], tools=detection.get("build_tools", []),
                     tool_version_requirements=detection.get("tool_version_requirements", {}),
                     workspace=source["source_directory"], working_directory=canonical["build"]["working_directory"],
-                    environment=canonical["build"]["environment"],
+                    environment=build_environment,
                     cancellation_event=control.event,
                     on_cancel=lambda: _observe_cancellation(control, run, store, "dependencies"),
                 )
@@ -443,7 +462,7 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
                 store.append_event(run, f"Dependencies missing: {', '.join(dependencies['missing']) or 'none'}")
                 summary = f"{len(dependencies.get('available_tools', []))} tools available; {len(dependencies['available'])} system dependencies installed, {len(dependencies['missing'])} missing"
                 _finish_step(run, store, dependencies_step, dependencies_started, status="success", summary=summary, details=dependencies)
-            except dependency_checker.DependencyError as exc:
+            except (dependency_checker.DependencyError, node_toolchain.NodeToolchainError) as exc:
                 project_requirement = {
                     key: detection.get(key, "")
                     for key in ("project_type", "package_manager", "package_manager_spec", "node_version")
@@ -508,8 +527,11 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
                         f"Post-build directory available: {item['path']} ({item['status'].replace('_', ' ')})",
                     )
                     _cancellation_checkpoint(control, run, store, "build")
+                if prepared_toolchain is not None:
+                    build_environment.update(node_toolchain.validate_prepared(prepared_toolchain, workspace=run["workspace"]))
                 build = build_executor.execute_build(
                     canonical, detection, source["source_directory"], dry_run=dry_run,
+                    environment=build_environment,
                     on_result=command_completed, on_output=command_output,
                     on_directory_result=directory_available,
                     cancellation_event=control.event,
@@ -520,7 +542,7 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
                     _finish_step(run, store, build_step, build_started, status="skipped", summary=f"Dry-run validated {len(build['plan']['commands'])} commands; none executed", details=build)
                 else:
                     _finish_step(run, store, build_step, build_started, status="success", summary=f"{len(build['commands'])} build commands completed", details=build)
-            except build_executor.BuildError as exc:
+            except (build_executor.BuildError, node_toolchain.NodeToolchainError) as exc:
                 error = {"stage": "build", "code": exc.code, "message": str(exc), "details": exc.details}
                 _finish_step(run, store, build_step, build_started, status="failed", summary=str(exc), details=exc.details, error=error)
                 run.update({"status": "failed", "error": error})

@@ -336,3 +336,22 @@ def reprepro_include_deb(repo_root: Path, distribution: str, deb_path: Path, com
         timeout=120, pass_fds=inherited,
     )
     return {"backend": "reprepro", "command": result}
+
+
+def reprepro_remove_package(repo_root: Path, distribution: str, package: str, component: str = "main", *, lease, runner=run_command) -> dict:
+    """Remove every version of one binary package through reprepro's database."""
+    lease.require_active()
+    root = Path(repo_root).absolute()
+    if root != lease.root:
+        raise ValueError("reprepro root does not match the active repository lease")
+    command_root = Path(f"/proc/self/fd/{lease.root_fd}")
+    arguments = (
+        *_reprepro_layout_arguments(command_root, lease=lease),
+        "--component", component, "--type", "deb", "remove", distribution, package,
+    )
+    result = runner(
+        " ".join(shlex.quote(value) for value in arguments),
+        workspace=command_root, working_directory=".", environment=reprepro_environment(),
+        timeout=120, pass_fds=lease.inherited_fds,
+    )
+    return {"backend": "reprepro", "command": result}

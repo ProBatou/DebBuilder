@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import apt_repo, execution_projection, package_store, storage
+from .build_models import utc_now
 from .build_store import BuildStore
 from .recipe_schema import SAFE_ARCH, require_safe_name
 
@@ -187,8 +188,19 @@ class PackageService:
 
     def list_packages(self, *, include_history: bool = False, live_rows: list[dict] | None = None) -> list[dict]:
         packages: dict[str, dict] = {}
+        retirements: dict[str, dict] = {}
         recipes = self.recipe_records_by_package()
-        live_rows = [] if live_rows is None else live_rows
+        raw_live_rows = [] if live_rows is None else live_rows
+        live_by_name: dict[str, dict] = {}
+        for row in raw_live_rows:
+            key = normalized_package_name(row.get("Package"))
+            current = live_by_name.get(key)
+            if key and (
+                current is None
+                or self._version_is_newer(str(row.get("Version") or ""), str(current.get("Version") or ""))
+            ):
+                live_by_name[key] = row
+        live_rows = list(live_by_name.values())
         for row in live_rows:
             key = normalized_package_name(row.get("Package"))
             if key:
@@ -200,7 +212,7 @@ class PackageService:
         for name, override in self.load_overrides().items():
             package_key = normalized_package_name(name)
             if override.get("deleted"):
-                packages.pop(package_key, None)
+                retirements[package_key] = override
                 continue
             merged = {**packages.get(package_key, self._empty_package(name, nullable=True)), **override}
             merged = self.merge_recipe_metadata(merged, recipes.get(package_key))
@@ -210,9 +222,6 @@ class PackageService:
         for package_key, package in list(packages.items()):
             packages[package_key] = self.merge_recipe_metadata(package, recipes.get(package_key))
 
-        live_by_name = {
-            normalized_package_name(row.get("Package")): row for row in live_rows if row.get("Package")
-        }
         runs_by_package: dict[str, list[dict]] = {}
         build_store = BuildStore(self.data_dir / "builds")
         for stored_run in build_store.list(limit=1000):
@@ -226,6 +235,23 @@ class PackageService:
             if key:
                 packages.setdefault(key, self._empty_package(key))
                 runs_by_package.setdefault(key, []).append(stored_run)
+
+        for key, retirement in retirements.items():
+            removed_at = str(retirement.get("removed_at") or "")
+            later_runs = ([
+                run for run in runs_by_package.get(key, [])
+                if str(run.get("created_at") or "") > removed_at
+            ] if removed_at else [])
+            rebuilt = any(
+                run.get("mode") == "build" and run.get("status") == "success"
+                and bool((run.get("artifact") or {}).get("path"))
+                for run in later_runs
+            )
+            if key not in live_by_name and not rebuilt:
+                packages.pop(key, None)
+                runs_by_package.pop(key, None)
+            elif rebuilt:
+                runs_by_package[key] = later_runs
 
         apt = self._repo_settings()
         enriched = []
@@ -266,10 +292,33 @@ class PackageService:
             }
         run_state = package_store.summarize_runs(runs, execution_projection.public_summary, include_history=include_history)
         successful, resolved = run_state["successful"], run_state["resolved"]
+        for artifact_run in (
+            run for run in runs
+            if run.get("mode") == "build"
+            and run.get("status") == "success"
+            and bool((run.get("artifact") or {}).get("path"))
+        ):
+            if successful is None:
+                successful = artifact_run
+                continue
+            artifact_version = (
+                ((artifact_run.get("artifact") or {}).get("inspection") or {}).get("version")
+                or (artifact_run.get("version") or {}).get("debian", "")
+            )
+            selected_version = (
+                ((successful.get("artifact") or {}).get("inspection") or {}).get("version")
+                or (successful.get("version") or {}).get("debian", "")
+            )
+            if artifact_version and selected_version and self._version_is_newer(artifact_version, selected_version):
+                successful = artifact_run
+        current_real = run_state["current_real"]
         # An override may contain a legacy last_build summary. The Run store is
         # authoritative for history, including durable Maintenance tombstones.
         package["last_build"] = execution_projection.public_summary(successful) if successful else None
-        candidate = (successful.get("version") or {}).get("debian", "") if successful else ""
+        candidate = (
+            ((successful.get("artifact") or {}).get("inspection") or {}).get("version")
+            or (successful.get("version") or {}).get("debian", "")
+        ) if successful else ""
         latest_validation = run_state["latest_validation"]
         latest_publication = run_state["latest_publication"]
         verified = bool(
@@ -351,19 +400,21 @@ class PackageService:
             "last_build_id": (successful or {}).get("id", ""),
             "last_status": (successful or {}).get("status", ""),
             "validated": verified,
-            "latest_run": run_state["last_real"],
-            "latest_run_id": (run_state["last_real"] or {}).get("id", ""),
-            "latest_status": (run_state["last_real"] or {}).get("status", ""),
+            "latest_run": current_real,
+            "latest_run_id": (current_real or {}).get("id", ""),
+            "latest_status": (current_real or {}).get("status", ""),
+            "active_run_id": (run_state["active_real"] or {}).get("id", ""),
             "last_real": run_state["last_real"],
             "last_dry_run": run_state["last_dry_run"],
         })
-        latest_real_run = next((run for run in runs if run.get("mode") == "build"), None)
+        current_real_id = (current_real or {}).get("id", "")
+        latest_real_run = next((run for run in runs if run.get("id") == current_real_id), None)
         item["validation"] = execution_projection.public_validation(latest_validation) if latest_validation else None
         item["publication"] = (
             execution_projection.public_publication(latest_publication, run=latest_real_run)
             if latest_publication else None
         )
-        item["lifecycle_display_status"] = (run_state["last_real"] or {}).get("lifecycle_status") or item["lifecycle_state"]
+        item["lifecycle_display_status"] = (current_real or {}).get("lifecycle_status") or item["lifecycle_state"]
         item["build"]["ready_to_publish"] = item["lifecycle_display_status"] == "ready_to_publish"
         eligibility = (latest_real_run or {}).get("publication_insertion_eligibility") or {
             "eligible": False, "reasons": ["current_validation_required"], "validation_id": "",
@@ -483,9 +534,44 @@ class PackageService:
             if changed:
                 self.save_overrides(overrides)
 
-    def mark_deleted(self, name: str) -> None:
+    def begin_removal(self, name: str) -> dict | None:
+        """Persist an auditable intent before the external repository mutation."""
         require_safe_name(name, "package")
         with storage.locked_path(self.packages_file):
             overrides = self.load_overrides()
-            overrides[name] = {"name": name, "deleted": True}
+            previous = dict(overrides[name]) if isinstance(overrides.get(name), dict) else None
+            overrides[name] = {
+                **(previous or {"name": name}),
+                "name": name,
+                "removal": {"status": "pending", "requested_at": utc_now()},
+            }
+            self.save_overrides(overrides)
+            return previous
+
+    def restore_after_failed_removal(self, name: str, previous: dict | None) -> None:
+        require_safe_name(name, "package")
+        with storage.locked_path(self.packages_file):
+            overrides = self.load_overrides()
+            if previous is None:
+                overrides.pop(name, None)
+            else:
+                overrides[name] = previous
+            self.save_overrides(overrides)
+
+    def mark_deleted(self, name: str, *, repository_removal: dict | None = None) -> None:
+        require_safe_name(name, "package")
+        with storage.locked_path(self.packages_file):
+            overrides = self.load_overrides()
+            pending = dict(overrides.get(name) or {})
+            requested_at = ((pending.get("removal") or {}).get("requested_at") or utc_now())
+            overrides[name] = {
+                "name": name,
+                "deleted": True,
+                "removed_at": utc_now(),
+                "removal": {
+                    "status": "success",
+                    "requested_at": requested_at,
+                    "repository": repository_removal or None,
+                },
+            }
             self.save_overrides(overrides)

@@ -87,12 +87,36 @@ def allowed_actions(package_state: str, recipe_id: str, run: dict | None) -> dic
 
 def summarize_runs(runs: list[dict], summary, *, include_history: bool = True) -> dict:
     """Select the Build Store facts used by package projections."""
+    def precedence(run: dict) -> tuple[float, str, str]:
+        try:
+            epoch = float(run.get("created_at_epoch") or 0)
+        except (TypeError, ValueError):
+            epoch = 0
+        return epoch, str(run.get("created_at") or ""), str(run.get("id") or "")
+
+    def active(run: dict) -> bool:
+        projected = summary(run)
+        return projected.get("lifecycle_active") is True or (
+            run.get("status") in {"pending", "queued", "running", "cancelling"}
+            or ((run.get("_validation_attempts") or [{}])[-1].get("status") in {"queued", "running", "cancelling"})
+            or ((run.get("publications") or [{}])[-1].get("status") == "running")
+        )
+
+    if all(run.get("created_at") or run.get("created_at_epoch") for run in runs):
+        runs = sorted(runs, key=precedence, reverse=True)
     last_real = next((run for run in runs if run.get("mode") == "build"), None)
+    active_real = next((run for run in runs if run.get("mode") == "build" and active(run)), None)
+    current_real = active_real or last_real
     last_dry = next((run for run in runs if run.get("mode") == "dry_run"), None)
-    successful = next((run for run in runs if run.get("mode") == "build" and run.get("status") == "success" and (run.get("artifact") or {}).get("path")), None)
+    successful = next((
+        run for run in runs
+        if run.get("mode") == "build"
+        and run.get("status") == "success"
+        and (run.get("artifact") or {}).get("path")
+    ), None)
     resolved = next((run for run in runs if (run.get("version") or {}).get("upstream")), None)
-    latest_validation = (last_real.get("_validation_attempts") or [])[-1] if last_real and last_real.get("_validation_attempts") else None
-    latest_publication = (last_real.get("publications") or [])[-1] if last_real and last_real.get("publications") else None
+    latest_validation = (current_real.get("_validation_attempts") or [])[-1] if current_real and current_real.get("_validation_attempts") else None
+    latest_publication = (current_real.get("publications") or [])[-1] if current_real and current_real.get("publications") else None
     history = []
     if include_history:
         for run in runs:
@@ -116,6 +140,8 @@ def summarize_runs(runs: list[dict], summary, *, include_history: bool = True) -
                 })
     return {
         "last_real": summary(last_real) if last_real else None,
+        "current_real": summary(current_real) if current_real else None,
+        "active_real": summary(active_real) if active_real else None,
         "last_dry_run": summary(last_dry) if last_dry else None,
         "successful": successful,
         "resolved": resolved,

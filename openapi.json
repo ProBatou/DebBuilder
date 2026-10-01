@@ -971,7 +971,7 @@
       },
       "delete": {
         "operationId": "packages.delete",
-        "summary": "Delete a package",
+        "summary": "Remove a package publication",
         "tags": [
           "packages"
         ],
@@ -982,13 +982,13 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/DeleteResponse"
+                  "$ref": "#/components/schemas/PackageRemovalResponse"
                 }
               }
             }
           },
           "400": {
-            "description": "HTTP 400 admin API error. Documented codes: invalid_request, invalid_json, internal_error.",
+            "description": "HTTP 400 admin API error. Documented codes: invalid_request, invalid_json, internal_error, invalid_package_id.",
             "content": {
               "application/json": {
                 "schema": {
@@ -999,7 +999,8 @@
             "x-debbuilder-error-codes": [
               "invalid_request",
               "invalid_json",
-              "internal_error"
+              "internal_error",
+              "invalid_package_id"
             ]
           },
           "401": {
@@ -1015,8 +1016,62 @@
               "authentication_required"
             ]
           },
+          "404": {
+            "description": "HTTP 404 admin API error. Documented codes: package_not_found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "package_not_found"
+            ]
+          },
+          "409": {
+            "description": "HTTP 409 admin API error. Documented codes: package_operation_conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "package_operation_conflict"
+            ]
+          },
+          "422": {
+            "description": "HTTP 422 admin API error. Documented codes: repository_query_failed, package_removal_proof_failed, reprepro_remove_failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "repository_query_failed",
+              "package_removal_proof_failed",
+              "reprepro_remove_failed"
+            ]
+          },
+          "500": {
+            "description": "HTTP 500 admin API error. Documented codes: package_removal_recovery_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "x-debbuilder-error-codes": [
+              "package_removal_recovery_required"
+            ]
+          },
           "503": {
-            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable, application_shutting_down.",
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable, application_shutting_down, repository_mutation_busy, repository_lock_invalid, repository_root_invalid.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1027,7 +1082,10 @@
             "x-debbuilder-error-codes": [
               "authentication_unavailable",
               "settings_unavailable",
-              "application_shutting_down"
+              "application_shutting_down",
+              "repository_mutation_busy",
+              "repository_lock_invalid",
+              "repository_root_invalid"
             ]
           }
         },
@@ -7650,6 +7708,89 @@
         "required": [
           "ok",
           "id"
+        ]
+      },
+      "PackageRemoval": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "publication_removed": {
+            "type": "boolean"
+          },
+          "recipe_preserved": {
+            "type": "boolean"
+          },
+          "runs_preserved": {
+            "const": true
+          },
+          "repository": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "package": {
+                    "type": "string"
+                  },
+                  "distribution": {
+                    "type": "string"
+                  },
+                  "component": {
+                    "type": "string"
+                  },
+                  "removed_versions": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "verified_at": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "package",
+                  "distribution",
+                  "component",
+                  "removed_versions",
+                  "verified_at"
+                ]
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "publication_removed",
+          "recipe_preserved",
+          "runs_preserved",
+          "repository"
+        ]
+      },
+      "PackageRemovalResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "id": {
+            "type": "string"
+          },
+          "removal": {
+            "$ref": "#/components/schemas/PackageRemoval"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "ok",
+          "id",
+          "removal"
         ]
       },
       "ExecutionLogDeleteResponse": {

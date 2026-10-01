@@ -2,7 +2,7 @@
 
 This is the canonical human-readable roadmap. GitHub Issues hold the detailed
 scope and acceptance criteria; the [DebBuilder Project](https://github.com/users/ProBatou/projects/1)
-tracks coordination state. The current public release is **v1.1.0**. Post-v1
+tracks coordination state. The current public release is **v1.2.0**. Post-v1
 items describe intended work unless marked exploratory.
 
 **Dependency key:** `A → B` means B waits for A. Coordination means the teams

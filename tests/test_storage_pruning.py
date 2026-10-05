@@ -303,6 +303,18 @@ class StoragePruningTests(unittest.TestCase):
         staging = next(step for step in self.store.load(run["id"])["steps"] if step["name"] == "staging")
         self.assertEqual(staging["details"]["content_manifest"], storage_pruning.STAGING_MANIFEST)
 
+    def test_run_toolchain_is_not_retained_source_evidence_for_manifest_pruning(self):
+        run, workspace = self.make_terminal_manifest_run("toolchain-only", status="failed")
+        toolchain = workspace / "toolchain/home/.local/share/pnpm/store/v10"
+        toolchain.mkdir(parents=True)
+        (toolchain / "package").write_bytes(b"recreatable")
+
+        result = self.sweep()
+
+        self.assertIn(run["id"], result["manifests_pruned"])
+        self.assertFalse((workspace / storage_pruning.STAGING_MANIFEST).exists())
+        self.assertTrue((toolchain / "package").is_file())
+
     def test_staging_manifest_crash_after_delete_recovers_from_intent(self):
         run, workspace = self.make_terminal_manifest_run("manifest-crash")
         original = storage_pruning._finish_staging_metadata

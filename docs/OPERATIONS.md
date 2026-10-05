@@ -33,12 +33,20 @@ packages checked through `dpkg-query`.
 
 A Run directory combines persistent history and disposable build data.
 Automatic cleanup removes only `source/`, `staging/`, `downloads/`, and
-`source.tar.gz`. It retains Run and Recipe metadata, logs, manifests, final
-`.deb` artifacts, Validation records, and artifacts retained for upgrade
-Validation. Unknown workspace entries are retained.
+`source.tar.gz` according to failed-workspace retention, and removes the
+recreatable Run-local `toolchain/` from every terminal Run. The toolchain's
+requested and resolved Node/package-manager identity remains in `run.json`;
+the shared immutable cache under the data directory's top-level `toolchains/`
+is never a Run cleanup target. Cleanup retains Run and Recipe metadata, logs,
+manifests, final `.deb` artifacts, Validation records, and artifacts retained
+for upgrade Validation. Unknown workspace entries are retained.
 
 Settings > Maintenance controls cleanup. It is enabled by default and keeps
 the five most recent failed or cancelled disposable workspaces globally.
+That preference retains their source/staging evidence, not their Run-local
+toolchain state. The latter is disposed after terminal completion because it
+contains per-Run HOME, npm/pnpm stores, Corepack state, and entry points that
+can be recreated from the durable identity and shared cache.
 Successful or prepared Runs become eligible after completion, even if manual
 Validation or Publication follows later. There is no automatic age-based
 deletion of final artifacts or history.

@@ -19,7 +19,9 @@ from .build_store import EXECUTION_HISTORY_DELETION_FILE as HISTORY_MARKER
 from .command_containment import containment_safety_gate, containment_safety_serialized
 from .recipe_schema import require_safe_name
 
-DISPOSABLE_DIRECTORIES = ("source", "staging", "downloads")
+RETENTION_DISPOSABLE_DIRECTORIES = ("source", "staging", "downloads")
+TERMINAL_DISPOSABLE_DIRECTORIES = ("toolchain",)
+DISPOSABLE_DIRECTORIES = RETENTION_DISPOSABLE_DIRECTORIES + TERMINAL_DISPOSABLE_DIRECTORIES
 DISPOSABLE_FILES = ("source.tar.gz",)
 DEFAULT_POLICY = {"enabled": True, "failed_workspaces_to_retain": 5}
 CLEANUP_MARKER = ".workspace-cleanup.json"
@@ -256,7 +258,13 @@ def _remove_targets(fd: int, directories: tuple[str, ...], files: tuple[str, ...
     return removed
 
 
-def _check_artifact(run: dict, *, extra_directories: tuple[str, ...] = ()) -> None:
+def _check_artifact(
+    run: dict,
+    *,
+    directories: tuple[str, ...] = DISPOSABLE_DIRECTORIES,
+    files: tuple[str, ...] = DISPOSABLE_FILES,
+    extra_directories: tuple[str, ...] = (),
+) -> None:
     workspace = Path(run["workspace"])
     candidates = [run.get("artifact") or {}]
     for step in run["steps"]:
@@ -269,7 +277,10 @@ def _check_artifact(run: dict, *, extra_directories: tuple[str, ...] = ()) -> No
             continue
         path = Path(artifact["path"])
         resolved = (path if path.is_absolute() else workspace / path).resolve(strict=False)
-        if any(resolved.is_relative_to(workspace / name) for name in DISPOSABLE_DIRECTORIES + extra_directories) or resolved == workspace / "source.tar.gz":
+        if (
+            any(resolved.is_relative_to(workspace / name) for name in directories + extra_directories)
+            or any(resolved == workspace / name for name in files)
+        ):
             raise ValueError("Final artifact is inside disposable workspace data; cleanup refused")
 
 
@@ -340,15 +351,17 @@ def _clean_locked(
     run: dict,
     *,
     reason: str,
+    directories: tuple[str, ...] = DISPOSABLE_DIRECTORIES,
+    files: tuple[str, ...] = DISPOSABLE_FILES,
     authorization: CleanupAuthorization = OPEN_CLEANUP_AUTHORIZATION,
 ) -> dict:
     # A terminal Run can still retain command ownership metadata after a
     # containment failure.  Startup recovery must prove workload absence and
     # clear that exact record before workspace data may be destroyed.
     require_destructive_run_safe(fd, run, authorization=authorization)
-    _check_artifact(run)
-    _check_targets(fd, DISPOSABLE_DIRECTORIES, DISPOSABLE_FILES)
-    removed = _remove_targets(fd, DISPOSABLE_DIRECTORIES, DISPOSABLE_FILES)
+    _check_artifact(run, directories=directories, files=files)
+    _check_targets(fd, directories, files)
+    removed = _remove_targets(fd, directories, files)
     result = {"id": run["id"], "removed": removed, "reason": reason}
     if removed:
         write_json(fd, CLEANUP_MARKER, {**result, "cleaned_at": utc_now()})
@@ -519,19 +532,22 @@ def apply_retention(
                 failed = _retention_failed(store, run)
                 deleted = bool(read_json(fd, HISTORY_MARKER) or run.get("log_deleted"))
                 revision = os.stat("run.json", dir_fd=fd, follow_symlinks=False).st_mtime_ns
-                candidates.append((run_id, _completion_time(store, run), failed, deleted, revision))
+                terminal_disposable = bool(entries.intersection(TERMINAL_DISPOSABLE_DIRECTORIES))
+                candidates.append((run_id, _completion_time(store, run), failed, deleted, revision, terminal_disposable))
         except (WorkspaceBusyError, FileNotFoundError):
             result["skipped"].append(run_id)
         except (OSError, ValueError) as exc:
             result["errors"].append({"id": run_id, "error": str(exc)})
     candidates.sort(key=lambda row: (row[1], row[0]), reverse=True)
     retained = 0
-    for run_id, _date, failed, deleted, revision in candidates:
+    for run_id, _date, failed, deleted, revision, terminal_disposable in candidates:
         if stop_requested():
             break
-        if failed and not deleted and retained < policy["failed_workspaces_to_retain"]:
+        retain_workspace = failed and not deleted and retained < policy["failed_workspaces_to_retain"]
+        if retain_workspace:
             result["retained"].append(run_id)
             retained += 1
+        if retain_workspace and not terminal_disposable:
             continue
         try:
             # Re-read while locked; a validation/publication may have begun
@@ -551,7 +567,15 @@ def apply_retention(
                         result["skipped"].append(run_id)
                         continue
                     cleanup = _clean_locked(
-                        fd, run, reason="retention", authorization=authorization,
+                        fd,
+                        run,
+                        reason="terminal_run" if retain_workspace else "retention",
+                        directories=(
+                            TERMINAL_DISPOSABLE_DIRECTORIES
+                            if retain_workspace else DISPOSABLE_DIRECTORIES
+                        ),
+                        files=() if retain_workspace else DISPOSABLE_FILES,
+                        authorization=authorization,
                     )
                     if cleanup["removed"]:
                         result["cleaned"].append(cleanup)

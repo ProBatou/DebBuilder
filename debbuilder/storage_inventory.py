@@ -75,6 +75,8 @@ def _classify_data(relative: Path) -> str:
     if not parts:
         return "unknown"
     if parts[0] != "builds":
+        if parts[0] == "toolchains":
+            return "cache"
         if parts[0] in {"workflows", "settings.json", "packages.json", "secrets.json", "upstream-observations.json"}:
             return "metadata"
         return "unknown"
@@ -82,7 +84,7 @@ def _classify_data(relative: Path) -> str:
         return "unknown"
     run_parts = parts[2:]
     first = run_parts[0]
-    if first in {"source", "staging", "downloads"} or first == "source.tar.gz":
+    if first in {"source", "staging", "downloads", "toolchain"} or first == "source.tar.gz":
         return "disposable"
     if first in {"logs", "manifests"}:
         return "logs_manifests"
@@ -394,7 +396,8 @@ def collect_storage_snapshot(
         },
         "retention_policy": {
             **policy,
-            "scope": ["source", "staging", "downloads", "source.tar.gz"],
+            "scope": ["source", "staging", "downloads", "source.tar.gz", "toolchain"],
+            "terminal_run_disposal_scope": ["toolchain"],
             "startup_destructive_cleanup": True,
             "periodic_destructive_cleanup": True,
             "cleanup_interval_seconds": MAINTENANCE_INTERVAL_SECONDS,

@@ -29,8 +29,10 @@ build subprocesses all resolve the same Node binary. HOME, npm's cache, and any
 Corepack state also point inside the Run workspace. The Run manifest records
 the requested range, exact versions, platform/architecture, distribution
 SHA-256, package-manager SRI, and durable source URLs without exposing cache
-paths. Workspace cleanup removes the Run-local entry points but never removes
-the shared cache.
+paths. After a Run is terminal, workspace cleanup removes the entire Run-local
+`toolchain/` tree, including its HOME, npm/pnpm caches, Corepack state, and
+entry points. The durable identity in `run.json` remains available for history
+and diagnostics, and cleanup never removes the shared cache.
 
 After preparation, validation of the Run-local entry points is local-only.
 Missing prepared files fail with `prepared_node_toolchain_missing`; no Node,

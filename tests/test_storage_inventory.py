@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from debbuilder import storage_inventory
+from debbuilder import storage_inventory, workspace_cleanup
 from debbuilder.build_store import BuildStore
 
 
@@ -39,6 +39,8 @@ class StorageInventoryTests(unittest.TestCase):
         (root / "downloads").mkdir(exist_ok=True)
         (root / "downloads/archive").write_bytes(b"download")
         (root / "source.tar.gz").write_bytes(b"tar")
+        (root / "toolchain/home/.local/share/pnpm/store/v10").mkdir(parents=True)
+        (root / "toolchain/home/.local/share/pnpm/store/v10/package").write_bytes(b"pnpm-store")
         artifact = root / "artifacts/package.deb"
         artifact.write_bytes(b"artifact")
         (root / "manifests/files.json").write_bytes(b"manifest")
@@ -59,6 +61,9 @@ class StorageInventoryTests(unittest.TestCase):
 
     def test_classifies_known_storage_and_unknown_without_following_symlinks(self):
         _run, root = self.make_run()
+        global_cache = self.data / "toolchains/node/linux-x64/22.21.1"
+        global_cache.mkdir(parents=True)
+        (global_cache / "manifest.json").write_bytes(b"shared-cache")
         outside = self.base / "outside"
         outside.write_bytes(b"outside-secret")
         (root / "source-link").symlink_to(outside)
@@ -70,10 +75,33 @@ class StorageInventoryTests(unittest.TestCase):
         self.assertGreater(result["categories"]["logs_manifests"], 0)
         self.assertEqual(result["categories"]["artifacts"], len(b"artifact"))
         self.assertEqual(result["categories"]["validation_previous"], len(b"previous"))
-        self.assertEqual(result["categories"]["disposable"], len(b"source") + len(b"stage") + len(b"download") + len(b"tar"))
+        self.assertEqual(
+            result["categories"]["disposable"],
+            len(b"source") + len(b"stage") + len(b"download") + len(b"tar") + len(b"pnpm-store"),
+        )
+        self.assertEqual(result["categories"]["cache"], len(b"shared-cache"))
         self.assertGreaterEqual(result["categories"]["unknown"], len(b"unknown"))
+        self.assertEqual(sum(result["categories"].values()), result["bytes"]["data_root"])
         self.assertEqual(result["runs"]["artifact_count"], 1)
         self.assertEqual(result["runs"]["artifact_bytes"], len(b"artifact"))
+
+    def test_run_toolchain_cleanup_reduces_disposable_without_reclassifying_global_cache(self):
+        run, _root = self.make_run("cleanup-accounting")
+        global_cache = self.data / "toolchains/managers/pnpm/10.24.0"
+        global_cache.mkdir(parents=True)
+        (global_cache / "manifest.json").write_bytes(b"immutable-global-cache")
+        before = self.collect()
+
+        cleanup = workspace_cleanup.apply_retention(self.store)
+        after = self.collect()
+
+        self.assertEqual([row["id"] for row in cleanup["cleaned"]], [run["id"]])
+        self.assertGreater(before["categories"]["disposable"], 0)
+        self.assertEqual(after["categories"]["disposable"], 0)
+        self.assertEqual(
+            before["categories"]["cache"], after["categories"]["cache"],
+        )
+        self.assertEqual(after["categories"]["cache"], len(b"immutable-global-cache"))
 
     def test_symlinked_configured_root_is_partial_without_fabricated_zero(self):
         actual = self.base / "actual-data"
@@ -229,6 +257,8 @@ class StorageInventoryTests(unittest.TestCase):
         self.assertTrue(result["retention_policy"]["periodic_destructive_cleanup"])
         self.assertEqual(result["retention_policy"]["cleanup_interval_seconds"], 300)
         self.assertTrue(result["retention_policy"]["lifecycle_destructive_cleanup"])
+        self.assertIn("toolchain", result["retention_policy"]["scope"])
+        self.assertEqual(result["retention_policy"]["terminal_run_disposal_scope"], ["toolchain"])
         self.assertEqual(
             result["retention_policy"]["published_run_artifact_pruning"],
             "exact_repository_proof_required",

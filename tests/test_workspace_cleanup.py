@@ -1,4 +1,5 @@
 from tests.lifecycle_helpers import clean_workspace
+import json
 import subprocess
 import sys
 import tempfile
@@ -34,9 +35,38 @@ class WorkspaceCleanupTests(unittest.TestCase):
             (root / name).mkdir(exist_ok=True)
             (root / name / "large-data").write_text("disposable")
         (root / "source.tar.gz").write_bytes(b"archive")
+        toolchain = root / "toolchain"
+        (toolchain / "bin").mkdir(parents=True)
+        (toolchain / "bin/node").write_text("run-local entry point")
+        (toolchain / "home/.local/share/pnpm/store/v10/files").mkdir(parents=True)
+        (toolchain / "home/.local/share/pnpm/store/v10/files/package").write_text("large pnpm store fixture")
+        (toolchain / "corepack").mkdir()
+        (toolchain / "corepack/state").write_text("recreatable")
+        (toolchain / "npm-cache").mkdir()
+        (toolchain / "npm-cache/index").write_text("recreatable")
+        identity = {
+            "schema_version": 1,
+            "requested_node_range": "^22.19.0",
+            "node": {
+                "version": "22.21.1", "platform": "linux", "architecture": "x64",
+                "archive": "node-v22.21.1-linux-x64.tar.xz", "sha256": "a" * 64,
+                "source": "https://nodejs.org/dist/v22.21.1/node-v22.21.1-linux-x64.tar.xz",
+            },
+            "package_manager": {
+                "name": "pnpm", "version": "10.24.0", "requested_range": "10.24.0",
+                "integrity": "sha512-durable", "source": "https://registry.npmjs.org/pnpm/-/pnpm-10.24.0.tgz",
+            },
+        }
+        (toolchain / "manifest.json").write_text(json.dumps(identity))
         artifact = root / "artifacts/demo.deb"
         artifact.write_bytes(b"final deb")
-        run.update({"status": status, "artifact": {"path": str(artifact)}, "finished_at": "2026-09-05T12:00:00+00:00"})
+        run.update({
+            "status": status,
+            "artifact": {"path": str(artifact)},
+            "finished_at": "2026-09-05T12:00:00+00:00",
+            "toolchain": identity,
+        })
+        next(step for step in run["steps"] if step["name"] == "dependencies")["details"]["toolchain"] = identity
         self.store.save(run)
         self.store.append_log_line(run_id, "persistent log")
         self.store.save_manifest(run_id, "manifests/staging-files.json", ["demo"])
@@ -96,7 +126,12 @@ class WorkspaceCleanupTests(unittest.TestCase):
         self.assertEqual(unknown.read_bytes(), b"unknown")
         self.assertIsNotNone(execution_service.get_execution(self.store, run["id"]))
         self.assertIn("persistent log", execution_service.get_log(self.store, run["id"], verbosity="raw")["text"])
+        marker = json.loads((root / workspace_cleanup.CLEANUP_MARKER).read_text())
+        self.assertEqual(marker["reason"], "retention")
+        self.assertIn("toolchain", marker["removed"])
+        marker_before = (root / workspace_cleanup.CLEANUP_MARKER).read_bytes()
         self.assertEqual(workspace_cleanup.apply_retention(self.store)["cleaned"], [])
+        self.assertEqual((root / workspace_cleanup.CLEANUP_MARKER).read_bytes(), marker_before)
 
     def test_default_retains_only_five_recent_failed_workspaces_across_restarts(self):
         roots = []
@@ -109,8 +144,95 @@ class WorkspaceCleanupTests(unittest.TestCase):
         self.assertEqual(set(result["retained"]), {f"failed-{index}" for index in range(2, 7)})
         for index, root in enumerate(roots):
             self.assertEqual((root / "source").exists(), index >= 2)
+            self.assertFalse((root / "toolchain").exists())
             self.assertTrue((root / "run.json").exists())
+        retained_marker = json.loads((roots[-1] / workspace_cleanup.CLEANUP_MARKER).read_text())
+        self.assertEqual(retained_marker["reason"], "terminal_run")
+        self.assertEqual(retained_marker["removed"], ["toolchain"])
         self.assertEqual(workspace_cleanup.apply_retention(BuildStore(self.store.root))["cleaned"], [])
+
+    def test_retained_toolchain_cleanup_does_not_block_later_workspace_eviction(self):
+        run, root = self.make_run("retained-then-evicted", status="failed")
+        expected_identity = json.loads(json.dumps(run["toolchain"]))
+
+        retained = workspace_cleanup.apply_retention(
+            self.store, {"failed_workspaces_to_retain": 1},
+        )
+
+        self.assertEqual(retained["retained"], [run["id"]])
+        self.assertEqual(retained["cleaned"], [{
+            "id": run["id"], "removed": ["toolchain"], "reason": "terminal_run",
+        }])
+        self.assertFalse((root / "toolchain").exists())
+        for name in workspace_cleanup.RETENTION_DISPOSABLE_DIRECTORIES + workspace_cleanup.DISPOSABLE_FILES:
+            self.assertTrue((root / name).exists())
+        first_marker = json.loads((root / workspace_cleanup.CLEANUP_MARKER).read_text())
+        self.assertEqual(first_marker["reason"], "terminal_run")
+
+        evicted = workspace_cleanup.apply_retention(
+            self.store, {"failed_workspaces_to_retain": 0},
+        )
+
+        self.assertEqual(evicted["retained"], [])
+        self.assertEqual([row["id"] for row in evicted["cleaned"]], [run["id"]])
+        self.assertEqual(
+            set(evicted["cleaned"][0]["removed"]),
+            set(workspace_cleanup.RETENTION_DISPOSABLE_DIRECTORIES + workspace_cleanup.DISPOSABLE_FILES),
+        )
+        for name in workspace_cleanup.DISPOSABLE_DIRECTORIES + workspace_cleanup.DISPOSABLE_FILES:
+            self.assertFalse((root / name).exists())
+        second_marker = json.loads((root / workspace_cleanup.CLEANUP_MARKER).read_text())
+        self.assertEqual(second_marker["reason"], "retention")
+        self.assertEqual(self.store.load(run["id"])["toolchain"], expected_identity)
+        self.assertTrue((root / "recipe.json").is_file())
+
+    def test_terminal_statuses_dispose_run_toolchains_but_preserve_global_cache(self):
+        roots = {}
+        for status in ("success", "failed", "cancelled"):
+            _run, roots[status] = self.make_run(status, status=status)
+        global_cache = self.store.root.parent / "toolchains/node/linux-x64/22.21.1"
+        global_cache.mkdir(parents=True)
+        (global_cache / "manifest.json").write_text("shared immutable cache")
+
+        result = workspace_cleanup.apply_retention(self.store)
+
+        self.assertEqual(set(result["retained"]), {"failed", "cancelled"})
+        for status, root in roots.items():
+            self.assertFalse((root / "toolchain").exists())
+            self.assertEqual((root / "source").exists(), status in {"failed", "cancelled"})
+        self.assertEqual((global_cache / "manifest.json").read_text(), "shared immutable cache")
+
+    def test_toolchain_provenance_and_failure_diagnostics_survive_cleanup(self):
+        run, root = self.make_run("provenance", status="failed")
+        error = {
+            "stage": "build", "code": "build_command_failed",
+            "message": "pnpm build failed", "details": {
+                "failed_command": {"command": "pnpm build", "status": "failed", "exit_code": 2},
+            },
+        }
+        run["error"] = error
+        next(step for step in run["steps"] if step["name"] == "build").update({
+            "status": "failed", "error": error, "summary": error["message"],
+        })
+        self.store.save(run)
+        expected_identity = json.loads(json.dumps(run["toolchain"]))
+
+        workspace_cleanup.apply_retention(self.store)
+
+        durable = self.store.load(run["id"])
+        self.assertFalse((root / "toolchain").exists())
+        self.assertEqual(durable["toolchain"], expected_identity)
+        self.assertEqual(
+            next(step for step in durable["steps"] if step["name"] == "dependencies")["details"]["toolchain"],
+            expected_identity,
+        )
+        detail = execution_service.get_execution(self.store, run["id"])
+        self.assertEqual(detail["toolchain"]["node"]["requested_range"], "^22.19.0")
+        self.assertEqual(detail["toolchain"]["node"]["version"], "22.21.1")
+        self.assertEqual(detail["toolchain"]["package_manager"]["name"], "pnpm")
+        self.assertEqual(detail["toolchain"]["package_manager"]["version"], "10.24.0")
+        self.assertEqual(detail["diagnostic"]["code"], "build_command_failed")
+        self.assertTrue((root / "recipe.json").is_file())
 
     def test_active_build_pending_validation_publication_and_steps_are_never_cleaned_or_deleted(self):
         for phase in ("pending", "queued", "running", "cancelling", "validation", "publication", "step"):
@@ -128,6 +250,7 @@ class WorkspaceCleanupTests(unittest.TestCase):
                 with self.assertRaises(workspace_cleanup.WorkspaceBusyError):
                     execution_service.delete_log(self.store, run["id"])
                 self.assertTrue((root / "source/large-data").exists())
+                self.assertTrue((root / "toolchain/home/.local/share/pnpm/store/v10/files/package").exists())
                 self.assertFalse((root / workspace_cleanup.HISTORY_MARKER).exists())
         result = workspace_cleanup.apply_retention(self.store, {"failed_workspaces_to_retain": 0})
         self.assertEqual(result["cleaned"], [])
@@ -148,6 +271,7 @@ class WorkspaceCleanupTests(unittest.TestCase):
         )
         self.assertIn(run["id"], result["skipped"])
         self.assertTrue((root / "source/large-data").is_file())
+        self.assertTrue((root / "toolchain/home/.local/share/pnpm/store/v10/files/package").is_file())
         self.assertTrue((root / "logs/pipeline.log").is_file())
 
     def test_non_latest_running_validation_or_publication_denies_cleanup(self):
@@ -183,6 +307,7 @@ class WorkspaceCleanupTests(unittest.TestCase):
 
         self.assertIn(run["id"], result["skipped"])
         self.assertTrue((root / "source/large-data").is_file())
+        self.assertTrue((root / "toolchain/home/.local/share/pnpm/store/v10/files/package").is_file())
 
     def test_terminal_run_with_active_systemd_identity_refuses_cleanup(self):
         run, root = self.make_run("active-systemd-cleanup")
@@ -197,6 +322,7 @@ class WorkspaceCleanupTests(unittest.TestCase):
         with self.assertRaisesRegex(workspace_cleanup.WorkspaceBusyError, "Active command"):
             clean_workspace(self.store, run["id"])
         self.assertTrue((root / "source/large-data").is_file())
+        self.assertTrue((root / "toolchain").is_dir())
 
     def test_matching_unit_or_cgroup_without_identity_refuses_cleanup_and_history_deletion(self):
         run, root = self.make_run("namespace-cleanup")
@@ -209,6 +335,7 @@ class WorkspaceCleanupTests(unittest.TestCase):
             with self.assertRaisesRegex(workspace_cleanup.WorkspaceBusyError, "unit/cgroup"):
                 execution_service.delete_log(self.store, run["id"])
         self.assertTrue((root / "source/large-data").is_file())
+        self.assertTrue((root / "toolchain").is_dir())
         self.assertTrue((root / "logs/pipeline.log").is_file())
 
     def test_unverifiable_command_namespace_refuses_destructive_cleanup(self):
@@ -220,6 +347,7 @@ class WorkspaceCleanupTests(unittest.TestCase):
             with self.assertRaisesRegex(workspace_cleanup.WorkspaceBusyError, "inventory is unverifiable"):
                 clean_workspace(self.store, run["id"])
         self.assertTrue((root / "source/large-data").is_file())
+        self.assertTrue((root / "toolchain").is_dir())
 
     def test_process_latched_probe_cleanup_failure_refuses_cleanup(self):
         run, root = self.make_run("probe-cleanup-blocked")
@@ -301,7 +429,9 @@ class WorkspaceCleanupTests(unittest.TestCase):
         _run, failed = self.make_run("failed", status="failed", mode="dry_run")
         workspace_cleanup.apply_retention(self.store)
         self.assertFalse((prepared / "source").exists())
+        self.assertFalse((prepared / "toolchain").exists())
         self.assertTrue((failed / "source").exists())
+        self.assertFalse((failed / "toolchain").exists())
 
     def test_zero_retention_reclaims_failed_validation_publication_and_cancelled_runs(self):
         for phase in ("validation", "publication", "cancelled"):
@@ -361,7 +491,7 @@ class WorkspaceCleanupTests(unittest.TestCase):
         self.assertFalse((self.base / ".workspace.lock").exists())
 
     def test_symlink_run_root_metadata_and_cleanup_target_are_refused(self):
-        for target in ("run", "root", "source", "logs", "run.json", ".workspace.lock", "marker"):
+        for target in ("run", "root", "source", "toolchain", "logs", "run.json", ".workspace.lock", "marker"):
             with self.subTest(target=target), tempfile.TemporaryDirectory(dir=self.base) as temporary:
                 self.store = BuildStore(Path(temporary) / "builds")
                 run, root = self.make_run()
@@ -390,6 +520,11 @@ class WorkspaceCleanupTests(unittest.TestCase):
                     self.assertTrue((actual / "source/large-data").exists())
                 elif target == "source":
                     self.assertEqual((outside / "large-data").read_text(), "disposable")
+                elif target == "toolchain":
+                    self.assertEqual(
+                        (outside / "home/.local/share/pnpm/store/v10/files/package").read_text(),
+                        "large pnpm store fixture",
+                    )
                 elif target not in {"logs", "run.json"}:
                     self.assertEqual(outside.read_text(), "protected")
 
@@ -403,12 +538,14 @@ class WorkspaceCleanupTests(unittest.TestCase):
         self.assertEqual((outside / "keep").read_text(), "protected")
 
     def test_bind_mount_below_disposable_directory_is_refused(self):
-        run, root = self.make_run()
-        mountinfo = f"1 2 0:1 / {root}/source/mounted rw - ext4 /dev/example rw\n"
-        with mock.patch("debbuilder.workspace_cleanup.Path.read_text", return_value=mountinfo):
-            with self.assertRaisesRegex(ValueError, "Mounted workspace"):
-                clean_workspace(self.store, run["id"])
-        self.assertTrue((root / "source/large-data").exists())
+        for target in ("source", "toolchain"):
+            with self.subTest(target=target):
+                run, root = self.make_run(f"mounted-{target}")
+                mountinfo = f"1 2 0:1 / {root}/{target}/mounted rw - ext4 /dev/example rw\n"
+                with mock.patch("debbuilder.workspace_cleanup.Path.read_text", return_value=mountinfo):
+                    with self.assertRaisesRegex(ValueError, "Mounted workspace"):
+                        clean_workspace(self.store, run["id"])
+                self.assertTrue((root / target).is_dir())
 
     def test_symlink_swap_during_removal_cannot_delete_outside_data(self):
         run, root = self.make_run()
@@ -485,6 +622,19 @@ class WorkspaceCleanupTests(unittest.TestCase):
         self.assertTrue((root / "source/large-data").exists())
         self.assertFalse((root / workspace_cleanup.HISTORY_MARKER).exists())
 
+    def test_artifact_in_run_local_toolchain_blocks_terminal_disposal(self):
+        run, root = self.make_run("toolchain-artifact", status="failed")
+        artifact = root / "toolchain/home/final.deb"
+        artifact.write_bytes(b"misplaced final artifact")
+        run["artifact"]["path"] = str(artifact)
+        self.store.save(run)
+
+        result = workspace_cleanup.apply_retention(self.store)
+
+        self.assertTrue(any(row["id"] == run["id"] for row in result["errors"]))
+        self.assertTrue(artifact.is_file())
+        self.assertTrue((root / "toolchain").is_dir())
+
     def test_manual_log_deletion_does_not_remove_a_misplaced_final_artifact(self):
         run, root = self.make_run()
         artifact = root / "logs/demo.deb"
@@ -521,7 +671,7 @@ class WorkspaceCleanupTests(unittest.TestCase):
         run, root = self.make_run(status="failed")
         process = subprocess.Popen(
             [sys.executable, "-c", "import time; print('ready', flush=True); time.sleep(30)"],
-            cwd=root / "source", stdout=subprocess.PIPE, text=True,
+            cwd=root / "toolchain/home", stdout=subprocess.PIPE, text=True,
         )
         try:
             self.assertEqual(process.stdout.readline().strip(), "ready")
@@ -530,6 +680,7 @@ class WorkspaceCleanupTests(unittest.TestCase):
             result = workspace_cleanup.apply_retention(self.store, {"failed_workspaces_to_retain": 0})
             self.assertIn(run["id"], result["skipped"])
             self.assertTrue((root / "source/large-data").exists())
+            self.assertTrue((root / "toolchain/home").is_dir())
             self.assertFalse((root / workspace_cleanup.HISTORY_MARKER).exists())
         finally:
             process.terminate()
@@ -561,6 +712,7 @@ class WorkspaceCleanupTests(unittest.TestCase):
         run, root = self.make_run()
         self.assertEqual(workspace_cleanup.apply_retention(self.store, {"enabled": False})["cleaned"], [])
         self.assertTrue((root / "source").exists())
+        self.assertTrue((root / "toolchain").exists())
         clean_workspace(self.store, run["id"])
         self.assertEqual(clean_workspace(self.store, run["id"])["removed"], [])
         with self.assertRaises(FileNotFoundError):

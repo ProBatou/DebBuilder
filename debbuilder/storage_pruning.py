@@ -12,9 +12,9 @@ from .build_models import utc_now, validate_run
 from .command_containment import containment_safety_gate
 from .repository_lock import RepositoryMutationBusy
 from .workspace_cleanup import (
-    DISPOSABLE_DIRECTORIES,
     DISPOSABLE_FILES,
     OPEN_CLEANUP_AUTHORIZATION,
+    RETENTION_DISPOSABLE_DIRECTORIES,
     CleanupAuthorization,
     WorkspaceBusyError,
     directory_fd,
@@ -301,7 +301,7 @@ def _delete_staging_manifest(
 
 
 def _retained_disposable_data(workspace_fd: int) -> bool:
-    for name in DISPOSABLE_DIRECTORIES:
+    for name in RETENTION_DISPOSABLE_DIRECTORIES:
         child_fd = -1
         try:
             child_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=workspace_fd)

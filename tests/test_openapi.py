@@ -95,6 +95,15 @@ class OpenApiContractTests(TestCase):
             ("POST", "/api/recipes/validate")]["responses"]["422"]["x-debbuilder-error-codes"])
         self.assertIn("github_unavailable", operations(document)[
             ("POST", "/api/recipes/{recipe_id}/observation/refresh")]["responses"]["502"]["x-debbuilder-error-codes"])
+        self.assertEqual(
+            set(operations(document)[("POST", "/api/run")]["responses"]["503"]["x-debbuilder-error-codes"]),
+            {
+                "authentication_unavailable", "settings_unavailable",
+                "application_shutting_down", "execution_manager_unavailable",
+                "github_unavailable", "storage_pressure_admission_blocked",
+                "storage_measurement_unavailable",
+            },
+        )
 
     def test_schema_references_and_key_request_contracts_are_valid(self):
         document = openapi_document()

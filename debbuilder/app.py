@@ -279,18 +279,177 @@ def run_post_build_automation(run_id: str, *, dry_run: bool, settings: dict | No
     )
 
 
-def execute_queued_recipe_run(run_id: str, *, store: BuildStore, expected_initial_status: str, cancellation_control=None) -> dict:
+def _storage_guard_failure(inventory, *, pressure_code: str) -> dict | None:
+    """Return a bounded Builds-capacity failure after one fresh O(1) measure."""
+    try:
+        filesystems = inventory.collect_capacity() if inventory is not None else None
+        builds = filesystems.get("builds") if isinstance(filesystems, dict) else None
+    except Exception as exc:
+        LOGGER.warning(
+            "Build workspace capacity measurement failed (%s)", type(exc).__name__,
+        )
+        builds = None
+    state = builds.get("pressure_state") if isinstance(builds, dict) else "measurement_error"
+    if state == "normal":
+        return None
+    request_maintenance(refresh=True, cleanup=True)
+    if state == "pressure":
+        details = {"state": "pressure"}
+        for source, target in (
+            ("available_bytes", "available_bytes"),
+            ("effective_start_bytes", "start_bytes"),
+            ("effective_target_bytes", "target_bytes"),
+        ):
+            value = builds.get(source)
+            if (
+                isinstance(value, int) and not isinstance(value, bool)
+                and 0 <= value <= workspace_cleanup.MAX_SAFE_JSON_INTEGER
+            ):
+                details[target] = value
+        percent = builds.get("available_percent")
+        if (
+            isinstance(percent, (int, float)) and not isinstance(percent, bool)
+            and math.isfinite(percent) and 0 <= percent <= 100
+        ):
+            details["available_percent"] = percent
+        return {
+            "stage": "storage_guard",
+            "code": pressure_code,
+            "message": "Build/Test cannot start while the Builds filesystem is under pressure",
+            "details": details,
+        }
+    return {
+        "stage": "storage_guard",
+        "code": "storage_measurement_unavailable",
+        "message": "Build/Test cannot start because Builds filesystem capacity is unavailable",
+        "details": {
+            "state": "measurement_error",
+            "reason": "builds_capacity_measurement_failed",
+        },
+    }
+
+
+def _require_storage_admission_clear(inventory) -> None:
+    failure = _storage_guard_failure(
+        inventory, pressure_code="storage_pressure_admission_blocked",
+    )
+    if failure is not None:
+        raise RunAdmissionError(
+            failure["code"], failure["message"], status=503,
+            details=failure["details"],
+        )
+
+
+def _terminalize_pre_pipeline_cancellation(
+    store: BuildStore, run_id: str, cancellation_control,
+) -> dict:
+    """Persist cancellation that won before the pipeline could start."""
+    request = cancellation_control.request if cancellation_control is not None else None
+    with store.locked_run(run_id):
+        run = store.load(run_id)
+        if run and run.get("status") == "cancelled":
+            return run
+        if not run or run.get("status") not in {"queued", "cancelling"}:
+            raise RuntimeError("pre-pipeline cancellation requires a queued Build Run")
+        existing = run.get("cancellation") if isinstance(run.get("cancellation"), dict) else {}
+        completed_at = utc_now()
+        cancellation = {
+            "code": str((request or existing).get("code") or "execution_cancelled"),
+            "reason": str((request or existing).get("reason") or "user_requested"),
+            "phase": "queue",
+            "stage": "storage_guard",
+            "requested_at": (request or existing).get("requested_at") or completed_at,
+            "completed_at": completed_at,
+        }
+        run.update({
+            "status": "cancelled", "finished_at": completed_at, "duration": 0.0,
+            "error": None, "cancellation": cancellation,
+        })
+        store.save(run)
+    try:
+        store.append_log_line(
+            run_id, "Execution cancelled before pipeline start.", level="info",
+        )
+    except OSError as exc:
+        LOGGER.warning(
+            "Could not append pre-pipeline cancellation log for Run %s (%s)",
+            run_id, type(exc).__name__,
+        )
+    return run
+
+
+def _terminalize_storage_guard_failure(
+    store: BuildStore, run_id: str, failure: dict, *, cancellation_control=None,
+) -> dict:
+    """Durably fail a queued Run without entering the Build pipeline."""
+    if cancellation_control is not None and not cancellation_control.claim_terminal():
+        return _terminalize_pre_pipeline_cancellation(
+            store, run_id, cancellation_control,
+        )
+    with store.locked_run(run_id):
+        run = store.load(run_id)
+        if run and run.get("status") == "cancelled":
+            return run
+        if run and run.get("status") == "cancelling":
+            existing = run.get("cancellation") if isinstance(run.get("cancellation"), dict) else {}
+            completed_at = utc_now()
+            run.update({
+                "status": "cancelled", "finished_at": completed_at, "duration": 0.0,
+                "error": None,
+                "cancellation": {
+                    "code": str(existing.get("code") or "execution_cancelled"),
+                    "reason": str(existing.get("reason") or "user_requested"),
+                    "phase": "queue", "stage": "storage_guard",
+                    "requested_at": existing.get("requested_at") or completed_at,
+                    "completed_at": completed_at,
+                },
+            })
+            store.save(run)
+            return run
+        if not run or run.get("status") != "queued":
+            raise RuntimeError("storage guard can only terminalize a queued Build Run")
+        run.update({
+            "status": "failed",
+            "finished_at": utc_now(),
+            "duration": 0.0,
+            "error": failure,
+        })
+        store.save(run)
+    try:
+        store.append_log_line(
+            run_id, "Storage guard blocked pipeline start; Run marked failed.", level="error",
+        )
+    except OSError as exc:
+        LOGGER.warning(
+            "Could not append storage guard log for Run %s (%s)", run_id, type(exc).__name__,
+        )
+    return run
+
+
+def execute_queued_recipe_run(
+    run_id: str, *, store: BuildStore, expected_initial_status: str,
+    cancellation_control=None, storage_inventory=None,
+) -> dict:
     """Execute one admitted Run and its existing post-build lifecycle."""
     run = store.load(run_id)
     dry_run = bool(run and run.get("mode") == "dry_run")
     try:
-        result = build_pipeline.execute_pipeline_run(
-            run_id,
-            store=store,
-            expected_initial_status=expected_initial_status,
-            github_token=github_token(DATA),
-            lifecycle_callback=notify_lifecycle,
-            cancellation_control=cancellation_control,
+        failure = _storage_guard_failure(
+            storage_inventory, pressure_code="storage_pressure_execution_blocked",
+        )
+        result = (
+            _terminalize_storage_guard_failure(
+                store, run_id, failure, cancellation_control=cancellation_control,
+            )
+            if failure is not None
+            else build_pipeline.execute_pipeline_run(
+                run_id,
+                store=store,
+                expected_initial_status=expected_initial_status,
+                github_token=github_token(DATA),
+                lifecycle_callback=notify_lifecycle,
+                cancellation_control=cancellation_control,
+            )
         )
         completed_run = store.load(run_id)
         if isinstance((completed_run or {}).get("automation"), dict):
@@ -312,8 +471,18 @@ def execute_queued_recipe_run(run_id: str, *, store: BuildStore, expected_initia
 
 def create_execution_manager(*, store: BuildStore | None = None, queue_capacity: int = 8, execute=None) -> ExecutionManager:
     """Construct, but do not start, the server's single execution manager."""
-    callback = execute or (lambda run_id, **kwargs: execute_queued_recipe_run(run_id, **kwargs))
-    return ExecutionManager(store or BuildStore(DATA / "builds"), queue_capacity=queue_capacity, execute=callback)
+    selected = None
+    if execute is None:
+        def callback(run_id, **kwargs):
+            return execute_queued_recipe_run(
+                run_id, storage_inventory=getattr(selected, "storage_inventory", None), **kwargs,
+            )
+    else:
+        callback = execute
+    selected = ExecutionManager(
+        store or BuildStore(DATA / "builds"), queue_capacity=queue_capacity, execute=callback,
+    )
+    return selected
 
 
 def create_validation_manager(*, store: BuildStore | None = None, queue_capacity: int = 8, execute=None):
@@ -419,6 +588,9 @@ def start_execution_manager(
     authorization.update_global_blocker(admission_blocker)
     if getattr(http_server, "storage_inventory", None) is None:
         http_server.storage_inventory = create_storage_inventory()
+    # Admission, execution start, and MaintenanceService deliberately share
+    # this process-lifetime state machine so pressure hysteresis cannot reset.
+    selected.storage_inventory = http_server.storage_inventory
     if shutdown_check is not None:
         shutdown_check()
     prepare_settings_for_startup()
@@ -563,7 +735,10 @@ def _require_cleanup_admission_clear() -> None:
         raise _cleanup_admission_error(cleanup_blocker)
 
 
-def enqueue_recipe_run(manager: ExecutionManager | None, workflow: dict, *, dry_run: bool = True) -> dict:
+def enqueue_recipe_run(
+    manager: ExecutionManager | None, workflow: dict, *, dry_run: bool = True,
+    storage_inventory=None,
+) -> dict:
     """Reserve capacity, persist exactly one Run, and submit it asynchronously."""
     if manager is None:
         raise RunAdmissionError(
@@ -574,6 +749,7 @@ def enqueue_recipe_run(manager: ExecutionManager | None, workflow: dict, *, dry_
     return _enqueue_prepared_recipe_run(
         manager, canonical, resource_contract, dry_run=dry_run,
         manual_source_provenance=manual_source_provenance,
+        storage_inventory=storage_inventory,
     )
 
 
@@ -603,11 +779,15 @@ def _enqueue_prepared_recipe_run(
     *,
     dry_run: bool,
     manual_source_provenance: dict | None = None,
+    storage_inventory=None,
 ) -> dict:
     """Atomically check blocker state and perform the normal admission path."""
     _require_cleanup_admission_clear()
     try:
         with manager.reserve() as reservation:
+            _require_storage_admission_clear(
+                storage_inventory or getattr(manager, "storage_inventory", None),
+            )
             run_id = manager.store.allocate_run_id()
             reservation.track(run_id)
             try:
@@ -688,6 +868,7 @@ def enqueue_preallocated_recipe_run(
     origin: dict,
     automation: dict,
     created_callback=None,
+    storage_inventory=None,
 ) -> dict:
     """Create/link/submit one preallocated automated Run through canonical owners.
 
@@ -701,7 +882,7 @@ def enqueue_preallocated_recipe_run(
     return _enqueue_prepared_preallocated_recipe_run(
         manager, canonical, resource_contract,
         run_id=run_id, dry_run=dry_run, origin=origin, automation=automation,
-        created_callback=created_callback,
+        created_callback=created_callback, storage_inventory=storage_inventory,
     )
 
 
@@ -716,11 +897,15 @@ def _enqueue_prepared_preallocated_recipe_run(
     origin: dict,
     automation: dict,
     created_callback=None,
+    storage_inventory=None,
 ) -> dict:
     """Atomically check blocker state and admit the exact preallocated Run."""
     _require_cleanup_admission_clear()
     existing = manager.store.load(run_id)
+    capacity = storage_inventory or getattr(manager, "storage_inventory", None)
+    created_now = False
     if existing is None:
+        _require_storage_admission_clear(capacity)
         try:
             run = build_pipeline.create_pipeline_run(
                 canonical,
@@ -732,6 +917,7 @@ def _enqueue_prepared_preallocated_recipe_run(
                 origin=origin,
                 automation=automation,
             )
+            created_now = True
         except FileExistsError as exc:
             existing = manager.store.load(run_id)
             if existing is None:
@@ -761,10 +947,14 @@ def _enqueue_prepared_preallocated_recipe_run(
         )
     if run.get("status") not in {"pending", "queued", "running", "cancelling", "prepared", "success", "failed", "cancelled"}:
         raise RunAdmissionError("automation_run_state_invalid", "Preallocated Run state is invalid", status=409)
+    if run["status"] != "pending":
+        if created_callback is not None:
+            created_callback(run)
+        return {"run_id": run_id, "status": run["status"], "duplicate": True}
+    if not created_now:
+        _require_storage_admission_clear(capacity)
     if created_callback is not None:
         created_callback(run)
-    if run["status"] != "pending":
-        return {"run_id": run_id, "status": run["status"], "duplicate": True}
     try:
         manager.submit(run_id)
     except ExecutionManagerError as exc:
@@ -996,7 +1186,9 @@ def create_automation_scheduler(http_server):
         ledger,
         manager.store if manager is not None else BuildStore(DATA / "builds"),
         execution_manager=lambda: getattr(http_server, "execution_manager", None),
-        enqueue_run=enqueue_preallocated_recipe_run,
+        enqueue_run=lambda selected_manager, workflow, **kwargs: enqueue_preallocated_recipe_run(
+            selected_manager, workflow, storage_inventory=http_server.storage_inventory, **kwargs,
+        ),
         validation_manager=lambda: getattr(http_server, "validation_manager", None),
         publish=publish_build_artifact,
         notify_completion=lambda result: notification_service().notify_automatic_completion(result),

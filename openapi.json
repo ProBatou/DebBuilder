@@ -3903,7 +3903,7 @@
             ]
           },
           "503": {
-            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable, application_shutting_down, execution_manager_unavailable, github_unavailable.",
+            "description": "HTTP 503 admin API error. Documented codes: authentication_unavailable, settings_unavailable, application_shutting_down, execution_manager_unavailable, github_unavailable, storage_pressure_admission_blocked, storage_measurement_unavailable.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3916,7 +3916,9 @@
               "settings_unavailable",
               "application_shutting_down",
               "execution_manager_unavailable",
-              "github_unavailable"
+              "github_unavailable",
+              "storage_pressure_admission_blocked",
+              "storage_measurement_unavailable"
             ]
           }
         },

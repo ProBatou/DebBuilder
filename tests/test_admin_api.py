@@ -199,6 +199,7 @@ class AdminApiTests(AdminApiCase):
         ):
             return server.execute_queued_recipe_run(
                 run_id, store=store, expected_initial_status="queued",
+                storage_inventory=self.httpd.storage_inventory,
             )
 
     def test_recipe_automation_save_roundtrip_wakes_without_detection(self):
@@ -1914,7 +1915,12 @@ class AdminApiTests(AdminApiCase):
             "source": {"repository": "example/enabled", "tracking": "manual", "ref": "v1.0.0"},
         }
         execute, finished = self.terminal_executor("success")
-        with mock.patch("debbuilder.app.execute_queued_recipe_run", side_effect=execute):
+
+        def guarded_execute(run_id, **kwargs):
+            kwargs.pop("storage_inventory", None)
+            return execute(run_id, **kwargs)
+
+        with mock.patch("debbuilder.app.execute_queued_recipe_run", side_effect=guarded_execute):
             status, response = self.request("POST", "/api/run", {"workflow": workflow, "dry_run": False})
             self.assertTrue(finished.wait(2))
         self.assertEqual(status, 202)

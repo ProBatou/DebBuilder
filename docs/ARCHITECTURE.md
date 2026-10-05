@@ -193,6 +193,24 @@ existing maintenance boundary. Repository pressure is observational and does
 not select workspace cleanup, including when Repository and Builds use
 different devices.
 
+The HTTP admission path, automation preallocation path, execution worker, and
+maintenance worker share the server-owned `StorageInventory` instance. After
+Recipe/Settings/provenance and containment checks, manager acceptance and queue
+capacity retain precedence; the final admission check then refreshes only O(1)
+capacity immediately before workspace creation or pending preallocated submit.
+The worker repeats that capacity-only guard immediately before invoking the
+pipeline. Admission refusal is a transient 503 and creates no Run. A queued
+Run refused at the worker boundary becomes durably failed at `storage_guard`;
+if that terminal write cannot be proved, the execution manager's existing
+fail-closed ownership path prevents the next queued Run from starting.
+
+Only Builds pressure controls these guards. The shared instance preserves
+hysteresis between the minimum-free start and target thresholds; measurement
+failure also blocks, independently of whether automatic cleanup is enabled.
+The guards request asynchronous maintenance and never call recursive storage
+collection. Capacity can change immediately after either measurement, so this
+is an ENOSPC risk reduction boundary rather than a reservation or quota.
+
 ## Boundaries
 
 DebBuilder's workspace, process, and filesystem controls reduce accidental

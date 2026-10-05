@@ -598,7 +598,10 @@ def create_handler(api):
                 return
             dry_run = bool(data.get("dry_run", True))
             try:
-                result = api.enqueue_recipe_run(getattr(self.server, "execution_manager", None), workflow, dry_run=dry_run)
+                result = api.enqueue_recipe_run(
+                    getattr(self.server, "execution_manager", None), workflow, dry_run=dry_run,
+                    storage_inventory=getattr(self.server, "storage_inventory", None),
+                )
             except api.RunAdmissionError as exc:
                 api.json_response(self, {"error": public_error(exc.as_dict())}, exc.status)
                 return

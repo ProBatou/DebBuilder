@@ -369,6 +369,11 @@ class StorageMaintenanceTests(unittest.TestCase):
                     mock.patch.object(app.workspace_cleanup, "apply_retention") as sweep:
                 result = app.execute_queued_recipe_run(
                     run["id"], store=store, expected_initial_status="pending",
+                    storage_inventory=mock.Mock(
+                        collect_capacity=mock.Mock(return_value={
+                            "builds": {"pressure_state": "normal"},
+                        }),
+                    ),
                 )
 
             self.assertEqual(result["status"], "success")

@@ -293,6 +293,11 @@ class AdmissionReconciliationTests(unittest.TestCase):
                     store.save(run)
                 return {"run_id": run_id, "status": "failed"}
         manager = ExecutionManager(BuildStore(self.data / "builds"), execute=execute)
+        manager.storage_inventory = mock.Mock(
+            collect_capacity=mock.Mock(return_value={
+                "builds": {"pressure_state": "normal"},
+            }),
+        )
         manager.start()
         self.managers.append(manager)
         return manager

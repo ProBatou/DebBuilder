@@ -77,7 +77,22 @@ symlink, and artifact checks as ordinary cleanup. Capacity is remeasured with
 the pinned-descriptor O(1) probe after each effective cleanup, and deletion
 stops when the higher target is reached, measurement fails, or safe candidates
 are exhausted. Repository-only pressure never triggers workspace cleanup.
-This release does not yet block Build/Test admission.
+
+Build/Test admission and execution start use the same process-lifetime
+filesystem state machine as maintenance. A fresh O(1) Builds capacity measure
+is taken immediately before a new Run workspace is created (or an existing
+preallocated pending Run is submitted), and again immediately before a queued
+Run enters the pipeline. Builds pressure or an unavailable measurement blocks
+the boundary fail-closed and requests maintenance asynchronously. A refusal at
+admission creates no workspace; a queued Run refused at execution start is
+persisted as failed with stage `storage_guard` without source acquisition or
+staging. Repository-only pressure does not block Builds. These guards remain
+active when automatic cleanup is disabled.
+
+The checks reduce ENOSPC risk but do not reserve space: a normal measurement
+authorizes only that instant, and an already-running Build can consume capacity
+afterward. Quotas, byte reservations, and future Build-size estimates are not
+part of this contract.
 Byte thresholds are limited to `9007199254740991` (`2^53 - 1`) so every value
 accepted by the backend remains exactly representable through the supported
 JSON/JavaScript Settings clients. Changing any pressure threshold rebases the

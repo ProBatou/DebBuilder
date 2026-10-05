@@ -85,6 +85,8 @@ _MESSAGES = {
     "request_failed": "The request could not be completed",
     "settings_unavailable": "Application settings are unavailable",
     "support_bundle_unavailable": "The support bundle cannot be generated",
+    "storage_measurement_unavailable": "Builds filesystem capacity is unavailable",
+    "storage_pressure_admission_blocked": "Build/Test admission is blocked by filesystem pressure",
     "upstream_unavailable": "The upstream service is unavailable",
     "unknown_field": "The request contains an unknown field",
     "unknown_settings_field": "The request contains an unknown settings field",
@@ -171,6 +173,22 @@ def _safe_details(error: object) -> dict[str, object]:
     stage = error.get("stage", source.get("stage"))
     if isinstance(stage, str) and _CODE.fullmatch(stage):
         details["stage"] = stage
+    if error.get("code") in {
+        "storage_pressure_admission_blocked", "storage_measurement_unavailable",
+    }:
+        state = source.get("state")
+        if state in {"pressure", "measurement_error"}:
+            details["state"] = state
+        reason = source.get("reason")
+        if isinstance(reason, str) and _CODE.fullmatch(reason):
+            details["reason"] = reason
+        for field in ("available_bytes", "start_bytes", "target_bytes"):
+            value = source.get(field)
+            if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 2**53 - 1:
+                details[field] = value
+        percent = source.get("available_percent")
+        if isinstance(percent, (int, float)) and not isinstance(percent, bool) and 0 <= percent <= 100:
+            details["available_percent"] = percent
     if error.get("code") == "ambiguous_archive_source":
         sources = source.get("sources")
         if isinstance(sources, list):

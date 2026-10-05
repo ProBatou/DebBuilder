@@ -5,6 +5,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from unittest import mock
 
@@ -103,6 +104,403 @@ class WorkspaceCleanupTests(unittest.TestCase):
                 "message": "Validation did not complete",
             } if terminal else None),
         })
+
+    @staticmethod
+    def pressure_capacity(available, *, state="pressure", target=200):
+        if state == "measurement_error":
+            return {"builds": {
+                "measurement_state": "error",
+                "pressure_state": "measurement_error",
+            }}
+        return {"builds": {
+            "measurement_state": "ready",
+            "pressure_state": state,
+            "available_bytes": available,
+            "effective_target_bytes": target,
+        }}
+
+    def apply_pressure(self, candidate_ids, measurements, *, policy=None, authorization=None):
+        values = iter(measurements)
+        initial = next(values)
+        measure = mock.Mock(side_effect=lambda: next(values))
+        result = workspace_cleanup.apply_storage_pressure(
+            self.store,
+            candidate_ids,
+            initial,
+            measure,
+            policy or {"enabled": True, "failed_workspaces_to_retain": len(candidate_ids)},
+            authorization=authorization or workspace_cleanup.CleanupAuthorization(),
+        )
+        return result, measure
+
+    def test_pressure_cleanup_ignores_normal_and_initial_measurement_error(self):
+        run, root = self.make_run("pressure-not-active", status="failed")
+        for capacity in (
+            self.pressure_capacity(200, state="normal"),
+            self.pressure_capacity(None, state="measurement_error"),
+        ):
+            with self.subTest(state=capacity["builds"]["pressure_state"]):
+                result, measure = self.apply_pressure([run["id"]], [capacity])
+                self.assertEqual(result["cleaned"], [])
+                measure.assert_not_called()
+                self.assertTrue((root / "source/large-data").is_file())
+
+    def test_pressure_cleanup_overrides_retention_oldest_first_and_stops_at_target(self):
+        roots = {}
+        for index, run_id in enumerate(("newest", "oldest", "middle")):
+            run, roots[run_id] = self.make_run(run_id, status="failed")
+            run["finished_at"] = f"2026-09-0{3 - index}T12:00:00+00:00"
+            self.store.save(run)
+        retained = workspace_cleanup.apply_retention(
+            self.store, {"failed_workspaces_to_retain": 3},
+        )
+
+        result, measure = self.apply_pressure(
+            retained["pressure_candidates"],
+            [
+                self.pressure_capacity(50),
+                self.pressure_capacity(150),
+                self.pressure_capacity(200, state="normal"),
+            ],
+        )
+
+        self.assertEqual(
+            [row["id"] for row in result["cleaned"]], ["middle", "oldest"],
+        )
+        # Dates above deliberately make middle the oldest and oldest second;
+        # candidate input order is the newer-first retention order.
+        self.assertEqual(measure.call_count, 2)
+        self.assertTrue(result["target_reached"])
+        self.assertEqual(result["final_state"], "normal")
+        self.assertFalse((roots["middle"] / "source").exists())
+        self.assertFalse((roots["oldest"] / "source").exists())
+        self.assertTrue((roots["newest"] / "source").exists())
+        marker = json.loads((roots["middle"] / workspace_cleanup.CLEANUP_MARKER).read_text())
+        self.assertEqual(marker["reason"], "storage_pressure")
+        self.assertEqual(
+            set(marker["removed"]),
+            set(workspace_cleanup.RETENTION_DISPOSABLE_DIRECTORIES + workspace_cleanup.DISPOSABLE_FILES),
+        )
+        for root in (roots["middle"], roots["oldest"]):
+            for name in ("run.json", "recipe.json", "logs", "artifacts"):
+                self.assertTrue((root / name).exists())
+            self.assertFalse((root / "toolchain").exists())
+
+    def test_pressure_cleanup_stops_fail_closed_on_intermediate_measurement_error(self):
+        first, first_root = self.make_run("first-pressure", status="failed")
+        second, second_root = self.make_run("second-pressure", status="failed")
+        first["finished_at"] = "2026-09-01T12:00:00+00:00"
+        second["finished_at"] = "2026-09-02T12:00:00+00:00"
+        self.store.save(first)
+        self.store.save(second)
+
+        result, measure = self.apply_pressure(
+            [second["id"], first["id"]],
+            [
+                self.pressure_capacity(50),
+                self.pressure_capacity(None, state="measurement_error"),
+            ],
+        )
+
+        self.assertEqual([row["id"] for row in result["cleaned"]], [first["id"]])
+        self.assertEqual(result["final_state"], "measurement_error")
+        self.assertFalse(result["target_reached"])
+        self.assertEqual(measure.call_count, 1)
+        self.assertFalse((first_root / "source").exists())
+        self.assertTrue((second_root / "source").exists())
+
+    def test_pressure_cleanup_disabled_and_exhausted_candidates_preserve_other_data(self):
+        run, root = self.make_run("pressure-exhausted", status="failed")
+        global_cache = self.store.root.parent / "toolchains/node/cache"
+        global_cache.mkdir(parents=True)
+        (global_cache / "keep").write_text("immutable")
+        disabled, disabled_measure = self.apply_pressure(
+            [run["id"]], [self.pressure_capacity(50)],
+            policy={"enabled": False, "failed_workspaces_to_retain": 1},
+        )
+        self.assertEqual(disabled["initial_state"], "pressure")
+        self.assertEqual(disabled["cleaned"], [])
+        disabled_measure.assert_not_called()
+
+        result, measure = self.apply_pressure(
+            [run["id"]],
+            [self.pressure_capacity(50), self.pressure_capacity(80)],
+        )
+        self.assertEqual(result["final_state"], "pressure")
+        self.assertFalse(result["target_reached"])
+        self.assertEqual(measure.call_count, 1)
+        self.assertEqual((global_cache / "keep").read_text(), "immutable")
+        self.assertTrue((root / "run.json").is_file())
+        self.assertTrue((root / "artifacts/demo.deb").is_file())
+        self.assertTrue((root / "logs").is_dir())
+
+    def test_pressure_cleanup_is_driven_only_by_builds_not_repository_projection(self):
+        run, root = self.make_run("repository-pressure", status="failed")
+        repository_only = self.pressure_capacity(300, state="normal")
+        repository_only["repository"] = {
+            "measurement_state": "ready",
+            "pressure_state": "pressure",
+            "same_as_builds": False,
+        }
+        result, measure = self.apply_pressure([run["id"]], [repository_only])
+        self.assertEqual(result["cleaned"], [])
+        measure.assert_not_called()
+        self.assertTrue((root / "source").is_dir())
+
+        shared = self.pressure_capacity(50)
+        shared["repository"] = {
+            "measurement_state": "ready",
+            "pressure_state": "pressure",
+            "same_as_builds": True,
+        }
+        result, measure = self.apply_pressure(
+            [run["id"]],
+            [shared, self.pressure_capacity(200, state="normal")],
+        )
+        self.assertEqual([row["id"] for row in result["cleaned"]], [run["id"]])
+        self.assertEqual(measure.call_count, 1)
+        marker_before = (root / workspace_cleanup.CLEANUP_MARKER).read_bytes()
+        repeated, repeated_measure = self.apply_pressure(
+            [run["id"]], [self.pressure_capacity(50)],
+        )
+        self.assertEqual(repeated["cleaned"], [])
+        repeated_measure.assert_not_called()
+        self.assertEqual(
+            (root / workspace_cleanup.CLEANUP_MARKER).read_bytes(), marker_before,
+        )
+
+    def test_pressure_only_reconsiders_runs_retained_by_normal_cleanup(self):
+        old, old_root = self.make_run("normally-evicted", status="failed")
+        kept, kept_root = self.make_run("normally-retained", status="failed")
+        old["finished_at"] = "2026-09-01T12:00:00+00:00"
+        kept["finished_at"] = "2026-09-02T12:00:00+00:00"
+        self.store.save(old)
+        self.store.save(kept)
+        normal = workspace_cleanup.apply_retention(
+            self.store, {"failed_workspaces_to_retain": 1},
+        )
+        self.assertEqual(normal["retained"], [kept["id"]])
+        self.assertFalse((old_root / "source").exists())
+
+        result, measure = self.apply_pressure(
+            normal["pressure_candidates"],
+            [self.pressure_capacity(50), self.pressure_capacity(200, state="normal")],
+        )
+
+        self.assertEqual([row["id"] for row in result["cleaned"]], [kept["id"]])
+        self.assertEqual(measure.call_count, 1)
+        self.assertEqual(
+            json.loads((old_root / workspace_cleanup.CLEANUP_MARKER).read_text())["reason"],
+            "retention",
+        )
+        self.assertEqual(
+            json.loads((kept_root / workspace_cleanup.CLEANUP_MARKER).read_text())["reason"],
+            "storage_pressure",
+        )
+
+    def test_mixed_retention_evicts_a_b_then_pressure_c_only(self):
+        roots = {}
+        for index, run_id in enumerate(("A", "B", "C", "D"), start=1):
+            run, roots[run_id] = self.make_run(run_id, status="failed")
+            run["finished_at"] = f"2026-09-0{index}T12:00:00+00:00"
+            self.store.save(run)
+
+        normal = workspace_cleanup.apply_retention(
+            self.store, {"failed_workspaces_to_retain": 2},
+        )
+        result, measure = self.apply_pressure(
+            normal["pressure_candidates"],
+            [self.pressure_capacity(50), self.pressure_capacity(200, state="normal")],
+        )
+
+        self.assertEqual(set(normal["retained"]), {"C", "D"})
+        self.assertEqual([row["id"] for row in result["cleaned"]], ["C"])
+        self.assertEqual(measure.call_count, 1)
+        for run_id in ("A", "B"):
+            self.assertEqual(
+                json.loads((roots[run_id] / workspace_cleanup.CLEANUP_MARKER).read_text())["reason"],
+                "retention",
+            )
+        self.assertEqual(
+            json.loads((roots["C"] / workspace_cleanup.CLEANUP_MARKER).read_text())["reason"],
+            "storage_pressure",
+        )
+        self.assertEqual(
+            json.loads((roots["D"] / workspace_cleanup.CLEANUP_MARKER).read_text())["reason"],
+            "terminal_run",
+        )
+        self.assertTrue((roots["D"] / "source").is_dir())
+
+    def test_blocked_normal_cleanup_is_not_a_pressure_candidate(self):
+        run, root = self.make_run("blocked-normal", status="failed")
+        with self.store.locked_run(run["id"]) as fd:
+            persist_identity(fd, starting_metadata(run["id"], "b" * 32))
+
+        normal = workspace_cleanup.apply_retention(
+            self.store, {"failed_workspaces_to_retain": 1},
+        )
+
+        self.assertEqual(normal["retained"], [run["id"]])
+        self.assertIn(run["id"], normal["skipped"])
+        self.assertEqual(normal["pressure_candidates"], [])
+        result, measure = self.apply_pressure(
+            normal["pressure_candidates"], [self.pressure_capacity(50)],
+        )
+        self.assertEqual(result["candidates_considered"], 0)
+        measure.assert_not_called()
+        self.assertTrue((root / "source/large-data").is_file())
+        self.assertTrue((root / "toolchain").is_dir())
+
+    def test_pressure_revalidates_each_selected_candidate_and_continues(self):
+        blocked, blocked_root = self.make_run("activity-after-selection", status="failed")
+        safe, safe_root = self.make_run("safe-after-blocked", status="failed")
+        blocked["finished_at"] = "2026-09-01T12:00:00+00:00"
+        safe["finished_at"] = "2026-09-02T12:00:00+00:00"
+        self.store.save(blocked)
+        self.store.save(safe)
+        original_read = workspace_cleanup.read_run
+        reads = 0
+
+        def become_active(fd, root, run_id):
+            nonlocal reads
+            reads += 1
+            run = original_read(fd, root, run_id)
+            if reads == 3:
+                self.assertEqual(run_id, blocked["id"])
+                run["publications"] = [{"status": "running"}]
+            return run
+
+        with mock.patch(
+            "debbuilder.workspace_cleanup.read_run", side_effect=become_active,
+        ):
+            result, measure = self.apply_pressure(
+                [safe["id"], blocked["id"]],
+                [self.pressure_capacity(50), self.pressure_capacity(200, state="normal")],
+            )
+
+        self.assertIn(blocked["id"], result["skipped"])
+        self.assertEqual([row["id"] for row in result["cleaned"]], [safe["id"]])
+        self.assertTrue((blocked_root / "source").is_dir())
+        self.assertFalse((safe_root / "source").exists())
+        self.assertEqual(measure.call_count, 1)
+
+    def test_pressure_timestamp_fallback_unknown_and_run_id_order(self):
+        specifications = (
+            ("tie-b", "2026-09-02T12:00:00+00:00", None),
+            ("unknown", None, "unknown"),
+            ("known-old", "2026-09-01T12:00:00+00:00", None),
+            ("fallback", "malformed", 2_000_000_000.0),
+            ("tie-a", "2026-09-02T12:00:00+00:00", None),
+        )
+        roots = {}
+        ids = []
+        for run_id, finished_at, created_fallback in specifications:
+            run, roots[run_id] = self.make_run(run_id, status="failed")
+            run["finished_at"] = finished_at
+            if created_fallback == "unknown":
+                run["created_at_epoch"] = "invalid"
+                run["created_at"] = "malformed"
+            elif created_fallback is not None:
+                run["created_at_epoch"] = created_fallback
+                run["created_at"] = "malformed"
+            self.store.save(run)
+            ids.append(run_id)
+        measurements = [self.pressure_capacity(50)]
+        measurements.extend(self.pressure_capacity(100 + index) for index in range(4))
+        measurements.append(self.pressure_capacity(200, state="normal"))
+
+        result, measure = self.apply_pressure(ids, measurements)
+
+        self.assertEqual(
+            [row["id"] for row in result["cleaned"]],
+            ["known-old", "tie-a", "tie-b", "fallback", "unknown"],
+        )
+        self.assertEqual(measure.call_count, 5)
+
+    def test_pressure_marker_write_failure_stops_before_next_candidate(self):
+        first, first_root = self.make_run("marker-first", status="failed")
+        second, second_root = self.make_run("marker-second", status="failed")
+        first["finished_at"] = "2026-09-01T12:00:00+00:00"
+        second["finished_at"] = "2026-09-02T12:00:00+00:00"
+        self.store.save(first)
+        self.store.save(second)
+        original_write = workspace_cleanup.write_json
+
+        def fail_marker(fd, name, value):
+            if name == workspace_cleanup.CLEANUP_MARKER:
+                raise OSError("marker filesystem failure")
+            return original_write(fd, name, value)
+
+        with mock.patch(
+            "debbuilder.workspace_cleanup.write_json", side_effect=fail_marker,
+        ):
+            result, measure = self.apply_pressure(
+                [second["id"], first["id"]], [self.pressure_capacity(50)],
+            )
+
+        self.assertEqual(result["cleaned"], [])
+        self.assertEqual(result["errors"][0]["id"], first["id"])
+        self.assertIn("marker filesystem failure", result["errors"][0]["error"])
+        measure.assert_not_called()
+        self.assertFalse((first_root / "source").exists())
+        self.assertFalse((first_root / workspace_cleanup.CLEANUP_MARKER).exists())
+        self.assertTrue((second_root / "source").is_dir())
+
+    def test_pressure_cleanup_reuses_recovery_identity_artifact_and_target_guards(self):
+        cases = (
+            "active", "recovery", "validation", "publication", "identity", "cgroup",
+            "process", "artifact", "symlink", "mount",
+        )
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory(dir=self.base) as temporary:
+                self.store = BuildStore(Path(temporary) / "builds")
+                run, root = self.make_run(f"pressure-{case}", status="failed")
+                patcher = nullcontext()
+                if case == "active":
+                    run["status"] = "running"
+                    self.store.save(run)
+                elif case == "recovery":
+                    run["recovery"] = {"status": "pending"}
+                    self.store.save(run)
+                elif case == "validation":
+                    self.save_validation_attempt(run, "pressure-active", "running")
+                elif case == "publication":
+                    run["publications"] = [{"status": "running"}]
+                    self.store.save(run)
+                elif case == "identity":
+                    with self.store.locked_run(run["id"]) as fd:
+                        persist_identity(fd, starting_metadata(run["id"], "a" * 32))
+                elif case == "cgroup":
+                    patcher = mock.patch(
+                        "debbuilder.command_containment.matching_run_command_units",
+                        return_value={"debbuilder-command.scope"},
+                    )
+                elif case == "process":
+                    patcher = mock.patch(
+                        "debbuilder.workspace_cleanup._require_unused_workspace",
+                        side_effect=workspace_cleanup.WorkspaceBusyError(
+                            "A process still uses this workspace",
+                        ),
+                    )
+                elif case == "artifact":
+                    run["artifact"]["path"] = str(root / "source/large-data")
+                    self.store.save(run)
+                elif case == "symlink":
+                    outside = Path(temporary) / "outside"
+                    (root / "source").rename(outside)
+                    (root / "source").symlink_to(outside, target_is_directory=True)
+                else:
+                    patcher = mock.patch(
+                        "debbuilder.workspace_cleanup.Path.read_text",
+                        return_value=f"1 2 0:1 / {root}/source/mounted rw - ext4 /dev/example rw\n",
+                    )
+                with patcher:
+                    result, measure = self.apply_pressure(
+                        [run["id"]], [self.pressure_capacity(50)],
+                    )
+                self.assertEqual(result["cleaned"], [])
+                measure.assert_not_called()
+                self.assertFalse((root / workspace_cleanup.CLEANUP_MARKER).exists())
 
     def test_automatic_cleanup_preserves_history_metadata_logs_manifests_and_artifact(self):
         run, root = self.make_run()

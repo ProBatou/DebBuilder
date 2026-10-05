@@ -65,13 +65,26 @@ preserving filesystem-reserved blocks for host operation. The repository is
 measured independently and is identified as sharing the Builds filesystem when
 both roots have the same device ID. Settings define minimum-free byte/percent
 thresholds and higher target byte/percent thresholds. This release reports the
-resulting `normal`, `pressure`, or `measurement_error` state; it does not yet
-perform pressure-driven deletion or block Build/Test admission.
+resulting `normal`, `pressure`, or `measurement_error` state. After ordinary
+workspace retention and repository-backed pruning, a `pressure` state on the
+Builds filesystem may override `failed_workspaces_to_retain`: retained failed
+or cancelled Runs are reconsidered oldest-first, and only `source/`,
+`staging/`, `downloads/`, and `source.tar.gz` may be removed. Candidates must
+have been deliberately retained by the count policy without a blocked or
+failed normal cleanup attempt. Each candidate is re-read under the same Run
+lease, recovery, containment, process, mount,
+symlink, and artifact checks as ordinary cleanup. Capacity is remeasured with
+the pinned-descriptor O(1) probe after each effective cleanup, and deletion
+stops when the higher target is reached, measurement fails, or safe candidates
+are exhausted. Repository-only pressure never triggers workspace cleanup.
+This release does not yet block Build/Test admission.
 Byte thresholds are limited to `9007199254740991` (`2^53 - 1`) so every value
 accepted by the backend remains exactly representable through the supported
 JSON/JavaScript Settings clients. Changing any pressure threshold rebases the
 next capacity refresh from the cold `unknown` state; the Settings mutation
 only requests that asynchronous refresh and performs no filesystem scan.
+Disabling automatic workspace cleanup also disables pressure cleanup, while
+capacity measurement and pressure reporting remain active.
 
 Deleting one Run's log/history or clearing execution history also requests
 disposable-workspace cleanup, even when automatic cleanup is disabled. It does

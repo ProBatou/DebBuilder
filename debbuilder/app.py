@@ -778,11 +778,12 @@ def _enqueue_prepared_preallocated_recipe_run(
     return {"run_id": run_id, "status": "queued", "duplicate": False}
 
 
-def cleanup_workspaces(*, authorization=None, should_stop=None) -> dict:
+def cleanup_workspaces(*, authorization=None, should_stop=None, policy=None) -> dict:
     """Use the current DATA/settings; cleanup failures never change a Run result."""
     try:
         result = workspace_cleanup.apply_retention(
-            BuildStore(DATA / "builds"), app_settings().get("workspace_cleanup"),
+            BuildStore(DATA / "builds"),
+            policy if policy is not None else app_settings().get("workspace_cleanup"),
             authorization=authorization or workspace_cleanup.OPEN_CLEANUP_AUTHORIZATION,
             should_stop=should_stop,
         )
@@ -794,12 +795,16 @@ def cleanup_workspaces(*, authorization=None, should_stop=None) -> dict:
         return {"cleaned": [], "retained": [], "skipped": [], "errors": [{"error": str(exc)}]}
 
 
-def maintain_run_storage(*, authorization=None, should_stop=None) -> dict:
+def maintain_run_storage(*, authorization=None, should_stop=None, inventory=None) -> dict:
     """Run the ordered destructive pass owned by the maintenance worker."""
     stop_requested = should_stop or (lambda: False)
+    policy = workspace_cleanup.validate_policy(
+        app_settings().get("workspace_cleanup", {}),
+    )
     cleanup = cleanup_workspaces(
         authorization=authorization,
         should_stop=stop_requested,
+        policy=policy,
     )
     pruning = {"pruned": [], "recovered": [], "already_pruned": [], "skipped": [], "manifests_pruned": [], "errors": []}
     if not stop_requested():
@@ -810,7 +815,7 @@ def maintain_run_storage(*, authorization=None, should_stop=None) -> dict:
                 repo_root=REPOSITORY_ROOT,
                 distribution=apt["distribution"],
                 component=apt["component"],
-                policy=app_settings().get("workspace_cleanup"),
+                policy=policy,
                 authorization=authorization or workspace_cleanup.OPEN_CLEANUP_AUTHORIZATION,
                 should_stop=stop_requested,
             )
@@ -819,7 +824,38 @@ def maintain_run_storage(*, authorization=None, should_stop=None) -> dict:
         except Exception as exc:
             LOGGER.exception("Run storage pruning sweep failed")
             pruning["errors"].append({"error": str(exc)})
-    return {"workspace_cleanup": cleanup, "storage_pruning": pruning}
+    pressure = {
+        "pressure_checked": False,
+        "initial_state": "unknown",
+        "candidates_considered": 0,
+        "cleaned": [],
+        "skipped": [],
+        "errors": [],
+        "target_reached": False,
+        "final_state": "unknown",
+    }
+    if not stop_requested() and inventory is not None:
+        try:
+            capacity = inventory.collect_capacity(policy=policy)
+            pressure = workspace_cleanup.apply_storage_pressure(
+                BuildStore(DATA / "builds"),
+                cleanup.get("pressure_candidates", []),
+                capacity,
+                lambda: inventory.collect_capacity(policy=policy),
+                policy,
+                authorization=authorization or workspace_cleanup.OPEN_CLEANUP_AUTHORIZATION,
+                should_stop=stop_requested,
+            )
+            for error in pressure["errors"]:
+                LOGGER.warning("Workspace pressure cleanup: %s", error)
+        except Exception as exc:
+            LOGGER.exception("Workspace pressure cleanup sweep failed")
+            pressure["errors"].append({"error": str(exc)})
+    return {
+        "workspace_cleanup": cleanup,
+        "storage_pruning": pruning,
+        "storage_pressure": pressure,
+    }
 
 
 def _cancellation_result(run_id: str, status: str, metadata: dict) -> dict:
@@ -927,11 +963,13 @@ def create_maintenance_service(http_server):
                 return maintain_run_storage(
                     authorization=authorization,
                     should_stop=service.stop_requested,
+                    inventory=http_server.storage_inventory,
                 )
             with lease:
                 return maintain_run_storage(
                     authorization=authorization,
                     should_stop=service.stop_requested,
+                    inventory=http_server.storage_inventory,
                 )
         except MutationGateClosed:
             return {"status": "skipped", "reason": "application_shutting_down"}

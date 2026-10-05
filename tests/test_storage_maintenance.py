@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from debbuilder import app, maintenance, workspace_cleanup
+from debbuilder import app, maintenance, storage_inventory, workspace_cleanup
 from debbuilder.build_store import BuildStore
 from debbuilder.lifecycle import MutationGate
 from debbuilder.storage_inventory import StorageInventory
@@ -69,8 +69,9 @@ class StorageMaintenanceTests(unittest.TestCase):
         )
         called = threading.Event()
 
-        def maintain(*, authorization, should_stop):
+        def maintain(*, authorization, should_stop, inventory):
             self.assertIs(authorization, server.cleanup_authorization)
+            self.assertIs(inventory, server.storage_inventory)
             self.assertEqual(gate.active, 1)
             self.assertFalse(should_stop())
             called.set()
@@ -261,8 +262,9 @@ class StorageMaintenanceTests(unittest.TestCase):
         release_cleanup = threading.Event()
         observed_stop = []
 
-        def cleanup(*, authorization, should_stop):
+        def cleanup(*, authorization, should_stop, policy):
             self.assertIs(authorization, server.cleanup_authorization)
+            self.assertTrue(policy["enabled"])
             cleanup_entered.set()
             release_cleanup.wait(2)
             observed_stop.append(should_stop())
@@ -385,6 +387,358 @@ class StorageMaintenanceTests(unittest.TestCase):
         self.assertEqual(calls, ["cleanup", "pruning"])
         self.assertIn("workspace_cleanup", result)
         self.assertIn("storage_pruning", result)
+        self.assertIn("storage_pressure", result)
+
+    def test_application_maintenance_orders_pressure_after_retention_and_pruning(self):
+        calls = []
+        inventory = mock.Mock()
+        inventory.collect_capacity.return_value = {
+            "builds": {
+                "measurement_state": "ready",
+                "pressure_state": "pressure",
+                "available_bytes": 50,
+                "effective_target_bytes": 200,
+            },
+            "repository": {
+                "measurement_state": "ready",
+                "pressure_state": "normal",
+                "same_as_builds": False,
+            },
+        }
+        policy = {"enabled": True, "failed_workspaces_to_retain": 5}
+        authorization = workspace_cleanup.CleanupAuthorization()
+        with mock.patch.object(
+            app, "cleanup_workspaces",
+            side_effect=lambda **_kwargs: calls.append("retention") or {
+                "retained": ["failed"], "errors": [],
+            },
+        ), mock.patch.object(
+            app.storage_pruning, "apply_pruning",
+            side_effect=lambda *_args, **_kwargs: calls.append("pruning") or {"errors": []},
+        ), mock.patch.object(
+            app.workspace_cleanup, "apply_storage_pressure",
+            side_effect=lambda *_args, **_kwargs: calls.append("pressure") or {"errors": []},
+        ), mock.patch.object(
+            app, "repo_settings", return_value={"distribution": "bookworm", "component": "main"},
+        ), mock.patch.object(
+            app, "app_settings", return_value={"workspace_cleanup": policy},
+        ):
+            app.maintain_run_storage(
+                authorization=authorization,
+                inventory=inventory,
+            )
+
+        self.assertEqual(calls, ["retention", "pruning", "pressure"])
+        inventory.collect_capacity.assert_called_once()
+
+    def test_application_maintenance_preserves_pressure_cleanup_errors(self):
+        inventory = mock.Mock()
+        inventory.collect_capacity.return_value = {
+            "builds": {
+                "measurement_state": "ready", "pressure_state": "pressure",
+                "available_bytes": 50, "effective_target_bytes": 200,
+            },
+            "repository": {"measurement_state": "ready", "pressure_state": "normal"},
+        }
+        pressure_result = {
+            "pressure_checked": True, "initial_state": "pressure",
+            "candidates_considered": 1, "cleaned": [], "skipped": [],
+            "errors": [{"id": "failed", "error": "marker filesystem failure"}],
+            "target_reached": False, "final_state": "pressure",
+        }
+        with mock.patch.object(app, "cleanup_workspaces", return_value={
+            "retained": ["failed"], "pressure_candidates": ["failed"], "errors": [],
+        }), mock.patch.object(
+            app.storage_pruning, "apply_pruning", return_value={"errors": []},
+        ), mock.patch.object(
+            app.workspace_cleanup, "apply_storage_pressure", return_value=pressure_result,
+        ), mock.patch.object(
+            app, "repo_settings", return_value={"distribution": "bookworm", "component": "main"},
+        ), mock.patch.object(
+            app, "app_settings", return_value={"workspace_cleanup": {"enabled": True}},
+        ), self.assertLogs("debbuilder.app", level="WARNING"):
+            result = app.maintain_run_storage(inventory=inventory)
+
+        self.assertEqual(result["storage_pressure"], pressure_result)
+
+    def test_real_maintenance_pressure_loop_preserves_hysteresis_until_target(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            data = base / "data"
+            repo = base / "repo"
+            repo.mkdir()
+            store = BuildStore(data / "builds")
+            roots = {}
+            for index, run_id in enumerate(("oldest", "middle", "newest"), start=1):
+                run = store.create({
+                    "schema_version": 5,
+                    "name": run_id,
+                    "package": {
+                        "name": run_id,
+                        "maintainer": "A <a@example.test>",
+                        "description": run_id,
+                    },
+                    "source": {"repository": f"owner/{run_id}"},
+                }, mode="build", run_id=run_id)
+                root = Path(run["workspace"])
+                (root / "source").mkdir(exist_ok=True)
+                (root / "source/data").write_text("disposable")
+                run["status"] = "failed"
+                run["finished_at"] = f"2026-09-0{index}T12:00:00+00:00"
+                store.save(run)
+                roots[run_id] = root
+            policy = {
+                "enabled": True,
+                "failed_workspaces_to_retain": 3,
+                "pressure_minimum_free_bytes": 100,
+                "pressure_minimum_free_percent": 10,
+                "pressure_target_free_bytes": 200,
+                "pressure_target_free_percent": 20,
+            }
+            available = iter((50, 150, 200))
+            observed_states = []
+
+            def measure_builds(*_args, **_kwargs):
+                value = next(available)
+                return {
+                    "measurement_state": "ready",
+                    "measured_scope": "builds",
+                    "device_id": 1,
+                    "total_bytes": 1000,
+                    "used_bytes": 1000 - value,
+                    "free_bytes": value,
+                    "available_bytes": value,
+                    "available_percent": value / 10,
+                    "utilized_percent": (1000 - value) / 10,
+                }
+
+            inventory = StorageInventory(data, repo, policy_provider=lambda: policy)
+            original_capacity = inventory.collect_capacity
+
+            def collect_capacity(*args, **kwargs):
+                result = original_capacity(*args, **kwargs)
+                observed_states.append(result["builds"]["pressure_state"])
+                return result
+
+            inventory.collect_capacity = mock.Mock(side_effect=collect_capacity)
+            with mock.patch.object(app, "DATA", data), \
+                    mock.patch.object(app, "REPOSITORY_ROOT", repo), \
+                    mock.patch.object(app, "app_settings", return_value={"workspace_cleanup": policy}), \
+                    mock.patch.object(app, "repo_settings", return_value={"distribution": "bookworm", "component": "main"}), \
+                    mock.patch.object(app.storage_pruning, "apply_pruning", return_value={"errors": []}), \
+                    mock.patch.object(storage_inventory, "_measure_builds_filesystem", side_effect=measure_builds), \
+                    mock.patch.object(storage_inventory, "_measure_repository_filesystem", return_value={
+                        "measurement_state": "ready", "measured_scope": "repository",
+                        "device_id": 2, "total_bytes": 1000, "used_bytes": 100,
+                        "free_bytes": 900, "available_bytes": 900,
+                        "available_percent": 90.0, "utilized_percent": 10.0,
+                    }), \
+                    mock.patch.object(inventory, "collect") as recursive_collect:
+                result = app.maintain_run_storage(
+                    authorization=workspace_cleanup.CleanupAuthorization(),
+                    inventory=inventory,
+                )
+
+            self.assertEqual(observed_states, ["pressure", "pressure", "normal"])
+            self.assertEqual(
+                [row["id"] for row in result["storage_pressure"]["cleaned"]],
+                ["oldest", "middle"],
+            )
+            self.assertTrue(result["storage_pressure"]["target_reached"])
+            self.assertFalse((roots["oldest"] / "source").exists())
+            self.assertFalse((roots["middle"] / "source").exists())
+            self.assertTrue((roots["newest"] / "source").exists())
+            recursive_collect.assert_not_called()
+
+    def test_real_maintenance_stops_on_intermediate_capacity_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            data, repo = base / "data", base / "repo"
+            repo.mkdir()
+            store = BuildStore(data / "builds")
+            roots = {}
+            for index, run_id in enumerate(("first", "second"), start=1):
+                run = store.create({
+                    "schema_version": 5, "name": run_id,
+                    "package": {"name": run_id, "maintainer": "A <a@example.test>", "description": run_id},
+                    "source": {"repository": f"owner/{run_id}"},
+                }, mode="build", run_id=run_id)
+                root = Path(run["workspace"])
+                (root / "source/data").write_text("disposable")
+                run["status"] = "failed"
+                run["finished_at"] = f"2026-09-0{index}T12:00:00+00:00"
+                store.save(run)
+                roots[run_id] = root
+            policy = {
+                "enabled": True, "failed_workspaces_to_retain": 2,
+                "pressure_minimum_free_bytes": 100, "pressure_minimum_free_percent": 10,
+                "pressure_target_free_bytes": 200, "pressure_target_free_percent": 20,
+            }
+            measurements = iter((
+                {
+                    "measurement_state": "ready", "measured_scope": "builds", "device_id": 1,
+                    "total_bytes": 1000, "used_bytes": 950, "free_bytes": 50,
+                    "available_bytes": 50, "available_percent": 5.0, "utilized_percent": 95.0,
+                },
+                {"measurement_state": "error", "pressure_state": "measurement_error"},
+            ))
+            inventory = StorageInventory(data, repo, policy_provider=lambda: policy)
+            with mock.patch.object(app, "DATA", data), \
+                    mock.patch.object(app, "REPOSITORY_ROOT", repo), \
+                    mock.patch.object(app, "app_settings", return_value={"workspace_cleanup": policy}), \
+                    mock.patch.object(app, "repo_settings", return_value={"distribution": "bookworm", "component": "main"}), \
+                    mock.patch.object(app, "cleanup_workspaces", return_value={
+                        "retained": ["first", "second"],
+                        "pressure_candidates": ["first", "second"], "errors": [],
+                    }), \
+                    mock.patch.object(app.storage_pruning, "apply_pruning", return_value={"errors": []}), \
+                    mock.patch.object(storage_inventory, "_measure_builds_filesystem", side_effect=lambda *_args, **_kwargs: next(measurements)), \
+                    mock.patch.object(storage_inventory, "_measure_repository_filesystem", return_value={
+                        "measurement_state": "ready", "device_id": 2, "total_bytes": 1000,
+                        "used_bytes": 100, "free_bytes": 900, "available_bytes": 900,
+                        "available_percent": 90.0, "utilized_percent": 10.0,
+                    }):
+                result = app.maintain_run_storage(
+                    authorization=workspace_cleanup.CleanupAuthorization(),
+                    inventory=inventory,
+                )
+
+            self.assertEqual(result["storage_pressure"]["final_state"], "measurement_error")
+            self.assertEqual(
+                [row["id"] for row in result["storage_pressure"]["cleaned"]], ["first"],
+            )
+            self.assertFalse((roots["first"] / "source").exists())
+            self.assertTrue((roots["second"] / "source").is_dir())
+
+    def test_maintain_storage_disabled_measures_pressure_without_cleanup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            data, repo = base / "data", base / "repo"
+            repo.mkdir()
+            store = BuildStore(data / "builds")
+            run = store.create({
+                "schema_version": 5, "name": "disabled",
+                "package": {"name": "disabled", "maintainer": "A <a@example.test>", "description": "disabled"},
+                "source": {"repository": "owner/disabled"},
+            }, mode="build", run_id="disabled")
+            root = Path(run["workspace"])
+            (root / "source/data").write_text("disposable")
+            (root / "toolchain").mkdir()
+            run["status"] = "failed"
+            run["finished_at"] = "2026-09-01T12:00:00+00:00"
+            store.save(run)
+            policy = {"enabled": False, "failed_workspaces_to_retain": 0}
+            inventory = mock.Mock()
+            inventory.collect_capacity.return_value = {
+                "builds": {
+                    "measurement_state": "ready", "pressure_state": "pressure",
+                    "available_bytes": 50, "effective_target_bytes": 200,
+                },
+                "repository": {"measurement_state": "ready", "pressure_state": "normal", "same_as_builds": False},
+            }
+            with mock.patch.object(app, "DATA", data), \
+                    mock.patch.object(app, "REPOSITORY_ROOT", repo), \
+                    mock.patch.object(app, "app_settings", return_value={"workspace_cleanup": policy}), \
+                    mock.patch.object(app, "repo_settings", return_value={"distribution": "bookworm", "component": "main"}), \
+                    mock.patch.object(app.storage_pruning, "apply_pruning", return_value={"errors": [], "pruned": []}):
+                result = app.maintain_run_storage(
+                    authorization=workspace_cleanup.CleanupAuthorization(), inventory=inventory,
+                )
+
+            self.assertEqual(result["storage_pressure"]["initial_state"], "pressure")
+            self.assertEqual(result["storage_pressure"]["cleaned"], [])
+            self.assertTrue((root / "source").is_dir())
+            self.assertTrue((root / "toolchain").is_dir())
+            self.assertEqual(result["storage_pruning"]["pruned"], [])
+            inventory.collect_capacity.assert_called_once()
+
+    def test_maintenance_uses_builds_pressure_only_for_separate_or_shared_repository(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            data, repo = base / "data", base / "repo"
+            repo.mkdir()
+            store = BuildStore(data / "builds")
+
+            def make_run(run_id):
+                run = store.create({
+                    "schema_version": 5, "name": run_id,
+                    "package": {"name": run_id, "maintainer": "A <a@example.test>", "description": run_id},
+                    "source": {"repository": f"owner/{run_id}"},
+                }, mode="build", run_id=run_id)
+                root = Path(run["workspace"])
+                (root / "source/data").write_text("disposable")
+                run["status"] = "failed"
+                run["finished_at"] = "2026-09-01T12:00:00+00:00"
+                store.save(run)
+                return root
+
+            separate_root = make_run("separate")
+            shared_root = make_run("shared")
+            policy = {"enabled": True, "failed_workspaces_to_retain": 2}
+            normal_builds = {
+                "builds": {
+                    "measurement_state": "ready", "pressure_state": "normal",
+                    "available_bytes": 300, "effective_target_bytes": 200,
+                },
+                "repository": {
+                    "measurement_state": "ready", "pressure_state": "pressure", "same_as_builds": False,
+                },
+            }
+            pressure_builds = {
+                "builds": {
+                    "measurement_state": "ready", "pressure_state": "pressure",
+                    "available_bytes": 50, "effective_target_bytes": 200,
+                },
+                "repository": {
+                    "measurement_state": "ready", "pressure_state": "normal", "same_as_builds": False,
+                },
+            }
+            target_shared = {
+                "builds": {
+                    "measurement_state": "ready", "pressure_state": "normal",
+                    "available_bytes": 200, "effective_target_bytes": 200,
+                },
+                "repository": {
+                    "measurement_state": "ready", "pressure_state": "normal", "same_as_builds": True,
+                },
+            }
+            with mock.patch.object(app, "DATA", data), \
+                    mock.patch.object(app, "REPOSITORY_ROOT", repo), \
+                    mock.patch.object(app, "app_settings", return_value={"workspace_cleanup": policy}), \
+                    mock.patch.object(app, "repo_settings", return_value={"distribution": "bookworm", "component": "main"}), \
+                    mock.patch.object(app, "cleanup_workspaces", return_value={
+                        "retained": ["separate"], "pressure_candidates": ["separate"], "errors": [],
+                    }), \
+                    mock.patch.object(app.storage_pruning, "apply_pruning", return_value={"errors": []}):
+                repository_only = mock.Mock()
+                repository_only.collect_capacity.return_value = normal_builds
+                first = app.maintain_run_storage(inventory=repository_only)
+                self.assertEqual(first["storage_pressure"]["cleaned"], [])
+                self.assertTrue((separate_root / "source").is_dir())
+
+                separate = mock.Mock()
+                separate.collect_capacity.side_effect = [pressure_builds, target_shared]
+                second = app.maintain_run_storage(inventory=separate)
+                self.assertEqual([row["id"] for row in second["storage_pressure"]["cleaned"]], ["separate"])
+                self.assertEqual(separate.collect_capacity.call_count, 2)
+
+            with mock.patch.object(app, "DATA", data), \
+                    mock.patch.object(app, "REPOSITORY_ROOT", repo), \
+                    mock.patch.object(app, "app_settings", return_value={"workspace_cleanup": policy}), \
+                    mock.patch.object(app, "repo_settings", return_value={"distribution": "bookworm", "component": "main"}), \
+                    mock.patch.object(app, "cleanup_workspaces", return_value={
+                        "retained": ["shared"], "pressure_candidates": ["shared"], "errors": [],
+                    }), \
+                    mock.patch.object(app.storage_pruning, "apply_pruning", return_value={"errors": []}):
+                shared = mock.Mock()
+                shared.collect_capacity.side_effect = [
+                    {**pressure_builds, "repository": {**pressure_builds["builds"], "same_as_builds": True}},
+                    target_shared,
+                ]
+                third = app.maintain_run_storage(inventory=shared)
+                self.assertEqual([row["id"] for row in third["storage_pressure"]["cleaned"]], ["shared"])
+                self.assertEqual(shared.collect_capacity.call_count, 2)
+                self.assertFalse((shared_root / "source").exists())
 
     def test_validation_publication_and_reconciliation_request_destructive_maintenance(self):
         notifier = mock.Mock()

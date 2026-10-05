@@ -173,6 +173,26 @@ The currently supported resolver profile is Debian Bookworm on amd64. See
 [ELF inspection and runtime dependencies](ELF_INSPECTION.md) for the detailed
 contract, limits, override rules, and offline resolver boundary.
 
+## Storage maintenance
+
+One application-owned worker serializes storage maintenance. Its destructive
+pass applies terminal-toolchain disposal and ordinary failed-workspace
+retention, then repository-backed pruning, then an O(1) Builds-filesystem
+capacity measurement. Only a Builds `pressure` state selects retained failed
+or cancelled Runs for additional cleanup, oldest completion first. Selection
+does not authorize deletion: each Run is re-read and passes the shared CP1
+destructive safety gate immediately before only its retention-disposable
+workspace evidence is removed.
+
+After every effective pressure cleanup, the worker refreshes filesystem
+capacity without recursively collecting storage inventory. The process-local
+hysteresis state remains authoritative until the configured target is reached;
+an intermediate measurement error stops cleanup fail-closed. The worker's
+normal final inventory refresh performs the single recursive snapshot at the
+existing maintenance boundary. Repository pressure is observational and does
+not select workspace cleanup, including when Repository and Builds use
+different devices.
+
 ## Boundaries
 
 DebBuilder's workspace, process, and filesystem controls reduce accidental

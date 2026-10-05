@@ -943,7 +943,7 @@ class AdminApiTests(AdminApiCase):
         settings_path = server.DATA / "settings.json"
         self.assertTrue(settings_path.exists())
         saved = json.loads(settings_path.read_text())
-        self.assertEqual(saved["schema_version"], 1)
+        self.assertEqual(saved["schema_version"], 2)
         self.assertEqual(saved["apt"]["repository"], "https://repo.example.test")
         self.assertNotIn("github", saved)
         self.assertNotIn("configured", saved["notifications"])
@@ -1002,9 +1002,13 @@ class AdminApiTests(AdminApiCase):
         source = Path(run["workspace"]) / "source/large-output"
         source.write_text("temporary")
         _, settings = self.request("GET", "/api/settings")
-        self.assertEqual(settings["settings"]["workspace_cleanup"], {"enabled": True, "failed_workspaces_to_retain": 5})
+        self.assertEqual(settings["settings"]["workspace_cleanup"], server.workspace_cleanup.DEFAULT_POLICY)
         _, saved = self.request("POST", "/api/settings", {"workspace_cleanup": {"enabled": False, "failed_workspaces_to_retain": 2}})
-        self.assertEqual(saved["settings"]["workspace_cleanup"], {"enabled": False, "failed_workspaces_to_retain": 2})
+        self.assertEqual(saved["settings"]["workspace_cleanup"], {
+            **server.workspace_cleanup.DEFAULT_POLICY,
+            "enabled": False,
+            "failed_workspaces_to_retain": 2,
+        })
         with mock.patch("debbuilder.app.request_maintenance") as request:
             self.complete_manual_run(run["id"])
         request.assert_called_once_with(cleanup=True)
@@ -1021,6 +1025,27 @@ class AdminApiTests(AdminApiCase):
         self.assertIsNotNone(server.get_execution(run["id"]))
         _, loaded = self.request("GET", "/api/settings")
         self.assertEqual(loaded["settings"]["workspace_cleanup"]["failed_workspaces_to_retain"], 2)
+
+    def test_pressure_threshold_update_only_requests_async_storage_refresh(self):
+        with mock.patch("debbuilder.app.request_maintenance") as request, \
+                mock.patch(
+                    "debbuilder.storage_inventory.collect_filesystem_capacity",
+                    side_effect=AssertionError("synchronous capacity collection"),
+                ) as collect:
+            status, response = self.request("POST", "/api/settings", {
+                "workspace_cleanup": {
+                    "pressure_minimum_free_percent": 12,
+                    "pressure_target_free_percent": 18,
+                },
+            })
+
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            response["settings"]["workspace_cleanup"]["pressure_minimum_free_percent"],
+            12,
+        )
+        request.assert_called_once_with(refresh=True)
+        collect.assert_not_called()
 
     def test_requested_maintenance_uses_current_data_and_stops_cleanly(self):
         store, run, _artifact = self.successful_build_run("sweep-run")
@@ -1246,7 +1271,7 @@ class AdminApiTests(AdminApiCase):
         self.assertEqual(response["settings"]["resource_limits"]["tasks_max"], 48)
 
         saved = json.loads(settings_path.read_text())
-        self.assertEqual(saved["schema_version"], 1)
+        self.assertEqual(saved["schema_version"], 2)
         self.assertEqual(set(saved["resource_limits"]), {
             "memory_max_bytes", "tasks_max", "cpu_quota_percent",
             "io_read_bandwidth_max_bytes_per_sec", "io_write_bandwidth_max_bytes_per_sec",

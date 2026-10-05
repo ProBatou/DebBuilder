@@ -448,6 +448,24 @@ class WorkspaceCleanupTests(unittest.TestCase):
         self.assertEqual(len(result["cleaned"]), 3)
         self.assertEqual(len(execution_service.list_executions(self.store, lambda run: "demo")), 3)
 
+    def test_pressure_thresholds_do_not_authorize_workspace_cleanup(self):
+        run, root = self.make_run("pressure-is-observational", status="failed")
+        result = workspace_cleanup.apply_retention(self.store, {
+            "failed_workspaces_to_retain": 1,
+            "pressure_minimum_free_bytes": 1,
+            "pressure_minimum_free_percent": 1,
+            "pressure_target_free_bytes": workspace_cleanup.MAX_SAFE_JSON_INTEGER,
+            "pressure_target_free_percent": 99,
+        })
+
+        self.assertEqual(result["retained"], [run["id"]])
+        for name in workspace_cleanup.RETENTION_DISPOSABLE_DIRECTORIES:
+            self.assertTrue((root / name).exists())
+        self.assertTrue((root / "source.tar.gz").exists())
+        self.assertFalse((root / "toolchain").exists())
+        marker = json.loads((root / workspace_cleanup.CLEANUP_MARKER).read_text())
+        self.assertEqual(marker["reason"], "terminal_run")
+
     def test_missing_runs_keep_existing_validation_and_publication_errors(self):
         from debbuilder import artifact_publication, artifact_validation
         with self.assertRaises(artifact_validation.ValidationError) as validation:
@@ -720,9 +738,12 @@ class WorkspaceCleanupTests(unittest.TestCase):
 
     def test_policy_validates_types_and_does_not_change_recipe_schema(self):
         defaults = default_settings("https://repo.example.test", "stable", "main")
-        self.assertEqual(defaults["workspace_cleanup"], {"enabled": True, "failed_workspaces_to_retain": 5})
+        self.assertEqual(defaults["workspace_cleanup"], workspace_cleanup.DEFAULT_POLICY)
         updated = validate_settings({"workspace_cleanup": {"failed_workspaces_to_retain": 0}}, defaults)
-        self.assertEqual(updated["workspace_cleanup"], {"enabled": True, "failed_workspaces_to_retain": 0})
+        self.assertEqual(updated["workspace_cleanup"], {
+            **workspace_cleanup.DEFAULT_POLICY,
+            "failed_workspaces_to_retain": 0,
+        })
         for policy in ({"enabled": "false"}, {"failed_workspaces_to_retain": True}, {"failed_workspaces_to_retain": -1}, {"failed_workspaces_to_retain": 1.5}):
             with self.subTest(policy=policy), self.assertRaises(ValueError):
                 validate_settings({"workspace_cleanup": policy}, defaults)

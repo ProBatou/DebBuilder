@@ -34,8 +34,9 @@ Recipes must declare `schema_version: 5`; unsupported, missing, or malformed
 versions are rejected rather than silently rewritten. Build Run inventories
 are stored in per-Run manifests instead of inline in `run.json`.
 
-Settings and secrets use their own strict schema-v1 documents. Their operational
-rules are documented in [Operations](OPERATIONS.md).
+Settings use a strict schema-v2 document with one strict, read-only v1
+compatibility adapter. Secrets remain schema v1. Their operational rules are
+documented in [Operations](OPERATIONS.md).
 
 ## Main components
 

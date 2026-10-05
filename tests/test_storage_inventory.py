@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from debbuilder import storage_inventory, workspace_cleanup
@@ -58,6 +59,328 @@ class StorageInventoryTests(unittest.TestCase):
             self.data,
             repository or self.repo,
         )
+
+    @staticmethod
+    def pressure_policy(**overrides):
+        return {
+            **workspace_cleanup.DEFAULT_POLICY,
+            "pressure_minimum_free_bytes": 100,
+            "pressure_minimum_free_percent": 10,
+            "pressure_target_free_bytes": 200,
+            "pressure_target_free_percent": 20,
+            **overrides,
+        }
+
+    def test_filesystem_measurement_uses_exact_statvfs_values_and_bavail(self):
+        capacity = SimpleNamespace(
+            f_frsize=10,
+            f_blocks=100,
+            f_bfree=80,
+            f_bavail=5,
+        )
+        with mock.patch.object(storage_inventory.os, "fstat", return_value=SimpleNamespace(st_dev=77)), \
+                mock.patch.object(storage_inventory.os, "fstatvfs", return_value=capacity):
+            measured = storage_inventory._filesystem_measurement(123, measured_scope="builds")
+
+        self.assertEqual(measured["device_id"], 77)
+        self.assertEqual(measured["total_bytes"], 1000)
+        self.assertEqual(measured["used_bytes"], 200)
+        self.assertEqual(measured["free_bytes"], 800)
+        self.assertEqual(measured["available_bytes"], 50)
+        self.assertEqual(measured["available_percent"], 5.0)
+        self.assertEqual(measured["utilized_percent"], 20.0)
+        state, start, target = storage_inventory.pressure_state_for_measurement(
+            "normal", measured, self.pressure_policy(),
+        )
+        self.assertEqual((state, start, target), ("pressure", 100, 200))
+
+    def test_effective_thresholds_use_integer_maximums(self):
+        policy = self.pressure_policy(
+            pressure_minimum_free_bytes=2_000,
+            pressure_minimum_free_percent=10,
+            pressure_target_free_bytes=2_500,
+            pressure_target_free_percent=30,
+        )
+        self.assertEqual(
+            storage_inventory.effective_pressure_thresholds(10_001, policy),
+            (2_000, 3_001),
+        )
+
+    def test_pressure_state_cold_start_and_hysteresis(self):
+        policy = self.pressure_policy()
+
+        def measurement(available):
+            return {
+                "measurement_state": "ready",
+                "total_bytes": 1000,
+                "available_bytes": available,
+            }
+
+        # A cold start between start and target is normal, not pressure.
+        self.assertEqual(
+            storage_inventory.pressure_state_for_measurement(
+                "unknown", measurement(150), policy,
+            )[0],
+            "normal",
+        )
+        self.assertEqual(
+            storage_inventory.pressure_state_for_measurement(
+                "normal", measurement(99), policy,
+            )[0],
+            "pressure",
+        )
+        display_only = measurement(99)
+        display_only["available_percent"] = 99.99
+        self.assertEqual(
+            storage_inventory.pressure_state_for_measurement(
+                "normal", display_only, policy,
+            )[0],
+            "pressure",
+        )
+        self.assertEqual(
+            storage_inventory.pressure_state_for_measurement(
+                "pressure", measurement(150), policy,
+            )[0],
+            "pressure",
+        )
+        self.assertEqual(
+            storage_inventory.pressure_state_for_measurement(
+                "pressure", measurement(200), policy,
+            )[0],
+            "normal",
+        )
+        self.assertEqual(
+            storage_inventory.pressure_state_for_measurement(
+                "pressure", {"measurement_state": "error"}, policy,
+            ),
+            ("measurement_error", None, None),
+        )
+
+    def test_capacity_uses_data_parent_before_builds_exists_without_walk(self):
+        scopes = []
+
+        def measure(_fd, *, measured_scope):
+            scopes.append(measured_scope)
+            return {
+                "measurement_state": "ready", "measured_scope": measured_scope,
+                "device_id": 1, "total_bytes": 1000, "used_bytes": 100,
+                "free_bytes": 900, "available_bytes": 900,
+                "available_percent": 90.0, "utilized_percent": 10.0,
+            }
+
+        with mock.patch.object(storage_inventory, "_scan_root", side_effect=AssertionError("walk")) as walk:
+            result = storage_inventory.collect_filesystem_capacity(
+                self.data,
+                self.repo,
+                policy=self.pressure_policy(),
+                measure_fd=measure,
+            )
+
+        walk.assert_not_called()
+        self.assertEqual(scopes, ["data_parent", "repository"])
+        self.assertEqual(result["builds"]["measured_scope"], "data_parent")
+        self.assertTrue(result["repository"]["same_as_builds"])
+
+    def test_repository_capacity_is_deduplicated_only_on_same_device(self):
+        (self.data / "builds").mkdir()
+
+        def capacities(devices):
+            def measure(_fd, *, measured_scope):
+                device = devices[measured_scope]
+                return {
+                    "measurement_state": "ready", "measured_scope": measured_scope,
+                    "device_id": device, "total_bytes": 1000,
+                    "used_bytes": 250, "free_bytes": 750,
+                    "available_bytes": 700, "available_percent": 70.0,
+                    "utilized_percent": 30.0,
+                }
+            return storage_inventory.collect_filesystem_capacity(
+                self.data,
+                self.repo,
+                policy=self.pressure_policy(),
+                measure_fd=measure,
+            )
+
+        same = capacities({"builds": 4, "repository": 4})
+        self.assertTrue(same["repository"]["same_as_builds"])
+        self.assertNotIn("total_bytes", same["repository"])
+
+        separate = capacities({"builds": 4, "repository": 9})
+        self.assertFalse(separate["repository"]["same_as_builds"])
+        self.assertEqual(separate["repository"]["device_id"], 9)
+        self.assertEqual(separate["repository"]["total_bytes"], 1000)
+
+    def test_unverifiable_capacity_is_measurement_error(self):
+        linked_data = self.base / "linked-data"
+        linked_data.symlink_to(self.data, target_is_directory=True)
+
+        result = storage_inventory.collect_filesystem_capacity(
+            linked_data,
+            self.repo,
+            policy=self.pressure_policy(),
+        )
+
+        self.assertEqual(result["builds"]["measurement_state"], "error")
+        self.assertEqual(result["builds"]["pressure_state"], "measurement_error")
+        self.assertNotIn(str(self.base), result["builds"]["diagnostic"])
+
+    def test_invalid_or_unrepresentable_capacity_fails_closed_and_closes_builds_fd(self):
+        invalid = SimpleNamespace(f_frsize=0, f_blocks=100, f_bfree=80, f_bavail=70)
+        with mock.patch.object(storage_inventory.os, "fstat", return_value=SimpleNamespace(st_dev=1)), \
+                mock.patch.object(storage_inventory.os, "fstatvfs", return_value=invalid), \
+                self.assertRaises(ValueError):
+            storage_inventory._filesystem_measurement(123, measured_scope="builds")
+
+        too_large = SimpleNamespace(
+            f_frsize=1,
+            f_blocks=workspace_cleanup.MAX_SAFE_JSON_INTEGER + 1,
+            f_bfree=1,
+            f_bavail=1,
+        )
+        with mock.patch.object(storage_inventory.os, "fstat", return_value=SimpleNamespace(st_dev=1)), \
+                mock.patch.object(storage_inventory.os, "fstatvfs", return_value=too_large), \
+                self.assertRaises(ValueError):
+            storage_inventory._filesystem_measurement(123, measured_scope="builds")
+
+        with mock.patch.object(storage_inventory, "directory_fd") as directory, \
+                mock.patch.object(storage_inventory.os, "open", return_value=11), \
+                mock.patch.object(storage_inventory.os, "close") as close:
+            directory.return_value.__enter__.return_value = 10
+            result = storage_inventory._measure_builds_filesystem(
+                self.data,
+                measure_fd=mock.Mock(side_effect=ValueError("invalid")),
+            )
+        self.assertEqual(result["measurement_state"], "error")
+        close.assert_called_once_with(11)
+
+    def test_inventory_preserves_hysteresis_across_real_capacity_refreshes(self):
+        policy = self.pressure_policy()
+        available_values = iter((150, 50, 150, 200))
+
+        def builds(_root, **_kwargs):
+            available = next(available_values)
+            return {
+                "measurement_state": "ready", "measured_scope": "builds",
+                "device_id": 1, "total_bytes": 1000, "used_bytes": 100,
+                "free_bytes": 900, "available_bytes": available,
+                "available_percent": float(available) / 10,
+                "utilized_percent": 10.0,
+            }
+
+        inventory = storage_inventory.StorageInventory(
+            self.data, self.repo, policy_provider=lambda: policy,
+        )
+        with mock.patch.object(storage_inventory, "_measure_builds_filesystem", side_effect=builds), \
+                mock.patch.object(
+                    storage_inventory,
+                    "_measure_repository_filesystem",
+                    return_value={"measurement_state": "error", "pressure_state": "measurement_error"},
+                ):
+            states = [
+                inventory.collect()["filesystems"]["builds"]["pressure_state"]
+                for _ in range(4)
+            ]
+
+        self.assertEqual(states, ["normal", "pressure", "pressure", "normal"])
+
+    def test_threshold_change_rebaselines_next_capacity_refresh(self):
+        policy = self.pressure_policy()
+
+        def builds(_root, **_kwargs):
+            return {
+                "measurement_state": "ready", "measured_scope": "builds",
+                "device_id": 1, "total_bytes": 1000, "used_bytes": 100,
+                "free_bytes": 900, "available_bytes": 150,
+                "available_percent": 15.0, "utilized_percent": 10.0,
+            }
+
+        inventory = storage_inventory.StorageInventory(
+            self.data, self.repo, policy_provider=lambda: policy,
+        )
+        with mock.patch.object(storage_inventory, "_measure_builds_filesystem", side_effect=builds), \
+                mock.patch.object(
+                    storage_inventory,
+                    "_measure_repository_filesystem",
+                    return_value={"measurement_state": "error", "pressure_state": "measurement_error"},
+                ):
+            self.assertEqual(inventory.collect_capacity()["builds"]["pressure_state"], "normal")
+            policy["pressure_minimum_free_bytes"] = 160
+            policy["pressure_target_free_bytes"] = 300
+            self.assertEqual(inventory.collect_capacity()["builds"]["pressure_state"], "pressure")
+            policy["pressure_minimum_free_bytes"] = 100
+            self.assertEqual(inventory.collect_capacity()["builds"]["pressure_state"], "normal")
+
+    def test_threshold_rebaseline_survives_an_initial_measurement_error(self):
+        policy = self.pressure_policy()
+        measurements = iter((
+            {
+                "measurement_state": "ready", "device_id": 1,
+                "total_bytes": 1000, "available_bytes": 50,
+            },
+            {"measurement_state": "error", "pressure_state": "measurement_error"},
+            {
+                "measurement_state": "ready", "device_id": 1,
+                "total_bytes": 1000, "available_bytes": 150,
+            },
+        ))
+        inventory = storage_inventory.StorageInventory(
+            self.data, self.repo, policy_provider=lambda: policy,
+        )
+        with mock.patch.object(
+            storage_inventory, "_measure_builds_filesystem",
+            side_effect=lambda *_args, **_kwargs: next(measurements),
+        ), mock.patch.object(
+            storage_inventory, "_measure_repository_filesystem",
+            return_value={"measurement_state": "error", "pressure_state": "measurement_error"},
+        ):
+            self.assertEqual(inventory.collect_capacity()["builds"]["pressure_state"], "pressure")
+            policy["pressure_target_free_bytes"] = 300
+            self.assertEqual(
+                inventory.collect_capacity()["builds"]["pressure_state"],
+                "measurement_error",
+            )
+            self.assertEqual(inventory.collect_capacity()["builds"]["pressure_state"], "normal")
+
+    def test_repository_error_and_pressure_do_not_change_builds_state(self):
+        measurements = {
+            "builds": {
+                "measurement_state": "ready", "measured_scope": "builds",
+                "device_id": 1, "total_bytes": 1000, "used_bytes": 100,
+                "free_bytes": 900, "available_bytes": 700,
+                "available_percent": 70.0, "utilized_percent": 10.0,
+            },
+            "repository": {
+                "measurement_state": "ready", "measured_scope": "repository",
+                "device_id": 2, "total_bytes": 1000, "used_bytes": 900,
+                "free_bytes": 100, "available_bytes": 50,
+                "available_percent": 5.0, "utilized_percent": 90.0,
+            },
+        }
+        with mock.patch.object(
+            storage_inventory, "_measure_builds_filesystem",
+            return_value=measurements["builds"],
+        ), mock.patch.object(
+            storage_inventory, "_measure_repository_filesystem",
+            return_value=measurements["repository"],
+        ):
+            separate = storage_inventory.collect_filesystem_capacity(
+                self.data, self.repo, policy=self.pressure_policy(),
+            )
+        self.assertEqual(separate["builds"]["pressure_state"], "normal")
+        self.assertEqual(separate["repository"]["pressure_state"], "pressure")
+
+        with mock.patch.object(
+            storage_inventory, "_measure_builds_filesystem",
+            return_value=measurements["builds"],
+        ), mock.patch.object(
+            storage_inventory, "_measure_repository_filesystem",
+            return_value={"measurement_state": "error", "pressure_state": "measurement_error"},
+        ):
+            failed = storage_inventory.collect_filesystem_capacity(
+                self.data, self.repo, policy=self.pressure_policy(),
+            )
+        self.assertEqual(failed["builds"]["pressure_state"], "normal")
+        self.assertEqual(failed["repository"]["pressure_state"], "measurement_error")
 
     def test_classifies_known_storage_and_unknown_without_following_symlinks(self):
         _run, root = self.make_run()
@@ -228,6 +551,33 @@ class StorageInventoryTests(unittest.TestCase):
         self.assertIn(ready["state"], {"ready", "partial"})
         self.assertEqual(inventory.snapshot()["state"], "stale")
 
+    def test_capacity_remains_available_when_recursive_inventory_fails(self):
+        inventory = storage_inventory.StorageInventory(
+            self.data,
+            self.repo,
+            policy_provider=self.pressure_policy,
+        )
+        capacity = {
+            "builds": {"measurement_state": "ready", "pressure_state": "normal"},
+            "repository": {
+                "measurement_state": "ready",
+                "pressure_state": "normal",
+                "same_as_builds": True,
+            },
+        }
+        with mock.patch(
+            "debbuilder.storage_inventory.collect_filesystem_capacity",
+            return_value=capacity,
+        ), mock.patch(
+            "debbuilder.storage_inventory.collect_storage_snapshot",
+            side_effect=OSError("recursive inventory unavailable"),
+        ):
+            failed = inventory.collect()
+
+        self.assertEqual(failed["state"], "error")
+        self.assertEqual(failed["filesystems"], capacity)
+        self.assertEqual(inventory.snapshot()["filesystems"], capacity)
+
     def test_history_deletion_invalidates_count_without_losing_repository_bytes(self):
         run, _root = self.make_run("history-to-clear")
         (self.repo / "published.deb").write_bytes(b"published")
@@ -253,6 +603,10 @@ class StorageInventoryTests(unittest.TestCase):
     def test_retention_projection_reports_fixed_active_schedule(self):
         result = self.collect()
 
+        self.assertEqual(result["retention_policy"]["pressure_minimum_free_bytes"], 536_870_912)
+        self.assertEqual(result["retention_policy"]["pressure_minimum_free_percent"], 10)
+        self.assertEqual(result["retention_policy"]["pressure_target_free_bytes"], 1_073_741_824)
+        self.assertEqual(result["retention_policy"]["pressure_target_free_percent"], 15)
         self.assertTrue(result["retention_policy"]["startup_destructive_cleanup"])
         self.assertTrue(result["retention_policy"]["periodic_destructive_cleanup"])
         self.assertEqual(result["retention_policy"]["cleanup_interval_seconds"], 300)

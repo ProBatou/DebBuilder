@@ -18,11 +18,21 @@ from debbuilder.settings_store import (
     validate_secrets_document,
     validate_settings,
 )
+from debbuilder.workspace_cleanup import MAX_SAFE_JSON_INTEGER
 
 
 class ResourceSettingsTests(unittest.TestCase):
     def defaults(self):
         return default_settings("http://localhost/debian", "stable", "main", "amd64")
+
+    def v1_settings(self):
+        settings = self.defaults()
+        settings["schema_version"] = 1
+        settings["workspace_cleanup"] = {
+            "enabled": settings["workspace_cleanup"]["enabled"],
+            "failed_workspaces_to_retain": settings["workspace_cleanup"]["failed_workspaces_to_retain"],
+        }
+        return settings
 
     def test_fresh_install_uses_canonical_defaults_without_writing(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -31,6 +41,98 @@ class ResourceSettingsTests(unittest.TestCase):
             self.assertFalse((root / "settings.json").exists())
         self.assertEqual(loaded["schema_version"], SETTINGS_SCHEMA_VERSION)
         self.assertEqual(loaded["resource_limits"], empty_policy())
+        self.assertEqual(loaded["workspace_cleanup"], {
+            "enabled": True,
+            "failed_workspaces_to_retain": 5,
+            "pressure_minimum_free_bytes": 536_870_912,
+            "pressure_minimum_free_percent": 10,
+            "pressure_target_free_bytes": 1_073_741_824,
+            "pressure_target_free_percent": 15,
+        })
+
+    def test_v1_settings_are_strictly_adapted_without_startup_writeback(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "settings.json"
+            raw = json.dumps(self.v1_settings(), sort_keys=True).encode()
+            path.write_bytes(raw)
+
+            loaded = load_settings(root, self.defaults())
+            startup_loaded = validate_app_settings_storage(root, self.defaults())
+
+            self.assertEqual(path.read_bytes(), raw)
+            self.assertEqual(loaded["schema_version"], 2)
+            self.assertEqual(startup_loaded, loaded)
+            self.assertEqual(
+                loaded["workspace_cleanup"]["pressure_minimum_free_bytes"],
+                536_870_912,
+            )
+            self.assertEqual(
+                loaded["workspace_cleanup"]["pressure_target_free_percent"],
+                15,
+            )
+
+    def test_next_authorized_mutation_persists_adapted_v1_as_v2(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "settings.json"
+            path.write_text(json.dumps(self.v1_settings()))
+
+            update_settings(
+                root,
+                {"workspace_cleanup": {"failed_workspaces_to_retain": 3}},
+                self.defaults(),
+            )
+
+            stored = json.loads(path.read_text())
+            self.assertEqual(stored["schema_version"], 2)
+            self.assertEqual(stored["workspace_cleanup"]["failed_workspaces_to_retain"], 3)
+            self.assertEqual(stored["workspace_cleanup"]["pressure_minimum_free_percent"], 10)
+
+    def test_invalid_v1_settings_are_rejected_before_adaptation(self):
+        for mutate, path in (
+            (lambda value: value["workspace_cleanup"].update({"legacy": True}), "$.workspace_cleanup.legacy"),
+            (lambda value: value["workspace_cleanup"].update({"pressure_minimum_free_bytes": 1}), "$.workspace_cleanup.pressure_minimum_free_bytes"),
+            (lambda value: value["workspace_cleanup"].update({"enabled": 1}), "$.workspace_cleanup.enabled"),
+            (lambda value: value["general"].update({"app_name": ""}), "$.general.app_name"),
+        ):
+            with self.subTest(path=path), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                document = self.v1_settings()
+                mutate(document)
+                raw = json.dumps(document)
+                (root / "settings.json").write_text(raw)
+                with self.assertRaises(SettingsDocumentError) as raised:
+                    load_settings(root, self.defaults())
+                self.assertEqual(raised.exception.path, path)
+                self.assertEqual((root / "settings.json").read_text(), raw)
+
+    def test_pressure_threshold_validation_is_strict(self):
+        invalid = (
+            ("pressure_minimum_free_bytes", False),
+            ("pressure_minimum_free_bytes", 0),
+            ("pressure_minimum_free_bytes", MAX_SAFE_JSON_INTEGER + 1),
+            ("pressure_minimum_free_percent", True),
+            ("pressure_minimum_free_percent", 0),
+            ("pressure_minimum_free_percent", 100),
+            ("pressure_target_free_bytes", 536_870_912),
+            ("pressure_target_free_percent", 10),
+        )
+        for field, value in invalid:
+            with self.subTest(field=field, value=value), self.assertRaises(SettingsDocumentError) as raised:
+                validate_settings({"workspace_cleanup": {field: value}}, self.defaults())
+            self.assertEqual(raised.exception.path, f"$.workspace_cleanup.{field}")
+
+        accepted = validate_settings({
+            "workspace_cleanup": {
+                "pressure_minimum_free_bytes": MAX_SAFE_JSON_INTEGER - 1,
+                "pressure_target_free_bytes": MAX_SAFE_JSON_INTEGER,
+            },
+        }, self.defaults())
+        self.assertEqual(
+            accepted["workspace_cleanup"]["pressure_target_free_bytes"],
+            MAX_SAFE_JSON_INTEGER,
+        )
 
     def test_native_architecture_outside_common_list_is_valid_for_defaults_and_updates(self):
         with mock.patch("debbuilder.settings_service.native_debian_architecture", return_value="riscv64"), \

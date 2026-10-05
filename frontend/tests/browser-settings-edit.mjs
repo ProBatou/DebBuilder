@@ -9,7 +9,7 @@ let settings = {
   security:{auth_mode:'none',oidc_issuer:'',oidc_client_id:'',oidc_redirect_uri:'',oidc_client_secret_configured:false},
   notifications:{type:'none',server_url:'https://ntfy.sh',topic:'debbuilder',token_configured:true},
   automation:{auto_validate_after_successful_build:false,auto_publish_after_successful_validation:false,upstream_checks_enabled:true,upstream_check_interval_seconds:3600,upstream_check_concurrency:4},
-  workspace_cleanup:{enabled:true,failed_workspaces_to_retain:5},
+  workspace_cleanup:{enabled:true,failed_workspaces_to_retain:5,pressure_minimum_free_bytes:536870912,pressure_minimum_free_percent:10,pressure_target_free_bytes:1073741824,pressure_target_free_percent:15},
   resource_limits:{memory_max_bytes:null,tasks_max:null,cpu_quota_percent:null,io_read_bandwidth_max_bytes_per_sec:null,io_write_bandwidth_max_bytes_per_sec:null},
 };
 const writes = [];
@@ -92,11 +92,18 @@ try {
   assert.equal(writes[6].automation.auto_publish_after_successful_validation,true);
   assert.equal(writes[6].automation.auto_validate_after_successful_build,true);
   await page.getByRole('button',{name:'Advanced',exact:true}).click();
+  assert.equal(await page.getByLabel('Pressure minimum free (%)').inputValue(),'10');
+  await page.getByLabel('Pressure minimum free bytes').fill('9007199254740990');
+  await page.getByLabel('Pressure target free bytes').fill('9007199254740991');
+  await page.getByLabel('Pressure target free (%)').fill('18');
   await page.getByLabel('Memory limit (bytes)').fill('1048576');
   await page.getByRole('button',{name:'Save changes'}).click();
   assert.deepEqual(Object.keys(writes[7]),['workspace_cleanup','resource_limits']);
   assert.equal(writes[7].resource_limits.memory_max_bytes,1048576);
   assert.equal(writes[7].resource_limits.tasks_max,null);
+  assert.equal(writes[7].workspace_cleanup.pressure_minimum_free_bytes,9007199254740990);
+  assert.equal(writes[7].workspace_cleanup.pressure_target_free_bytes,Number.MAX_SAFE_INTEGER);
+  assert.equal(writes[7].workspace_cleanup.pressure_target_free_percent,18);
   await page.setViewportSize({width:390,height:844});
   await page.goto(`${base}/#/settings`);
   await page.getByRole('button',{name:'General',exact:true}).click();

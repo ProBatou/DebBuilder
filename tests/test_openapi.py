@@ -14,6 +14,7 @@ from debbuilder.api_routes import ADMIN_API_ROUTES, RouteEffect
 from debbuilder.build_models import RUN_STATUSES
 from debbuilder.openapi import OPERATION_DOCS, SCHEMAS, openapi_document, openapi_json
 from debbuilder.recipe_schema import AUTOMATION_POLICIES, SCHEMA_VERSION, recipe_document_for_storage
+from debbuilder.workspace_cleanup import MAX_SAFE_JSON_INTEGER
 from tests.admin_api_case import AdminApiCase
 
 
@@ -123,6 +124,30 @@ class OpenApiContractTests(TestCase):
         self.assertEqual(schemas["PackageCreateInput"]["allOf"][1]["required"], ["name"])
         self.assertEqual(schemas["RunAdmissionResponse"]["required"], ["run_id", "status"])
         self.assertEqual(set(schemas["Execution"]["properties"]["status"]["enum"]), RUN_STATUSES)
+        self.assertEqual(
+            set(schemas["WorkspaceCleanupPolicy"]["properties"]),
+            {
+                "enabled", "failed_workspaces_to_retain",
+                "pressure_minimum_free_bytes", "pressure_minimum_free_percent",
+                "pressure_target_free_bytes", "pressure_target_free_percent",
+            },
+        )
+        filesystem = schemas["FilesystemCapacity"]["properties"]
+        cleanup = schemas["WorkspaceCleanupPolicy"]["properties"]
+        self.assertEqual(
+            cleanup["pressure_minimum_free_bytes"]["maximum"],
+            MAX_SAFE_JSON_INTEGER,
+        )
+        self.assertEqual(
+            cleanup["pressure_target_free_bytes"]["maximum"],
+            MAX_SAFE_JSON_INTEGER,
+        )
+        self.assertIn("available_bytes", filesystem)
+        self.assertEqual(filesystem["available_bytes"]["maximum"], MAX_SAFE_JSON_INTEGER)
+        self.assertIn("effective_start_bytes", filesystem)
+        self.assertIn("effective_target_bytes", filesystem)
+        self.assertNotIn("admission_blocked", filesystem)
+        self.assertNotIn("recovered_bytes", filesystem)
         recipe_document_for_storage({
             "schema_version": SCHEMA_VERSION, "name": "api-docs-example",
             "package": {"name": "api-docs-example"},

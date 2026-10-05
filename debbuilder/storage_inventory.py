@@ -15,7 +15,12 @@ from . import storage_pruning
 from .build_models import validate_run
 from .build_store import BuildStore
 from .maintenance import MAINTENANCE_INTERVAL_SECONDS
-from .workspace_cleanup import DEFAULT_POLICY, directory_fd, validate_policy
+from .workspace_cleanup import (
+    DEFAULT_POLICY,
+    MAX_SAFE_JSON_INTEGER,
+    directory_fd,
+    validate_policy,
+)
 
 CATEGORIES = (
     "metadata",
@@ -54,6 +59,188 @@ def _within(child: Path, parent: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _unknown_filesystems() -> dict:
+    return {
+        "builds": {
+            "measurement_state": "unknown",
+            "pressure_state": "unknown",
+        },
+        "repository": {
+            "measurement_state": "unknown",
+            "pressure_state": "unknown",
+            "same_as_builds": False,
+        },
+    }
+
+
+def _filesystem_measurement(fd: int, *, measured_scope: str) -> dict:
+    """Measure one pinned filesystem without traversing its contents."""
+    info = os.fstat(fd)
+    capacity = os.fstatvfs(fd)
+    fragment_size = int(capacity.f_frsize)
+    blocks = int(capacity.f_blocks)
+    free_blocks = int(capacity.f_bfree)
+    available_blocks = int(capacity.f_bavail)
+    device_id = int(info.st_dev)
+    if (
+        fragment_size <= 0
+        or blocks <= 0
+        or not 0 <= available_blocks <= free_blocks <= blocks
+        or not 0 <= device_id <= MAX_SAFE_JSON_INTEGER
+    ):
+        raise ValueError("Filesystem capacity values are invalid")
+    total = blocks * fragment_size
+    free = free_blocks * fragment_size
+    available = available_blocks * fragment_size
+    used = total - free
+    if any(
+        value > MAX_SAFE_JSON_INTEGER
+        for value in (total, used, free, available)
+    ):
+        raise ValueError("Filesystem capacity exceeds the exact JSON integer range")
+    return {
+        "measurement_state": "ready",
+        "measured_scope": measured_scope,
+        "device_id": device_id,
+        "total_bytes": total,
+        "used_bytes": used,
+        "free_bytes": free,
+        "available_bytes": available,
+        "available_percent": round(available * 100 / total, 2),
+        "utilized_percent": round(used * 100 / total, 2),
+    }
+
+
+def _measurement_error(message: str) -> dict:
+    return {
+        "measurement_state": "error",
+        "pressure_state": "measurement_error",
+        "diagnostic": str(message)[:240],
+    }
+
+
+def _measure_builds_filesystem(
+    data_root: Path,
+    *,
+    measure_fd: Callable[..., dict] = _filesystem_measurement,
+) -> dict:
+    """Measure DATA/builds, or its safely pinned DATA parent before it exists."""
+    try:
+        with directory_fd(data_root) as data_fd:
+            builds_fd = -1
+            try:
+                builds_fd = os.open(
+                    "builds",
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=data_fd,
+                )
+            except FileNotFoundError:
+                return measure_fd(data_fd, measured_scope="data_parent")
+            try:
+                return measure_fd(builds_fd, measured_scope="builds")
+            finally:
+                os.close(builds_fd)
+    except (OSError, TypeError, ValueError, OverflowError) as exc:
+        return _measurement_error(
+            f"Build workspace filesystem measurement failed: {type(exc).__name__}"
+        )
+
+
+def _measure_repository_filesystem(
+    repository_root: Path,
+    *,
+    measure_fd: Callable[..., dict] = _filesystem_measurement,
+) -> dict:
+    try:
+        with directory_fd(repository_root) as repository_fd:
+            return measure_fd(repository_fd, measured_scope="repository")
+    except (OSError, TypeError, ValueError, OverflowError) as exc:
+        return _measurement_error(
+            f"Repository filesystem measurement failed: {type(exc).__name__}"
+        )
+
+
+def effective_pressure_thresholds(total_bytes: int, policy: dict) -> tuple[int, int]:
+    """Return integer start/target bytes without rounded percentage decisions."""
+    canonical = validate_policy(policy)
+    start_percent = (
+        total_bytes * canonical["pressure_minimum_free_percent"] + 99
+    ) // 100
+    target_percent = (
+        total_bytes * canonical["pressure_target_free_percent"] + 99
+    ) // 100
+    return (
+        max(canonical["pressure_minimum_free_bytes"], start_percent),
+        max(canonical["pressure_target_free_bytes"], target_percent),
+    )
+
+
+def pressure_state_for_measurement(
+    previous_state: str,
+    measurement: dict,
+    policy: dict,
+) -> tuple[str, int | None, int | None]:
+    """Apply the accepted cold-start and hysteresis state machine."""
+    if measurement.get("measurement_state") != "ready":
+        return "measurement_error", None, None
+    total = int(measurement["total_bytes"])
+    available = int(measurement["available_bytes"])
+    start, target = effective_pressure_thresholds(total, policy)
+    if previous_state == "pressure":
+        state = "normal" if available >= target else "pressure"
+    else:
+        state = "pressure" if available < start else "normal"
+    return state, start, target
+
+
+def collect_filesystem_capacity(
+    data_root: Path,
+    repository_root: Path,
+    *,
+    policy: dict,
+    previous_states: dict[str, str] | None = None,
+    measure_fd: Callable[..., dict] = _filesystem_measurement,
+) -> dict:
+    """Collect bounded O(1) capacity projections for workspace and repository."""
+    canonical = validate_policy(policy)
+    previous = previous_states or {}
+    builds = _measure_builds_filesystem(Path(data_root), measure_fd=measure_fd)
+    builds_state, builds_start, builds_target = pressure_state_for_measurement(
+        previous.get("builds", "unknown"), builds, canonical,
+    )
+    builds["pressure_state"] = builds_state
+    builds["effective_start_bytes"] = builds_start
+    builds["effective_target_bytes"] = builds_target
+
+    repository_measurement = _measure_repository_filesystem(
+        Path(repository_root), measure_fd=measure_fd,
+    )
+    same_device = (
+        builds.get("measurement_state") == "ready"
+        and repository_measurement.get("measurement_state") == "ready"
+        and repository_measurement.get("device_id") == builds.get("device_id")
+    )
+    if same_device:
+        repository = {
+            "measurement_state": "ready",
+            "pressure_state": builds_state,
+            "same_as_builds": True,
+            "device_id": builds["device_id"],
+        }
+    else:
+        repository = repository_measurement
+        repository_state, repository_start, repository_target = pressure_state_for_measurement(
+            previous.get("repository", "unknown"), repository, canonical,
+        )
+        repository.update({
+            "pressure_state": repository_state,
+            "effective_start_bytes": repository_start,
+            "effective_target_bytes": repository_target,
+            "same_as_builds": False,
+        })
+    return {"builds": builds, "repository": repository}
 
 
 def _mount_points() -> set[Path]:
@@ -296,9 +483,16 @@ def collect_storage_snapshot(
     repository_root: Path,
     *,
     retention_policy: dict | None = None,
+    filesystem_capacity: dict | None = None,
 ) -> dict:
     data = _absolute(Path(data_root))
     repository = _absolute(Path(repository_root))
+    policy = validate_policy(retention_policy or DEFAULT_POLICY)
+    filesystems = (
+        collect_filesystem_capacity(data, repository, policy=policy)
+        if filesystem_capacity is None
+        else filesystem_capacity
+    )
     repository_within_data = _within(repository, data)
     scan = _Scan(data)
     try:
@@ -363,7 +557,6 @@ def collect_storage_snapshot(
             key=lambda row: (-row[1], row[0]),
         )[:MAX_LARGEST_RUNS]
     ]
-    policy = validate_policy(retention_policy or DEFAULT_POLICY)
     measured_at = _utc_now()
     return {
         "state": "partial" if scan.partial else "ready",
@@ -381,6 +574,7 @@ def collect_storage_snapshot(
             "data_root": data_bytes,
             "repository": repository_bytes,
         },
+        "filesystems": filesystems,
         "categories": scan.categories,
         "runs": {
             "count": len(visible_runs),
@@ -419,6 +613,7 @@ def _initial_snapshot() -> dict:
         "diagnostics": [],
         "roots": {"data_root": "", "repository_root": "", "repository_within_data": False},
         "bytes": {"managed_total": None, "data_root": None, "repository": None},
+        "filesystems": _unknown_filesystems(),
         "categories": {name: None for name in CATEGORIES},
         "runs": {
             "count": None, "by_mode": {}, "by_status": {}, "failed_count": None,
@@ -446,6 +641,10 @@ class StorageInventory:
         self.stale_after = float(stale_after)
         self._lock = threading.Lock()
         self._snapshot = _initial_snapshot()
+        self._filesystems = _unknown_filesystems()
+        self._pressure_states = {"builds": "unknown", "repository": "unknown"}
+        self._pressure_policy: tuple[int, int, int, int] | None = None
+        self._capacity_lock = threading.Lock()
         self._measured_monotonic: float | None = None
         self._collecting = False
         self._revision = 0
@@ -462,6 +661,7 @@ class StorageInventory:
     def snapshot(self) -> dict:
         with self._lock:
             result = deepcopy(self._snapshot)
+            result["filesystems"] = deepcopy(self._filesystems)
             measured = self._measured_monotonic
             collecting = self._collecting
             pending = self._revision != self._completed_revision
@@ -478,19 +678,61 @@ class StorageInventory:
             result["partial"] = True
         return result
 
+    def collect_capacity(self, *, policy: dict | None = None) -> dict:
+        """Refresh the O(1) filesystem view independently from recursive inventory."""
+        canonical = validate_policy(policy or self.policy_provider())
+        policy_identity = tuple(
+            canonical[field]
+            for field in (
+                "pressure_minimum_free_bytes",
+                "pressure_minimum_free_percent",
+                "pressure_target_free_bytes",
+                "pressure_target_free_percent",
+            )
+        )
+        # Capacity refreshes are serialized independently from snapshot readers.
+        # A threshold change deliberately starts from cold-state semantics.
+        with self._capacity_lock:
+            with self._lock:
+                if self._pressure_policy == policy_identity:
+                    previous_states = dict(self._pressure_states)
+                else:
+                    self._pressure_states = {
+                        "builds": "unknown", "repository": "unknown",
+                    }
+                    previous_states = dict(self._pressure_states)
+            filesystems = collect_filesystem_capacity(
+                self.data_root,
+                self.repository_root,
+                policy=canonical,
+                previous_states=previous_states,
+            )
+            with self._lock:
+                self._filesystems = deepcopy(filesystems)
+                self._pressure_policy = policy_identity
+                for scope in ("builds", "repository"):
+                    state = filesystems[scope].get("pressure_state")
+                    if state in {"normal", "pressure"}:
+                        self._pressure_states[scope] = state
+                return deepcopy(filesystems)
+
     def collect(self) -> dict:
         with self._lock:
             self._collecting = True
             revision = self._revision
         try:
+            policy = validate_policy(self.policy_provider())
+            filesystems = self.collect_capacity(policy=policy)
             snapshot = collect_storage_snapshot(
                 self.data_root,
                 self.repository_root,
-                retention_policy=self.policy_provider(),
+                retention_policy=policy,
+                filesystem_capacity=filesystems,
             )
         except Exception as exc:
             with self._lock:
                 previous = deepcopy(self._snapshot)
+                previous["filesystems"] = deepcopy(self._filesystems)
                 previous["state"] = "stale" if previous.get("measured_at") else "error"
                 previous["partial"] = True
                 previous["diagnostics"] = [f"Storage inventory failed: {exc}"[:300]]

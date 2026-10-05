@@ -4729,6 +4729,278 @@
           "error"
         ]
       },
+      "WorkspaceCleanupPolicy": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "failed_workspaces_to_retain": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000
+          },
+          "pressure_minimum_free_bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "pressure_minimum_free_percent": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 99
+          },
+          "pressure_target_free_bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "pressure_target_free_percent": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 99
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "enabled",
+          "failed_workspaces_to_retain",
+          "pressure_minimum_free_bytes",
+          "pressure_minimum_free_percent",
+          "pressure_target_free_bytes",
+          "pressure_target_free_percent"
+        ],
+        "description": "Retention preference plus filesystem pressure classification thresholds; CP2B1 does not perform pressure cleanup or admission blocking."
+      },
+      "RetentionPolicyProjection": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "failed_workspaces_to_retain": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000
+          },
+          "pressure_minimum_free_bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "pressure_minimum_free_percent": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 99
+          },
+          "pressure_target_free_bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "pressure_target_free_percent": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 99
+          }
+        },
+        "additionalProperties": true,
+        "required": [
+          "enabled",
+          "failed_workspaces_to_retain",
+          "pressure_minimum_free_bytes",
+          "pressure_minimum_free_percent",
+          "pressure_target_free_bytes",
+          "pressure_target_free_percent"
+        ],
+        "description": "Workspace cleanup policy plus existing maintenance schedule and preservation facts."
+      },
+      "FilesystemCapacity": {
+        "type": "object",
+        "properties": {
+          "measurement_state": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "ready",
+              "error"
+            ]
+          },
+          "pressure_state": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "normal",
+              "pressure",
+              "measurement_error"
+            ]
+          },
+          "measured_scope": {
+            "type": "string",
+            "enum": [
+              "builds",
+              "data_parent",
+              "repository"
+            ]
+          },
+          "device_id": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "total_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "used_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "free_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "available_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "available_percent": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "utilized_percent": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "effective_start_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "effective_target_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "diagnostic": {
+            "type": "string",
+            "maxLength": 240
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "measurement_state",
+          "pressure_state"
+        ],
+        "description": "Bounded O(1) statvfs projection; pressure is observational in CP2B1."
+      },
+      "RepositoryFilesystemCapacity": {
+        "type": "object",
+        "properties": {
+          "measurement_state": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "ready",
+              "error"
+            ]
+          },
+          "pressure_state": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "normal",
+              "pressure",
+              "measurement_error"
+            ]
+          },
+          "measured_scope": {
+            "type": "string",
+            "enum": [
+              "builds",
+              "data_parent",
+              "repository"
+            ]
+          },
+          "device_id": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "total_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "used_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "free_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "available_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "available_percent": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "utilized_percent": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "effective_start_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "effective_target_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "diagnostic": {
+            "type": "string",
+            "maxLength": 240
+          },
+          "same_as_builds": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "measurement_state",
+          "pressure_state",
+          "same_as_builds"
+        ],
+        "description": "Repository capacity, or an explicit same-filesystem reference to Builds."
+      },
       "Recipe": {
         "type": "object",
         "properties": {
@@ -5284,7 +5556,38 @@
           },
           "workspace_cleanup": {
             "type": "object",
-            "description": "Retention policy; validated by workspace_cleanup.py."
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "failed_workspaces_to_retain": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000
+              },
+              "pressure_minimum_free_bytes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "pressure_minimum_free_percent": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 99
+              },
+              "pressure_target_free_bytes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "pressure_target_free_percent": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 99
+              }
+            },
+            "additionalProperties": false,
+            "description": "Partial retention and filesystem-pressure threshold update; validated by workspace_cleanup.py."
           },
           "security": {
             "type": "object",
@@ -5778,6 +6081,9 @@
             },
             "additionalProperties": false
           },
+          "workspace_cleanup": {
+            "$ref": "#/components/schemas/WorkspaceCleanupPolicy"
+          },
           "resource_limits_status": {
             "type": "object",
             "properties": {
@@ -5796,10 +6102,29 @@
         "properties": {
           "state": {
             "type": "string"
+          },
+          "filesystems": {
+            "type": "object",
+            "properties": {
+              "builds": {
+                "$ref": "#/components/schemas/FilesystemCapacity"
+              },
+              "repository": {
+                "$ref": "#/components/schemas/RepositoryFilesystemCapacity"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "builds",
+              "repository"
+            ]
+          },
+          "retention_policy": {
+            "$ref": "#/components/schemas/RetentionPolicyProjection"
           }
         },
         "additionalProperties": true,
-        "description": "Cached storage inventory; GET does not collect or mutate it."
+        "description": "Cached logical inventory plus a separately collected O(1) filesystem-capacity projection; GET does not collect or mutate it."
       },
       "ExecutionLog": {
         "type": "object",

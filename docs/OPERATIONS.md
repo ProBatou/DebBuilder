@@ -14,12 +14,15 @@ Source checkouts default to the repository's `data/` directory. Python startup
 reads process environment variables and does not load `.env` itself; source
 `.env` before running `server.py`.
 
-Persisted `settings.json` and `secrets.json` documents use strict schema version
-1. Missing documents use environment-derived defaults in memory. Partial,
-unversioned, older, newer, malformed, and unknown-field documents are rejected
-without startup write-back. The secret store must be an owner-only (`0600`)
-regular file. The literal `masked` is accepted only as a preserve-existing
-sentinel during secret mutation, never as a stored secret value.
+Persisted `settings.json` documents use strict schema version 2. A complete,
+valid version-1 document is accepted through the one supported compatibility
+adapter, which adds the filesystem-pressure defaults in memory without startup
+write-back; the next authorized Settings mutation persists version 2. Partial,
+unversioned, invalid-v1, future, malformed, and unknown-field documents are
+rejected. `secrets.json` remains strict schema version 1 and must be an
+owner-only (`0600`) regular file. The literal `masked` is accepted only as a
+preserve-existing sentinel during secret mutation, never as a stored secret
+value.
 
 Persisted OIDC configuration requires its OIDC client secret at startup. The
 separately provisioned session-cookie secret cannot replace it.
@@ -54,6 +57,21 @@ deletion of final artifacts or history.
 The application-owned maintenance worker performs cleanup after startup and at
 regular intervals, and refreshes the cached storage inventory. `GET
 /api/storage` reads that snapshot without walking or mutating the filesystem.
+
+The inventory separately measures the filesystem containing `DATA/builds`
+with a pinned-descriptor `statvfs` call. Before `builds` exists, its safe `DATA`
+parent supplies the capacity measurement. Available capacity uses `f_bavail`,
+preserving filesystem-reserved blocks for host operation. The repository is
+measured independently and is identified as sharing the Builds filesystem when
+both roots have the same device ID. Settings define minimum-free byte/percent
+thresholds and higher target byte/percent thresholds. This release reports the
+resulting `normal`, `pressure`, or `measurement_error` state; it does not yet
+perform pressure-driven deletion or block Build/Test admission.
+Byte thresholds are limited to `9007199254740991` (`2^53 - 1`) so every value
+accepted by the backend remains exactly representable through the supported
+JSON/JavaScript Settings clients. Changing any pressure threshold rebases the
+next capacity refresh from the cold `unknown` state; the Settings mutation
+only requests that asynchronous refresh and performs no filesystem scan.
 
 Deleting one Run's log/history or clearing execution history also requests
 disposable-workspace cleanup, even when automatic cleanup is disabled. It does

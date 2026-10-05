@@ -26,6 +26,7 @@ from .validation_contracts import VALIDATION_STATUSES
 from .system_diagnostics import CHECK_IDS, SCHEMA_VERSION_DIAGNOSTICS, STATUSES
 from .validation_service import ACTIVE_STATUSES as ACTIVE_VALIDATION_STATUSES
 from .validation_service import TERMINAL_STATUSES as TERMINAL_VALIDATION_STATUSES
+from .workspace_cleanup import MAX_SAFE_JSON_INTEGER
 
 
 def _ref(name: str) -> dict:
@@ -53,6 +54,29 @@ LIFECYCLE_STATUSES = sorted({
     for validation in ("not_run", *sorted(VALIDATION_STATUSES))
     for publication in PUBLICATION_STATUSES
 } | {"published"})
+WORKSPACE_CLEANUP_PROPERTIES = {
+    "enabled": B,
+    "failed_workspaces_to_retain": {"type": "integer", "minimum": 0, "maximum": 1000},
+    "pressure_minimum_free_bytes": {"type": "integer", "minimum": 1, "maximum": MAX_SAFE_JSON_INTEGER},
+    "pressure_minimum_free_percent": {"type": "integer", "minimum": 1, "maximum": 99},
+    "pressure_target_free_bytes": {"type": "integer", "minimum": 1, "maximum": MAX_SAFE_JSON_INTEGER},
+    "pressure_target_free_percent": {"type": "integer", "minimum": 1, "maximum": 99},
+}
+FILESYSTEM_CAPACITY_PROPERTIES = {
+    "measurement_state": {"type": "string", "enum": ["unknown", "ready", "error"]},
+    "pressure_state": {"type": "string", "enum": ["unknown", "normal", "pressure", "measurement_error"]},
+    "measured_scope": {"type": "string", "enum": ["builds", "data_parent", "repository"]},
+    "device_id": {"type": "integer", "minimum": 0, "maximum": MAX_SAFE_JSON_INTEGER},
+    "total_bytes": {"type": "integer", "minimum": 0, "maximum": MAX_SAFE_JSON_INTEGER},
+    "used_bytes": {"type": "integer", "minimum": 0, "maximum": MAX_SAFE_JSON_INTEGER},
+    "free_bytes": {"type": "integer", "minimum": 0, "maximum": MAX_SAFE_JSON_INTEGER},
+    "available_bytes": {"type": "integer", "minimum": 0, "maximum": MAX_SAFE_JSON_INTEGER},
+    "available_percent": {"type": "number", "minimum": 0, "maximum": 100},
+    "utilized_percent": {"type": "number", "minimum": 0, "maximum": 100},
+    "effective_start_bytes": {"type": ["integer", "null"], "minimum": 0, "maximum": MAX_SAFE_JSON_INTEGER},
+    "effective_target_bytes": {"type": ["integer", "null"], "minimum": 0, "maximum": MAX_SAFE_JSON_INTEGER},
+    "diagnostic": {"type": "string", "maxLength": 240},
+}
 
 
 SCHEMAS = {
@@ -73,6 +97,27 @@ SCHEMAS = {
             }, description="Only allowlisted, bounded diagnostic fields are exposed."),
         }, ("code", "message", "details")),
     }, ("ok", "error")),
+    "WorkspaceCleanupPolicy": _object(
+        WORKSPACE_CLEANUP_PROPERTIES,
+        tuple(WORKSPACE_CLEANUP_PROPERTIES),
+        description="Retention preference plus filesystem pressure classification thresholds; CP2B1 does not perform pressure cleanup or admission blocking.",
+    ),
+    "RetentionPolicyProjection": _object(
+        WORKSPACE_CLEANUP_PROPERTIES,
+        tuple(WORKSPACE_CLEANUP_PROPERTIES),
+        extra=True,
+        description="Workspace cleanup policy plus existing maintenance schedule and preservation facts.",
+    ),
+    "FilesystemCapacity": _object(
+        FILESYSTEM_CAPACITY_PROPERTIES,
+        ("measurement_state", "pressure_state"),
+        description="Bounded O(1) statvfs projection; pressure is observational in CP2B1.",
+    ),
+    "RepositoryFilesystemCapacity": _object(
+        {**FILESYSTEM_CAPACITY_PROPERTIES, "same_as_builds": B},
+        ("measurement_state", "pressure_state", "same_as_builds"),
+        description="Repository capacity, or an explicit same-filesystem reference to Builds.",
+    ),
     "Recipe": _object({
         "schema_version": {"const": SCHEMA_VERSION},
         "name": {"type": "string", "pattern": "^[a-zA-Z0-9_.+-]+$"},
@@ -133,7 +178,10 @@ SCHEMAS = {
                                "upstream_checks_enabled": B, "upstream_check_interval_seconds": I,
                                "upstream_check_concurrency": I}),
         "resource_limits": {"type": "object", "description": "Resource policy; validated by resource_limits.py."},
-        "workspace_cleanup": {"type": "object", "description": "Retention policy; validated by workspace_cleanup.py."},
+        "workspace_cleanup": _object(
+            WORKSPACE_CLEANUP_PROPERTIES,
+            description="Partial retention and filesystem-pressure threshold update; validated by workspace_cleanup.py.",
+        ),
         "security": _object({"auth_mode": {"type": "string", "enum": ["none", "header", "oidc"]},
                              "oidc_issuer": S, "oidc_client_id": S, "oidc_redirect_uri": S,
                              "oidc_client_secret": {"type": "string", "writeOnly": True}}),
@@ -192,9 +240,17 @@ SCHEMAS = {
                                                  "upstream_check_interval_seconds": I}),
                          "security": _object({"auth_mode": S,
                                               "oidc_client_secret_configured": B}),
+                         "workspace_cleanup": _ref("WorkspaceCleanupPolicy"),
                          "resource_limits_status": _object({"valid": B})},
                         extra=True, description="Redacted operator settings view; secret values are omitted."),
-    "Storage": _object({"state": S}, extra=True, description="Cached storage inventory; GET does not collect or mutate it."),
+    "Storage": _object({
+        "state": S,
+        "filesystems": _object({
+            "builds": _ref("FilesystemCapacity"),
+            "repository": _ref("RepositoryFilesystemCapacity"),
+        }, ("builds", "repository")),
+        "retention_policy": _ref("RetentionPolicyProjection"),
+    }, extra=True, description="Cached logical inventory plus a separately collected O(1) filesystem-capacity projection; GET does not collect or mutate it."),
     "ExecutionLog": _object({"text": S, "offset": I, "size": I,
                              "complete": B, "verbosity": S},
                             ("text", "offset", "size")),

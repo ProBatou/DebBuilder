@@ -150,7 +150,7 @@ def _mutation_plan(payload: dict, current: dict, existing_secrets: dict) -> tupl
 
 
 def update_settings(data_dir: Path, payload: dict, defaults: dict, *, before_save=None) -> None:
-    """Serialize the complete current-v1 mutation, including resource-only repair."""
+    """Serialize the complete current-v2 mutation, including resource-only repair."""
     with storage.locked_path(settings_path(data_dir)):
         try:
             current = load_settings(data_dir, defaults)

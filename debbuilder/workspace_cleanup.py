@@ -23,7 +23,17 @@ RETENTION_DISPOSABLE_DIRECTORIES = ("source", "staging", "downloads")
 TERMINAL_DISPOSABLE_DIRECTORIES = ("toolchain",)
 DISPOSABLE_DIRECTORIES = RETENTION_DISPOSABLE_DIRECTORIES + TERMINAL_DISPOSABLE_DIRECTORIES
 DISPOSABLE_FILES = ("source.tar.gz",)
-DEFAULT_POLICY = {"enabled": True, "failed_workspaces_to_retain": 5}
+# Settings cross a JSON/JavaScript Number boundary in both supported UIs.
+# Keep every accepted byte threshold exactly representable end to end.
+MAX_SAFE_JSON_INTEGER = 2**53 - 1
+DEFAULT_POLICY = {
+    "enabled": True,
+    "failed_workspaces_to_retain": 5,
+    "pressure_minimum_free_bytes": 536_870_912,
+    "pressure_minimum_free_percent": 10,
+    "pressure_target_free_bytes": 1_073_741_824,
+    "pressure_target_free_percent": 15,
+}
 CLEANUP_MARKER = ".workspace-cleanup.json"
 
 
@@ -447,6 +457,20 @@ def validate_policy(policy: dict) -> dict:
     count = result["failed_workspaces_to_retain"]
     if type(count) is not int or not 0 <= count <= 1000:
         raise ValueError("failed_workspaces_to_retain must be an integer between 0 and 1000")
+    for field in ("pressure_minimum_free_bytes", "pressure_target_free_bytes"):
+        value = result[field]
+        if type(value) is not int or not 0 < value <= MAX_SAFE_JSON_INTEGER:
+            raise ValueError(
+                f"{field} must be an integer between 1 and {MAX_SAFE_JSON_INTEGER}"
+            )
+    for field in ("pressure_minimum_free_percent", "pressure_target_free_percent"):
+        value = result[field]
+        if type(value) is not int or not 1 <= value <= 99:
+            raise ValueError(f"{field} must be an integer between 1 and 99")
+    if result["pressure_target_free_bytes"] <= result["pressure_minimum_free_bytes"]:
+        raise ValueError("pressure_target_free_bytes must exceed pressure_minimum_free_bytes")
+    if result["pressure_target_free_percent"] <= result["pressure_minimum_free_percent"]:
+        raise ValueError("pressure_target_free_percent must exceed pressure_minimum_free_percent")
     return {key: result[key] for key in DEFAULT_POLICY}
 
 

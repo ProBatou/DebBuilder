@@ -140,7 +140,11 @@ function settingsPayload(){
     },
     workspace_cleanup: {
       enabled: !!$('settingWorkspaceCleanupEnabled')?.checked,
-      failed_workspaces_to_retain: Number($('settingFailedWorkspacesToRetain')?.value ?? 5)
+      failed_workspaces_to_retain: Number($('settingFailedWorkspacesToRetain')?.value ?? 5),
+      pressure_minimum_free_bytes: Number($('settingPressureMinimumFreeBytes')?.value ?? 536870912),
+      pressure_minimum_free_percent: Number($('settingPressureMinimumFreePercent')?.value ?? 10),
+      pressure_target_free_bytes: Number($('settingPressureTargetFreeBytes')?.value ?? 1073741824),
+      pressure_target_free_percent: Number($('settingPressureTargetFreePercent')?.value ?? 15)
     },
     resource_limits: {...(currentSettings?.resource_limits || {})},
     security: {
@@ -178,7 +182,14 @@ function renderSettingsPage(){
   const general = s.general || {}, apt = s.apt || {}, github = s.github || {};
   const notifications = s.notifications || {}, security = s.security || {};
   const automation = s.automation || {};
-  const cleanup = s.workspace_cleanup || {enabled:true, failed_workspaces_to_retain:5};
+  const cleanup = s.workspace_cleanup || {
+    enabled:true,
+    failed_workspaces_to_retain:5,
+    pressure_minimum_free_bytes:536870912,
+    pressure_minimum_free_percent:10,
+    pressure_target_free_bytes:1073741824,
+    pressure_target_free_percent:15
+  };
   const notificationType = notifications.type === 'ntfy' ? 'ntfy' : 'none';
   const tokenConfigured = !!github.token_configured;
   const ntfyTokenConfigured = !!notifications.token_configured;
@@ -254,6 +265,10 @@ function renderSettingsPage(){
         <div class="settings-form-grid settings-grid-two">
           <label class="settings-check setting-toggle"><span>Automatic workspace cleanup</span><input type="checkbox" id="settingWorkspaceCleanupEnabled" ${cleanup.enabled?'checked':''}></label>
           ${fieldInput('settingFailedWorkspacesToRetain','Failed workspaces to retain',cleanup.failed_workspaces_to_retain,'type="number" min="0" max="1000" step="1" required')}
+          ${fieldInput('settingPressureMinimumFreeBytes','Pressure minimum free bytes',cleanup.pressure_minimum_free_bytes,'type="number" min="1" max="9007199254740991" step="1" required')}
+          ${fieldInput('settingPressureMinimumFreePercent','Pressure minimum free (%)',cleanup.pressure_minimum_free_percent,'type="number" min="1" max="99" step="1" required')}
+          ${fieldInput('settingPressureTargetFreeBytes','Pressure target free bytes',cleanup.pressure_target_free_bytes,'type="number" min="1" max="9007199254740991" step="1" required')}
+          ${fieldInput('settingPressureTargetFreePercent','Pressure target free (%)',cleanup.pressure_target_free_percent,'type="number" min="1" max="99" step="1" required')}
         </div>
         <p class="muted">Authorized cleanup runs after startup, every five minutes, and after lifecycle completion. It removes disposable sources, downloads and staging; recent failed workspaces are kept for debugging. A published Run-local .deb is pruned only after exact repository verification. Terminal staging manifests are pruned after retained workspace evidence is cleared; artifact manifests, compact history and repository packages remain.</p>
         <div class="maintenance-actions">

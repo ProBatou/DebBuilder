@@ -23,28 +23,28 @@
       github:['GitHub token'],auth:['Authentication mode','Issuer URL','Client ID','Redirect URI','Client secret'],
       notifications:['Type','Server URL','Topic','Token'],
       automation:['Auto validate after build','Auto publish after validation','Upstream checks enabled','Check interval (seconds)','Check concurrency'],
-      advanced:['Workspace cleanup enabled','Failed workspaces to retain','Memory limit (bytes)','Task limit','CPU quota (%)','Read bandwidth (bytes/s)','Write bandwidth (bytes/s)'],
+      advanced:['Workspace cleanup enabled','Failed workspaces to retain','Pressure minimum free bytes','Pressure minimum free (%)','Pressure target free bytes','Pressure target free (%)','Memory limit (bytes)','Task limit','CPU quota (%)','Read bandwidth (bytes/s)','Write bandwidth (bytes/s)'],
     },
     fr:{
       general:['Nom de l’application','URL publique'],repository:['URL publique du dépôt','Distribution','Composant','Architecture'],
       github:['Jeton GitHub'],auth:['Mode d’authentification','URL de l’émetteur','Identifiant client','URI de redirection','Secret client'],
       notifications:['Type','URL du serveur','Sujet','Jeton'],
       automation:['Valider après la construction','Publier après la validation','Vérification amont activée','Intervalle de vérification (secondes)','Vérifications simultanées'],
-      advanced:['Nettoyage des espaces activé','Espaces en échec à conserver','Limite de mémoire (octets)','Limite de tâches','Quota processeur (%)','Débit de lecture (octets/s)','Débit d’écriture (octets/s)'],
+      advanced:['Nettoyage des espaces activé','Espaces en échec à conserver','Minimum libre sous pression (octets)','Minimum libre sous pression (%)','Cible libre après pression (octets)','Cible libre après pression (%)','Limite de mémoire (octets)','Limite de tâches','Quota processeur (%)','Débit de lecture (octets/s)','Débit d’écriture (octets/s)'],
     },
     de:{
       general:['Anwendungsname','Öffentliche URL'],repository:['Öffentliche Repository-URL','Distribution','Komponente','Architektur'],
       github:['GitHub-Token'],auth:['Authentifizierungsmodus','Aussteller-URL','Client-ID','Weiterleitungs-URI','Client-Geheimnis'],
       notifications:['Typ','Server-URL','Thema','Token'],
       automation:['Nach dem Build validieren','Nach der Validierung veröffentlichen','Upstream-Prüfungen aktiviert','Prüfintervall (Sekunden)','Gleichzeitige Prüfungen'],
-      advanced:['Arbeitsbereichsbereinigung aktiviert','Fehlgeschlagene Arbeitsbereiche behalten','Speicherlimit (Bytes)','Task-Limit','CPU-Quote (%)','Lesebandbreite (Bytes/s)','Schreibbandbreite (Bytes/s)'],
+      advanced:['Arbeitsbereichsbereinigung aktiviert','Fehlgeschlagene Arbeitsbereiche behalten','Druckgrenze freier Speicher (Bytes)','Druckgrenze freier Speicher (%)','Ziel freier Speicher (Bytes)','Ziel freier Speicher (%)','Speicherlimit (Bytes)','Task-Limit','CPU-Quote (%)','Lesebandbreite (Bytes/s)','Schreibbandbreite (Bytes/s)'],
     },
     es:{
       general:['Nombre de la aplicación','URL pública'],repository:['URL pública del repositorio','Distribución','Componente','Arquitectura'],
       github:['Token de GitHub'],auth:['Modo de autenticación','URL del emisor','ID de cliente','URI de redirección','Secreto de cliente'],
       notifications:['Tipo','URL del servidor','Tema','Token'],
       automation:['Validar después de compilar','Publicar después de validar','Comprobaciones de origen activadas','Intervalo de revisión (segundos)','Revisiones simultáneas'],
-      advanced:['Limpieza de espacios activada','Espacios fallidos conservados','Límite de memoria (bytes)','Límite de tareas','Cuota de CPU (%)','Ancho de lectura (bytes/s)','Ancho de escritura (bytes/s)'],
+      advanced:['Limpieza de espacios activada','Espacios fallidos conservados','Mínimo libre bajo presión (bytes)','Mínimo libre bajo presión (%)','Objetivo libre tras presión (bytes)','Objetivo libre tras presión (%)','Límite de memoria (bytes)','Límite de tareas','Cuota de CPU (%)','Ancho de lectura (bytes/s)','Ancho de escritura (bytes/s)'],
     },
   };
   const chrome = {
@@ -63,7 +63,7 @@
     auth:[{path:'security.auth_mode',type:'select',options:['none','header','oidc']},{path:'security.oidc_issuer',type:'url'},{path:'security.oidc_client_id'},{path:'security.oidc_redirect_uri',type:'url'},{path:'security.oidc_client_secret',type:'secret'}],
     notifications:[{path:'notifications.type',type:'select',options:['none','ntfy']},{path:'notifications.server_url',type:'url'},{path:'notifications.topic',pattern:'[A-Za-z0-9._-]+'},{path:'notifications.token',type:'secret'}],
     automation:[{path:'automation.auto_validate_after_successful_build',type:'toggle'},{path:'automation.auto_publish_after_successful_validation',type:'toggle'},{path:'automation.upstream_checks_enabled',type:'toggle'},{path:'automation.upstream_check_interval_seconds',type:'number',min:60,max:86400},{path:'automation.upstream_check_concurrency',type:'number',min:1,max:8}],
-    advanced:[{path:'workspace_cleanup.enabled',type:'toggle'},{path:'workspace_cleanup.failed_workspaces_to_retain',type:'number',min:0,max:1000},{path:'resource_limits.memory_max_bytes',type:'number',min:1},{path:'resource_limits.tasks_max',type:'number',min:1},{path:'resource_limits.cpu_quota_percent',type:'number',min:1},{path:'resource_limits.io_read_bandwidth_max_bytes_per_sec',type:'number',min:1},{path:'resource_limits.io_write_bandwidth_max_bytes_per_sec',type:'number',min:1}],
+    advanced:[{path:'workspace_cleanup.enabled',type:'toggle'},{path:'workspace_cleanup.failed_workspaces_to_retain',type:'number',min:0,max:1000,required:true},{path:'workspace_cleanup.pressure_minimum_free_bytes',type:'number',min:1,max:9007199254740991,required:true},{path:'workspace_cleanup.pressure_minimum_free_percent',type:'number',min:1,max:99,required:true},{path:'workspace_cleanup.pressure_target_free_bytes',type:'number',min:1,max:9007199254740991,required:true},{path:'workspace_cleanup.pressure_target_free_percent',type:'number',min:1,max:99,required:true},{path:'resource_limits.memory_max_bytes',type:'number',min:1},{path:'resource_limits.tasks_max',type:'number',min:1},{path:'resource_limits.cpu_quota_percent',type:'number',min:1},{path:'resource_limits.io_read_bandwidth_max_bytes_per_sec',type:'number',min:1},{path:'resource_limits.io_write_bandwidth_max_bytes_per_sec',type:'number',min:1}],
   };
   const sectionFor = {general:'general',repository:'apt',github:'github',auth:'security',notifications:'notifications',automation:'automation'};
   const secretTab = {github:'github',notifications:'notifications',security:'auth'};
@@ -134,7 +134,7 @@
   <form class="settings-form" onsubmit={save}>
     <div class="settings-edit-fields">
       {#each fields[tab] as field, index}
-        {#if tab==='advanced' && index===2}<h3 class="settings-group-title">{copy('limits')}</h3>{/if}
+        {#if tab==='advanced' && index===6}<h3 class="settings-group-title">{copy('limits')}</h3>{/if}
         <label class:settings-toggle={field.type==='toggle'}>
           <span>{fieldLabel(tab,index)}</span>
           {#if field.type==='toggle'}
@@ -146,7 +146,7 @@
             <small>{copy('secret')} {settings?.[secretStatus[tab]?.split('.')[0]]?.[secretStatus[tab]?.split('.')[1]] ? copy('configured') : copy('missing')}.</small>
           {:else}
             <input type={field.type==='number'?'number':field.type==='url'?'url':'text'} value={draft?.[field.path.split('.')[0]]?.[field.path.split('.')[1]] ?? ''} oninput={event => changed(field,event.currentTarget.value)} required={field.required || (tab==='auth' && draft.security.auth_mode==='oidc' && index>0 && index<4) || (tab==='notifications' && draft.notifications.type==='ntfy' && index>0 && index<3) || (field.type==='number' && tab==='automation') || (field.type==='number' && tab==='advanced' && index===1)} min={field.min} max={field.max} maxlength={field.maxlength} pattern={field.pattern} step={field.type==='number'?'1':undefined} disabled={saving}/>
-            {#if tab==='advanced' && index>1}<small>{copy('unlimited')}</small>{/if}
+            {#if tab==='advanced' && index>=6}<small>{copy('unlimited')}</small>{/if}
           {/if}
         </label>
       {/each}

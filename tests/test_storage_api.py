@@ -14,6 +14,20 @@ def snapshot(state="ready"):
         "diagnostics": ["bounded diagnostic"] if state in {"partial", "stale", "error"} else [],
         "roots": {"data_root": "/data", "repository_root": "/repo", "repository_within_data": False},
         "bytes": {"managed_total": 123, "data_root": 100, "repository": 23},
+        "filesystems": {
+            "builds": {
+                "measurement_state": "ready", "pressure_state": "normal",
+                "measured_scope": "builds", "device_id": 7,
+                "total_bytes": 1000, "used_bytes": 400, "free_bytes": 600,
+                "available_bytes": 550, "available_percent": 55.0,
+                "utilized_percent": 45.0, "effective_start_bytes": 100,
+                "effective_target_bytes": 150,
+            },
+            "repository": {
+                "measurement_state": "ready", "pressure_state": "normal",
+                "same_as_builds": True, "device_id": 7,
+            },
+        },
         "categories": {
             "metadata": 10, "logs_manifests": 20, "artifacts": 30,
             "validation_previous": 5, "disposable": 15, "cache": 0, "unknown": 20,
@@ -24,6 +38,12 @@ def snapshot(state="ready"):
             "test_count": 1, "artifact_count": 1, "artifact_bytes": 30, "largest": [],
         },
         "retention_policy": {
+            "enabled": True,
+            "failed_workspaces_to_retain": 5,
+            "pressure_minimum_free_bytes": 536_870_912,
+            "pressure_minimum_free_percent": 10,
+            "pressure_target_free_bytes": 1_073_741_824,
+            "pressure_target_free_percent": 15,
             "startup_destructive_cleanup": True,
             "periodic_destructive_cleanup": True,
             "cleanup_interval_seconds": 300,
@@ -54,6 +74,13 @@ class StorageApiTests(AdminApiCase):
         self.assertEqual(status, 200)
         self.assertEqual(response["storage"]["bytes"]["managed_total"], 123)
         self.assertEqual(response["storage"]["categories"]["cache"], 0)
+        self.assertEqual(response["storage"]["filesystems"]["builds"]["available_bytes"], 550)
+        self.assertTrue(response["storage"]["filesystems"]["repository"]["same_as_builds"])
+        self.assertEqual(
+            response["storage"]["retention_policy"]["pressure_target_free_percent"], 15,
+        )
+        for future_field in ("admission_blocked", "last_pressure_cleanup", "recovered_bytes"):
+            self.assertNotIn(future_field, response["storage"])
         self.assertTrue(response["storage"]["retention_policy"]["periodic_destructive_cleanup"])
         self.assertEqual(response["storage"]["retention_policy"]["cleanup_interval_seconds"], 300)
         self.assertEqual(inventory.snapshot_calls, 1)

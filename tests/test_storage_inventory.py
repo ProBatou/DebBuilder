@@ -1,3 +1,5 @@
+import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -59,6 +61,19 @@ class StorageInventoryTests(unittest.TestCase):
             self.data,
             repository or self.repo,
         )
+
+    @staticmethod
+    def write_cleanup_marker(root, run_id, *, reason="retention",
+                             cleaned_at="2026-09-08T12:00:00+00:00",
+                             removed=None, **extra):
+        marker = {
+            "id": run_id,
+            "reason": reason,
+            "removed": ["source"] if removed is None else removed,
+            "cleaned_at": cleaned_at,
+            **extra,
+        }
+        (root / workspace_cleanup.CLEANUP_MARKER).write_text(json.dumps(marker))
 
     @staticmethod
     def pressure_policy(**overrides):
@@ -425,6 +440,222 @@ class StorageInventoryTests(unittest.TestCase):
             before["categories"]["cache"], after["categories"]["cache"],
         )
         self.assertEqual(after["categories"]["cache"], len(b"immutable-global-cache"))
+
+    def test_projects_valid_cleanup_markers_and_their_exact_public_fields(self):
+        expected = {
+            "retention": ["source", "staging", "downloads", "source.tar.gz", "toolchain"],
+            "storage_pressure": ["downloads"],
+            "terminal_run": ["toolchain"],
+        }
+        for index, (reason, removed) in enumerate(expected.items()):
+            run, root = self.make_run(f"cleanup-{index}")
+            self.write_cleanup_marker(
+                root, run["id"], reason=reason,
+                cleaned_at=f"2026-09-0{index + 1}T12:00:00+02:00",
+                removed=removed,
+            )
+
+        projected = self.collect()["recent_workspace_cleanups"]
+
+        self.assertEqual(projected["total_marked"], 3)
+        self.assertEqual(projected["omitted"], 0)
+        by_reason = {row["reason"]: row for row in projected["entries"]}
+        self.assertEqual(set(by_reason), set(expected))
+        for reason, removed in expected.items():
+            self.assertEqual(by_reason[reason]["removed"], removed)
+            self.assertEqual(
+                set(by_reason[reason]), {"run_id", "reason", "cleaned_at", "removed"},
+            )
+            self.assertTrue(by_reason[reason]["cleaned_at"].endswith("+00:00"))
+        self.assertEqual(by_reason["terminal_run"]["cleaned_at"], "2026-09-03T10:00:00+00:00")
+
+    def test_absent_cleanup_marker_is_normal_and_projects_no_entry(self):
+        self.make_run("no-cleanup")
+
+        result = self.collect()
+
+        self.assertEqual(result["state"], "ready")
+        self.assertEqual(result["recent_workspace_cleanups"], {
+            "entries": [], "total_marked": 0, "omitted": 0,
+        })
+
+    def test_invalid_cleanup_markers_are_omitted_with_bounded_private_safe_diagnostics(self):
+        invalid_markers = {
+            "bad-json": "{",
+            "bad-reason": {"reason": "secret-reason"},
+            "bad-time": {"cleaned_at": "not-a-time"},
+            "naive-time": {"cleaned_at": "2026-09-08T12:00:00"},
+            "bad-removed-type": {"removed": "source"},
+            "bad-removed-name": {"removed": ["/private/secret"]},
+            "bad-pressure-target": {"reason": "storage_pressure", "removed": ["toolchain"]},
+            "bad-terminal-target": {"reason": "terminal_run", "removed": ["source"]},
+            "duplicate-removed": {"removed": ["source", "source"]},
+            "bad-id": {"id": "another-run"},
+            "extra-field": {"private_path": "/private/marker-secret"},
+        }
+        for name, change in invalid_markers.items():
+            run, root = self.make_run(name)
+            if isinstance(change, str):
+                (root / workspace_cleanup.CLEANUP_MARKER).write_text(change)
+            else:
+                values = {
+                    "id": run["id"], "reason": "retention", "removed": ["source"],
+                    "cleaned_at": "2026-09-08T12:00:00+00:00", **change,
+                }
+                (root / workspace_cleanup.CLEANUP_MARKER).write_text(json.dumps(values))
+
+        result = self.collect()
+
+        self.assertEqual(result["state"], "partial")
+        self.assertEqual(result["runs"]["count"], len(invalid_markers))
+        self.assertEqual(result["recent_workspace_cleanups"]["entries"], [])
+        self.assertLessEqual(len(result["diagnostics"]), storage_inventory.MAX_DIAGNOSTICS)
+        diagnostic = " ".join(result["diagnostics"])
+        self.assertNotIn(str(self.base), diagnostic)
+        self.assertNotIn("marker-secret", diagnostic)
+        self.assertNotIn("secret-reason", diagnostic)
+
+    def test_cleanup_marker_identity_must_be_a_safe_run_id(self):
+        root = self.base / "unsafe-marker-id"
+        root.mkdir()
+        self.write_cleanup_marker(root, "unsafe marker id")
+
+        with workspace_cleanup.directory_fd(root) as workspace_fd:
+            with self.assertRaisesRegex(ValueError, "identity is invalid"):
+                storage_inventory._read_workspace_cleanup_marker(
+                    workspace_fd, "unsafe marker id",
+                )
+
+    def test_unsafe_or_oversized_cleanup_markers_are_not_read_or_projected(self):
+        outside = self.base / "outside-marker"
+        outside.write_text(json.dumps({
+            "id": "symlink-marker", "reason": "retention", "removed": ["source"],
+            "cleaned_at": "2026-09-08T12:00:00+00:00",
+        }))
+        _run, symlink_root = self.make_run("symlink-marker")
+        (symlink_root / workspace_cleanup.CLEANUP_MARKER).symlink_to(outside)
+
+        _run, hardlink_root = self.make_run("hardlink-marker")
+        os.link(outside, hardlink_root / workspace_cleanup.CLEANUP_MARKER)
+
+        _run, nonregular_root = self.make_run("nonregular-marker")
+        (nonregular_root / workspace_cleanup.CLEANUP_MARKER).mkdir()
+
+        _run, large_root = self.make_run("large-marker")
+        (large_root / workspace_cleanup.CLEANUP_MARKER).write_bytes(
+            b"x" * (storage_inventory.MAX_CLEANUP_MARKER_BYTES + 1)
+        )
+
+        result = self.collect()
+
+        self.assertEqual(result["state"], "partial")
+        self.assertEqual(result["runs"]["count"], 4)
+        self.assertEqual(result["recent_workspace_cleanups"]["total_marked"], 0)
+        self.assertEqual(
+            sum("cleanup marker is invalid" in row for row in result["diagnostics"]), 4,
+        )
+
+    def test_hidden_run_cleanup_marker_is_not_reexposed(self):
+        run, root = self.make_run("hidden-cleanup")
+        self.write_cleanup_marker(root, run["id"])
+        self.store.clear_log_history(run["id"])
+
+        result = self.collect()
+
+        self.assertEqual(result["runs"]["count"], 0)
+        self.assertEqual(result["recent_workspace_cleanups"]["entries"], [])
+        self.assertFalse(any("cleanup marker" in row for row in result["diagnostics"]))
+
+    def test_cleanup_projection_is_bounded_newest_first_with_run_id_tiebreaker(self):
+        for index in range(23):
+            run_id = f"bounded-{index:02d}"
+            run, root = self.make_run(run_id)
+            minute = 2 if index == 0 else 1
+            self.write_cleanup_marker(
+                root, run["id"], reason="storage_pressure",
+                cleaned_at=f"2026-09-{index + 1:02d}T12:{minute:02d}:00+00:00",
+            )
+        for run_id in ("tie-a", "tie-b"):
+            run, root = self.make_run(run_id)
+            self.write_cleanup_marker(
+                root, run["id"], reason="retention",
+                cleaned_at="2026-10-01T00:00:00+00:00",
+            )
+
+        projected = self.collect()["recent_workspace_cleanups"]
+
+        self.assertEqual(projected["total_marked"], 25)
+        self.assertEqual(len(projected["entries"]), 20)
+        self.assertEqual(projected["omitted"], 5)
+        self.assertEqual([row["run_id"] for row in projected["entries"][:2]], ["tie-a", "tie-b"])
+        dates = [row["cleaned_at"] for row in projected["entries"]]
+        self.assertEqual(dates, sorted(dates, reverse=True))
+
+    def test_each_real_cleanup_writer_is_reflected_after_collection(self):
+        retention_run, _retention_root = self.make_run(
+            "writer-retention", status="success",
+        )
+        pressure_run, _pressure_root = self.make_run(
+            "writer-pressure", status="failed",
+        )
+        terminal_run, _terminal_root = self.make_run(
+            "writer-terminal", status="failed",
+        )
+        inventory = storage_inventory.StorageInventory(self.data, self.repo)
+
+        normal = workspace_cleanup.apply_retention(
+            self.store, {"failed_workspaces_to_retain": 2},
+        )
+        pressure = workspace_cleanup.apply_storage_pressure(
+            self.store,
+            [pressure_run["id"]],
+            {"builds": {
+                "measurement_state": "ready",
+                "pressure_state": "pressure",
+                "available_bytes": 50,
+                "effective_target_bytes": 200,
+            }},
+            lambda: {"builds": {
+                "measurement_state": "ready",
+                "pressure_state": "normal",
+                "available_bytes": 200,
+                "effective_target_bytes": 200,
+            }},
+            self.pressure_policy(failed_workspaces_to_retain=2),
+        )
+        projected = inventory.collect()["recent_workspace_cleanups"]
+
+        self.assertEqual(
+            {row["id"]: row["reason"] for row in normal["cleaned"]},
+            {
+                retention_run["id"]: "retention",
+                pressure_run["id"]: "terminal_run",
+                terminal_run["id"]: "terminal_run",
+            },
+        )
+        self.assertEqual(
+            pressure["cleaned"],
+            [{
+                "id": pressure_run["id"],
+                "reason": "storage_pressure",
+                "removed": ["source", "staging", "downloads", "source.tar.gz"],
+            }],
+        )
+        self.assertEqual(projected["total_marked"], 3)
+        by_reason = {row["reason"]: row for row in projected["entries"]}
+        self.assertEqual(set(by_reason), {"retention", "storage_pressure", "terminal_run"})
+        self.assertEqual(by_reason["retention"]["run_id"], retention_run["id"])
+        self.assertEqual(
+            by_reason["retention"]["removed"],
+            ["source", "staging", "downloads", "toolchain", "source.tar.gz"],
+        )
+        self.assertEqual(by_reason["storage_pressure"]["run_id"], pressure_run["id"])
+        self.assertEqual(
+            by_reason["storage_pressure"]["removed"],
+            ["source", "staging", "downloads", "source.tar.gz"],
+        )
+        self.assertEqual(by_reason["terminal_run"]["run_id"], terminal_run["id"])
+        self.assertEqual(by_reason["terminal_run"]["removed"], ["toolchain"])
 
     def test_symlinked_configured_root_is_partial_without_fabricated_zero(self):
         actual = self.base / "actual-data"

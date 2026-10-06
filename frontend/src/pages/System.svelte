@@ -16,6 +16,21 @@
     es:{storage:'Almacenamiento',history:'Historial de ejecuciones',failedRuns:'Ejecuciones fallidas',testRuns:'Pruebas',repositoryStorage:'Repositorio APT',disposable:'Espacio temporal',runArtifacts:'Artefactos de ejecuciones',retention:'Retención y limpieza',policy:'Limpieza automática de espacios',enabled:'Activada',disabled:'Desactivada',retained:'Espacios fallidos que conservar',clear:'Borrar historial de ejecuciones',checking:'Comprobando…',deleting:'Borrando…',none:'No hay ejecuciones terminadas que borrar.',preview:'Ejecuciones terminadas seleccionadas para borrar',clearDescription:'Elimina su historial visible, registros detallados y archivos temporales. Excluye ejecuciones activas, recetas, paquetes y publicaciones APT.',confirm:'Confirmar borrado',cancel:'Cancelar',cleared:'Historial de ejecuciones borrado.',partial:'No se pudieron borrar algunas ejecuciones.',refreshFailed:'Cambió el historial, pero no se pudo actualizar el almacenamiento.',recoveryReady:'No se ha comunicado un bloqueo de recuperación para nuevos trabajos.',recoveryBlocked:'La recuperación bloquea nuevas compilaciones y pruebas.',recoveryUnknown:'Estado de recuperación no disponible.',viewRuns:'Ver ejecuciones',unknown:'Desconocido',lastMeasured:'Medido'},
   };
   const maintenanceCopy = key => maintenanceText[language]?.[key] || maintenanceText.en[key];
+  const cleanupText = {
+    en:{title:'Latest recorded workspace cleanups',scope:'Each row is the latest recorded cleanup marker for that Run, not complete history.',run:'Run',date:'Date',reason:'Reason',removed:'Removed targets',empty:'No recorded workspace cleanup is available.',unavailable:'Recorded cleanup information is not currently available.',limited:'Only the most recent entries are shown; additional valid markers omitted:',retention:'Retention policy cleanup',storage_pressure:'Storage pressure relief',terminal_run:'Temporary Run toolchain disposal',unknownReason:'Unknown cleanup reason',unknownDate:'Unknown date',unknownTarget:'unknown target',source:'source',staging:'staging',downloads:'downloads',toolchain:'Run toolchain','source.tar.gz':'source archive'},
+    fr:{title:'Derniers nettoyages enregistrés',scope:'Chaque ligne est le dernier marker de nettoyage enregistré pour cette exécution, pas un historique complet.',run:'Exécution',date:'Date',reason:'Motif',removed:'Cibles supprimées',empty:'Aucun nettoyage d’espace de travail enregistré n’est disponible.',unavailable:'Les informations de nettoyage enregistrées ne sont pas disponibles actuellement.',limited:'Seules les entrées les plus récentes sont affichées ; markers valides supplémentaires omis :',retention:'Nettoyage selon la politique de rétention',storage_pressure:'Nettoyage pour libérer de l’espace sous pression',terminal_run:'Élimination du toolchain temporaire après la fin de l’exécution',unknownReason:'Motif de nettoyage inconnu',unknownDate:'Date inconnue',unknownTarget:'cible inconnue',source:'sources',staging:'préparation',downloads:'téléchargements',toolchain:'toolchain de l’exécution','source.tar.gz':'archive source'},
+    de:{title:'Zuletzt erfasste Arbeitsbereichbereinigungen',scope:'Jede Zeile zeigt den zuletzt erfassten Bereinigungsmarker dieses Laufs, keinen vollständigen Verlauf.',run:'Lauf',date:'Datum',reason:'Grund',removed:'Entfernte Ziele',empty:'Keine erfasste Arbeitsbereichbereinigung verfügbar.',unavailable:'Erfasste Bereinigungsinformationen sind derzeit nicht verfügbar.',limited:'Nur die neuesten Einträge werden angezeigt; weitere gültige Marker ausgelassen:',retention:'Bereinigung gemäß Aufbewahrungsrichtlinie',storage_pressure:'Bereinigung zur Speicherentlastung',terminal_run:'Entfernung der temporären Lauf-Toolchain nach Laufende',unknownReason:'Unbekannter Bereinigungsgrund',unknownDate:'Unbekanntes Datum',unknownTarget:'unbekanntes Ziel',source:'Quellen',staging:'Bereitstellung',downloads:'Downloads',toolchain:'Lauf-Toolchain','source.tar.gz':'Quellarchiv'},
+    es:{title:'Últimas limpiezas registradas de espacios',scope:'Cada fila es el último marcador de limpieza registrado para esa ejecución, no un historial completo.',run:'Ejecución',date:'Fecha',reason:'Motivo',removed:'Objetivos eliminados',empty:'No hay ninguna limpieza registrada disponible.',unavailable:'La información de limpieza registrada no está disponible actualmente.',limited:'Solo se muestran las entradas más recientes; marcadores válidos adicionales omitidos:',retention:'Limpieza según la política de retención',storage_pressure:'Limpieza para aliviar la presión de almacenamiento',terminal_run:'Eliminación de las herramientas temporales al finalizar la ejecución',unknownReason:'Motivo de limpieza desconocido',unknownDate:'Fecha desconocida',unknownTarget:'objetivo desconocido',source:'fuentes',staging:'preparación',downloads:'descargas',toolchain:'herramientas de la ejecución','source.tar.gz':'archivo fuente'},
+  };
+  const cleanupCopy = key => cleanupText[language]?.[key] || cleanupText.en[key];
+  const cleanupReason = reason => ['retention','storage_pressure','terminal_run'].includes(reason) ? cleanupCopy(reason) : cleanupCopy('unknownReason');
+  const cleanupTargets = removed => Array.isArray(removed) ? removed.map(target => cleanupText[language]?.[target] || cleanupText.en[target] || cleanupCopy('unknownTarget')).join(', ') : '—';
+  function cleanupDate(value) {
+    const parsed = new Date(value);
+    return value && Number.isFinite(parsed.getTime())
+      ? new Intl.DateTimeFormat(language,{dateStyle:'medium',timeStyle:'short'}).format(parsed)
+      : cleanupCopy('unknownDate');
+  }
   const refreshingStorageText = {en:'Refreshing storage…',fr:'Actualisation du stockage…',de:'Speicher wird aktualisiert…',es:'Actualizando almacenamiento…'};
   const refreshingStorageCopy = () => refreshingStorageText[language] || refreshingStorageText.en;
   const failureText = {
@@ -262,6 +277,26 @@
       {#if clearError && !clearDialog?.open}<ErrorNotice error={clearError} {language}/>{/if}
     </section>
     <section class="panel maintenance-card"><h2>{t('recovery',language)}</h2><p class="muted">{recoveryBlocked === true ? maintenanceCopy('recoveryBlocked') : recoveryBlocked === false ? maintenanceCopy('recoveryReady') : maintenanceCopy('recoveryUnknown')}</p><StatusChip label={maintenanceState(recoveryBlocked === true ? 'blocked' : recoveryBlocked === false ? 'notBlocked' : 'unknown')} tone={recoveryBlocked === true ? 'warning' : recoveryBlocked === false ? 'ready' : 'neutral'} icon="●"/></section>
+    <section class="panel maintenance-card maintenance-cleanups" data-testid="workspace-cleanups">
+      <div class="section-head"><div><h2>{cleanupCopy('title')}</h2><p class="muted maintenance-cleanup-scope">{cleanupCopy('scope')}</p></div>{#if storage}<StatusChip label={maintenanceState(storage.state)} tone={storageTone(storage.state)} icon="●"/>{/if}</div>
+      {#if storage?.recent_workspace_cleanups?.entries?.length}
+        <div class="maintenance-cleanup-list">
+          {#each storage.recent_workspace_cleanups.entries as cleanup (cleanup.run_id)}
+            <article class="maintenance-cleanup-row">
+              <div><span>{cleanupCopy('run')}</span><strong>{cleanup.run_id}</strong></div>
+              <div><span>{cleanupCopy('date')}</span><strong>{cleanupDate(cleanup.cleaned_at)}</strong></div>
+              <div><span>{cleanupCopy('reason')}</span><strong>{cleanupReason(cleanup.reason)}</strong></div>
+              <div><span>{cleanupCopy('removed')}</span><strong>{cleanupTargets(cleanup.removed)}</strong></div>
+            </article>
+          {/each}
+        </div>
+        {#if storage.recent_workspace_cleanups.omitted > 0}<p class="muted maintenance-cleanup-limited">{cleanupCopy('limited')} {storage.recent_workspace_cleanups.omitted}</p>{/if}
+      {:else if storage?.state === 'ready'}
+        <p class="muted" data-testid="workspace-cleanups-empty">{cleanupCopy('empty')}</p>
+      {:else}
+        <p class="muted" data-testid="workspace-cleanups-unavailable">{cleanupCopy('unavailable')}</p>
+      {/if}
+    </section>
   </div>
 {:else if tab==='developer'}
   <div class="system-developer">

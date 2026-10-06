@@ -176,6 +176,25 @@ class OpenApiContractTests(TestCase):
         ):
             self.assertNotIn(sentinel.encode(), first)
 
+    def test_storage_cleanup_projection_documents_bounded_last_marker_semantics(self):
+        storage = SCHEMAS["Storage"]["properties"]
+        self.assertEqual(
+            storage["recent_workspace_cleanups"]["$ref"],
+            "#/components/schemas/RecentWorkspaceCleanups",
+        )
+        recent = SCHEMAS["RecentWorkspaceCleanups"]
+        self.assertEqual(recent["properties"]["entries"]["maxItems"], 20)
+        self.assertIn("not an append-only history", recent["description"])
+        marker = SCHEMAS["WorkspaceCleanupMarker"]
+        self.assertEqual(set(marker["properties"]["reason"]["enum"]), {
+            "retention", "storage_pressure", "terminal_run",
+        })
+        self.assertFalse(marker["additionalProperties"])
+        self.assertEqual(
+            set(marker["required"]), {"run_id", "reason", "cleaned_at", "removed"},
+        )
+        self.assertIn("not exhaustive history", marker["description"])
+
 
 class OpenApiHttpTests(AdminApiCase):
     def test_document_is_authenticated_json_and_does_not_mutate_state(self):

@@ -243,12 +243,43 @@ SCHEMAS = {
                          "workspace_cleanup": _ref("WorkspaceCleanupPolicy"),
                          "resource_limits_status": _object({"valid": B})},
                         extra=True, description="Redacted operator settings view; secret values are omitted."),
+    "WorkspaceCleanupMarker": _object({
+        "run_id": S,
+        "reason": {
+            "type": "string",
+            "enum": ["retention", "storage_pressure", "terminal_run"],
+        },
+        "cleaned_at": {"type": "string", "format": "date-time", "maxLength": 64},
+        "removed": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "enum": ["downloads", "source", "source.tar.gz", "staging", "toolchain"],
+            },
+            "minItems": 1,
+            "maxItems": 5,
+            "uniqueItems": True,
+        },
+    }, ("run_id", "reason", "cleaned_at", "removed"),
+       description="Validated marker for the last recorded cleanup of one visible Run; it is replaceable and is not exhaustive history or recovered-byte evidence."),
+    "RecentWorkspaceCleanups": _object({
+        "entries": {
+            "type": "array",
+            "items": _ref("WorkspaceCleanupMarker"),
+            "maxItems": 20,
+            "description": "At most 20 valid visible markers, ordered by cleaned_at descending then Run ID.",
+        },
+        "total_marked": {"type": "integer", "minimum": 0},
+        "omitted": {"type": "integer", "minimum": 0},
+    }, ("entries", "total_marked", "omitted"),
+       description="Bounded view of current last-cleanup markers. omitted counts valid visible markers excluded by the limit; this is not an append-only history."),
     "Storage": _object({
         "state": S,
         "filesystems": _object({
             "builds": _ref("FilesystemCapacity"),
             "repository": _ref("RepositoryFilesystemCapacity"),
         }, ("builds", "repository")),
+        "recent_workspace_cleanups": _ref("RecentWorkspaceCleanups"),
         "retention_policy": _ref("RetentionPolicyProjection"),
     }, extra=True, description="Cached logical inventory plus a separately collected O(1) filesystem-capacity projection; GET does not collect or mutate it."),
     "ExecutionLog": _object({"text": S, "offset": I, "size": I,

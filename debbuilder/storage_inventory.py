@@ -15,9 +15,15 @@ from . import storage_pruning
 from .build_models import validate_run
 from .build_store import BuildStore
 from .maintenance import MAINTENANCE_INTERVAL_SECONDS
+from .recipe_schema import require_safe_name
 from .workspace_cleanup import (
+    CLEANUP_MARKER,
     DEFAULT_POLICY,
+    DISPOSABLE_DIRECTORIES,
+    DISPOSABLE_FILES,
     MAX_SAFE_JSON_INTEGER,
+    RETENTION_DISPOSABLE_DIRECTORIES,
+    TERMINAL_DISPOSABLE_DIRECTORIES,
     directory_fd,
     validate_policy,
 )
@@ -33,6 +39,15 @@ CATEGORIES = (
 )
 MAX_DIAGNOSTICS = 20
 MAX_LARGEST_RUNS = 5
+MAX_RECENT_WORKSPACE_CLEANUPS = 20
+MAX_CLEANUP_MARKER_BYTES = 16 * 1024
+CLEANUP_REASONS = frozenset({"retention", "storage_pressure", "terminal_run"})
+CLEANUP_TARGETS = frozenset((*DISPOSABLE_DIRECTORIES, *DISPOSABLE_FILES))
+CLEANUP_TARGETS_BY_REASON = {
+    "retention": CLEANUP_TARGETS,
+    "storage_pressure": frozenset((*RETENTION_DISPOSABLE_DIRECTORIES, *DISPOSABLE_FILES)),
+    "terminal_run": frozenset(TERMINAL_DISPOSABLE_DIRECTORIES),
+}
 RUN_METADATA_FILES = frozenset({
     "run.json",
     "recipe.json",
@@ -295,6 +310,7 @@ class _Scan:
         self.run_artifact_counts: dict[str, int] = {}
         self.run_metadata: dict[str, dict] = {}
         self.hidden_runs: set[str] = set()
+        self.cleanup_markers: list[dict] = []
         self.run_revisions: dict[str, tuple[int, int, int, int]] = {}
         self.artifact_count = 0
         self.artifact_bytes = 0
@@ -324,6 +340,78 @@ class _Scan:
         if len(parts) >= 2 and parts[0] == "builds":
             run_id = parts[1]
             self.run_bytes[run_id] = self.run_bytes.get(run_id, 0) + size
+
+
+def _read_workspace_cleanup_marker(workspace_fd: int, run_id: str) -> dict | None:
+    """Read and validate one bounded marker relative to a pinned workspace."""
+    try:
+        marker_fd = os.open(
+            CLEANUP_MARKER,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=workspace_fd,
+        )
+    except FileNotFoundError:
+        return None
+    try:
+        opened = os.fstat(marker_fd)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+            raise ValueError("cleanup marker is not a single regular file")
+        if opened.st_size > MAX_CLEANUP_MARKER_BYTES:
+            raise ValueError("cleanup marker exceeds the size limit")
+        payload = os.read(marker_fd, MAX_CLEANUP_MARKER_BYTES + 1)
+        if len(payload) > MAX_CLEANUP_MARKER_BYTES:
+            raise ValueError("cleanup marker exceeds the size limit")
+        current = os.stat(CLEANUP_MARKER, dir_fd=workspace_fd, follow_symlinks=False)
+        opened_revision = (
+            opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns,
+        )
+        current_revision = (
+            current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns,
+        )
+        if current_revision != opened_revision or len(payload) != opened.st_size:
+            raise ValueError("cleanup marker changed while it was read")
+    finally:
+        os.close(marker_fd)
+
+    marker = json.loads(payload.decode("utf-8"))
+    if not isinstance(marker, dict) or set(marker) != {
+        "id", "reason", "removed", "cleaned_at",
+    }:
+        raise ValueError("cleanup marker structure is invalid")
+    if not isinstance(marker["id"], str):
+        raise ValueError("cleanup marker identity is invalid")
+    try:
+        require_safe_name(marker["id"], "cleanup marker id")
+    except ValueError as exc:
+        raise ValueError("cleanup marker identity is invalid") from exc
+    if marker["id"] != run_id:
+        raise ValueError("cleanup marker identity is invalid")
+    reason = marker["reason"]
+    if not isinstance(reason, str) or reason not in CLEANUP_REASONS:
+        raise ValueError("cleanup marker reason is invalid")
+    removed = marker["removed"]
+    allowed_targets = CLEANUP_TARGETS_BY_REASON[reason]
+    if (
+        not isinstance(removed, list)
+        or not 1 <= len(removed) <= len(allowed_targets)
+        or len(set(removed)) != len(removed)
+        or any(not isinstance(item, str) or item not in allowed_targets for item in removed)
+    ):
+        raise ValueError("cleanup marker removed targets are invalid")
+    cleaned_at = marker["cleaned_at"]
+    if not isinstance(cleaned_at, str) or not 1 <= len(cleaned_at) <= 64:
+        raise ValueError("cleanup marker timestamp is invalid")
+    parsed = datetime.fromisoformat(cleaned_at)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("cleanup marker timestamp must include a timezone")
+    normalized = parsed.astimezone(timezone.utc).isoformat()
+    return {
+        "run_id": run_id,
+        "reason": reason,
+        "cleaned_at": normalized,
+        "removed": list(removed),
+        "_cleaned_at": parsed.astimezone(timezone.utc),
+    }
 
 
 def _read_run_metadata(data_root: Path, run_id: str, scan: _Scan) -> None:
@@ -358,6 +446,13 @@ def _read_run_metadata(data_root: Path, run_id: str, scan: _Scan) -> None:
         if BuildStore(data_root / "builds").execution_history_deleted(run_id, run):
             scan.hidden_runs.add(run_id)
             return
+        try:
+            with directory_fd(path.parent) as workspace_fd:
+                cleanup_marker = _read_workspace_cleanup_marker(workspace_fd, run_id)
+            if cleanup_marker is not None:
+                scan.cleanup_markers.append(cleanup_marker)
+        except (OSError, ValueError, TypeError, UnicodeError, json.JSONDecodeError):
+            scan.diagnostic(f"Run {run_id} cleanup marker is invalid")
         active = run.get("status") in {"pending", "queued", "running", "cancelling"}
         active = active or any(step.get("status") == "running" for step in run.get("steps") or [])
         from .validation_service import ACTIVE_STATUSES, list_attempts
@@ -558,6 +653,12 @@ def collect_storage_snapshot(
         )[:MAX_LARGEST_RUNS]
     ]
     measured_at = _utc_now()
+    cleanup_markers = sorted(scan.cleanup_markers, key=lambda row: row["run_id"])
+    cleanup_markers.sort(key=lambda row: row["_cleaned_at"], reverse=True)
+    projected_cleanup_markers = [
+        {key: row[key] for key in ("run_id", "reason", "cleaned_at", "removed")}
+        for row in cleanup_markers[:MAX_RECENT_WORKSPACE_CLEANUPS]
+    ]
     return {
         "state": "partial" if scan.partial else "ready",
         "measured_at": measured_at,
@@ -587,6 +688,11 @@ def collect_storage_snapshot(
             "pruned_artifact_count": pruned_artifact_count,
             "pruned_artifact_bytes": pruned_artifact_bytes,
             "largest": largest,
+        },
+        "recent_workspace_cleanups": {
+            "entries": projected_cleanup_markers,
+            "total_marked": len(cleanup_markers),
+            "omitted": max(0, len(cleanup_markers) - MAX_RECENT_WORKSPACE_CLEANUPS),
         },
         "retention_policy": {
             **policy,
@@ -619,6 +725,9 @@ def _initial_snapshot() -> dict:
             "count": None, "by_mode": {}, "by_status": {}, "failed_count": None,
             "test_count": None, "artifact_count": None, "artifact_bytes": None, "largest": [],
             "pruned_artifact_count": None, "pruned_artifact_bytes": None,
+        },
+        "recent_workspace_cleanups": {
+            "entries": [], "total_marked": 0, "omitted": 0,
         },
         "retention_policy": {},
     }

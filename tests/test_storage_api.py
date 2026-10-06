@@ -37,6 +37,15 @@ def snapshot(state="ready"):
             "by_status": {"success": 1, "failed": 1}, "failed_count": 1,
             "test_count": 1, "artifact_count": 1, "artifact_bytes": 30, "largest": [],
         },
+        "recent_workspace_cleanups": {
+            "entries": [{
+                "run_id": "failed-run", "reason": "storage_pressure",
+                "cleaned_at": "2026-09-08T12:00:00+00:00",
+                "removed": ["source", "downloads"],
+            }],
+            "total_marked": 1,
+            "omitted": 0,
+        },
         "retention_policy": {
             "enabled": True,
             "failed_workspaces_to_retain": 5,
@@ -61,6 +70,12 @@ class FakeInventory:
         self.snapshot_calls += 1
         return deepcopy(self.value)
 
+    def collect(self, *args, **kwargs):
+        raise AssertionError("GET /api/storage must not collect storage")
+
+    def collect_capacity(self, *args, **kwargs):
+        raise AssertionError("GET /api/storage must not measure capacity")
+
 
 class StorageApiTests(AdminApiCase):
     def test_get_storage_returns_cached_snapshot_without_walk_or_write(self):
@@ -68,7 +83,12 @@ class StorageApiTests(AdminApiCase):
         self.httpd.storage_inventory = inventory
         with mock.patch("debbuilder.storage_inventory.collect_storage_snapshot") as collect, \
                 mock.patch("debbuilder.storage.atomic_write_text") as write, \
-                mock.patch("debbuilder.storage_inventory.os.scandir") as walk:
+                mock.patch("debbuilder.storage_inventory.os.open") as marker_open, \
+                mock.patch("debbuilder.storage_inventory.os.scandir") as scandir, \
+                mock.patch("debbuilder.storage_inventory.os.walk") as walk, \
+                mock.patch("debbuilder.workspace_cleanup.read_json") as read_json, \
+                mock.patch("debbuilder.storage_inventory._read_workspace_cleanup_marker") as marker_read, \
+                mock.patch("debbuilder.app.request_maintenance") as maintenance:
             status, response = self.request("GET", "/api/storage")
 
         self.assertEqual(status, 200)
@@ -79,14 +99,23 @@ class StorageApiTests(AdminApiCase):
         self.assertEqual(
             response["storage"]["retention_policy"]["pressure_target_free_percent"], 15,
         )
+        self.assertEqual(
+            response["storage"]["recent_workspace_cleanups"]["entries"][0]["reason"],
+            "storage_pressure",
+        )
         for future_field in ("admission_blocked", "last_pressure_cleanup", "recovered_bytes"):
             self.assertNotIn(future_field, response["storage"])
         self.assertTrue(response["storage"]["retention_policy"]["periodic_destructive_cleanup"])
         self.assertEqual(response["storage"]["retention_policy"]["cleanup_interval_seconds"], 300)
         self.assertEqual(inventory.snapshot_calls, 1)
         collect.assert_not_called()
+        marker_open.assert_not_called()
+        scandir.assert_not_called()
         walk.assert_not_called()
+        read_json.assert_not_called()
+        marker_read.assert_not_called()
         write.assert_not_called()
+        maintenance.assert_not_called()
 
     def test_get_storage_exposes_all_cached_states(self):
         for state in ("collecting", "ready", "partial", "stale", "error"):

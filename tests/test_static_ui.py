@@ -34,6 +34,13 @@ class StaticUiTests(unittest.TestCase):
         self.assertIn('id="view-system"', html)
         self.assertIn("if (name === 'system') loadSystemDiagnostics();", admin)
         self.assertIn("getJson('/api/system/diagnostics')", script)
+        self.assertIn("getJson('/api/storage')", script)
+        self.assertIn('id="systemStorageCleanups"', html)
+        self.assertIn('latest recorded cleanup marker', script)
+        for reason in ('retention', 'storage_pressure', 'terminal_run'):
+            self.assertIn(f"{reason}:", script)
+        self.assertIn("Unknown cleanup reason", script)
+        self.assertNotIn("showToast", script.split("function renderSystemStorageCleanups", 1)[1].split("let systemDiagnosticsRequest", 1)[0])
         self.assertIn('id="btnRefreshDiagnostics"', html)
         self.assertIn('href="/api/openapi.json"', html)
         self.assertIn('id="btnSystemSupportBundle"', html)

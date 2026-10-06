@@ -6099,6 +6099,79 @@
         "additionalProperties": true,
         "description": "Redacted operator settings view; secret values are omitted."
       },
+      "WorkspaceCleanupMarker": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "retention",
+              "storage_pressure",
+              "terminal_run"
+            ]
+          },
+          "cleaned_at": {
+            "type": "string",
+            "format": "date-time",
+            "maxLength": 64
+          },
+          "removed": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "downloads",
+                "source",
+                "source.tar.gz",
+                "staging",
+                "toolchain"
+              ]
+            },
+            "minItems": 1,
+            "maxItems": 5,
+            "uniqueItems": true
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "run_id",
+          "reason",
+          "cleaned_at",
+          "removed"
+        ],
+        "description": "Validated marker for the last recorded cleanup of one visible Run; it is replaceable and is not exhaustive history or recovered-byte evidence."
+      },
+      "RecentWorkspaceCleanups": {
+        "type": "object",
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceCleanupMarker"
+            },
+            "maxItems": 20,
+            "description": "At most 20 valid visible markers, ordered by cleaned_at descending then Run ID."
+          },
+          "total_marked": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "omitted": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "entries",
+          "total_marked",
+          "omitted"
+        ],
+        "description": "Bounded view of current last-cleanup markers. omitted counts valid visible markers excluded by the limit; this is not an append-only history."
+      },
       "Storage": {
         "type": "object",
         "properties": {
@@ -6120,6 +6193,9 @@
               "builds",
               "repository"
             ]
+          },
+          "recent_workspace_cleanups": {
+            "$ref": "#/components/schemas/RecentWorkspaceCleanups"
           },
           "retention_policy": {
             "$ref": "#/components/schemas/RetentionPolicyProjection"

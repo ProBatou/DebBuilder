@@ -530,7 +530,7 @@ def prepare_authentication_for_startup() -> None:
 
 
 def prepare_settings_for_startup() -> dict:
-    """Validate canonical v1 Settings and secrets without writing either store."""
+    """Validate canonical v2 Settings and secrets without writing either store."""
     return settings_service.validate_app_settings_storage(DATA, settings_defaults())
 
 

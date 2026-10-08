@@ -5,6 +5,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from debbuilder import build_pipeline, execution_service
 from debbuilder.build_models import RUN_STATUSES, STEP_NAMES
@@ -253,6 +254,279 @@ class BuildStoreTests(unittest.TestCase):
             self.assertEqual(persisted["steps"][4]["status"], "skipped")
             self.assertEqual([step["status"] for step in persisted["steps"][5:]], ["success", "success", "skipped", "skipped", "skipped"])
             self.assertEqual(result["detection"]["proposed_commands"], ["npm install", "npm run build"])
+
+    def test_python_auxiliary_node_project_uses_run_local_toolchain_through_build(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = BuildStore(root / "builds")
+            host_bin = root / "host-bin"
+            host_bin.mkdir()
+            host_selected = root / "host-tool-selected"
+
+            def executable(path, source):
+                path.write_text("#!/usr/bin/python3\n" + source)
+                path.chmod(0o700)
+
+            for name in ("node", "npm"):
+                executable(
+                    host_bin / name,
+                    "from pathlib import Path\n"
+                    f"Path({str(host_selected)!r}).write_text({name!r})\n"
+                    "print('99.0.0')\n",
+                )
+
+            def acquire(_recipe, workspace, token="", expected_identity=None):
+                source = Path(workspace) / "source"
+                (source / "frontend").mkdir()
+                (source / "pyproject.toml").write_text('[project]\nname = "demo"\n')
+                (source / "frontend/package.json").write_text(json.dumps({
+                    "packageManager": "npm@11.7.0",
+                    "engines": {"node": ">=24 <25", "npm": ">=11 <12"},
+                }))
+                return {
+                    "repository": "owner/demo", "ref": "v1.2.0", "tag": "v1.2.0",
+                    "upstream_version": "1.2.0", "debian_version": "1.2.0-1",
+                    "source_directory": str(source),
+                }
+
+            configured = recipe()
+            configured["build"] = {
+                "node_project_directory": "frontend",
+                "commands": ["npm run build"],
+                "environment": {
+                    "PATH": str(host_bin),
+                    "HOME": str(root / "recipe-home"),
+                    "npm_config_cache": str(root / "recipe-npm-cache"),
+                    "COREPACK_HOME": str(root / "recipe-corepack"),
+                    "COREPACK_ENABLE_DOWNLOAD_PROMPT": "1",
+                    "DEBBUILDER_TEST_MARKER": "hybrid-cp2",
+                },
+            }
+            identity = {
+                "node": {"version": "24.12.0"},
+                "package_manager": {"name": "npm", "version": "11.7.0"},
+            }
+            prepared_environments = []
+
+            def prepare_toolchain(_resolution, *, workspace, cache, checkpoint=None):
+                run_root = Path(workspace) / "toolchain"
+                bin_directory = run_root / "bin"
+                home = run_root / "home"
+                npm_cache = run_root / "npm-cache"
+                corepack_home = run_root / "corepack"
+                for directory in (bin_directory, home, npm_cache, corepack_home):
+                    directory.mkdir(parents=True, exist_ok=True)
+                executable(
+                    bin_directory / "node",
+                    "import os\n"
+                    "from pathlib import Path\n"
+                    "print('24.12.0')\n"
+                    "print(f'node-executable={Path(__file__).resolve()}')\n"
+                    "print(f'node-marker={os.environ.get(\"DEBBUILDER_TEST_MARKER\", \"\")}')\n",
+                )
+                executable(
+                    bin_directory / "npm",
+                    "import os\n"
+                    "import subprocess\n"
+                    "import sys\n"
+                    "from pathlib import Path\n"
+                    "if sys.argv[1:] == ['--version']:\n"
+                    "    print('11.7.0')\n"
+                    "    print(f'npm-executable={Path(__file__).resolve()}')\n"
+                    "else:\n"
+                    "    child = subprocess.run(['node', '--version'], check=False, capture_output=True, text=True)\n"
+                    "    print(f'npm-executable={Path(__file__).resolve()}')\n"
+                    "    for key in ('PATH', 'HOME', 'npm_config_cache', 'COREPACK_HOME', 'COREPACK_ENABLE_DOWNLOAD_PROMPT', 'DEBBUILDER_TEST_MARKER'):\n"
+                    "        print(f'{key}={os.environ.get(key, \"\")}')\n"
+                    "    print('child-output-begin')\n"
+                    "    print(child.stdout, end='')\n"
+                    "    print('child-output-end')\n"
+                    "    sys.exit(child.returncode)\n",
+                )
+                environment = {
+                    "PATH": f"{bin_directory}:{host_bin}:/usr/bin:/bin",
+                    "HOME": str(home),
+                    "npm_config_cache": str(npm_cache),
+                    "COREPACK_HOME": str(corepack_home),
+                    "COREPACK_ENABLE_DOWNLOAD_PROMPT": "0",
+                }
+                prepared_environments.append(environment)
+                return {"identity": identity, "environment": environment}
+
+            with (
+                patch.object(build_pipeline.node_toolchain, "resolve", return_value={"resolved": True}) as resolve,
+                patch.object(build_pipeline.node_toolchain, "prepare", side_effect=prepare_toolchain) as prepare,
+                patch.object(build_pipeline.node_toolchain.urllib.request, "urlopen", side_effect=AssertionError("offline Build attempted network acquisition")) as network,
+                patch.object(
+                    build_pipeline.debian_packaging, "prepare_staging",
+                    side_effect=build_pipeline.debian_packaging.PackagingError(
+                        "test_stop_after_build", "Controlled test stops after the real Build command",
+                    ),
+                ),
+            ):
+                result = build_pipeline.execute_pipeline_run(
+                    build_pipeline.create_pipeline_run(configured, store=store, dry_run=False)["id"],
+                    store=store, acquire=acquire,
+                )
+
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["error"]["stage"], "staging")
+            self.assertEqual(result["error"]["code"], "test_stop_after_build")
+            self.assertEqual(result["detection"]["project_type"], "python")
+            self.assertEqual(result["detection"]["auxiliary_node_project"]["project_directory"], "frontend")
+            resolve.assert_called_once()
+            self.assertEqual(resolve.call_args.args[0], {"node": ">=24 <25", "npm": "11.7.0"})
+            self.assertEqual(resolve.call_args.kwargs["package_manager"], "npm")
+            prepare.assert_called_once()
+            network.assert_not_called()
+            environment = prepared_environments[0]
+            checks = {row["tool"]: row for row in result["dependencies"]["tool_checks"]}
+            self.assertEqual(checks["node"]["path"], environment["PATH"].split(":", 1)[0] + "/node")
+            self.assertEqual(checks["node"]["version"], "24.12.0")
+            self.assertEqual(checks["npm"]["path"], environment["PATH"].split(":", 1)[0] + "/npm")
+            self.assertEqual(checks["npm"]["version"], "11.7.0")
+            command = result["build"]["commands"][0]
+            self.assertEqual(command["status"], "success")
+            output = command["stdout"]
+            run_bin = Path(environment["PATH"].split(":", 1)[0])
+            self.assertIn(f"npm-executable={run_bin / 'npm'}", output)
+            self.assertIn(f"PATH={environment['PATH']}", output)
+            self.assertIn(f"HOME={environment['HOME']}", output)
+            self.assertIn(f"npm_config_cache={environment['npm_config_cache']}", output)
+            self.assertIn(f"COREPACK_HOME={environment['COREPACK_HOME']}", output)
+            self.assertIn("COREPACK_ENABLE_DOWNLOAD_PROMPT=0", output)
+            self.assertIn("DEBBUILDER_TEST_MARKER=hybrid-cp2", output)
+            self.assertIn(f"node-executable={run_bin / 'node'}", output)
+            self.assertIn("node-marker=hybrid-cp2", output)
+            self.assertFalse(host_selected.exists())
+            self.assertEqual(store.load(result["run_id"])["toolchain"], identity)
+
+    def test_missing_prepared_auxiliary_toolchain_fails_before_build_without_host_fallback(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = BuildStore(root / "builds")
+            host_bin = root / "host-bin"
+            host_bin.mkdir()
+            host_selected = root / "host-tool-selected"
+
+            def executable(path, source):
+                path.write_text("#!/usr/bin/python3\n" + source)
+                path.chmod(0o700)
+
+            for name in ("node", "npm"):
+                executable(
+                    host_bin / name,
+                    "from pathlib import Path\n"
+                    f"Path({str(host_selected)!r}).write_text({name!r})\n"
+                    "print('99.0.0')\n",
+                )
+
+            def acquire(_recipe, workspace, token="", expected_identity=None):
+                source = Path(workspace) / "source"
+                (source / "frontend").mkdir()
+                (source / "pyproject.toml").write_text('[project]\nname = "demo"\n')
+                (source / "frontend/package.json").write_text(json.dumps({
+                    "packageManager": "npm@11.7.0",
+                    "engines": {"node": ">=24 <25", "npm": ">=11 <12"},
+                }))
+                return {
+                    "repository": "owner/demo", "ref": "v1", "tag": "v1",
+                    "upstream_version": "1.0", "debian_version": "1.0-1",
+                    "source_directory": str(source),
+                }
+
+            identity = {
+                "node": {"version": "24.12.0"},
+                "package_manager": {"name": "npm", "version": "11.7.0"},
+            }
+            prepared = {}
+
+            def prepare_toolchain(_resolution, *, workspace, cache, checkpoint=None):
+                bin_directory = Path(workspace) / "toolchain/bin"
+                bin_directory.mkdir(parents=True)
+                executable(bin_directory / "node", "print('24.12.0')\n")
+                executable(bin_directory / "npm", "print('11.7.0')\n")
+                environment = {
+                    "PATH": f"{bin_directory}:{host_bin}:/usr/bin:/bin",
+                    "HOME": str(Path(workspace) / "toolchain/home"),
+                    "npm_config_cache": str(Path(workspace) / "toolchain/npm-cache"),
+                    "COREPACK_HOME": str(Path(workspace) / "toolchain/corepack"),
+                    "COREPACK_ENABLE_DOWNLOAD_PROMPT": "0",
+                }
+                for name in ("home", "npm-cache", "corepack"):
+                    (Path(workspace) / "toolchain" / name).mkdir()
+                prepared.update({"identity": identity, "environment": environment})
+                return prepared
+
+            check_dependencies = build_pipeline.dependency_checker.check_dependencies
+
+            def check_then_remove(*args, **kwargs):
+                state = check_dependencies(*args, **kwargs)
+                Path(prepared["environment"]["PATH"].split(":", 1)[0], "npm").unlink()
+                return state
+
+            configured = recipe()
+            configured["build"] = {
+                "node_project_directory": "frontend",
+                "commands": ["npm run build"],
+                "environment": {"PATH": str(host_bin)},
+            }
+            with (
+                patch.object(build_pipeline.node_toolchain, "resolve", return_value={"resolved": True}),
+                patch.object(build_pipeline.node_toolchain, "prepare", side_effect=prepare_toolchain),
+                patch.object(build_pipeline.dependency_checker, "check_dependencies", side_effect=check_then_remove),
+                patch.object(build_pipeline.build_executor, "execute_build", wraps=build_pipeline.build_executor.execute_build) as execute_build,
+                patch.object(build_pipeline.node_toolchain.urllib.request, "urlopen", side_effect=AssertionError("offline Build attempted network acquisition")) as network,
+            ):
+                result = build_pipeline.execute_pipeline_run(
+                    build_pipeline.create_pipeline_run(configured, store=store, dry_run=False)["id"],
+                    store=store, acquire=acquire,
+                )
+
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["error"]["stage"], "build")
+            self.assertEqual(result["error"]["code"], "prepared_node_toolchain_missing")
+            execute_build.assert_not_called()
+            network.assert_not_called()
+            self.assertFalse(host_selected.exists())
+
+    def test_auxiliary_node_resolution_failure_preserves_primary_and_auxiliary_facts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = BuildStore(Path(temporary) / "builds")
+
+            def acquire(_recipe, workspace, token="", expected_identity=None):
+                source = Path(workspace) / "source"
+                (source / "frontend").mkdir()
+                (source / "pyproject.toml").write_text('[project]\nname = "demo"\n')
+                (source / "frontend/package.json").write_text(json.dumps({
+                    "packageManager": "npm@11.7.0",
+                    "engines": {"node": ">=24 <25", "npm": ">=11 <12"},
+                }))
+                return {
+                    "repository": "owner/demo", "ref": "v1", "tag": "v1",
+                    "upstream_version": "1.0", "debian_version": "1.0-1",
+                    "source_directory": str(source),
+                }
+
+            configured = recipe()
+            configured["build"] = {"node_project_directory": "frontend"}
+            failure = build_pipeline.node_toolchain.NodeToolchainError(
+                "node_toolchain_acquisition_failed", "Node metadata unavailable",
+                details={"source": "https://nodejs.invalid/dist/index.json"},
+            )
+            with patch.object(build_pipeline.node_toolchain, "resolve", side_effect=failure):
+                result = build_pipeline.execute_pipeline_run(
+                    build_pipeline.create_pipeline_run(configured, store=store, dry_run=True)["id"],
+                    store=store, acquire=acquire,
+                )
+
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["error"]["stage"], "dependencies")
+            self.assertEqual(result["error"]["code"], "node_toolchain_acquisition_failed")
+            requirement = result["error"]["details"]["project_requirement"]
+            self.assertEqual(requirement["project_type"], "python")
+            self.assertEqual(requirement["auxiliary_node_project"]["project_directory"], "frontend")
+            self.assertEqual(requirement["auxiliary_node_project"]["package_manager_spec"], "npm@11.7.0")
 
     def test_detection_failure_stops_before_dependencies(self):
         with tempfile.TemporaryDirectory() as temporary:

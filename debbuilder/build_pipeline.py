@@ -143,6 +143,24 @@ def _run_expected_identity(run: dict, recipe: dict) -> dict | None:
     return None
 
 
+def _detected_node_toolchain(detection: dict) -> dict | None:
+    """Return Node requirements without conflating primary and auxiliary facts."""
+    if detection.get("project_type") == "nodejs":
+        return detection
+    auxiliary = detection.get("auxiliary_node_project")
+    return auxiliary if isinstance(auxiliary, dict) else None
+
+
+def _dependency_tool_facts(detection: dict) -> tuple[list[str], dict[str, str]]:
+    tools = list(detection.get("build_tools", []))
+    requirements = dict(detection.get("tool_version_requirements", {}))
+    node_project = _detected_node_toolchain(detection)
+    if node_project is not None and node_project is not detection:
+        tools.extend(["node", str(node_project.get("package_manager") or "npm")])
+        requirements.update(node_project.get("tool_version_requirements", {}))
+    return list(dict.fromkeys(tools)), requirements
+
+
 def _finalize_execution_cancellation(run: dict, store: BuildStore, exc: ExecutionCancelled, lifecycle_callback=None, recipe: dict | None = None) -> dict:
     completed_at = utc_now()
     active = next((step for step in run["steps"] if step.get("status") == "running"), None)
@@ -410,7 +428,10 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
                     "archive_payload": payload,
                 }
             else:
-                detection = detector(source["source_directory"], working_directory=canonical["build"]["working_directory"])
+                detection_options = {"working_directory": canonical["build"]["working_directory"]}
+                if "node_project_directory" in canonical["build"]:
+                    detection_options["node_project_directory"] = canonical["build"]["node_project_directory"]
+                detection = detector(source["source_directory"], **detection_options)
             _cancellation_checkpoint(control, run, store, "detection")
             summary = f"{detection['display_name']} from {', '.join(detection['detected_files'])}"
             _finish_step(run, store, detection_step, detection_started, status="success", summary=summary, details=detection)
@@ -428,10 +449,11 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
             _finish_step(run, store, dependencies_step, dependencies_started, status="skipped", summary="No build dependencies: upstream release artifact", details={**dependencies, "reason": "upstream_archive"})
         else:
             try:
-                if detection.get("project_type") == "nodejs" and prepare_detected_toolchain:
+                node_project = _detected_node_toolchain(detection)
+                if node_project is not None and prepare_detected_toolchain:
                     resolution = node_toolchain.resolve(
-                        detection.get("tool_version_requirements", {}),
-                        package_manager=detection.get("package_manager", "npm"),
+                        node_project.get("tool_version_requirements", {}),
+                        package_manager=node_project.get("package_manager", "npm"),
                         checkpoint=lambda: _cancellation_checkpoint(control, run, store, "dependencies"),
                     )
                     _cancellation_checkpoint(control, run, store, "dependencies")
@@ -444,10 +466,11 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
                     run["toolchain"] = prepared_toolchain["identity"]
                     dependencies_step.setdefault("details", {})["toolchain"] = prepared_toolchain["identity"]
                     store.append_event(run, f"Prepared isolated Node {prepared_toolchain['identity']['node']['version']} with {prepared_toolchain['identity']['package_manager']['name']} {prepared_toolchain['identity']['package_manager']['version']}.")
+                dependency_tools, tool_version_requirements = _dependency_tool_facts(detection)
                 dependencies = dependency_check(
                     detection["system_build_dependencies"],
-                    canonical["build"]["extra_dependencies"], tools=detection.get("build_tools", []),
-                    tool_version_requirements=detection.get("tool_version_requirements", {}),
+                    canonical["build"]["extra_dependencies"], tools=dependency_tools,
+                    tool_version_requirements=tool_version_requirements,
                     workspace=source["source_directory"], working_directory=canonical["build"]["working_directory"],
                     environment=build_environment,
                     cancellation_event=control.event,
@@ -468,6 +491,16 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
                     for key in ("project_type", "package_manager", "package_manager_spec", "node_version")
                     if detection.get(key)
                 }
+                auxiliary = detection.get("auxiliary_node_project")
+                if isinstance(auxiliary, dict):
+                    project_requirement["auxiliary_node_project"] = {
+                        key: auxiliary[key]
+                        for key in (
+                            "project_directory", "manifest", "package_manager",
+                            "package_manager_spec", "node_version", "npm_version",
+                        )
+                        if auxiliary.get(key)
+                    }
                 state = {**exc.details, "project_requirement": project_requirement}
                 store.append_event(run, f"Build tools available: {', '.join(state.get('available_tools', [])) or 'none'}")
                 store.append_event(run, f"Build tools unavailable: {', '.join(state.get('missing_tools', [])) or 'none'}", level="error" if state.get("missing_tools") else "info")

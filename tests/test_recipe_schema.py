@@ -18,6 +18,58 @@ def current(name="demo", **values):
 
 
 class RecipeSchemaTests(unittest.TestCase):
+    def test_auxiliary_node_project_is_optional_and_round_trips_without_schema_change(self):
+        old = recipe_document_for_storage(current(build={"commands": ["python3 -m build"]}))
+        self.assertEqual(old["schema_version"], 5)
+        self.assertNotIn("node_project_directory", old["build"])
+        self.assertEqual(recipe_document_for_storage(old), old)
+
+        configured = recipe_document_for_storage(current(build={"node_project_directory": "frontend"}))
+        self.assertEqual(configured["schema_version"], 5)
+        self.assertEqual(configured["build"]["node_project_directory"], "frontend")
+        self.assertEqual(recipe_document_for_storage(configured), configured)
+
+    def test_auxiliary_node_project_path_is_one_bounded_canonical_posix_path(self):
+        invalid = (
+            "", ".", "/frontend", "../frontend", "apps/../frontend", "frontend/./app",
+            "frontend//app", "frontend/", "frontend\\app", "front\x00end", "front\x7fend",
+            "front\ud800end", "a" * 1025, ["frontend", "admin"], None,
+        )
+        for value in invalid:
+            with self.subTest(value=value), self.assertRaises(RecipeDocumentError) as raised:
+                recipe_document_for_storage(current(build={"node_project_directory": value}))
+            self.assertEqual(raised.exception.code, "auxiliary_node_project_invalid_path")
+            self.assertEqual(raised.exception.path, "$.build.node_project_directory")
+
+        unicode_path = "interface/équipe"
+        configured = recipe_document_for_storage(current(build={"node_project_directory": unicode_path}))
+        self.assertEqual(configured["build"]["node_project_directory"], unicode_path)
+
+    def test_auxiliary_node_project_requires_a_source_build_recipe(self):
+        configured = recipe_document_for_storage(current(
+            build={"node_project_directory": "frontend"},
+            artifact={"mode": "source_build"},
+        ))
+        self.assertEqual(configured["build"]["node_project_directory"], "frontend")
+
+        unsupported = (
+            {"mode": "upstream_deb"},
+            {
+                "mode": "upstream_archive",
+                "type": "archive",
+                "payload": {"mode": "paths", "include": ["bin/demo"]},
+            },
+        )
+        for artifact in unsupported:
+            with self.subTest(mode=artifact["mode"]), self.assertRaises(RecipeDocumentError) as raised:
+                recipe_document_for_storage(current(
+                    build={"node_project_directory": "frontend"}, artifact=artifact,
+                ))
+            self.assertEqual(raised.exception.code, "auxiliary_node_project_requires_source_build")
+            self.assertEqual(raised.exception.path, "$.build.node_project_directory")
+            historical = recipe_document_for_storage(current(artifact=artifact))
+            self.assertNotIn("node_project_directory", historical["build"])
+
     def test_runtime_detection_v5_defaults_and_overrides_round_trip(self):
         old = current(package={"name": "demo", "runtime_dependencies": ["ca-certificates"]})
         stored = recipe_document_for_storage(old)

@@ -1,12 +1,313 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from debbuilder.project_detection import DetectionError, detect_project
+from debbuilder.project_detection import MAX_AUXILIARY_MANIFEST_BYTES, DetectionError, detect_project
 
 
 class ProjectDetectionTests(unittest.TestCase):
+    @staticmethod
+    def python_project(root: Path) -> None:
+        (root / "pyproject.toml").write_text('[project]\nname="demo"\n')
+
+    @staticmethod
+    def auxiliary_manifest(**overrides) -> dict:
+        document = {
+            "packageManager": "npm@11.20.0",
+            "engines": {"node": ">=24 <25", "npm": ">=11 <12"},
+        }
+        document.update(overrides)
+        return document
+
+    def test_python_with_explicit_auxiliary_node_project_keeps_primary_facts_separate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.python_project(root)
+            (root / "frontend").mkdir()
+            (root / "frontend/package.json").write_text(json.dumps(self.auxiliary_manifest()))
+            baseline = detect_project(root)
+            result = detect_project(root, node_project_directory="frontend")
+        self.assertEqual(result["project_type"], "python")
+        self.assertEqual(result["detected_files"], baseline["detected_files"])
+        self.assertEqual(result["build_tools"], baseline["build_tools"])
+        self.assertEqual(result["tool_version_requirements"], baseline["tool_version_requirements"])
+        self.assertEqual(result["auxiliary_node_project"], {
+            "project_directory": "frontend",
+            "manifest": "frontend/package.json",
+            "package_manager": "npm",
+            "package_manager_spec": "npm@11.20.0",
+            "package_manager_version": "11.20.0",
+            "node_version": ">=24 <25",
+            "npm_version": ">=11 <12",
+            "tool_version_requirements": {"node": ">=24 <25", "npm": "11.20.0"},
+            "detected_files": ["frontend/package.json"],
+            "diagnostics": [],
+        })
+
+    def test_current_debbuilder_checkout_reports_python_and_real_frontend_requirements(self):
+        root = Path(__file__).resolve().parents[1]
+        result = detect_project(root, node_project_directory="frontend")
+        self.assertEqual(result["project_type"], "python")
+        auxiliary = result["auxiliary_node_project"]
+        self.assertEqual(auxiliary["node_version"], ">=24 <25")
+        self.assertEqual(auxiliary["npm_version"], ">=11 <12")
+        self.assertEqual(auxiliary["package_manager_spec"], "npm@11.20.0")
+        self.assertEqual(auxiliary["manifest"], "frontend/package.json")
+
+    def test_omitted_auxiliary_project_preserves_python_and_node_results_exactly(self):
+        fixtures = (
+            ("python", lambda root: self.python_project(root)),
+            ("nodejs", lambda root: (root / "package.json").write_text(json.dumps({"scripts": {"build": "vite build"}}))),
+        )
+        for expected, prepare in fixtures:
+            with self.subTest(project_type=expected), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                prepare(root)
+                baseline = detect_project(root)
+                self.assertEqual(detect_project(root, node_project_directory=None), baseline)
+                self.assertEqual(baseline["project_type"], expected)
+                self.assertNotIn("auxiliary_node_project", baseline)
+
+    def test_auxiliary_node_manifest_requires_complete_valid_requirements(self):
+        cases = (
+            ({"packageManager": "npm@11.20.0"}, "auxiliary_node_requirements_missing"),
+            ({"packageManager": "npm@11.20.0", "engines": {"npm": ">=11 <12"}}, "auxiliary_node_requirement_missing"),
+            ({"packageManager": "npm@11.20.0", "engines": {"node": ">=24 <25"}}, "auxiliary_node_requirement_missing"),
+            ({"engines": {"node": ">=24 <25", "npm": ">=11 <12"}}, "auxiliary_node_package_manager_missing"),
+            ({"packageManager": "npm@11", "engines": {"node": ">=24 <25", "npm": ">=11 <12"}}, "auxiliary_node_package_manager_invalid"),
+            ({"packageManager": "pnpm@10.24.0", "engines": {"node": ">=24 <25", "npm": ">=11 <12"}}, "auxiliary_node_package_manager_invalid"),
+            ({"packageManager": "npm@11.20.0", "engines": {"node": "latest", "npm": ">=11 <12"}}, "auxiliary_node_requirement_invalid"),
+        )
+        for manifest, code in cases:
+            with self.subTest(code=code, manifest=manifest), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self.python_project(root)
+                (root / "frontend").mkdir()
+                (root / "frontend/package.json").write_text(json.dumps(manifest))
+                with self.assertRaises(DetectionError) as raised:
+                    detect_project(root, node_project_directory="frontend")
+                self.assertEqual(raised.exception.code, code)
+                self.assertEqual(raised.exception.details["manifest"], "frontend/package.json")
+
+    def test_auxiliary_exact_npm_version_must_satisfy_npm_engine(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.python_project(root)
+            (root / "frontend").mkdir()
+            manifest = self.auxiliary_manifest(packageManager="npm@10.9.4")
+            (root / "frontend/package.json").write_text(json.dumps(manifest))
+            with self.assertRaises(DetectionError) as raised:
+                detect_project(root, node_project_directory="frontend")
+        self.assertEqual(raised.exception.code, "auxiliary_node_package_manager_mismatch")
+        self.assertEqual(raised.exception.details["package_manager_version"], "10.9.4")
+        self.assertEqual(raised.exception.details["requested_range"], ">=11 <12")
+
+    def test_auxiliary_version_ranges_validate_every_disjunction_branch(self):
+        valid = self.auxiliary_manifest(
+            engines={"node": ">=24 <25 || 26.x", "npm": ">=11 <12 || 12.x"},
+        )
+        invalid = (
+            (self.auxiliary_manifest(engines={"node": "latest", "npm": ">=11 <12"}), "node"),
+            (self.auxiliary_manifest(engines={"node": ">=0 || latest", "npm": ">=11 <12"}), "node"),
+            (self.auxiliary_manifest(engines={"node": "latest || >=0", "npm": ">=11 <12"}), "node"),
+            (self.auxiliary_manifest(engines={"node": ">=24 <25", "npm": "latest"}), "npm"),
+            (self.auxiliary_manifest(engines={"node": ">=24 <25", "npm": ">=0 || latest"}), "npm"),
+            (self.auxiliary_manifest(engines={"node": ">=24 <25", "npm": "latest || >=0"}), "npm"),
+            (self.auxiliary_manifest(engines={"node": ">=24 <25", "npm": "<1 || latest"}), "npm"),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.python_project(root)
+            (root / "frontend").mkdir()
+            manifest = root / "frontend/package.json"
+            manifest.write_text(json.dumps(valid))
+            result = detect_project(root, node_project_directory="frontend")
+            self.assertEqual(result["auxiliary_node_project"]["node_version"], ">=24 <25 || 26.x")
+            self.assertEqual(result["auxiliary_node_project"]["npm_version"], ">=11 <12 || 12.x")
+
+            for document, requirement in invalid:
+                with self.subTest(requirement=requirement, document=document):
+                    manifest.write_text(json.dumps(document))
+                    with self.assertRaises(DetectionError) as raised:
+                        detect_project(root, node_project_directory="frontend")
+                    self.assertEqual(raised.exception.code, "auxiliary_node_requirement_invalid")
+                    self.assertEqual(raised.exception.details["requirement"], requirement)
+
+    def test_auxiliary_package_manager_requires_a_canonical_exact_version(self):
+        versions = ("npm@01.2.3", "npm@1.02.3", "npm@1.2.03")
+        for package_manager in versions:
+            with self.subTest(package_manager=package_manager), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self.python_project(root)
+                (root / "frontend").mkdir()
+                document = self.auxiliary_manifest(packageManager=package_manager)
+                (root / "frontend/package.json").write_text(json.dumps(document))
+                with self.assertRaises(DetectionError) as raised:
+                    detect_project(root, node_project_directory="frontend")
+                self.assertEqual(raised.exception.code, "auxiliary_node_package_manager_invalid")
+
+        valid = (
+            ("npm@0.0.0", ">=0"),
+            ("npm@1.2.3", ">=1 <2"),
+            ("npm@11.20.0", ">=11 <12"),
+        )
+        for package_manager, npm_range in valid:
+            with self.subTest(package_manager=package_manager), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self.python_project(root)
+                (root / "frontend").mkdir()
+                document = self.auxiliary_manifest(
+                    packageManager=package_manager,
+                    engines={"node": ">=24 <25", "npm": npm_range},
+                )
+                (root / "frontend/package.json").write_text(json.dumps(document))
+                result = detect_project(root, node_project_directory="frontend")
+            version = package_manager.removeprefix("npm@")
+            self.assertEqual(result["auxiliary_node_project"]["package_manager_spec"], package_manager)
+            self.assertEqual(result["auxiliary_node_project"]["package_manager_version"], version)
+
+    def test_auxiliary_path_missing_traversal_and_directory_file_fail_structurally(self):
+        cases = (
+            ("missing", "auxiliary_node_directory_missing"),
+            ("../outside", "auxiliary_node_project_invalid_path"),
+            ("frontend", "auxiliary_node_directory_invalid"),
+        )
+        for directory, code in cases:
+            with self.subTest(directory=directory), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self.python_project(root)
+                if directory == "frontend":
+                    (root / "frontend").write_text("not a directory")
+                with self.assertRaises(DetectionError) as raised:
+                    detect_project(root, node_project_directory=directory)
+                self.assertEqual(raised.exception.code, code)
+
+    def test_auxiliary_manifest_must_exist(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.python_project(root)
+            (root / "frontend").mkdir()
+            with self.assertRaises(DetectionError) as raised:
+                detect_project(root, node_project_directory="frontend")
+        self.assertEqual(raised.exception.code, "auxiliary_node_manifest_missing")
+        self.assertEqual(raised.exception.details["manifest"], "frontend/package.json")
+
+    def test_auxiliary_directory_and_manifest_symlinks_are_never_followed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            outside = base / "outside"
+            outside.mkdir()
+            (outside / "package.json").write_text(json.dumps(self.auxiliary_manifest()))
+
+            directory_case = base / "directory-case"
+            directory_case.mkdir()
+            self.python_project(directory_case)
+            (directory_case / "frontend").symlink_to(outside, target_is_directory=True)
+            with self.assertRaises(DetectionError) as directory_error:
+                detect_project(directory_case, node_project_directory="frontend")
+            self.assertEqual(directory_error.exception.code, "auxiliary_node_directory_symlink")
+
+            manifest_case = base / "manifest-case"
+            manifest_case.mkdir()
+            self.python_project(manifest_case)
+            (manifest_case / "frontend").mkdir()
+            (manifest_case / "frontend/package.json").symlink_to(outside / "package.json")
+            with self.assertRaises(DetectionError) as manifest_error:
+                detect_project(manifest_case, node_project_directory="frontend")
+            self.assertEqual(manifest_error.exception.code, "auxiliary_node_manifest_symlink")
+
+    def test_auxiliary_non_encodable_path_always_fails_structurally(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.python_project(root)
+            with self.assertRaises(DetectionError) as raised:
+                detect_project(root, node_project_directory="front\ud800end")
+            unicode_directory = "interface-équipe"
+            (root / unicode_directory).mkdir()
+            (root / unicode_directory / "package.json").write_text(json.dumps(self.auxiliary_manifest()))
+            result = detect_project(root, node_project_directory=unicode_directory)
+        self.assertEqual(raised.exception.code, "auxiliary_node_project_invalid_path")
+        self.assertEqual(raised.exception.details["field"], "build.node_project_directory")
+        self.assertEqual(result["auxiliary_node_project"]["project_directory"], unicode_directory)
+
+    def test_auxiliary_manifest_replacement_by_fifo_is_nonblocking_and_structured(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.python_project(root)
+            (root / "frontend").mkdir()
+            manifest = root / "frontend/package.json"
+            manifest.write_text(json.dumps(self.auxiliary_manifest()))
+            real_stat, real_open = os.stat, os.open
+            replaced = False
+
+            def replace_after_stat(path, *args, **kwargs):
+                nonlocal replaced
+                result = real_stat(path, *args, **kwargs)
+                if path == "package.json" and kwargs.get("follow_symlinks") is False and not replaced:
+                    manifest.unlink()
+                    os.mkfifo(manifest)
+                    replaced = True
+                return result
+
+            def guarded_open(path, flags, *args, **kwargs):
+                if path == "package.json":
+                    self.assertTrue(flags & os.O_NONBLOCK)
+                return real_open(path, flags, *args, **kwargs)
+
+            with patch.object(os, "stat", side_effect=replace_after_stat), \
+                    patch.object(os, "open", side_effect=guarded_open), \
+                    self.assertRaises(DetectionError) as raised:
+                detect_project(root, node_project_directory="frontend")
+        self.assertTrue(replaced)
+        self.assertEqual(raised.exception.code, "auxiliary_node_manifest_invalid")
+
+    def test_auxiliary_node_project_is_rejected_for_every_non_python_primary(self):
+        fixtures = (
+            ("nodejs", lambda root: (root / "package.json").write_text(json.dumps({"scripts": {"build": "vite build"}}))),
+            ("rust", lambda root: (root / "Cargo.toml").write_text("[package]\n")),
+            ("static", lambda root: (root / ".bashrc").write_text("alias ll='ls -la'\n")),
+        )
+        for expected, prepare in fixtures:
+            with self.subTest(project_type=expected), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                prepare(root)
+                with self.assertRaises(DetectionError) as raised:
+                    detect_project(root, node_project_directory="frontend")
+                self.assertEqual(raised.exception.code, "auxiliary_node_project_requires_python")
+                self.assertEqual(raised.exception.details["project_type"], expected)
+
+    def test_auxiliary_manifest_malformed_oversized_and_special_entries_fail_closed(self):
+        cases = (
+            (lambda path: path.write_text("{"), "auxiliary_node_manifest_invalid"),
+            (lambda path: path.write_bytes(b" " * (MAX_AUXILIARY_MANIFEST_BYTES + 1)), "auxiliary_node_manifest_too_large"),
+            (lambda path: path.mkdir(), "auxiliary_node_manifest_invalid"),
+            (lambda path: os.mkfifo(path), "auxiliary_node_manifest_invalid"),
+        )
+        for prepare, code in cases:
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self.python_project(root)
+                (root / "frontend").mkdir()
+                prepare(root / "frontend/package.json")
+                with self.assertRaises(DetectionError) as raised:
+                    detect_project(root, node_project_directory="frontend")
+                self.assertEqual(raised.exception.code, code)
+
+    def test_auxiliary_detection_never_executes_source_or_host_commands(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.python_project(root)
+            (root / "frontend").mkdir()
+            (root / "frontend/package.json").write_text(json.dumps(self.auxiliary_manifest()))
+            (root / "frontend/postinstall.py").write_text("raise RuntimeError('must not run')\n")
+            with patch("subprocess.run", side_effect=AssertionError("must not execute")), \
+                    patch.object(os, "system", side_effect=AssertionError("must not execute")):
+                result = detect_project(root, node_project_directory="frontend")
+        self.assertEqual(result["auxiliary_node_project"]["package_manager_version"], "11.20.0")
+
     def test_debbuilder_fixture_declares_node_24_and_npm_11(self):
         repository = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as temporary:

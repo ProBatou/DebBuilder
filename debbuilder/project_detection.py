@@ -5,9 +5,17 @@ import ast
 import configparser
 import glob
 import json
+import os
 import re
+import stat
 import tomllib
 from pathlib import Path
+
+from .node_toolchain import version_satisfies
+from .recipe_schema import RecipeDocumentError, normalize_node_project_directory
+
+
+MAX_AUXILIARY_MANIFEST_BYTES = 1024 * 1024
 
 
 class DetectionError(RuntimeError):
@@ -35,6 +43,251 @@ def _relative(source: Path, paths: list[Path]) -> list[str]:
 
 def _unique(values: list) -> list:
     return list(dict.fromkeys(value for value in values if value))
+
+
+def _auxiliary_error(code: str, message: str, directory: str, **details) -> DetectionError:
+    return DetectionError(code, message, details={"project_directory": directory, **details})
+
+
+def _version_requirement_supported(requirement: str) -> bool:
+    """Validate every disjunction branch using the shared Node range grammar."""
+    branches = requirement.split("||")
+    return all(
+        branch.strip() and version_satisfies("0.0.0", branch) is not None
+        for branch in branches
+    )
+
+
+def _read_auxiliary_manifest(source: Path, directory: str) -> tuple[dict, str]:
+    """Read package.json beneath source without following any symlink component."""
+    manifest_name = "package.json"
+    manifest_path = f"{directory}/{manifest_name}"
+    directory_fd = None
+    try:
+        directory_fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY)
+        for component in directory.split("/"):
+            try:
+                component_stat = os.stat(component, dir_fd=directory_fd, follow_symlinks=False)
+            except FileNotFoundError as exc:
+                raise _auxiliary_error(
+                    "auxiliary_node_directory_missing",
+                    "The configured auxiliary Node project directory does not exist",
+                    directory,
+                ) from exc
+            except (OSError, UnicodeError) as exc:
+                raise _auxiliary_error(
+                    "auxiliary_node_directory_inaccessible",
+                    "The configured auxiliary Node project directory cannot be inspected safely",
+                    directory,
+                ) from exc
+            if stat.S_ISLNK(component_stat.st_mode):
+                raise _auxiliary_error(
+                    "auxiliary_node_directory_symlink",
+                    "The configured auxiliary Node project directory must not contain symlinks",
+                    directory,
+                )
+            if not stat.S_ISDIR(component_stat.st_mode):
+                raise _auxiliary_error(
+                    "auxiliary_node_directory_invalid",
+                    "The configured auxiliary Node project path is not a directory",
+                    directory,
+                )
+            try:
+                next_fd = os.open(
+                    component,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=directory_fd,
+                )
+            except (OSError, UnicodeError) as exc:
+                raise _auxiliary_error(
+                    "auxiliary_node_directory_inaccessible",
+                    "The configured auxiliary Node project directory cannot be opened safely",
+                    directory,
+                ) from exc
+            os.close(directory_fd)
+            directory_fd = next_fd
+
+        try:
+            manifest_stat = os.stat(manifest_name, dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError as exc:
+            raise _auxiliary_error(
+                "auxiliary_node_manifest_missing",
+                "The auxiliary Node project has no package.json",
+                directory,
+                manifest=manifest_path,
+            ) from exc
+        except (OSError, UnicodeError) as exc:
+            raise _auxiliary_error(
+                "auxiliary_node_manifest_inaccessible",
+                "The auxiliary Node package.json cannot be inspected safely",
+                directory,
+                manifest=manifest_path,
+            ) from exc
+        if stat.S_ISLNK(manifest_stat.st_mode):
+            raise _auxiliary_error(
+                "auxiliary_node_manifest_symlink",
+                "The auxiliary Node package.json must not be a symlink",
+                directory,
+                manifest=manifest_path,
+            )
+        if not stat.S_ISREG(manifest_stat.st_mode):
+            raise _auxiliary_error(
+                "auxiliary_node_manifest_invalid",
+                "The auxiliary Node package.json must be a regular file",
+                directory,
+                manifest=manifest_path,
+            )
+        if manifest_stat.st_size > MAX_AUXILIARY_MANIFEST_BYTES:
+            raise _auxiliary_error(
+                "auxiliary_node_manifest_too_large",
+                "The auxiliary Node package.json exceeds the detection size limit",
+                directory,
+                manifest=manifest_path,
+                maximum_bytes=MAX_AUXILIARY_MANIFEST_BYTES,
+            )
+        try:
+            manifest_fd = os.open(
+                manifest_name,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                dir_fd=directory_fd,
+            )
+        except (OSError, UnicodeError) as exc:
+            raise _auxiliary_error(
+                "auxiliary_node_manifest_inaccessible",
+                "The auxiliary Node package.json cannot be opened safely",
+                directory,
+                manifest=manifest_path,
+            ) from exc
+        try:
+            try:
+                opened_stat = os.fstat(manifest_fd)
+                if not stat.S_ISREG(opened_stat.st_mode):
+                    raise _auxiliary_error(
+                        "auxiliary_node_manifest_invalid",
+                        "The auxiliary Node package.json must be a regular file",
+                        directory,
+                        manifest=manifest_path,
+                    )
+                chunks, size = [], 0
+                while chunk := os.read(manifest_fd, min(64 * 1024, MAX_AUXILIARY_MANIFEST_BYTES + 1 - size)):
+                    chunks.append(chunk)
+                    size += len(chunk)
+                    if size > MAX_AUXILIARY_MANIFEST_BYTES:
+                        raise _auxiliary_error(
+                            "auxiliary_node_manifest_too_large",
+                            "The auxiliary Node package.json exceeds the detection size limit",
+                            directory,
+                            manifest=manifest_path,
+                            maximum_bytes=MAX_AUXILIARY_MANIFEST_BYTES,
+                        )
+                raw = b"".join(chunks)
+            except DetectionError:
+                raise
+            except OSError as exc:
+                raise _auxiliary_error(
+                    "auxiliary_node_manifest_inaccessible",
+                    "The auxiliary Node package.json could not be read safely",
+                    directory,
+                    manifest=manifest_path,
+                ) from exc
+        finally:
+            os.close(manifest_fd)
+    finally:
+        if directory_fd is not None:
+            os.close(directory_fd)
+    try:
+        document = json.loads(raw.decode("utf-8", errors="strict"))
+    except (UnicodeError, ValueError, RecursionError) as exc:
+        raise _auxiliary_error(
+            "auxiliary_node_manifest_invalid",
+            "The auxiliary Node package.json is not valid UTF-8 JSON",
+            directory,
+            manifest=manifest_path,
+        ) from exc
+    if not isinstance(document, dict):
+        raise _auxiliary_error(
+            "auxiliary_node_manifest_invalid",
+            "The auxiliary Node package.json root must be an object",
+            directory,
+            manifest=manifest_path,
+        )
+    return document, manifest_path
+
+
+def _detect_auxiliary_node(source: Path, directory: str) -> dict:
+    document, manifest = _read_auxiliary_manifest(source, directory)
+    engines = document.get("engines")
+    if not isinstance(engines, dict):
+        raise _auxiliary_error(
+            "auxiliary_node_requirements_missing",
+            "The auxiliary Node package.json must declare engines.node and engines.npm",
+            directory,
+            manifest=manifest,
+        )
+    node_range, npm_range = engines.get("node"), engines.get("npm")
+    for name, requirement in (("node", node_range), ("npm", npm_range)):
+        if not isinstance(requirement, str) or not requirement.strip():
+            raise _auxiliary_error(
+                "auxiliary_node_requirement_missing",
+                f"The auxiliary Node package.json must declare engines.{name}",
+                directory,
+                manifest=manifest,
+                requirement=name,
+            )
+        if len(requirement) > 256 or not _version_requirement_supported(requirement):
+            raise _auxiliary_error(
+                "auxiliary_node_requirement_invalid",
+                f"The auxiliary Node engines.{name} range is invalid or unsupported",
+                directory,
+                manifest=manifest,
+                requirement=name,
+                requested_range=requirement[:256],
+            )
+    node_range, npm_range = node_range.strip(), npm_range.strip()
+    package_manager_spec = document.get("packageManager")
+    if not isinstance(package_manager_spec, str) or not package_manager_spec:
+        raise _auxiliary_error(
+            "auxiliary_node_package_manager_missing",
+            "The auxiliary Node package.json must declare an exact npm packageManager version",
+            directory,
+            manifest=manifest,
+        )
+    numeric_version_component = r"(?:0|[1-9][0-9]*)"
+    match = None if len(package_manager_spec) > 256 else re.fullmatch(
+        rf"npm@({numeric_version_component}\.{numeric_version_component}\.{numeric_version_component})",
+        package_manager_spec,
+    )
+    if not match:
+        raise _auxiliary_error(
+            "auxiliary_node_package_manager_invalid",
+            "The auxiliary Node packageManager must be an exact npm version",
+            directory,
+            manifest=manifest,
+            package_manager_spec=package_manager_spec[:256],
+        )
+    npm_version = match.group(1)
+    if version_satisfies(npm_version, npm_range) is not True:
+        raise _auxiliary_error(
+            "auxiliary_node_package_manager_mismatch",
+            "The exact npm packageManager version does not satisfy engines.npm",
+            directory,
+            manifest=manifest,
+            package_manager="npm",
+            package_manager_version=npm_version,
+            requested_range=npm_range,
+        )
+    return {
+        "project_directory": directory,
+        "manifest": manifest,
+        "package_manager": "npm",
+        "package_manager_spec": package_manager_spec,
+        "package_manager_version": npm_version,
+        "node_version": node_range,
+        "npm_version": npm_range,
+        "tool_version_requirements": {"node": node_range, "npm": npm_version},
+        "detected_files": [manifest],
+        "diagnostics": [],
+    }
 
 
 def _detect_node(source: Path, root: Path) -> dict | None:
@@ -462,7 +715,12 @@ def _detect_static(source: Path, root: Path) -> dict | None:
     }
 
 
-def detect_project(source_directory: str | Path, *, working_directory: str = ".") -> dict:
+def detect_project(
+    source_directory: str | Path,
+    *,
+    working_directory: str = ".",
+    node_project_directory: str | None = None,
+) -> dict:
     source, root = _project_root(source_directory, working_directory)
     node, python, rust = _detect_node(source, root), _detect_python(source, root), _detect_rust(source, root)
     if node and not node.get("strong_application"):
@@ -474,11 +732,29 @@ def detect_project(source_directory: str | Path, *, working_directory: str = "."
     candidates = [candidate for candidate in (node, python, rust) if candidate]
     if not candidates:
         static = _detect_static(source, root)
-        if static:
-            return {**static, "working_directory": working_directory}
-        raise DetectionError("project_not_detected", "No supported Node.js, Python, Rust, or static project marker was found")
-    if len(candidates) > 1:
+        if not static:
+            raise DetectionError("project_not_detected", "No supported Node.js, Python, Rust, or static project marker was found")
+        result = static
+    elif len(candidates) > 1:
         names = [candidate["project_type"] for candidate in candidates]
         raise DetectionError("ambiguous_project", f"Multiple project types were detected: {', '.join(names)}; select a more specific working directory", details={"candidates": candidates})
-    result = candidates[0]
-    return {**result, "working_directory": working_directory}
+    else:
+        result = candidates[0]
+    detected = {**result, "working_directory": working_directory}
+    if node_project_directory is None:
+        return detected
+    try:
+        node_directory = normalize_node_project_directory(node_project_directory)
+    except RecipeDocumentError as exc:
+        raise DetectionError(
+            exc.code,
+            str(exc),
+            details={"field": "build.node_project_directory"},
+        ) from exc
+    if result["project_type"] != "python":
+        raise DetectionError(
+            "auxiliary_node_project_requires_python",
+            "An auxiliary Node project is supported only for a primary Python project",
+            details={"project_type": result["project_type"], "project_directory": node_directory},
+        )
+    return {**detected, "auxiliary_node_project": _detect_auxiliary_node(source, node_directory)}

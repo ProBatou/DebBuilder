@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import re
+import unicodedata
 from pathlib import PurePosixPath
 
 from .archive_payload import normalize_archive_payload
@@ -32,6 +33,7 @@ OPERATOR_BUILD_OVERRIDE_FIELDS = {"environment", "inactivity_timeout", "maximum_
 AUTOMATION_POLICIES = {"manual", "detect", "test", "build", "build_validate", "full"}
 MAX_ENSURE_DIRECTORIES = 256
 MAX_ENSURE_DIRECTORY_LENGTH = 1024
+MAX_NODE_PROJECT_DIRECTORY_LENGTH = 1024
 MAX_ELF_OVERRIDES = 32
 ELF_SONAME = re.compile(r"[A-Za-z0-9_+.-]{1,128}\Z")
 DEBIAN_RELATION = re.compile(r"[a-z0-9][a-z0-9+.-]*(?: \(>= [A-Za-z0-9.+:~\-]+\))?\Z")
@@ -155,6 +157,34 @@ def _ensure_directories(value) -> list[str]:
         seen.add(row)
         normalized.append(row)
     return normalized
+
+
+def normalize_node_project_directory(value) -> str:
+    """Validate the one source-root-relative auxiliary Node project path."""
+    path = "$.build.node_project_directory"
+    if not isinstance(value, str):
+        raise RecipeDocumentError(
+            "auxiliary_node_project_invalid_path",
+            "build.node_project_directory must be a string",
+            path=path,
+        )
+    parsed = PurePosixPath(value)
+    if (
+        not value
+        or not parsed.parts
+        or len(value) > MAX_NODE_PROJECT_DIRECTORY_LENGTH
+        or any(unicodedata.category(character) in {"Cc", "Cs"} for character in value)
+        or "\\" in value
+        or parsed.is_absolute()
+        or value != parsed.as_posix()
+        or any(part in {"", ".", ".."} for part in parsed.parts)
+    ):
+        raise RecipeDocumentError(
+            "auxiliary_node_project_invalid_path",
+            "build.node_project_directory must be a canonical relative POSIX path",
+            path=path,
+        )
+    return value
 
 
 def _environment(value, what: str) -> dict[str, str]:
@@ -512,6 +542,8 @@ def normalize_recipe(workflow: dict) -> dict:
             "maximum_runtime": _optional_positive_int(build_in.get("maximum_runtime"), "build.maximum_runtime"),
             "environment": _environment(build_in.get("environment"), "build.environment"),
             "working_directory": str(build_in.get("working_directory") or "."),
+            **({"node_project_directory": normalize_node_project_directory(build_in["node_project_directory"])}
+               if "node_project_directory" in build_in else {}),
             "output": {"mode": output_mode, "path": output_path, **({"paths": output_paths} if output_mode == "paths" else {})},
         },
         "install": {
@@ -627,6 +659,12 @@ def validate_recipe_metadata(workflow: dict) -> dict:
         raise ValueError("build.maximum_runtime must be empty or between 1 and 604800 seconds")
     if artifact["mode"] not in ARTIFACT_MODES:
         raise ValueError("unsupported artifact mode")
+    if "node_project_directory" in build and artifact["mode"] != "source_build":
+        raise RecipeDocumentError(
+            "auxiliary_node_project_requires_source_build",
+            "build.node_project_directory is supported only for source_build Recipes",
+            path="$.build.node_project_directory",
+        )
     if artifact["mode"] in {"source_build", "upstream_deb"} and artifact["type"] != "deb":
         raise ValueError("unsupported upstream artifact type")
     if artifact["mode"] == "upstream_archive" and artifact["type"] not in {"archive", "tar.gz", "tgz", "tar.xz", "zip"}:

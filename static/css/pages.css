@@ -386,6 +386,8 @@
 .system-status--failed { color: var(--danger); }
 .system-status--unknown { color: var(--info); }
 .system-legend { margin-top: var(--space-3); }
+.system-cleanups { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: var(--space-2); }
+.system-cleanup { min-width: 0; }
 .system-inspector-dialog { width: min(720px, calc(100vw - 24px)); max-height: min(86dvh, 900px); overflow: auto; }
 .system-inspector-head { margin-bottom: var(--space-3); }
 .system-inspection-section { margin-top: var(--space-2); }

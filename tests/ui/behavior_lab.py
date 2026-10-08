@@ -155,16 +155,29 @@ def pipeline_setup(*, running: bool):
     def setup(app, _runtime):
         from debbuilder import build_pipeline
         acquire = fixture_acquire(running=running)
+        execute_pipeline_run = build_pipeline.execute_pipeline_run
 
-        def execute(run_id, *, store, expected_initial_status, cancellation_control):
+        def execute(
+            run_id, *, store, expected_initial_status, github_token="",
+            lifecycle_callback=None, cancellation_control=None,
+        ):
+            # Keep app.execute_queued_recipe_run as the canonical manager
+            # callback so the real execution-start storage guard still runs.
+            # This fixture replaces only external source acquisition.
             def controlled(recipe, workspace, token="", expected_identity=None):
                 return acquire(recipe, workspace, token=token, cancellation_event=cancellation_control.event, on_cancel=lambda: {**(cancellation_control.request or {}), "phase": "pipeline", "stage": "source"})
             try:
-                return build_pipeline.execute_pipeline_run(run_id, store=store, expected_initial_status=expected_initial_status, cancellation_control=cancellation_control, acquire=controlled, lifecycle_callback=app.notify_lifecycle)
+                return execute_pipeline_run(
+                    run_id, store=store,
+                    expected_initial_status=expected_initial_status,
+                    github_token=github_token, acquire=controlled,
+                    lifecycle_callback=lifecycle_callback,
+                    cancellation_control=cancellation_control,
+                )
             finally:
                 app.cleanup_workspaces()
 
-        app.execute_queued_recipe_run = execute
+        build_pipeline.execute_pipeline_run = execute
         return ScenarioState()
     return setup
 

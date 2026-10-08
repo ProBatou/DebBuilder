@@ -26,6 +26,7 @@ from .validation_contracts import VALIDATION_STATUSES
 from .system_diagnostics import CHECK_IDS, SCHEMA_VERSION_DIAGNOSTICS, STATUSES
 from .validation_service import ACTIVE_STATUSES as ACTIVE_VALIDATION_STATUSES
 from .validation_service import TERMINAL_STATUSES as TERMINAL_VALIDATION_STATUSES
+from .workspace_cleanup import MAX_SAFE_JSON_INTEGER
 
 
 def _ref(name: str) -> dict:
@@ -53,6 +54,29 @@ LIFECYCLE_STATUSES = sorted({
     for validation in ("not_run", *sorted(VALIDATION_STATUSES))
     for publication in PUBLICATION_STATUSES
 } | {"published"})
+WORKSPACE_CLEANUP_PROPERTIES = {
+    "enabled": B,
+    "failed_workspaces_to_retain": {"type": "integer", "minimum": 0, "maximum": 1000},
+    "pressure_minimum_free_bytes": {"type": "integer", "minimum": 1, "maximum": MAX_SAFE_JSON_INTEGER},
+    "pressure_minimum_free_percent": {"type": "integer", "minimum": 1, "maximum": 99},
+    "pressure_target_free_bytes": {"type": "integer", "minimum": 1, "maximum": MAX_SAFE_JSON_INTEGER},
+    "pressure_target_free_percent": {"type": "integer", "minimum": 1, "maximum": 99},
+}
+FILESYSTEM_CAPACITY_PROPERTIES = {
+    "measurement_state": {"type": "string", "enum": ["unknown", "ready", "error"]},
+    "pressure_state": {"type": "string", "enum": ["unknown", "normal", "pressure", "measurement_error"]},
+    "measured_scope": {"type": "string", "enum": ["builds", "data_parent", "repository"]},
+    "device_id": {"type": "integer", "minimum": 0, "maximum": MAX_SAFE_JSON_INTEGER},
+    "total_bytes": {"type": "integer", "minimum": 0, "maximum": MAX_SAFE_JSON_INTEGER},
+    "used_bytes": {"type": "integer", "minimum": 0, "maximum": MAX_SAFE_JSON_INTEGER},
+    "free_bytes": {"type": "integer", "minimum": 0, "maximum": MAX_SAFE_JSON_INTEGER},
+    "available_bytes": {"type": "integer", "minimum": 0, "maximum": MAX_SAFE_JSON_INTEGER},
+    "available_percent": {"type": "number", "minimum": 0, "maximum": 100},
+    "utilized_percent": {"type": "number", "minimum": 0, "maximum": 100},
+    "effective_start_bytes": {"type": ["integer", "null"], "minimum": 0, "maximum": MAX_SAFE_JSON_INTEGER},
+    "effective_target_bytes": {"type": ["integer", "null"], "minimum": 0, "maximum": MAX_SAFE_JSON_INTEGER},
+    "diagnostic": {"type": "string", "maxLength": 240},
+}
 
 
 SCHEMAS = {
@@ -73,6 +97,27 @@ SCHEMAS = {
             }, description="Only allowlisted, bounded diagnostic fields are exposed."),
         }, ("code", "message", "details")),
     }, ("ok", "error")),
+    "WorkspaceCleanupPolicy": _object(
+        WORKSPACE_CLEANUP_PROPERTIES,
+        tuple(WORKSPACE_CLEANUP_PROPERTIES),
+        description="Retention preference plus filesystem pressure classification thresholds; CP2B1 does not perform pressure cleanup or admission blocking.",
+    ),
+    "RetentionPolicyProjection": _object(
+        WORKSPACE_CLEANUP_PROPERTIES,
+        tuple(WORKSPACE_CLEANUP_PROPERTIES),
+        extra=True,
+        description="Workspace cleanup policy plus existing maintenance schedule and preservation facts.",
+    ),
+    "FilesystemCapacity": _object(
+        FILESYSTEM_CAPACITY_PROPERTIES,
+        ("measurement_state", "pressure_state"),
+        description="Bounded O(1) statvfs projection; pressure is observational in CP2B1.",
+    ),
+    "RepositoryFilesystemCapacity": _object(
+        {**FILESYSTEM_CAPACITY_PROPERTIES, "same_as_builds": B},
+        ("measurement_state", "pressure_state", "same_as_builds"),
+        description="Repository capacity, or an explicit same-filesystem reference to Builds.",
+    ),
     "Recipe": _object({
         "schema_version": {"const": SCHEMA_VERSION},
         "name": {"type": "string", "pattern": "^[a-zA-Z0-9_.+-]+$"},
@@ -133,7 +178,10 @@ SCHEMAS = {
                                "upstream_checks_enabled": B, "upstream_check_interval_seconds": I,
                                "upstream_check_concurrency": I}),
         "resource_limits": {"type": "object", "description": "Resource policy; validated by resource_limits.py."},
-        "workspace_cleanup": {"type": "object", "description": "Retention policy; validated by workspace_cleanup.py."},
+        "workspace_cleanup": _object(
+            WORKSPACE_CLEANUP_PROPERTIES,
+            description="Partial retention and filesystem-pressure threshold update; validated by workspace_cleanup.py.",
+        ),
         "security": _object({"auth_mode": {"type": "string", "enum": ["none", "header", "oidc"]},
                              "oidc_issuer": S, "oidc_client_id": S, "oidc_redirect_uri": S,
                              "oidc_client_secret": {"type": "string", "writeOnly": True}}),
@@ -192,9 +240,48 @@ SCHEMAS = {
                                                  "upstream_check_interval_seconds": I}),
                          "security": _object({"auth_mode": S,
                                               "oidc_client_secret_configured": B}),
+                         "workspace_cleanup": _ref("WorkspaceCleanupPolicy"),
                          "resource_limits_status": _object({"valid": B})},
                         extra=True, description="Redacted operator settings view; secret values are omitted."),
-    "Storage": _object({"state": S}, extra=True, description="Cached storage inventory; GET does not collect or mutate it."),
+    "WorkspaceCleanupMarker": _object({
+        "run_id": S,
+        "reason": {
+            "type": "string",
+            "enum": ["retention", "storage_pressure", "terminal_run"],
+        },
+        "cleaned_at": {"type": "string", "format": "date-time", "maxLength": 64},
+        "removed": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "enum": ["downloads", "source", "source.tar.gz", "staging", "toolchain"],
+            },
+            "minItems": 1,
+            "maxItems": 5,
+            "uniqueItems": True,
+        },
+    }, ("run_id", "reason", "cleaned_at", "removed"),
+       description="Validated marker for the last recorded cleanup of one visible Run; it is replaceable and is not exhaustive history or recovered-byte evidence."),
+    "RecentWorkspaceCleanups": _object({
+        "entries": {
+            "type": "array",
+            "items": _ref("WorkspaceCleanupMarker"),
+            "maxItems": 20,
+            "description": "At most 20 valid visible markers, ordered by cleaned_at descending then Run ID.",
+        },
+        "total_marked": {"type": "integer", "minimum": 0},
+        "omitted": {"type": "integer", "minimum": 0},
+    }, ("entries", "total_marked", "omitted"),
+       description="Bounded view of current last-cleanup markers. omitted counts valid visible markers excluded by the limit; this is not an append-only history."),
+    "Storage": _object({
+        "state": S,
+        "filesystems": _object({
+            "builds": _ref("FilesystemCapacity"),
+            "repository": _ref("RepositoryFilesystemCapacity"),
+        }, ("builds", "repository")),
+        "recent_workspace_cleanups": _ref("RecentWorkspaceCleanups"),
+        "retention_policy": _ref("RetentionPolicyProjection"),
+    }, extra=True, description="Cached logical inventory plus a separately collected O(1) filesystem-capacity projection; GET does not collect or mutate it."),
     "ExecutionLog": _object({"text": S, "offset": I, "size": I,
                              "complete": B, "verbosity": S},
                             ("text", "offset", "size")),
@@ -529,7 +616,7 @@ OPERATION_DOCS = {
     "recipes.validate": _doc(200, "RecipeValidationResponse", "RecipeInput", errors={422: ("invalid_recipe_json", "unknown_field", "unsupported_recipe_schema", "unsupported_version_source", "invalid_automation_policy", "post_build_directory_invalid_path")}),
     "recipes.draft": _doc(200, "RecipeDraftResponse", "RecipeDraftInput", errors={422: ("invalid_recipe", "missing_id")}),
     "recipes.import": _doc(200, "RecipeImportResponse", "RecipeImportInput", errors={403: ("readonly_recipe",), 409: ("recipe_exists", "builtin_recipe_reserved"), 422: ("invalid_recipe_json", "unsupported_recipe_schema", "unsupported_version_source", "unknown_field", "post_build_directory_invalid_path")}),
-    "executions.run": _doc(202, "RunAdmissionResponse", "RunInput", errors={400: ("invalid_request",), 409: ("recipe_disabled",), 422: ("unsupported_recipe_schema", "unsupported_version_source", "unknown_field", "post_build_directory_invalid_path"), 429: ("execution_queue_full",), 500: ("execution_enqueue_failed",), 503: ("execution_manager_unavailable", "github_unavailable")}),
+    "executions.run": _doc(202, "RunAdmissionResponse", "RunInput", errors={400: ("invalid_request",), 409: ("recipe_disabled",), 422: ("unsupported_recipe_schema", "unsupported_version_source", "unknown_field", "post_build_directory_invalid_path"), 429: ("execution_queue_full",), 500: ("execution_enqueue_failed",), 503: ("execution_manager_unavailable", "github_unavailable", "storage_pressure_admission_blocked", "storage_measurement_unavailable")}),
     "archives.inspect": _doc(200, "ArchiveInspectionResponse", "ArchiveInspectInput", errors={422: ("invalid_recipe_json", "ambiguous_archive_source", "ambiguous_release_asset", "release_asset_not_found", "github_unavailable")}),
     "validation.start": _doc(202, "ValidationResponse", "ValidationStartInput", errors={400: ("invalid_validation_request",), 404: ("build_run_not_found",), 409: ("artifact_not_available",), 429: ("validation_queue_full",), 503: ("validation_manager_unavailable",)}),
     "publication.publish": _doc(200, "PublicationResponse", "PublicationInput", errors={400: ("publication_confirmation_required", "build_run_not_found", "artifact_not_available", "publication_identity_conflict"), 409: ("repository_mutation_busy", "publication_identity_conflict"), 422: ("publication_proof_failed", "reprepro_include_failed")}),

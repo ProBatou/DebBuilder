@@ -34,6 +34,27 @@ def recipe(name: str) -> dict:
     }
 
 
+class CapacityInventory:
+    def __init__(self, state):
+        self.state = state
+        self.capacity_calls = 0
+
+    def collect_capacity(self):
+        self.capacity_calls += 1
+        if self.state == "error":
+            return {"builds": {"pressure_state": "measurement_error"}}
+        return {"builds": {
+            "pressure_state": self.state,
+            "available_bytes": 10,
+            "effective_start_bytes": 20,
+            "effective_target_bytes": 30,
+            "available_percent": 1.5,
+        }, "repository": {"pressure_state": "pressure"}}
+
+    def collect(self):
+        raise AssertionError("admission must not collect recursive inventory")
+
+
 class AsyncExecutionTests(AdminApiCase):
     def replace_manager(self, *, queue_capacity=8, execute):
         stop_partial_manager(self.httpd, timeout=5)
@@ -68,6 +89,67 @@ class AsyncExecutionTests(AdminApiCase):
         with self.assertRaises(urllib.error.HTTPError) as captured:
             self.request(method, path, body)
         return captured.exception.code, json.loads(captured.exception.read())
+
+    def test_server_manager_and_maintenance_share_canonical_inventory(self):
+        self.assertIs(self.execution_manager.storage_inventory, self.httpd.storage_inventory)
+        service = server.create_maintenance_service(self.httpd)
+        self.assertIs(service.inventory, self.httpd.storage_inventory)
+
+    def test_storage_pressure_returns_bounded_503_without_workspace(self):
+        manager = self.replace_manager(execute=lambda *_args, **_kwargs: self.fail("must not execute"))
+        inventory = CapacityInventory("pressure")
+        self.httpd.storage_inventory = inventory
+        manager.storage_inventory = inventory
+        before = {path.name for path in manager.store.root.iterdir()}
+        status, response = self.error_response(
+            "POST", "/api/run", {"workflow": recipe("storage-pressure"), "dry_run": False},
+        )
+        self.assertEqual(status, 503)
+        self.assertEqual(response["error"], {
+            "code": "storage_pressure_admission_blocked",
+            "message": "Build/Test admission is blocked by filesystem pressure",
+            "details": {
+                "state": "pressure", "available_bytes": 10,
+                "start_bytes": 20, "target_bytes": 30, "available_percent": 1.5,
+            },
+        })
+        self.assertEqual(before, {path.name for path in manager.store.root.iterdir()})
+        self.assertEqual(inventory.capacity_calls, 1)
+
+    def test_storage_measurement_error_returns_safe_503_without_workspace(self):
+        manager = self.replace_manager(execute=lambda *_args, **_kwargs: self.fail("must not execute"))
+        inventory = CapacityInventory("error")
+        self.httpd.storage_inventory = inventory
+        manager.storage_inventory = inventory
+        before = {path.name for path in manager.store.root.iterdir()}
+        status, response = self.error_response(
+            "POST", "/api/run", {"workflow": recipe("storage-measurement"), "dry_run": True},
+        )
+        self.assertEqual(status, 503)
+        self.assertEqual(response["error"]["code"], "storage_measurement_unavailable")
+        self.assertEqual(response["error"]["details"], {
+            "state": "measurement_error", "reason": "builds_capacity_measurement_failed",
+        })
+        self.assertEqual(before, {path.name for path in manager.store.root.iterdir()})
+
+    def test_repository_only_pressure_allows_admission(self):
+        done = threading.Event()
+
+        def execute(run_id, *, store, expected_initial_status, cancellation_control=None):
+            run = store.transition_status(run_id, expected=expected_initial_status, status="running")
+            run.update({"status": "success", "finished_at": server.utc_now(), "duration": 0.0})
+            store.save(run)
+            done.set()
+
+        manager = self.replace_manager(execute=execute)
+        inventory = CapacityInventory("normal")
+        self.httpd.storage_inventory = inventory
+        manager.storage_inventory = inventory
+        status, _response = self.request(
+            "POST", "/api/run", {"workflow": recipe("repository-pressure"), "dry_run": False},
+        )
+        self.assertEqual(status, 202)
+        self.assertTrue(done.wait(2))
 
     def test_build_and_dry_run_are_accepted_then_executed_asynchronously(self):
         for dry_run, terminal in ((True, "prepared"), (False, "success")):

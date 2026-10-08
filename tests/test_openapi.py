@@ -14,6 +14,7 @@ from debbuilder.api_routes import ADMIN_API_ROUTES, RouteEffect
 from debbuilder.build_models import RUN_STATUSES
 from debbuilder.openapi import OPERATION_DOCS, SCHEMAS, openapi_document, openapi_json
 from debbuilder.recipe_schema import AUTOMATION_POLICIES, SCHEMA_VERSION, recipe_document_for_storage
+from debbuilder.workspace_cleanup import MAX_SAFE_JSON_INTEGER
 from tests.admin_api_case import AdminApiCase
 
 
@@ -94,6 +95,15 @@ class OpenApiContractTests(TestCase):
             ("POST", "/api/recipes/validate")]["responses"]["422"]["x-debbuilder-error-codes"])
         self.assertIn("github_unavailable", operations(document)[
             ("POST", "/api/recipes/{recipe_id}/observation/refresh")]["responses"]["502"]["x-debbuilder-error-codes"])
+        self.assertEqual(
+            set(operations(document)[("POST", "/api/run")]["responses"]["503"]["x-debbuilder-error-codes"]),
+            {
+                "authentication_unavailable", "settings_unavailable",
+                "application_shutting_down", "execution_manager_unavailable",
+                "github_unavailable", "storage_pressure_admission_blocked",
+                "storage_measurement_unavailable",
+            },
+        )
 
     def test_schema_references_and_key_request_contracts_are_valid(self):
         document = openapi_document()
@@ -123,6 +133,30 @@ class OpenApiContractTests(TestCase):
         self.assertEqual(schemas["PackageCreateInput"]["allOf"][1]["required"], ["name"])
         self.assertEqual(schemas["RunAdmissionResponse"]["required"], ["run_id", "status"])
         self.assertEqual(set(schemas["Execution"]["properties"]["status"]["enum"]), RUN_STATUSES)
+        self.assertEqual(
+            set(schemas["WorkspaceCleanupPolicy"]["properties"]),
+            {
+                "enabled", "failed_workspaces_to_retain",
+                "pressure_minimum_free_bytes", "pressure_minimum_free_percent",
+                "pressure_target_free_bytes", "pressure_target_free_percent",
+            },
+        )
+        filesystem = schemas["FilesystemCapacity"]["properties"]
+        cleanup = schemas["WorkspaceCleanupPolicy"]["properties"]
+        self.assertEqual(
+            cleanup["pressure_minimum_free_bytes"]["maximum"],
+            MAX_SAFE_JSON_INTEGER,
+        )
+        self.assertEqual(
+            cleanup["pressure_target_free_bytes"]["maximum"],
+            MAX_SAFE_JSON_INTEGER,
+        )
+        self.assertIn("available_bytes", filesystem)
+        self.assertEqual(filesystem["available_bytes"]["maximum"], MAX_SAFE_JSON_INTEGER)
+        self.assertIn("effective_start_bytes", filesystem)
+        self.assertIn("effective_target_bytes", filesystem)
+        self.assertNotIn("admission_blocked", filesystem)
+        self.assertNotIn("recovered_bytes", filesystem)
         recipe_document_for_storage({
             "schema_version": SCHEMA_VERSION, "name": "api-docs-example",
             "package": {"name": "api-docs-example"},
@@ -141,6 +175,25 @@ class OpenApiContractTests(TestCase):
             "/opt/debbuilder-worktrees", "/root/.codex",
         ):
             self.assertNotIn(sentinel.encode(), first)
+
+    def test_storage_cleanup_projection_documents_bounded_last_marker_semantics(self):
+        storage = SCHEMAS["Storage"]["properties"]
+        self.assertEqual(
+            storage["recent_workspace_cleanups"]["$ref"],
+            "#/components/schemas/RecentWorkspaceCleanups",
+        )
+        recent = SCHEMAS["RecentWorkspaceCleanups"]
+        self.assertEqual(recent["properties"]["entries"]["maxItems"], 20)
+        self.assertIn("not an append-only history", recent["description"])
+        marker = SCHEMAS["WorkspaceCleanupMarker"]
+        self.assertEqual(set(marker["properties"]["reason"]["enum"]), {
+            "retention", "storage_pressure", "terminal_run",
+        })
+        self.assertFalse(marker["additionalProperties"])
+        self.assertEqual(
+            set(marker["required"]), {"run_id", "reason", "cleaned_at", "removed"},
+        )
+        self.assertIn("not exhaustive history", marker["description"])
 
 
 class OpenApiHttpTests(AdminApiCase):

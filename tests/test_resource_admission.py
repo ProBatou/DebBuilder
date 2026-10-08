@@ -54,6 +54,10 @@ class ResourceAdmissionTests(unittest.TestCase):
 
     def manager(self, execute=None):
         manager = ExecutionManager(self.store, execute=execute)
+        manager.storage_inventory = mock.Mock()
+        manager.storage_inventory.collect_capacity.return_value = {
+            "builds": {"pressure_state": "normal"},
+        }
         manager.start()
         self.managers.append(manager)
         return manager

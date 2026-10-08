@@ -44,6 +44,7 @@ MAX_RETRY_SECONDS = 15 * 60
 RUN_ADMISSION_TRANSIENT_CODES = frozenset({
     "execution_queue_full", "execution_manager_unavailable",
     "execution_recovery_unresolved",
+    "storage_pressure_admission_blocked", "storage_measurement_unavailable",
 })
 
 

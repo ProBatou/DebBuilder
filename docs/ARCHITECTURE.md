@@ -34,8 +34,9 @@ Recipes must declare `schema_version: 5`; unsupported, missing, or malformed
 versions are rejected rather than silently rewritten. Build Run inventories
 are stored in per-Run manifests instead of inline in `run.json`.
 
-Settings and secrets use their own strict schema-v1 documents. Their operational
-rules are documented in [Operations](OPERATIONS.md).
+Settings use a strict schema-v2 document with one strict, read-only v1
+compatibility adapter. Secrets remain schema v1. Their operational rules are
+documented in [Operations](OPERATIONS.md).
 
 ## Main components
 
@@ -171,6 +172,44 @@ Inspection uses `readelf`, never `ldd`, and never executes upstream ELF files.
 The currently supported resolver profile is Debian Bookworm on amd64. See
 [ELF inspection and runtime dependencies](ELF_INSPECTION.md) for the detailed
 contract, limits, override rules, and offline resolver boundary.
+
+## Storage maintenance
+
+One application-owned worker serializes storage maintenance. Its destructive
+pass applies terminal-toolchain disposal and ordinary failed-workspace
+retention, then repository-backed pruning, then an O(1) Builds-filesystem
+capacity measurement. Only a Builds `pressure` state selects retained failed
+or cancelled Runs for additional cleanup, oldest completion first. Selection
+does not authorize deletion: each Run is re-read and passes the shared CP1
+destructive safety gate immediately before only its retention-disposable
+workspace evidence is removed.
+
+After every effective pressure cleanup, the worker refreshes filesystem
+capacity without recursively collecting storage inventory. The process-local
+hysteresis state remains authoritative until the configured target is reached;
+an intermediate measurement error stops cleanup fail-closed. The worker's
+normal final inventory refresh performs the single recursive snapshot at the
+existing maintenance boundary. Repository pressure is observational and does
+not select workspace cleanup, including when Repository and Builds use
+different devices.
+
+The HTTP admission path, automation preallocation path, execution worker, and
+maintenance worker share the server-owned `StorageInventory` instance. After
+Recipe/Settings/provenance and containment checks, manager acceptance and queue
+capacity retain precedence; the final admission check then refreshes only O(1)
+capacity immediately before workspace creation or pending preallocated submit.
+The worker repeats that capacity-only guard immediately before invoking the
+pipeline. Admission refusal is a transient 503 and creates no Run. A queued
+Run refused at the worker boundary becomes durably failed at `storage_guard`;
+if that terminal write cannot be proved, the execution manager's existing
+fail-closed ownership path prevents the next queued Run from starting.
+
+Only Builds pressure controls these guards. The shared instance preserves
+hysteresis between the minimum-free start and target thresholds; measurement
+failure also blocks, independently of whether automatic cleanup is enabled.
+The guards request asynchronous maintenance and never call recursive storage
+collection. Capacity can change immediately after either measurement, so this
+is an ENOSPC risk reduction boundary rather than a reservation or quota.
 
 ## Boundaries
 

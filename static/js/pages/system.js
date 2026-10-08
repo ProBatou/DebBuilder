@@ -12,6 +12,15 @@ const SYSTEM_CHECKS = {
 };
 const SYSTEM_STATES = new Set(['ok', 'warning', 'failed', 'unknown']);
 const SYSTEM_STATUS_LABELS = {ok: 'OK', warning: 'Warning', failed: 'Failed', unknown: 'Unknown'};
+const SYSTEM_CLEANUP_REASONS = {
+  retention: 'Retention policy cleanup',
+  storage_pressure: 'Storage pressure relief',
+  terminal_run: 'Temporary Run toolchain disposal',
+};
+const SYSTEM_CLEANUP_TARGETS = {
+  source: 'source', staging: 'staging', downloads: 'downloads',
+  toolchain: 'Run toolchain', 'source.tar.gz': 'source archive',
+};
 const SYSTEM_DETAIL_FIELDS = {
   'settings.documents': [['auth_mode', 'Authentication mode']],
   'repository.publication': [['listener_active', 'Repository listener', 'Active', 'Inactive'], ['configuration_valid', 'Configuration', 'Valid', 'Not confirmed'], ['signed_release_present', 'Signed release', 'Present', 'Missing'], ['public_key_present', 'Public signing key', 'Available', 'Missing'], ['signing_fingerprint', 'Signing fingerprint']],
@@ -100,6 +109,49 @@ function renderSystemDiagnostics(snapshot) {
   $('systemContent').hidden = false;
 }
 
+function renderSystemStorageCleanups(storage) {
+  const container = $('systemStorageCleanups');
+  const feedback = $('systemStorageCleanupFeedback');
+  container.replaceChildren();
+  const recent = storage?.recent_workspace_cleanups;
+  const entries = Array.isArray(recent?.entries) ? recent.entries : [];
+  if (!entries.length) {
+    feedback.textContent = storage?.state === 'ready'
+      ? 'No recorded workspace cleanup is available.'
+      : 'Recorded cleanup information is not currently available.';
+  } else {
+    feedback.textContent = storage?.state === 'ready'
+      ? 'Each row is the latest recorded cleanup marker for that Run, not complete history.'
+      : `Showing cached cleanup markers while storage state is ${storage?.state || 'unknown'}.`;
+  }
+  for (const cleanup of entries) {
+    const article = document.createElement('article');
+    article.className = 'section system-cleanup';
+    const timestamp = new Date(cleanup?.cleaned_at);
+    const date = Number.isFinite(timestamp.getTime()) ? timestamp.toLocaleString() : 'Unknown date';
+    const removed = Array.isArray(cleanup?.removed)
+      ? cleanup.removed.map(target => SYSTEM_CLEANUP_TARGETS[target] || 'unknown target').join(', ')
+      : '—';
+    const facts = document.createElement('dl');
+    facts.className = 'system-facts';
+    systemFactList(facts, {
+      run_id: cleanup?.run_id || 'Unknown Run',
+      cleaned_at: date,
+      reason: SYSTEM_CLEANUP_REASONS[cleanup?.reason] || 'Unknown cleanup reason',
+      removed,
+    }, [['run_id', 'Run'], ['cleaned_at', 'Date'], ['reason', 'Reason'], ['removed', 'Removed targets']]);
+    article.appendChild(facts);
+    container.appendChild(article);
+  }
+  if (Number.isSafeInteger(recent?.omitted) && recent.omitted > 0) {
+    const limited = document.createElement('p');
+    limited.className = 'muted';
+    limited.textContent = `Only the most recent entries are shown; additional valid markers omitted: ${recent.omitted}`;
+    container.appendChild(limited);
+  }
+  $('systemContent').hidden = false;
+}
+
 let systemDiagnosticsRequest = 0;
 async function loadSystemDiagnostics() {
   const revision = ++systemDiagnosticsRequest;
@@ -107,10 +159,18 @@ async function loadSystemDiagnostics() {
   refresh.disabled = true;
   $('systemFeedback').textContent = 'Loading diagnostics…';
   try {
-    const snapshot = await getJson('/api/system/diagnostics');
+    const [diagnostics, storage] = await Promise.allSettled([
+      getJson('/api/system/diagnostics'),
+      getJson('/api/storage'),
+    ]);
     if (revision !== systemDiagnosticsRequest) return;
-    renderSystemDiagnostics(snapshot);
-    $('systemFeedback').textContent = 'Diagnostics updated. Refresh to check again.';
+    if (diagnostics.status === 'fulfilled') renderSystemDiagnostics(diagnostics.value);
+    if (storage.status === 'fulfilled') renderSystemStorageCleanups(storage.value.storage);
+    else renderSystemStorageCleanups(null);
+    if (diagnostics.status === 'rejected' && storage.status === 'rejected') throw diagnostics.reason;
+    $('systemFeedback').textContent = diagnostics.status === 'fulfilled'
+      ? 'Diagnostics updated. Refresh to check again.'
+      : 'Diagnostics are unavailable; cached storage information may still be shown.';
   } catch (error) {
     if (revision !== systemDiagnosticsRequest) return;
     $('systemFeedback').textContent = error.message || 'Diagnostics are unavailable.';

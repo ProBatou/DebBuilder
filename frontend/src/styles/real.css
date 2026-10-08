@@ -143,12 +143,21 @@
 .maintenance-card .detail-facts strong { max-width:55%;text-align:right;overflow-wrap:anywhere; }
 .maintenance-measured { margin-top:12px!important;font-size:10px!important; }
 .maintenance-card .maintenance-clear { margin-top:16px; }
+.maintenance-cleanups { grid-column:1/-1; }
+.maintenance-cleanup-scope { margin:4px 0 0;font-size:11px;line-height:1.45; }
+.maintenance-cleanup-list { display:grid;gap:8px; }
+.maintenance-cleanup-row { display:grid;grid-template-columns:minmax(120px,.7fr) minmax(155px,.9fr) minmax(190px,1.2fr) minmax(160px,1fr);gap:14px;padding:11px 12px;border:1px solid var(--line);border-radius:7px;background:var(--subtle); }
+.maintenance-cleanup-row>div { min-width:0;display:grid;gap:3px; }
+.maintenance-cleanup-row span { color:var(--muted);font-size:10px; }
+.maintenance-cleanup-row strong { font-size:11px;line-height:1.4;overflow-wrap:anywhere; }
+.maintenance-cleanup-limited { margin:10px 0 0!important; }
 .maintenance-feedback { margin:12px 0 0;font-size:11px;line-height:1.5;color:var(--ink); }
 .system-clear-dialog .modal-copy { line-height:1.5; }
 .system-clear-dialog .modal-actions { gap:8px;flex-wrap:wrap; }
 .system-clear-count { margin:16px 0 0;font-size:12px; }
 @media (max-width:1100px) { .system-check-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
-@media (max-width:650px) { .system-check-grid { grid-template-columns:1fr; } }
+@media (max-width:800px) { .maintenance-cleanup-row { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+@media (max-width:650px) { .system-check-grid,.maintenance-cleanup-row { grid-template-columns:1fr; } }
 .recipe-fields-editor { min-width: 0; }
 .notice {
   padding: 13px;

@@ -20,7 +20,8 @@ _SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 _ARCHES = {"all", "amd64", "arm64", "armhf", "i386"}
 _MIN_COOKIE_SECRET_LENGTH = 40
 SECRET_PRESERVE_SENTINEL = "masked"
-SETTINGS_SCHEMA_VERSION = 1
+SETTINGS_SCHEMA_VERSION = 2
+LEGACY_SETTINGS_SCHEMA_VERSION = 1
 SECRETS_SCHEMA_VERSION = 1
 AUTOMATION_POLL_DEFAULT_SECONDS = 3600
 AUTOMATION_POLL_MIN_SECONDS = 60
@@ -35,7 +36,7 @@ class SessionSecretError(RuntimeError):
 
 
 class SettingsDocumentError(ValueError):
-    """A persisted Settings or secrets document is not canonical v1."""
+    """A persisted Settings or secrets document is not canonical or supported."""
 
     def __init__(self, code: str, message: str, *, path: str = "$"):
         super().__init__(message)
@@ -419,19 +420,39 @@ def _validated_security(value: dict, *, exact: bool) -> dict:
     return result
 
 
-def validate_settings_document(value: dict) -> dict:
-    """Validate one complete canonical Settings v1 document without defaults."""
+def _validate_v1_cleanup_policy(value: dict) -> dict:
+    """Validate the frozen v1 cleanup shape before any schema adaptation."""
+    enabled = value["enabled"]
+    if type(enabled) is not bool:
+        raise ValueError("workspace_cleanup.enabled must be a boolean")
+    count = value["failed_workspaces_to_retain"]
+    if type(count) is not int or not 0 <= count <= 1000:
+        raise ValueError("failed_workspaces_to_retain must be an integer between 0 and 1000")
+    return {
+        "enabled": enabled,
+        "failed_workspaces_to_retain": count,
+    }
+
+
+def _validate_settings_document_version(
+    value: dict,
+    *,
+    version: int,
+    cleanup_fields: set[str],
+    cleanup_validator,
+) -> dict:
+    """Validate one complete Settings document against one exact schema."""
     value = _object(value, "$")
     sections = {
         "schema_version", "general", "apt", "notifications", "automation",
         "workspace_cleanup", "resource_limits", "security",
     }
     _require_exact_fields(value, sections, "$")
-    version = value["schema_version"]
-    if type(version) is not int or version != SETTINGS_SCHEMA_VERSION:
+    stored_version = value["schema_version"]
+    if type(stored_version) is not int or stored_version != version:
         raise SettingsDocumentError(
             "unsupported_settings_schema_version",
-            f"Settings schema_version must be {SETTINGS_SCHEMA_VERSION}",
+            f"Settings schema_version must be {version}",
             path="$.schema_version",
         )
 
@@ -471,11 +492,17 @@ def validate_settings_document(value: dict) -> dict:
         )
 
     cleanup = _object(value["workspace_cleanup"], "$.workspace_cleanup")
-    _require_exact_fields(cleanup, set(DEFAULT_POLICY), "$.workspace_cleanup")
+    _require_exact_fields(cleanup, cleanup_fields, "$.workspace_cleanup")
     try:
-        normalized_cleanup = validate_policy(cleanup)
+        normalized_cleanup = cleanup_validator(cleanup)
     except ValueError as exc:
-        field = "enabled" if "enabled" in str(exc) else "failed_workspaces_to_retain"
+        field = next(
+            (
+                name for name in cleanup_fields
+                if str(exc).startswith((name, f"workspace_cleanup.{name}"))
+            ),
+            "workspace_cleanup",
+        )
         raise SettingsDocumentError(
             "invalid_settings_field", str(exc), path=f"$.workspace_cleanup.{field}",
         ) from exc
@@ -495,7 +522,7 @@ def validate_settings_document(value: dict) -> dict:
     )
 
     return {
-        "schema_version": SETTINGS_SCHEMA_VERSION,
+        "schema_version": version,
         "general": normalized_general,
         "apt": normalized_apt,
         "notifications": notifications,
@@ -504,6 +531,50 @@ def validate_settings_document(value: dict) -> dict:
         "resource_limits": normalized_limits,
         "security": security,
     }
+
+
+def validate_settings_document(value: dict) -> dict:
+    """Validate canonical v2 Settings or strictly adapt a canonical v1 document."""
+    value = _object(value, "$")
+    _require_exact_fields(value, {
+        "schema_version", "general", "apt", "notifications", "automation",
+        "workspace_cleanup", "resource_limits", "security",
+    }, "$")
+    version = value.get("schema_version")
+    if type(version) is not int or version not in {
+        LEGACY_SETTINGS_SCHEMA_VERSION, SETTINGS_SCHEMA_VERSION,
+    }:
+        raise SettingsDocumentError(
+            "unsupported_settings_schema_version",
+            f"Unsupported Settings schema_version: {version!r}",
+            path="$.schema_version",
+        )
+    if version == SETTINGS_SCHEMA_VERSION:
+        return _validate_settings_document_version(
+            value,
+            version=SETTINGS_SCHEMA_VERSION,
+            cleanup_fields=set(DEFAULT_POLICY),
+            cleanup_validator=validate_policy,
+        )
+
+    canonical_v1 = _validate_settings_document_version(
+        value,
+        version=LEGACY_SETTINGS_SCHEMA_VERSION,
+        cleanup_fields={"enabled", "failed_workspaces_to_retain"},
+        cleanup_validator=_validate_v1_cleanup_policy,
+    )
+    adapted = deepcopy(canonical_v1)
+    adapted["schema_version"] = SETTINGS_SCHEMA_VERSION
+    adapted["workspace_cleanup"] = {
+        **DEFAULT_POLICY,
+        **canonical_v1["workspace_cleanup"],
+    }
+    return _validate_settings_document_version(
+        adapted,
+        version=SETTINGS_SCHEMA_VERSION,
+        cleanup_fields=set(DEFAULT_POLICY),
+        cleanup_validator=validate_policy,
+    )
 
 
 def validate_settings(payload: dict, current: dict) -> dict:
@@ -575,7 +646,13 @@ def validate_settings(payload: dict, current: dict) -> dict:
         try:
             result["workspace_cleanup"] = validate_policy({**result.get("workspace_cleanup", DEFAULT_POLICY), **policy})
         except ValueError as exc:
-            field = "enabled" if "enabled" in str(exc) else "failed_workspaces_to_retain"
+            field = next(
+                (
+                    name for name in DEFAULT_POLICY
+                    if str(exc).startswith((name, f"workspace_cleanup.{name}"))
+                ),
+                "workspace_cleanup",
+            )
             raise SettingsDocumentError(
                 "invalid_settings_field", str(exc), path=f"$.workspace_cleanup.{field}",
             ) from exc
@@ -659,7 +736,7 @@ def validate_secrets_document(value: dict) -> dict:
 
 
 def _resource_repair_document(data_dir: Path) -> tuple[dict, Exception]:
-    """Read a current-v1 document whose only invalid state is resource limits."""
+    """Read a supported document whose only invalid state is resource limits."""
     path = settings_path(data_dir)
     if not path.exists() and not path.is_symlink():
         raise SettingsDocumentError(
@@ -688,7 +765,7 @@ def _resource_repair_document(data_dir: Path) -> tuple[dict, Exception]:
 
 
 def resource_repair_security(data_dir: Path) -> dict:
-    """Return security only when resource limits are the sole v1 corruption."""
+    """Return security only when resource limits are the sole Settings corruption."""
     stored, _error = _resource_repair_document(data_dir)
     candidate = deepcopy(stored)
     candidate["resource_limits"] = empty_policy()
@@ -696,7 +773,7 @@ def resource_repair_security(data_dir: Path) -> dict:
 
 
 def repair_resource_limits(data_dir: Path, payload: dict) -> dict:
-    """Explicitly repair only resource limits in an otherwise canonical v1 document."""
+    """Explicitly repair only resource limits in an otherwise supported document."""
     payload = _object(payload, "$")
     _reject_unknown(payload, {"resource_limits"}, "$")
     if "resource_limits" not in payload:

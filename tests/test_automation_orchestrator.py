@@ -7,7 +7,7 @@ from unittest import mock
 from debbuilder import app, build_pipeline, execution_projection, recipe_store, storage, validation_service
 from debbuilder.automation_identity import normalize_upstream_identity
 from debbuilder.automation_ledger import AutomationLedger
-from debbuilder.automation_orchestrator import AutomationOrchestrator
+from debbuilder.automation_orchestrator import AutomationOrchestrator, RUN_ADMISSION_TRANSIENT_CODES
 from debbuilder.build_models import utc_now
 from debbuilder.build_store import BuildStore, canonical_recipe_sha256
 from debbuilder.execution_manager import ExecutionManager
@@ -444,6 +444,154 @@ class OrchestratorCase(unittest.TestCase):
         self.assertEqual(self.enqueue.calls, [delayed["preallocated_run_id"]])
         self.assertEqual(len(list(self.store.root.glob("*/run.json"))), 1)
 
+    def test_storage_pressure_retries_same_preallocation_without_creating_workspace(self):
+        claim = self.claim("build")
+        admitted = self.enqueue
+        calls = []
+
+        class StoragePressure(RuntimeError):
+            code = "storage_pressure_admission_blocked"
+
+        def enqueue(manager, workflow, **kwargs):
+            calls.append(kwargs["run_id"])
+            if len(calls) == 1:
+                raise StoragePressure("pressure")
+            return admitted(manager, workflow, **kwargs)
+
+        owner = AutomationOrchestrator(
+            self.recipes, self.ledger, self.store,
+            execution_manager=lambda: object(), enqueue_run=enqueue,
+            validation_manager=lambda: self.validation, publish=self.publish,
+            notify_completion=self.notifications.append,
+            admission_open=lambda: self.open, wall_clock=lambda: self.clock[0],
+        )
+        owner.advance(claim.attempt_key, 0)
+        delayed = self.ledger.read()["attempts"][claim.attempt_key]["generations"][0]
+        self.assertEqual(delayed["state"], "retry_delayed")
+        self.assertEqual(delayed["last_error_code"], "storage_pressure_admission_blocked")
+        self.assertIsNone(delayed["run_id"])
+        self.assertEqual(list(self.store.root.glob("*/run.json")), [])
+        self.clock[0] += 61
+        owner.advance(claim.attempt_key, 0)
+        admitted_row = self.ledger.read()["attempts"][claim.attempt_key]["generations"][0]
+        self.assertEqual(calls, [delayed["preallocated_run_id"], delayed["preallocated_run_id"]])
+        self.assertEqual(admitted_row["run_id"], delayed["preallocated_run_id"])
+        self.assertEqual(len(list(self.store.root.glob("*/run.json"))), 1)
+        self.assertIn("storage_measurement_unavailable", RUN_ADMISSION_TRANSIENT_CODES)
+
+    def test_storage_measurement_failure_is_transient_without_notification_or_workspace(self):
+        claim = self.claim("build")
+
+        class MeasurementUnavailable(RuntimeError):
+            code = "storage_measurement_unavailable"
+
+        calls = []
+
+        def unavailable(_manager, _workflow, **kwargs):
+            calls.append(kwargs["run_id"])
+            raise MeasurementUnavailable("unavailable")
+
+        owner = AutomationOrchestrator(
+            self.recipes, self.ledger, self.store,
+            execution_manager=lambda: object(), enqueue_run=unavailable,
+            validation_manager=lambda: self.validation, publish=self.publish,
+            notify_completion=self.notifications.append,
+            admission_open=lambda: self.open, wall_clock=lambda: self.clock[0],
+        )
+        owner.advance(claim.attempt_key, 0)
+        delayed = self.ledger.read()["attempts"][claim.attempt_key]["generations"][0]
+        self.assertEqual(delayed["state"], "retry_delayed")
+        self.assertEqual(delayed["last_error_code"], "storage_measurement_unavailable")
+        self.assertIsNone(delayed["run_id"])
+        self.assertEqual(delayed["terminal_classification"], "transient_retryable")
+        self.assertEqual(calls, [delayed["preallocated_run_id"]])
+        self.assertEqual(self.notifications, [])
+        self.assertEqual(list(self.store.root.glob("*/run.json")), [])
+
+    def test_real_storage_guard_retry_creates_exact_preallocated_identity_once(self):
+        claim = self.claim("build")
+
+        def execute(run_id, *, store, expected_initial_status, cancellation_control=None):
+            run = store.transition_status(run_id, expected=expected_initial_status, status="running")
+            run.update({"status": "success", "finished_at": utc_now(), "duration": 0.0})
+            store.save(run)
+            return run
+
+        manager = ExecutionManager(self.store, execute=execute)
+        manager.start()
+        self.addCleanup(manager.stop, timeout=5)
+        inventory = mock.Mock()
+        inventory.collect_capacity.side_effect = [
+            {"builds": {"pressure_state": "pressure"}},
+            {"builds": {"pressure_state": "normal"}},
+        ]
+
+        def guarded_enqueue(selected_manager, workflow, **kwargs):
+            return app.enqueue_preallocated_recipe_run(
+                selected_manager, workflow, storage_inventory=inventory, **kwargs,
+            )
+
+        owner = AutomationOrchestrator(
+            self.recipes, self.ledger, self.store,
+            execution_manager=lambda: manager, enqueue_run=guarded_enqueue,
+            validation_manager=lambda: self.validation, publish=self.publish,
+            notify_completion=self.notifications.append,
+            admission_open=lambda: manager.accepting, wall_clock=lambda: self.clock[0],
+        )
+        old_data = app.DATA
+        app.DATA = self.data
+        self.addCleanup(setattr, app, "DATA", old_data)
+        capability = {
+            "backend": "process_group", "available": True,
+            "requested_controls": [], "reason": "not requested",
+        }
+        with mock.patch.object(app.command_containment, "resource_limit_capability", return_value=capability):
+            owner.advance(claim.attempt_key, 0)
+            delayed = self.ledger.read()["attempts"][claim.attempt_key]["generations"][0]
+            self.assertEqual(delayed["state"], "retry_delayed")
+            self.assertIsNone(delayed["run_id"])
+            self.assertEqual(list(self.store.root.glob("*/run.json")), [])
+            self.clock[0] += 61
+            owner.advance(claim.attempt_key, 0)
+        admitted = self.ledger.read()["attempts"][claim.attempt_key]["generations"][0]
+        self.assertEqual(admitted["run_id"], delayed["preallocated_run_id"])
+        self.assertEqual(len(list(self.store.root.glob("*/run.json"))), 1)
+        self.assertEqual(inventory.collect_capacity.call_count, 2)
+
+    def test_execution_storage_guard_notifies_automation_terminal_hook_once(self):
+        claim = self.claim("build")
+        owner = self.orchestrator()
+        owner.advance(claim.attempt_key, 0)
+        admitted = self.ledger.read()["attempts"][claim.attempt_key]["generations"][0]
+        run_id = admitted["run_id"]
+
+        old_owner = app.APPLICATION_AUTOMATION_ORCHESTRATOR
+        app.APPLICATION_AUTOMATION_ORCHESTRATOR = owner
+        self.addCleanup(setattr, app, "APPLICATION_AUTOMATION_ORCHESTRATOR", old_owner)
+        inventory = mock.Mock(
+            collect_capacity=mock.Mock(return_value={
+                "builds": {"pressure_state": "pressure"},
+            }),
+        )
+        with mock.patch.object(
+            owner, "on_run_terminal", wraps=owner.on_run_terminal,
+        ) as terminal_hook, mock.patch.object(
+            app.build_pipeline, "execute_pipeline_run",
+        ) as execute_pipeline, mock.patch.object(app, "request_maintenance"):
+            result = app.execute_queued_recipe_run(
+                run_id, store=self.store, expected_initial_status="queued",
+                storage_inventory=inventory,
+            )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error"]["code"], "storage_pressure_execution_blocked")
+        execute_pipeline.assert_not_called()
+        terminal_hook.assert_called_once_with(run_id)
+        terminal = self.ledger.read()["attempts"][claim.attempt_key]["generations"][0]
+        self.assertEqual(terminal["state"], "terminal")
+        self.assertEqual(terminal["terminal_classification"], "terminal_failure")
+        self.assertEqual(terminal["last_error_code"], "storage_pressure_execution_blocked")
+
     def test_disable_during_queue_backoff_blocks_pending_run_submission(self):
         claim = self.claim("build")
 
@@ -818,6 +966,11 @@ class OrchestratorCase(unittest.TestCase):
                 mock.patch.object(app, "request_maintenance"):
             app.execute_queued_recipe_run(
                 run_id, store=self.store, expected_initial_status="queued",
+                storage_inventory=mock.Mock(
+                    collect_capacity=mock.Mock(return_value={
+                        "builds": {"pressure_state": "normal"},
+                    }),
+                ),
             )
         manual_automation.assert_not_called()
         self.assertEqual(self.validation.calls, [])
@@ -915,6 +1068,11 @@ class OrchestratorCase(unittest.TestCase):
                 origin={"kind": "automation", "trigger": "upstream_change", "reason": "new_release"},
                 automation=metadata,
                 created_callback=lambda run: self.ledger.link_run(claim.attempt_key, 0, run["id"], store=self.store),
+                storage_inventory=mock.Mock(
+                    collect_capacity=mock.Mock(return_value={
+                        "builds": {"pressure_state": "normal"},
+                    }),
+                ),
             )
         self.assertEqual(result["run_id"], row["preallocated_run_id"])
         manager.stop(timeout=5)

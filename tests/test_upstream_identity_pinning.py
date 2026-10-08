@@ -350,6 +350,7 @@ class AcquisitionPinningTests(unittest.TestCase):
         }
         expected = source_archive_identity(configured, resolved, generated_release=True)
         manager = object()
+        inventory = object()
         with mock.patch.object(
             app, "_prepare_run_admission", return_value=(configured, {"contract": "test"}),
         ), mock.patch.object(
@@ -357,11 +358,14 @@ class AcquisitionPinningTests(unittest.TestCase):
         ), mock.patch.object(
             app, "_enqueue_prepared_recipe_run", return_value={"run_id": "run", "status": "queued"},
         ) as enqueue:
-            result = app.enqueue_recipe_run(manager, configured, dry_run=True)
+            result = app.enqueue_recipe_run(
+                manager, configured, dry_run=True, storage_inventory=inventory,
+            )
         self.assertEqual(result, {"run_id": "run", "status": "queued"})
         enqueue.assert_called_once_with(
             manager, configured, {"contract": "test"}, dry_run=True,
             manual_source_provenance=expected,
+            storage_inventory=inventory,
         )
 
     def test_manual_exact_ref_admission_does_not_add_latest_release_resolution(self):

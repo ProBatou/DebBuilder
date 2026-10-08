@@ -17,6 +17,48 @@ vm.runInContext(settingsSource, context, {filename: 'settings.js'});
 assert.match(settingsSource, /cleanup runs after startup, every five minutes/);
 assert.match(settingsSource, /published Run-local \.deb is pruned only after exact repository verification/);
 assert.match(settingsSource, /Terminal staging manifests are pruned after retained workspace evidence is cleared/);
+for (const field of [
+  'pressure_minimum_free_bytes',
+  'pressure_minimum_free_percent',
+  'pressure_target_free_bytes',
+  'pressure_target_free_percent',
+]) {
+  assert.match(settingsSource, new RegExp(field));
+}
+for (const label of [
+  'Pressure minimum free bytes',
+  'Pressure minimum free (%)',
+  'Pressure target free bytes',
+  'Pressure target free (%)',
+]) {
+  assert.match(settingsSource, new RegExp(label.replace(/[()]/g, '\\$&')));
+}
+assert.match(settingsSource, /max="9007199254740991"/);
+
+const elements = {
+  settingAppName:{value:'DebBuilder'}, settingPublicUrl:{value:''},
+  settingRepoUrl:{value:'https://repo.example.test'}, settingSuite:{value:'stable'},
+  settingComponent:{value:'main'}, settingArch:{value:'amd64'},
+  settingGithubToken:{value:''}, settingNtfyServer:{value:''},
+  settingNtfyTopic:{value:''}, settingNtfyToken:{value:''},
+  settingOidcIssuer:{value:''}, settingOidcClientId:{value:''},
+  settingOidcRedirectUri:{value:''}, settingOidcSecret:{value:''},
+  settingAutoValidateAfterBuild:{checked:false}, settingAutoPublishAfterValidation:{checked:false},
+  settingWorkspaceCleanupEnabled:{checked:true}, settingFailedWorkspacesToRetain:{value:'5'},
+  settingPressureMinimumFreeBytes:{value:'9007199254740990'},
+  settingPressureMinimumFreePercent:{value:'10'},
+  settingPressureTargetFreeBytes:{value:'9007199254740991'},
+  settingPressureTargetFreePercent:{value:'15'},
+};
+context.$ = id => elements[id] || null;
+vm.runInContext('currentSettings={resource_limits:{}}', context);
+const exactPayload = context.settingsPayload();
+assert.equal(exactPayload.workspace_cleanup.pressure_minimum_free_bytes, 9007199254740990);
+assert.equal(exactPayload.workspace_cleanup.pressure_target_free_bytes, Number.MAX_SAFE_INTEGER);
+assert.equal(
+  JSON.parse(JSON.stringify(exactPayload)).workspace_cleanup.pressure_target_free_bytes,
+  Number.MAX_SAFE_INTEGER,
+);
 
 assert.equal(context.formatStorageBytes(0), '0 B');
 assert.equal(context.formatStorageBytes(1024), '1.00 KiB');

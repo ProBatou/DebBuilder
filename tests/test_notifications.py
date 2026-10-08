@@ -211,18 +211,24 @@ class NotificationServiceTests(unittest.TestCase):
 
         old = server.NOTIFICATION_SERVICE
         server.NOTIFICATION_SERVICE = Recorder()
+        inventory = mock.Mock()
+        inventory.collect_capacity.return_value = {
+            "builds": {"pressure_state": "normal"},
+        }
         try:
             with mock.patch(
                 "debbuilder.app.build_pipeline.execute_pipeline_run", side_effect=fake_execute,
             ), mock.patch("debbuilder.app.request_maintenance"):
                 result = server.execute_queued_recipe_run(
                     run["id"], store=store, expected_initial_status="pending",
+                    storage_inventory=inventory,
                 )
         finally:
             server.NOTIFICATION_SERVICE = old
 
         self.assertEqual(result["run_id"], "run-callback")
         self.assertEqual(events[0][0], "build_failed")
+        inventory.collect_capacity.assert_called_once_with()
 
     def test_structured_build_pipeline_emits_started_and_failed_events(self):
         events = []

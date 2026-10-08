@@ -122,6 +122,25 @@ def public_error(error) -> dict | None:
     suggested_action = _safe_error_message(error.get("suggested_action"))[:240]
     if suggested_action:
         response["suggested_action"] = suggested_action
+    if response["code"] in {
+        "storage_pressure_admission_blocked", "storage_measurement_unavailable",
+    }:
+        source = error.get("details") if isinstance(error.get("details"), dict) else {}
+        details = {}
+        state = source.get("state")
+        if state in {"pressure", "measurement_error"}:
+            details["state"] = state
+        reason = source.get("reason")
+        if isinstance(reason, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,127}", reason):
+            details["reason"] = reason
+        for field in ("available_bytes", "start_bytes", "target_bytes"):
+            value = source.get(field)
+            if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 2**53 - 1:
+                details[field] = value
+        percent = source.get("available_percent")
+        if isinstance(percent, (int, float)) and not isinstance(percent, bool) and 0 <= percent <= 100:
+            details["available_percent"] = percent
+        response["details"] = details
     return response
 
 

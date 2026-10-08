@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import math
 import os
 import re
 import secrets
@@ -19,9 +20,21 @@ from .build_store import EXECUTION_HISTORY_DELETION_FILE as HISTORY_MARKER
 from .command_containment import containment_safety_gate, containment_safety_serialized
 from .recipe_schema import require_safe_name
 
-DISPOSABLE_DIRECTORIES = ("source", "staging", "downloads")
+RETENTION_DISPOSABLE_DIRECTORIES = ("source", "staging", "downloads")
+TERMINAL_DISPOSABLE_DIRECTORIES = ("toolchain",)
+DISPOSABLE_DIRECTORIES = RETENTION_DISPOSABLE_DIRECTORIES + TERMINAL_DISPOSABLE_DIRECTORIES
 DISPOSABLE_FILES = ("source.tar.gz",)
-DEFAULT_POLICY = {"enabled": True, "failed_workspaces_to_retain": 5}
+# Settings cross a JSON/JavaScript Number boundary in both supported UIs.
+# Keep every accepted byte threshold exactly representable end to end.
+MAX_SAFE_JSON_INTEGER = 2**53 - 1
+DEFAULT_POLICY = {
+    "enabled": True,
+    "failed_workspaces_to_retain": 5,
+    "pressure_minimum_free_bytes": 536_870_912,
+    "pressure_minimum_free_percent": 10,
+    "pressure_target_free_bytes": 1_073_741_824,
+    "pressure_target_free_percent": 15,
+}
 CLEANUP_MARKER = ".workspace-cleanup.json"
 
 
@@ -256,7 +269,13 @@ def _remove_targets(fd: int, directories: tuple[str, ...], files: tuple[str, ...
     return removed
 
 
-def _check_artifact(run: dict, *, extra_directories: tuple[str, ...] = ()) -> None:
+def _check_artifact(
+    run: dict,
+    *,
+    directories: tuple[str, ...] = DISPOSABLE_DIRECTORIES,
+    files: tuple[str, ...] = DISPOSABLE_FILES,
+    extra_directories: tuple[str, ...] = (),
+) -> None:
     workspace = Path(run["workspace"])
     candidates = [run.get("artifact") or {}]
     for step in run["steps"]:
@@ -269,7 +288,10 @@ def _check_artifact(run: dict, *, extra_directories: tuple[str, ...] = ()) -> No
             continue
         path = Path(artifact["path"])
         resolved = (path if path.is_absolute() else workspace / path).resolve(strict=False)
-        if any(resolved.is_relative_to(workspace / name) for name in DISPOSABLE_DIRECTORIES + extra_directories) or resolved == workspace / "source.tar.gz":
+        if (
+            any(resolved.is_relative_to(workspace / name) for name in directories + extra_directories)
+            or any(resolved == workspace / name for name in files)
+        ):
             raise ValueError("Final artifact is inside disposable workspace data; cleanup refused")
 
 
@@ -340,15 +362,17 @@ def _clean_locked(
     run: dict,
     *,
     reason: str,
+    directories: tuple[str, ...] = DISPOSABLE_DIRECTORIES,
+    files: tuple[str, ...] = DISPOSABLE_FILES,
     authorization: CleanupAuthorization = OPEN_CLEANUP_AUTHORIZATION,
 ) -> dict:
     # A terminal Run can still retain command ownership metadata after a
     # containment failure.  Startup recovery must prove workload absence and
     # clear that exact record before workspace data may be destroyed.
     require_destructive_run_safe(fd, run, authorization=authorization)
-    _check_artifact(run)
-    _check_targets(fd, DISPOSABLE_DIRECTORIES, DISPOSABLE_FILES)
-    removed = _remove_targets(fd, DISPOSABLE_DIRECTORIES, DISPOSABLE_FILES)
+    _check_artifact(run, directories=directories, files=files)
+    _check_targets(fd, directories, files)
+    removed = _remove_targets(fd, directories, files)
     result = {"id": run["id"], "removed": removed, "reason": reason}
     if removed:
         write_json(fd, CLEANUP_MARKER, {**result, "cleaned_at": utc_now()})
@@ -434,6 +458,20 @@ def validate_policy(policy: dict) -> dict:
     count = result["failed_workspaces_to_retain"]
     if type(count) is not int or not 0 <= count <= 1000:
         raise ValueError("failed_workspaces_to_retain must be an integer between 0 and 1000")
+    for field in ("pressure_minimum_free_bytes", "pressure_target_free_bytes"):
+        value = result[field]
+        if type(value) is not int or not 0 < value <= MAX_SAFE_JSON_INTEGER:
+            raise ValueError(
+                f"{field} must be an integer between 1 and {MAX_SAFE_JSON_INTEGER}"
+            )
+    for field in ("pressure_minimum_free_percent", "pressure_target_free_percent"):
+        value = result[field]
+        if type(value) is not int or not 1 <= value <= 99:
+            raise ValueError(f"{field} must be an integer between 1 and 99")
+    if result["pressure_target_free_bytes"] <= result["pressure_minimum_free_bytes"]:
+        raise ValueError("pressure_target_free_bytes must exceed pressure_minimum_free_bytes")
+    if result["pressure_target_free_percent"] <= result["pressure_minimum_free_percent"]:
+        raise ValueError("pressure_target_free_percent must exceed pressure_minimum_free_percent")
     return {key: result[key] for key in DEFAULT_POLICY}
 
 
@@ -464,10 +502,39 @@ def _canonical_validation_attempts(store, run: dict) -> list[dict]:
 
 
 def _completion_time(store, run: dict) -> float:
-    dates = [run.get("finished_at") or run.get("created_at")]
+    dates = [run.get("finished_at")]
     dates.extend(attempt.get("finished_at") for attempt in _canonical_validation_attempts(store, run))
     dates.extend(attempt.get("finished_at") for attempt in (run.get("publications") or []))
-    return max(datetime.fromisoformat(date).timestamp() for date in dates if date)
+    completed = []
+    for date in dates:
+        if not isinstance(date, str) or not date:
+            continue
+        try:
+            parsed = datetime.fromisoformat(date)
+            timestamp = parsed.timestamp() if parsed.tzinfo is not None else math.nan
+        except (OSError, OverflowError, ValueError):
+            continue
+        if math.isfinite(timestamp):
+            completed.append(timestamp)
+    if completed:
+        return max(completed)
+    created_epoch = run.get("created_at_epoch")
+    if (
+        not isinstance(created_epoch, bool)
+        and isinstance(created_epoch, (int, float))
+        and math.isfinite(created_epoch)
+    ):
+        return float(created_epoch)
+    created_at = run.get("created_at")
+    if isinstance(created_at, str) and created_at:
+        try:
+            parsed = datetime.fromisoformat(created_at)
+            timestamp = parsed.timestamp() if parsed.tzinfo is not None else math.nan
+        except (OSError, OverflowError, ValueError):
+            timestamp = math.nan
+        if math.isfinite(timestamp):
+            return timestamp
+    raise ValueError("Run completion time is not reliably orderable")
 
 
 def _retention_failed(store, run: dict) -> bool:
@@ -488,7 +555,10 @@ def apply_retention(
     should_stop: Callable[[], bool] | None = None,
 ) -> dict:
     policy = validate_policy(DEFAULT_POLICY if policy is None else policy)
-    result = {"cleaned": [], "retained": [], "skipped": [], "errors": []}
+    result = {
+        "cleaned": [], "retained": [], "pressure_candidates": [],
+        "skipped": [], "errors": [],
+    }
     if not policy["enabled"]:
         return result
     stop_requested = should_stop or (lambda: False)
@@ -519,19 +589,23 @@ def apply_retention(
                 failed = _retention_failed(store, run)
                 deleted = bool(read_json(fd, HISTORY_MARKER) or run.get("log_deleted"))
                 revision = os.stat("run.json", dir_fd=fd, follow_symlinks=False).st_mtime_ns
-                candidates.append((run_id, _completion_time(store, run), failed, deleted, revision))
+                terminal_disposable = bool(entries.intersection(TERMINAL_DISPOSABLE_DIRECTORIES))
+                candidates.append((run_id, _completion_time(store, run), failed, deleted, revision, terminal_disposable))
         except (WorkspaceBusyError, FileNotFoundError):
             result["skipped"].append(run_id)
         except (OSError, ValueError) as exc:
             result["errors"].append({"id": run_id, "error": str(exc)})
     candidates.sort(key=lambda row: (row[1], row[0]), reverse=True)
     retained = 0
-    for run_id, _date, failed, deleted, revision in candidates:
+    for run_id, _date, failed, deleted, revision, terminal_disposable in candidates:
         if stop_requested():
             break
-        if failed and not deleted and retained < policy["failed_workspaces_to_retain"]:
+        retain_workspace = failed and not deleted and retained < policy["failed_workspaces_to_retain"]
+        if retain_workspace:
             result["retained"].append(run_id)
             retained += 1
+        if retain_workspace and not terminal_disposable:
+            result["pressure_candidates"].append(run_id)
             continue
         try:
             # Re-read while locked; a validation/publication may have begun
@@ -551,12 +625,159 @@ def apply_retention(
                         result["skipped"].append(run_id)
                         continue
                     cleanup = _clean_locked(
-                        fd, run, reason="retention", authorization=authorization,
+                        fd,
+                        run,
+                        reason="terminal_run" if retain_workspace else "retention",
+                        directories=(
+                            TERMINAL_DISPOSABLE_DIRECTORIES
+                            if retain_workspace else DISPOSABLE_DIRECTORIES
+                        ),
+                        files=() if retain_workspace else DISPOSABLE_FILES,
+                        authorization=authorization,
                     )
                     if cleanup["removed"]:
                         result["cleaned"].append(cleanup)
+                    if retain_workspace:
+                        result["pressure_candidates"].append(run_id)
         except (WorkspaceBusyError, FileNotFoundError):
             result["skipped"].append(run_id)
         except (OSError, ValueError) as exc:
             result["errors"].append({"id": run_id, "error": str(exc)})
+    return result
+
+
+def apply_storage_pressure(
+    store,
+    candidate_ids: list[str],
+    initial_capacity: dict,
+    measure_capacity: Callable[[], dict],
+    policy: dict | None = None,
+    *,
+    authorization: CleanupAuthorization = OPEN_CLEANUP_AUTHORIZATION,
+    should_stop: Callable[[], bool] | None = None,
+) -> dict:
+    """Override failed-Run retention while Builds remains below its target."""
+    canonical = validate_policy(DEFAULT_POLICY if policy is None else policy)
+    builds = initial_capacity.get("builds", {})
+    result = {
+        "pressure_checked": True,
+        "initial_state": builds.get("pressure_state", "measurement_error"),
+        "candidates_considered": 0,
+        "cleaned": [],
+        "skipped": [],
+        "errors": [],
+        "target_reached": False,
+        "final_state": builds.get("pressure_state", "measurement_error"),
+    }
+    if (
+        result["initial_state"] != "pressure"
+        or builds.get("measurement_state") != "ready"
+        or type(builds.get("available_bytes")) is not int
+        or type(builds.get("effective_target_bytes")) is not int
+        or not canonical["enabled"]
+    ):
+        return result
+    stop_requested = should_stop or (lambda: False)
+    if stop_requested():
+        return result
+    try:
+        authorization.require_global()
+    except WorkspaceBusyError as exc:
+        result["blocked"] = {"scope": "global", "reason": str(exc)}
+        return result
+
+    selected = []
+    for run_id in dict.fromkeys(candidate_ids):
+        if stop_requested():
+            return result
+        try:
+            with store.locked_run(run_id, blocking=False) as fd:
+                run = read_run(fd, store.root, run_id)
+                authorization.require_run(run)
+                require_finished(run)
+                entries = set(os.listdir(fd))
+                if not entries.intersection(
+                    RETENTION_DISPOSABLE_DIRECTORIES + DISPOSABLE_FILES
+                ):
+                    continue
+                if not _retention_failed(store, run):
+                    result["skipped"].append(run_id)
+                    continue
+                revision = os.stat(
+                    "run.json", dir_fd=fd, follow_symlinks=False,
+                ).st_mtime_ns
+                try:
+                    completion_order = (0, _completion_time(store, run))
+                except ValueError:
+                    # Unorderable age is never treated as older than a known
+                    # completion. Run ID remains the deterministic fallback.
+                    completion_order = (1, 0.0)
+                selected.append((*completion_order, run_id, revision))
+        except (WorkspaceBusyError, FileNotFoundError):
+            result["skipped"].append(run_id)
+        except (OSError, ValueError) as exc:
+            result["errors"].append({"id": run_id, "error": str(exc)})
+    selected.sort(key=lambda row: (row[0], row[1], row[2]))
+
+    for _unknown, _date, run_id, revision in selected:
+        if stop_requested():
+            break
+        result["candidates_considered"] += 1
+        try:
+            # Selection is never authorization. Re-read and apply the complete
+            # CP1 destructive gate while holding both containment and Run locks.
+            with containment_safety_gate():
+                with store.locked_run(run_id, blocking=False) as fd:
+                    if stop_requested():
+                        break
+                    run = read_run(fd, store.root, run_id)
+                    authorization.require_run(run)
+                    require_finished(run)
+                    if os.stat(
+                        "run.json", dir_fd=fd, follow_symlinks=False,
+                    ).st_mtime_ns != revision:
+                        result["skipped"].append(run_id)
+                        continue
+                    if not _retention_failed(store, run):
+                        result["skipped"].append(run_id)
+                        continue
+                    cleanup = _clean_locked(
+                        fd,
+                        run,
+                        reason="storage_pressure",
+                        directories=RETENTION_DISPOSABLE_DIRECTORIES,
+                        files=DISPOSABLE_FILES,
+                        authorization=authorization,
+                    )
+            if not cleanup["removed"]:
+                continue
+            result["cleaned"].append(cleanup)
+        except (WorkspaceBusyError, FileNotFoundError):
+            result["skipped"].append(run_id)
+            continue
+        except OSError as exc:
+            # Removal may already have happened before a filesystem or marker
+            # finalization failure. Stop this pass; a later pass is idempotent.
+            result["errors"].append({"id": run_id, "error": str(exc)})
+            break
+        except ValueError as exc:
+            result["errors"].append({"id": run_id, "error": str(exc)})
+            continue
+
+        capacity = measure_capacity()
+        builds = capacity.get("builds", {})
+        result["final_state"] = builds.get(
+            "pressure_state", "measurement_error",
+        )
+        target = builds.get("effective_target_bytes")
+        available = builds.get("available_bytes")
+        if (
+            type(target) is int
+            and type(available) is int
+            and available >= target
+        ):
+            result["target_reached"] = True
+            break
+        if result["final_state"] != "pressure":
+            break
     return result

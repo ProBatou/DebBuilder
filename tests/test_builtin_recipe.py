@@ -41,7 +41,7 @@ class BuiltinRecipeTests(unittest.TestCase):
         self.assertEqual(canonical["name"], "debbuilder")
         self.assertEqual(canonical["management"], {
             "owner": "application", "builtin_id": "debbuilder",
-            "definition_version": 9, "operator_overrides": {},
+            "definition_version": 10, "operator_overrides": {},
         })
         self.assertEqual(builtin_recipe.OPERATOR_OVERRIDE_PATHS, (
             "active",
@@ -64,6 +64,8 @@ class BuiltinRecipeTests(unittest.TestCase):
         self.assertEqual(canonical["service"]["type"], "simple")
         self.assertEqual(canonical["service"]["exec_start_pre"],
                          ["/usr/bin/python3 /opt/debbuilder/bootstrap_local.py"])
+        self.assertEqual(canonical["build"]["node_project_directory"], "frontend")
+        self.assertNotIn("build.node_project_directory", builtin_recipe.OPERATOR_OVERRIDE_PATHS)
         self.assertEqual(builtin_recipe.ui_projection(canonical), {
             "source": "builtin",
             "managed": True,
@@ -153,28 +155,44 @@ class BuiltinRecipeTests(unittest.TestCase):
             builtin_recipe.effective_builtin_recipe({"build": "invalid"})
         self.assertEqual(raised.exception.code, "builtin_recipe_override_invalid")
 
-    def test_definition_upgrade_replaces_managed_fields_and_keeps_override(self):
-        first = builtin_recipe.reconcile_builtin_recipe(self.workflows)
-        edited = copy.deepcopy(first.recipe)
-        edited["active"] = False
-        builtin_recipe.update_builtin_recipe(self.path, edited)
+    def test_definition_v9_upgrade_adds_auxiliary_node_project_and_preserves_overrides(self):
+        previous = self.definition()
+        previous["management"]["definition_version"] = 9
+        previous["build"].pop("node_project_directory")
+        previous["package"]["description"] = "previous managed description"
+        previous["active"] = False
+        previous["package"]["maintainer"] = "Operator <operator@example.test>"
+        previous["build"]["environment"] = {"OPERATOR_MODE": "enabled"}
+        previous["build"]["inactivity_timeout"] = 420
+        previous["build"]["maximum_runtime"] = 1200
+        previous["resource_limits"]["tasks_max"] = 128
+        previous["management"]["operator_overrides"] = {
+            "active": False,
+            "package": {"maintainer": "Operator <operator@example.test>"},
+            "build": {
+                "environment": {"OPERATOR_MODE": "enabled"},
+                "inactivity_timeout": 420,
+                "maximum_runtime": 1200,
+            },
+            "resource_limits": copy.deepcopy(previous["resource_limits"]),
+        }
+        self.write(previous)
 
-        upgraded_definition = self.definition()
-        upgraded_definition["management"]["definition_version"] = 10
-        upgraded_definition["package"]["description"] = "DebBuilder managed definition v10"
-        upgraded_definition["package"]["runtime_dependencies"].append("curl")
-        definition_path = Path(self.temporary.name) / "definition-v10.json"
-        definition_path.write_text(json.dumps(upgraded_definition))
-
-        result = builtin_recipe.reconcile_builtin_recipe(self.workflows, definition_path=definition_path)
+        result = builtin_recipe.reconcile_builtin_recipe(self.workflows)
 
         self.assertEqual(result.action, "upgraded")
         self.assertEqual(result.previous_definition_version, 9)
         self.assertEqual(result.definition_version, 10)
         self.assertFalse(result.recipe["active"])
-        self.assertEqual(result.recipe["package"]["description"], "DebBuilder managed definition v10")
-        self.assertIn("curl", result.recipe["package"]["runtime_dependencies"])
-        self.assertEqual(result.recipe["management"]["operator_overrides"], {"active": False})
+        self.assertEqual(result.recipe["schema_version"], 5)
+        self.assertEqual(result.recipe["build"]["node_project_directory"], "frontend")
+        self.assertEqual(result.recipe["package"]["description"], "debbuilder")
+        self.assertEqual(result.recipe["package"]["maintainer"], "Operator <operator@example.test>")
+        self.assertEqual(result.recipe["build"]["environment"], {"OPERATOR_MODE": "enabled"})
+        self.assertEqual(result.recipe["build"]["inactivity_timeout"], 420)
+        self.assertEqual(result.recipe["build"]["maximum_runtime"], 1200)
+        self.assertEqual(result.recipe["resource_limits"]["tasks_max"], 128)
+        self.assertEqual(result.recipe["management"]["operator_overrides"], previous["management"]["operator_overrides"])
 
     def test_v5_upgrade_adds_podman_module_loader_and_bytecode_suppression(self):
         previous = self.definition()
@@ -187,7 +205,7 @@ class BuiltinRecipeTests(unittest.TestCase):
 
         result = builtin_recipe.reconcile_builtin_recipe(self.workflows)
 
-        self.assertEqual((result.action, result.previous_definition_version, result.definition_version), ("upgraded", 5, 9))
+        self.assertEqual((result.action, result.previous_definition_version, result.definition_version), ("upgraded", 5, 10))
         self.assertFalse(result.recipe["active"])
         self.assertIn("kmod", result.recipe["package"]["runtime_dependencies"])
         self.assertTrue(result.recipe["install"]["maintainer_scripts"]["postinst"].startswith("PYTHONDONTWRITEBYTECODE=1 "))
@@ -207,7 +225,7 @@ class BuiltinRecipeTests(unittest.TestCase):
 
         self.assertEqual(result.action, "upgraded")
         self.assertEqual(result.previous_definition_version, 1)
-        self.assertEqual(result.definition_version, 9)
+        self.assertEqual(result.definition_version, 10)
         self.assertEqual(result.recipe["service"]["restart_sec"], "3s")
         self.assertEqual(result.recipe["service"]["timeout_stop_sec"], "20s")
         self.assertEqual(result.recipe["service"]["kill_signal"], "SIGTERM")
@@ -235,7 +253,7 @@ class BuiltinRecipeTests(unittest.TestCase):
 
         self.assertEqual(result.action, "upgraded")
         self.assertEqual(result.previous_definition_version, 2)
-        self.assertEqual(result.definition_version, 9)
+        self.assertEqual(result.definition_version, 10)
         self.assertEqual(result.recipe["service"]["environment_files"], ["/etc/debbuilder/debbuilder.env"])
         self.assertFalse(result.recipe["active"])
         self.assertEqual(result.recipe["package"]["maintainer"], "Operator <operator@example.test>")
@@ -244,7 +262,7 @@ class BuiltinRecipeTests(unittest.TestCase):
 
     def test_newer_persisted_definition_requires_review_without_rewrite(self):
         managed = self.definition()
-        managed["management"]["definition_version"] = 10
+        managed["management"]["definition_version"] = 11
         original = self.write(managed)
 
         with self.assertRaises(builtin_recipe.BuiltinRecipeError) as raised:
@@ -300,6 +318,8 @@ class BuiltinRecipeTests(unittest.TestCase):
         self.assertEqual(recipe["source"]["repository"], "ProBatou/DebBuilder")
         self.assertEqual(recipe["package"]["runtime_dependencies"], ["python3", "python3-dbus", "reprepro", "gnupg", "gpgv", "podman", "kmod", "ca-certificates", "binutils"])
         self.assertEqual(recipe["build"]["detected_project"], "python")
+        self.assertEqual(recipe["build"]["node_project_directory"], "frontend")
+        self.assertEqual(recipe["build"]["working_directory"], ".")
         self.assertEqual(recipe["build"]["commands"], [
             "node frontend/scripts/check-toolchain.mjs",
             "npm --prefix frontend ci",
@@ -348,6 +368,10 @@ class BuiltinRecipeTests(unittest.TestCase):
             self.assertTrue((staging / "opt/debbuilder/debbuilder/__init__.py").is_file())
             self.assertTrue((staging / "opt/debbuilder/server.py").is_file())
             self.assertTrue((staging / "opt/debbuilder/static/index.html").is_file())
+            self.assertFalse((staging / "opt/debbuilder/frontend").exists())
+            self.assertFalse((staging / "opt/debbuilder/node_modules").exists())
+            self.assertFalse((staging / "opt/debbuilder/bin/node").exists())
+            self.assertFalse((staging / "opt/debbuilder/bin/npm").exists())
             self.assertTrue((staging / "usr/share/debbuilder/config-templates/etc/debbuilder/debbuilder.env").is_file())
             self.assertIn("Depends: python3, python3-dbus", result["control"])
             self.assertIn("ExecStart=/usr/bin/python3 /opt/debbuilder/server.py", result["systemd"]["content"])

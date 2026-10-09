@@ -7,10 +7,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from debbuilder import build_pipeline, execution_service
+from debbuilder import build_pipeline, builtin_recipe, execution_service
+from debbuilder.automation_identity import source_archive_identity
 from debbuilder.build_models import RUN_STATUSES, STEP_NAMES
 from debbuilder.build_store import BuildStore
 from debbuilder.recipe_schema import RecipeDocumentError
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 def recipe():
@@ -400,6 +404,113 @@ class BuildStoreTests(unittest.TestCase):
             self.assertIn("node-marker=hybrid-cp2", output)
             self.assertFalse(host_selected.exists())
             self.assertEqual(store.load(result["run_id"])["toolchain"], identity)
+
+    def test_builtin_self_build_uses_manifest_requirements_and_one_toolchain_environment(self):
+        definition = builtin_recipe.load_builtin_definition()
+        resolved = {
+            "repository": "ProBatou/DebBuilder",
+            "ref": "v1.2.3",
+            "tag": "v1.2.3",
+            "upstream_version": "1.2.3",
+            "commit": "a" * 40,
+            "ref_object_sha": "b" * 40,
+            "release_id": 53,
+        }
+        expected_identity = source_archive_identity(definition, resolved, generated_release=True)
+        manifest = json.loads((REPOSITORY_ROOT / "frontend/package.json").read_text())
+        toolchain_environment = {
+            "PATH": "/run/toolchain/bin:/usr/bin:/bin",
+            "HOME": "/run/toolchain/home",
+            "npm_config_cache": "/run/toolchain/npm-cache",
+            "COREPACK_HOME": "/run/toolchain/corepack",
+            "COREPACK_ENABLE_DOWNLOAD_PROMPT": "0",
+        }
+        identity = {
+            "node": {"version": "24.21.0"},
+            "package_manager": {"name": "npm", "version": "11.20.0"},
+        }
+        dependency_environments = []
+        build_environments = []
+
+        def acquire(_recipe, _workspace, token="", expected_identity=None):
+            return {
+                **resolved,
+                "debian_version": "1.2.3-1",
+                "source_directory": str(REPOSITORY_ROOT),
+                "upstream_identity": expected_identity,
+            }
+
+        def dependency_check(detected, manual, **kwargs):
+            dependency_environments.append(kwargs["environment"])
+            return {
+                "detected": detected,
+                "manually_added": manual,
+                "required": detected + manual,
+                "available": detected + manual,
+                "missing": [],
+                "available_tools": ["node", "npm"],
+                "missing_tools": [],
+                "tool_checks": [],
+                "installation_attempted": False,
+            }
+
+        def execute_build(recipe, detection, source_directory, **kwargs):
+            build_environments.append(kwargs["environment"])
+            self.assertEqual(recipe["build"]["commands"], definition["build"]["commands"])
+            self.assertEqual(detection["project_type"], "python")
+            self.assertEqual(Path(source_directory), REPOSITORY_ROOT)
+            return {
+                "executed": True,
+                "plan": {"commands": recipe["build"]["commands"]},
+                "commands": [],
+                "output": {"mode": "paths", "paths": []},
+            }
+
+        with tempfile.TemporaryDirectory() as temporary:
+            store = BuildStore(Path(temporary) / "builds")
+            run_id = build_pipeline.create_pipeline_run(
+                definition,
+                store=store,
+                dry_run=False,
+                manual_source_provenance=expected_identity,
+            )["id"]
+            with (
+                patch.object(build_pipeline.node_toolchain, "resolve", return_value={"resolved": True}) as resolve_toolchain,
+                patch.object(build_pipeline.node_toolchain, "prepare", return_value={
+                    "identity": identity, "environment": toolchain_environment,
+                }) as prepare_toolchain,
+                patch.object(build_pipeline.node_toolchain, "validate_prepared", return_value=toolchain_environment) as validate_toolchain,
+                patch.object(build_pipeline.dependency_checker, "check_dependencies", side_effect=dependency_check),
+                patch.object(build_pipeline.build_executor, "execute_build", side_effect=execute_build),
+                patch.object(
+                    build_pipeline.debian_packaging,
+                    "prepare_staging",
+                    side_effect=build_pipeline.debian_packaging.PackagingError(
+                        "test_stop_after_build", "Controlled test stops after pipeline integration proof",
+                    ),
+                ),
+            ):
+                result = build_pipeline.execute_pipeline_run(run_id, store=store, acquire=acquire)
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error"]["code"], "test_stop_after_build")
+        self.assertEqual(result["detection"]["project_type"], "python")
+        auxiliary = result["detection"]["auxiliary_node_project"]
+        self.assertEqual(auxiliary["project_directory"], "frontend")
+        self.assertEqual(auxiliary["manifest"], "frontend/package.json")
+        self.assertEqual(auxiliary["node_version"], manifest["engines"]["node"])
+        self.assertEqual(auxiliary["npm_version"], manifest["engines"]["npm"])
+        self.assertEqual(auxiliary["package_manager_spec"], manifest["packageManager"])
+        self.assertEqual(auxiliary["package_manager_version"], "11.20.0")
+        resolve_toolchain.assert_called_once_with(
+            {"node": manifest["engines"]["node"], "npm": "11.20.0"},
+            package_manager="npm",
+            checkpoint=resolve_toolchain.call_args.kwargs["checkpoint"],
+        )
+        prepare_toolchain.assert_called_once()
+        self.assertEqual(validate_toolchain.call_count, 2)
+        self.assertEqual(dependency_environments, [toolchain_environment])
+        self.assertEqual(build_environments, [toolchain_environment])
 
     def test_missing_prepared_auxiliary_toolchain_fails_before_build_without_host_fallback(self):
         with tempfile.TemporaryDirectory() as temporary:

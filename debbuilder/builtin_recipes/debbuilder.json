@@ -9,7 +9,7 @@
   "management": {
     "owner": "application",
     "builtin_id": "debbuilder",
-    "definition_version": 9,
+    "definition_version": 10,
     "operator_overrides": {}
   },
   "resource_limits": {
@@ -65,6 +65,7 @@
   },
   "build": {
     "detected_project": "python",
+    "node_project_directory": "frontend",
     "detected_files": [],
     "detected_dependencies": [],
     "detected_tools": [],

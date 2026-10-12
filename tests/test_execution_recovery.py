@@ -188,6 +188,88 @@ class StartupRecoveryTests(unittest.TestCase):
         self.assertTrue(all(step["status"] == "pending" for step in recovered["steps"][2:]))
         self.assertEqual(recovered["cancellation"], run["cancellation"])
 
+    def test_interrupted_hybrid_runs_terminalize_without_losing_toolchain_provenance(self):
+        identity = {
+            "schema_version": 1,
+            "requested_node_range": ">=24 <25",
+            "node": {
+                "version": "24.12.0", "platform": "linux", "architecture": "x64",
+                "archive": "node-v24.12.0-linux-x64.tar.xz", "sha256": "a" * 64,
+                "source": "https://nodejs.invalid/v24.12.0/node.tar.xz",
+            },
+            "package_manager": {
+                "name": "npm", "version": "11.7.0", "requested_range": "11.7.0",
+                "integrity": "sha512-fixture", "source": "https://registry.invalid/npm.tgz",
+            },
+        }
+        auxiliary = {
+            "project_directory": "frontend", "manifest": "frontend/package.json",
+            "package_manager": "npm", "package_manager_spec": "npm@11.7.0",
+            "node_version": ">=24 <25", "npm_version": ">=11 <12",
+        }
+        scenarios = {
+            "hybrid-dependencies": ("dependencies", False),
+            "hybrid-after-prepare": ("dependencies", True),
+            "hybrid-build": ("build", True),
+            "hybrid-after-build": (None, True),
+        }
+        shared = self.store.root.parent / "toolchains/node/linux-x64/24.12.0/manifest.json"
+        shared.parent.mkdir(parents=True)
+        shared.write_text("immutable shared cache")
+
+        for run_id, (active_name, prepared) in scenarios.items():
+            run = self.create(run_id, "running")
+            active_index = next(
+                (index for index, step in enumerate(run["steps"]) if step["name"] == active_name),
+                5,
+            )
+            for step in run["steps"][:active_index]:
+                step.update({
+                    "status": "success", "started_at": run["created_at"],
+                    "finished_at": run["created_at"], "duration": 0.0,
+                })
+            detection = next(step for step in run["steps"] if step["name"] == "detection")
+            detection["details"] = {
+                "project_type": "python", "display_name": "Python",
+                "auxiliary_node_project": auxiliary,
+            }
+            if active_name is not None:
+                active = next(step for step in run["steps"] if step["name"] == active_name)
+                active.update({"status": "running", "started_at": run["created_at"]})
+            if prepared:
+                run["toolchain"] = identity
+                dependencies = next(step for step in run["steps"] if step["name"] == "dependencies")
+                dependencies.setdefault("details", {})["toolchain"] = identity
+                toolchain = Path(run["workspace"]) / "toolchain/bin"
+                toolchain.mkdir(parents=True)
+                (toolchain / "node").write_text("run-local fixture")
+            self.store.save(run)
+            self.save_identity(run_id, self.process_identity(
+                run_id, boot_id="00000000-0000-0000-0000-000000000000",
+            ))
+
+        result = recover_startup(self.store)
+
+        self.assertIsNone(result.admission_blocker)
+        self.assertEqual(set(result.recovered_run_ids), set(scenarios))
+        for run_id, (active_name, prepared) in scenarios.items():
+            recovered = self.store.load(run_id)
+            self.assertEqual(recovered["status"], "failed")
+            self.assertEqual(recovered["error"]["code"], RECOVERY_ERROR_CODE)
+            self.assertEqual(recovered["error"]["stage"], active_name or "recovery")
+            self.assertEqual(recovered["recovery"]["status"], "resolved")
+            detection = next(step for step in recovered["steps"] if step["name"] == "detection")
+            self.assertEqual(detection["details"]["project_type"], "python")
+            self.assertEqual(detection["details"]["auxiliary_node_project"], auxiliary)
+            self.assertEqual(recovered["toolchain"], identity if prepared else None)
+
+        workspace_cleanup.apply_retention(self.store)
+        for run_id, (_active_name, prepared) in scenarios.items():
+            recovered = self.store.load(run_id)
+            self.assertEqual(recovered["toolchain"], identity if prepared else None)
+            self.assertFalse((Path(recovered["workspace"]) / "toolchain").exists())
+        self.assertEqual(shared.read_text(), "immutable shared cache")
+
     def test_multiple_running_steps_block_ambiguous_lifecycle_mutation(self):
         run = self.create("multiple-running-steps", "running")
         for step in run["steps"][:2]:

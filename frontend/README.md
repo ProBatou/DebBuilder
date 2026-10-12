@@ -43,6 +43,15 @@ backend-controlled. Expert JSON import/edit applies only to the draft after
 backend validation; Save is separate. Standalone New Recipe is intentionally
 hidden in the current operator UI.
 
+For an ordinary Python `source_build`, Advanced configuration can represent
+the optional `build.node_project_directory` without adding it implicitly.
+It also offers the closed optional `build.auxiliary_node_install: npm_ci`
+choice; clearing either optional control removes that field. The backend owns
+path, Python/source-build, lockfile, and applicability rules. Dry-run validates
+the npm inputs without installing; Build uses npm offline after Dependencies
+installs once. The system-managed DebBuilder Recipe keeps both values read-only
+because they are not allowed operator overrides.
+
 Test and Build validate the exact same frozen current draft submitted for Run
 admission. Test sends `dry_run: true`; Build sends `dry_run: false`. Neither
 implicitly saves the Recipe. The returned `run_id` is the navigation target.
@@ -50,6 +59,11 @@ An ambiguous network outcome is not automatically retried. Run selection owns
 detail/log polling; requests do not overlap, stale selection responses are
 ignored, the log cursor is per verbosity, and terminal detail polling stops.
 The list continues to refresh while Runs is open.
+
+When detection reports an explicit auxiliary Node project, Run detail labels
+the primary application as Python and the auxiliary Node/npm build toolchain
+separately. Resolved versions remain in Technical facts; the UI never recasts
+the self-build as a primary Node application.
 
 Eligible Run, Package and Overview actions recheck current state before
 Validation, Publication or Build update. Publication requires confirmation of

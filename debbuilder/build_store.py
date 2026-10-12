@@ -198,11 +198,14 @@ class BuildStore:
             data = handle.read()
         return {"text": data.decode("utf-8", errors="replace"), "offset": size, "size": size}
 
-    def save_command_result(self, run_id: str, result: dict) -> Path:
+    def save_command_result(self, run_id: str, result: dict, *, namespace: str = "build") -> Path:
         index = int(result.get("index") or 0)
         if index < 1:
             raise ValueError("command result requires a positive index")
-        path = self.run_dir(run_id) / "logs" / "commands" / f"{index:03d}.json"
+        if namespace not in {"build", "dependencies"}:
+            raise ValueError("command result namespace must be build or dependencies")
+        filename = f"{index:03d}.json" if namespace == "build" else f"dependencies-{index:03d}.json"
+        path = self.run_dir(run_id) / "logs" / "commands" / filename
         storage.save_json(path, result)
         path.chmod(0o600)
         return path

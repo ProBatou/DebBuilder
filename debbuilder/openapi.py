@@ -18,6 +18,7 @@ from .inspectors import PUBLICATION_INSPECTION_STATUSES, RECIPE_INSPECTION_VERSI
 from .package_store import derive_lifecycle_status
 from .recipe_schema import (
     ARCHIVE_ASSET_SELECTIONS, ARCHIVE_SOURCES, ARTIFACT_MODES, AUTOMATION_POLICIES,
+    MAX_NODE_PROJECT_DIRECTORY_LENGTH,
     OUTPUT_MODES, RESTART_POLICIES, SAFE_ARCH, SCHEMA_VERSION, SERVICE_TYPES,
     SOURCE_ARCHIVE_FORMATS, SOURCE_CHANGE_TYPES, VERSION_SOURCES,
 )
@@ -137,6 +138,14 @@ SCHEMAS = {
         "automation": _ref("AutomationPolicy"),
         "build": _object({"commands": {"type": "array", "items": S},
                           "ensure_directories": STRINGS,
+                          "node_project_directory": {
+                              "type": "string", "minLength": 1, "maxLength": MAX_NODE_PROJECT_DIRECTORY_LENGTH,
+                              "description": "Optional canonical relative POSIX path to one auxiliary npm project. Valid only for a Python source_build Recipe; recipe_schema.py enforces confinement and applicability.",
+                          },
+                          "auxiliary_node_install": {
+                              "type": "string", "enum": ["npm_ci"],
+                              "description": "Optional explicit npm ci during Dependencies for a Python source_build Recipe with node_project_directory. No installation is inferred when omitted.",
+                          },
                           "environment": {"type": "object", "additionalProperties": S},
                           "output": _object({"mode": {"type": "string", "enum": sorted(OUTPUT_MODES)},
                                              "path": S, "paths": STRINGS}, extra=True),
@@ -201,6 +210,56 @@ SCHEMAS = {
                                     ("id", "history_deleted", "visible"), extra=True),
     "Package": _object({"name": S, "status": S, "recipe": S, "version": _object(extra=True)},
                        ("name",), extra=True, description="Projection of Recipe, Run and APT repository state."),
+    "AuxiliaryNodeProject": _object({
+        "project_directory": {"type": "string", "description": "Canonical relative directory configured by build.node_project_directory."},
+        "manifest": {"type": "string", "description": "Relative path to the auxiliary package.json."},
+        "package_manager": {"type": "string", "enum": ["npm"]},
+        "package_manager_spec": S,
+        "package_manager_version": S,
+        "node_version": {"type": "string", "description": "engines.node requirement from the auxiliary package.json."},
+        "npm_version": {"type": "string", "description": "engines.npm requirement from the auxiliary package.json."},
+        "detected_files": STRINGS,
+        "diagnostics": STRINGS,
+    }, ("project_directory", "manifest", "package_manager"),
+        description="Explicit auxiliary Node/npm build project detected for a primary Python application."),
+    "NodeToolchainIdentity": _object({
+        "node": _object({
+            "requested_range": S, "version": S, "platform": S,
+            "architecture": S, "sha256": S,
+        }, ("version",)),
+        "package_manager": _object({
+            "name": S, "requested_range": S, "version": S, "integrity": S,
+        }, ("name", "version")),
+    }, ("node", "package_manager"),
+        description="Resolved immutable per-Run Node and package-manager provenance; cache and workspace paths are omitted."),
+    "AuxiliaryNpmInstall": _object({
+        "mode": {"const": "npm_ci"}, "executed": B, "reason": S,
+        "project_directory": S,
+        "inputs": _object({
+            "lockfile_version": {"type": ["integer", "null"], "enum": [2, 3, None]},
+            "files": {"type": "array", "maxItems": 2, "items": _object({"path": S, "size": I, "sha256": S}, extra=True)},
+            "absent": {"type": "array", "maxItems": 2, "items": S},
+        }, extra=True),
+        "commands": {"type": "array", "maxItems": 1, "items": _object({
+            "index": I, "command": S, "arguments": STRINGS, "working_directory": S,
+            "status": S, "exit_code": {"type": ["integer", "null"]}, "duration": {"type": ["number", "null"]}, "timed_out": B,
+        }, extra=True)},
+    }, ("mode", "executed", "project_directory", "inputs", "commands"),
+        description="Bounded public proof for the explicit npm ci command executed during Dependencies."),
+    "ExecutionStep": _object({
+        "name": {"type": "string", "enum": list(STEP_NAMES)},
+        "status": {"type": "string", "enum": sorted(STEP_STATUSES)},
+        "started_at": {"type": ["string", "null"]},
+        "finished_at": {"type": ["string", "null"]},
+        "duration": {"type": ["number", "null"]},
+        "summary": S,
+        "error": {"oneOf": [_object({"code": S, "stage": S, "message": S, "suggested_action": S}, ("code", "stage", "message")), {"type": "null"}]},
+        "details": _object({
+            "project_type": {"type": "string", "enum": ["nodejs", "python", "rust", "static", "upstream_archive"]},
+            "auxiliary_node_project": _ref("AuxiliaryNodeProject"),
+            "auxiliary_node_install": _ref("AuxiliaryNpmInstall"),
+        }, extra=True, description="Stage-specific bounded facts. Detection uses project_type and optional auxiliary_node_project."),
+    }, ("name", "status", "details"), extra=True),
     "Execution": _object({"id": S, "run_id": S, "recipe_id": S,
                           "status": {"type": "string", "enum": sorted(RUN_STATUSES)},
                           "lifecycle_status": {"type": "string", "enum": LIFECYCLE_STATUSES},
@@ -209,7 +268,8 @@ SCHEMAS = {
                           "lifecycle_active": B,
                           "version": _object({"upstream": S, "debian": S}),
                           "allowed_actions": _object({"validate": B, "publish": B}),
-                          "toolchain": {"type": ["object", "null"], "description": "Resolved per-Run Node and package-manager identity when applicable.", "additionalProperties": True}},
+                          "steps": {"type": "array", "items": _ref("ExecutionStep")},
+                          "toolchain": {"oneOf": [_ref("NodeToolchainIdentity"), {"type": "null"}]}},
                          ("id", "status", "lifecycle_status"), extra=True,
                          description="Public Build Run lifecycle projection; some fields depend on available evidence."),
     "Validation": _object({"attempt_id": S, "build_run_id": S,

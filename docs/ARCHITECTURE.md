@@ -57,10 +57,18 @@ Validation, Publication, settings, and repository services. The application
 module wires those boundaries to the standard-library HTTP server.
 
 The admin HTTP listener serves the cutover-ready Svelte build from
-`/opt/debbuilder/static` in a package installation. The managed self-build and
-official release build run
-`npm ci` and Vite with Node 24/npm 11 in an isolated build workspace; only
-compiled `static/` assets enter the package. Node is not a runtime dependency.
+`/opt/debbuilder/static` in a package installation. The managed self-build
+remains a Python source build and explicitly declares
+`build.node_project_directory: frontend`. Its Dependencies stage prepares a
+Run-local Node 24/npm 11 toolchain and, through the explicit
+`build.auxiliary_node_install: npm_ci` contract, installs the sealed frontend
+graph exactly once there. Build uses those same binaries with npm offline for
+the toolchain check and Vite; npm offline constrains npm, not sockets used by
+arbitrary programs. The official release builder is a distinct host-qualified
+path whose caller provisions compatible Node/npm. Both paths place only
+compiled `static/` assets in the package: neither Node, npm, nor `node_modules`
+is a runtime dependency or payload entry. The detailed lifecycle contract is
+in [Per-Run Node build toolchains](NODE_TOOLCHAIN_PROPOSAL.md).
 The admin listener owns the Svelte shell and API/auth routes, while the public
 APT listener and landing template remain separate. This describes candidate
 source and package behavior, not a production deployment.

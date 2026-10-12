@@ -1,15 +1,25 @@
 import json
+import os
 import shlex
+import shutil
 import sys
 import tempfile
 import threading
+import time
 import unittest
-from pathlib import Path
+from contextlib import ExitStack
+from pathlib import Path, PurePosixPath
+from unittest.mock import patch
 
-from debbuilder import build_pipeline, execution_service
+from debbuilder import build_pipeline, builtin_recipe, command_runner, execution_service, workspace_cleanup
+from debbuilder.automation_identity import source_archive_identity
 from debbuilder.build_models import RUN_STATUSES, STEP_NAMES
 from debbuilder.build_store import BuildStore
+from debbuilder.execution_cancellation import CancellationControl, ExecutionCancelled
 from debbuilder.recipe_schema import RecipeDocumentError
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 def recipe():
@@ -22,6 +32,331 @@ def recipe():
 
 
 class BuildStoreTests(unittest.TestCase):
+    def run_auxiliary_install_case(
+        self, root: Path, install_runner=None, *, dry_run=False, change_applier=None,
+        build_effect=None, manager_source=None, build_updates=None, cancellation_control=None,
+        package_updates=None, lock_updates=None,
+    ):
+        store = BuildStore(root / "builds")
+
+        def acquire(_recipe, workspace, token="", expected_identity=None):
+            source = Path(workspace) / "source"
+            (source / "frontend").mkdir()
+            (source / "pyproject.toml").write_text('[project]\nname="demo"\n')
+            package = {
+                "packageManager": "npm@11.20.0", "engines": {"node": ">=24 <25", "npm": ">=11 <12"},
+                "dependencies": {"pkg": "1.0.0"},
+            }
+            package.update(package_updates or {})
+            lock = {
+                "name": "demo", "lockfileVersion": 3,
+                "packages": {"": {"dependencies": {"pkg": "1.0.0"}}, "node_modules/pkg": {
+                    "version": "1.0.0", "resolved": "https://registry.npmjs.org/pkg/-/pkg-1.0.0.tgz", "integrity": "sha512-example",
+                }},
+            }
+            lock.update(lock_updates or {})
+            (source / "frontend/package.json").write_text(json.dumps(package))
+            (source / "frontend/package-lock.json").write_text(json.dumps(lock))
+            return {"repository": "owner/demo", "ref": "v1.2.0", "tag": "v1.2.0", "upstream_version": "1.2.0", "debian_version": "1.2.0-1", "source_directory": str(source)}
+
+        configured = recipe()
+        configured["build"] = {"node_project_directory": "frontend", "auxiliary_node_install": "npm_ci", "commands": ["true"]}
+        configured["build"].update(build_updates or {})
+        environment = {"PATH": "/run/toolchain/bin:/usr/bin:/bin", "HOME": str(root / "home"), "npm_config_cache": str(root / "cache")}
+        prepared = {"identity": {"node": {"version": "24.12.0"}, "package_manager": {"name": "npm", "version": "11.20.0"}}, "environment": environment}
+
+        def prepare(_resolution, *, workspace, **_kwargs):
+            if manager_source is None:
+                return prepared
+            toolchain = Path(workspace) / "toolchain"
+            bin_directory = toolchain / "bin"
+            for directory in (bin_directory, toolchain / "home", toolchain / "npm-cache"):
+                directory.mkdir(parents=True, exist_ok=True)
+            for name, source in (("node", "print('24.12.0')\n"), ("npm", manager_source)):
+                executable = bin_directory / name
+                executable.write_text("#!/usr/bin/python3\n" + source)
+                executable.chmod(0o700)
+            real_environment = {
+                "PATH": f"{bin_directory}:/usr/bin:/bin",
+                "HOME": str(toolchain / "home"),
+                "npm_config_cache": str(toolchain / "npm-cache"),
+            }
+            return {**prepared, "environment": real_environment}
+
+        available = lambda detected, manual, **_kwargs: {"detected": detected, "manually_added": manual, "required": [], "available": [], "missing": [], "checks": [], "available_tools": ["node", "npm"], "missing_tools": []}
+        default_build = lambda _recipe, _detection, _source, **_kwargs: {"executed": not dry_run, "reason": "dry_run" if dry_run else "build", "plan": {"commands": ["true"]}, "commands": [], "output": {"mode": "source", "path": ""}}
+        validate_prepared = build_pipeline.node_toolchain.validate_prepared
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(build_pipeline.node_toolchain, "resolve", return_value={"resolved": True}))
+            stack.enter_context(patch.object(build_pipeline.node_toolchain, "prepare", side_effect=prepare))
+            stack.enter_context(patch.object(
+                build_pipeline.node_toolchain, "validate_prepared",
+                side_effect=lambda value, **kwargs: (
+                    validate_prepared(value, **kwargs) if manager_source is not None
+                    else value["environment"]
+                ),
+            ))
+            install = None
+            if install_runner is not None:
+                install = stack.enter_context(patch.object(
+                    build_pipeline.command_runner, "run_command", side_effect=install_runner,
+                ))
+            build = stack.enter_context(patch.object(
+                build_pipeline.build_executor, "execute_build", side_effect=build_effect or default_build,
+            ))
+            stack.enter_context(patch.object(
+                build_pipeline.debian_packaging, "prepare_staging",
+                side_effect=build_pipeline.debian_packaging.PackagingError("test_stop", "stop"),
+            ))
+            result = build_pipeline.execute_pipeline_run(
+                build_pipeline.create_pipeline_run(configured, store=store, dry_run=dry_run)["id"],
+                store=store, acquire=acquire, dependency_check=available, change_applier=change_applier,
+                cancellation_control=cancellation_control,
+            )
+        return result, store, install, build
+
+    def assert_processes_gone(self, pids):
+        remaining = set(pids)
+        deadline = time.monotonic() + 1
+        while remaining and time.monotonic() < deadline:
+            for pid in tuple(remaining):
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    remaining.remove(pid)
+            if remaining:
+                time.sleep(0.01)
+        self.assertEqual(remaining, set(), f"processes still exist: {sorted(remaining)}")
+
+    def test_command_results_use_closed_non_colliding_dependency_namespace(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = BuildStore(Path(temporary) / "builds")
+            run = build_pipeline.create_pipeline_run(recipe(), store=store, dry_run=False)
+            result = {"index": 1, "status": "success"}
+            build_path = store.save_command_result(run["id"], result)
+            dependency_path = store.save_command_result(run["id"], result, namespace="dependencies")
+            self.assertEqual(build_path.name, "001.json")
+            self.assertEqual(dependency_path.name, "dependencies-001.json")
+            self.assertTrue(build_path.is_file() and dependency_path.is_file())
+            with self.assertRaises(ValueError):
+                store.save_command_result(run["id"], result, namespace="user-prefix")
+
+    def test_auxiliary_npm_ci_dry_run_preflights_without_installing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            result, _store, install, _build = self.run_auxiliary_install_case(
+                Path(temporary), AssertionError("dry-run executed npm ci"), dry_run=True,
+            )
+        install.assert_not_called()
+        proof = result["dependencies"]["auxiliary_node_install"]
+        self.assertFalse(proof["executed"])
+        self.assertEqual(proof["reason"], "dry_run")
+        self.assertEqual(proof["commands"], [])
+
+    def test_auxiliary_npm_ci_failure_timeout_and_cancellation_remain_dependencies(self):
+        cases = (
+            ({"status": "failed", "exit_code": 7, "timed_out": False}, "failed", "auxiliary_node_install_failed"),
+            ({"status": "failed", "exit_code": None, "timed_out": True, "timeout_reason": "maximum_runtime"}, "failed", "auxiliary_node_install_timeout"),
+        )
+        for updates, status, code in cases:
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as temporary:
+                command = {"command": "npm ci", "arguments": ["npm", "ci"], "configured_working_directory": "frontend", "working_directory": "frontend", "stdout": "", "stderr": "safe failure", "duration": 0.01, **updates}
+                result, store, _install, build = self.run_auxiliary_install_case(Path(temporary), lambda *_args, **_kwargs: command)
+                self.assertEqual(result["status"], status)
+                self.assertEqual(result["error"]["stage"], "dependencies")
+                self.assertEqual(result["error"]["code"], code)
+                build.assert_not_called()
+                self.assertTrue((Path(result["workspace"]) / "logs/commands/dependencies-001.json").is_file())
+                self.assertEqual(store.load(result["run_id"])["error"]["code"], code)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            cancelled = {"command": "npm ci", "arguments": ["npm", "ci"], "configured_working_directory": "frontend", "working_directory": "frontend", "status": "cancelled", "exit_code": None, "stdout": "", "stderr": "", "duration": 0.01, "timed_out": False, "cancellation": {"code": "execution_cancelled", "reason": "user_requested"}}
+            def cancel(*_args, **_kwargs):
+                raise ExecutionCancelled(cancelled["cancellation"], command_result=cancelled)
+            result, store, _install, build = self.run_auxiliary_install_case(Path(temporary), cancel)
+            self.assertEqual(result["status"], "cancelled")
+            self.assertEqual(store.load(result["run_id"])["cancellation"]["stage"], "dependencies")
+            build.assert_not_called()
+            self.assertTrue((Path(result["workspace"]) / "logs/commands/dependencies-001.json").is_file())
+
+    def test_auxiliary_npm_ci_uses_real_runner_for_success_and_nonzero_exit(self):
+        cases = (
+            ("success", 0, "dependencies-real-success", None),
+            ("nonzero", 7, "dependencies-real-nonzero", "auxiliary_node_install_failed"),
+        )
+        for point, exit_code, marker, error_code in cases:
+            with self.subTest(point=point), tempfile.TemporaryDirectory() as temporary:
+                source = (
+                    "import sys\n"
+                    "if sys.argv[1:] != ['ci']:\n"
+                    "    raise SystemExit(91)\n"
+                    f"print({marker!r}, flush=True)\n"
+                    f"raise SystemExit({exit_code})\n"
+                )
+                result, store, install, build = self.run_auxiliary_install_case(
+                    Path(temporary), manager_source=source,
+                )
+                persisted = store.load(result["run_id"])
+                dependencies = next(step for step in persisted["steps"] if step["name"] == "dependencies")
+                command = dependencies["details"]["auxiliary_node_install"]["commands"][0]
+                self.assertIsNone(install)
+                self.assertEqual(command["arguments"], ["npm", "ci"])
+                self.assertEqual(command["exit_code"], exit_code)
+                self.assertIn(marker, command["stdout"])
+                self.assertTrue((Path(result["workspace"]) / "logs/commands/dependencies-001.json").is_file())
+                if error_code is None:
+                    self.assertEqual(dependencies["status"], "success")
+                    self.assertEqual(command["status"], "success")
+                    build.assert_called_once()
+                else:
+                    self.assertEqual(result["status"], "failed")
+                    self.assertEqual((persisted["error"]["stage"], persisted["error"]["code"]), ("dependencies", error_code))
+                    self.assertEqual(command["status"], "failed")
+                    build.assert_not_called()
+
+    def test_auxiliary_npm_ci_rejects_git_file_before_runner_or_build(self):
+        local_reference = "git+file:///tmp/local-package#0123456789abcdef"
+        with tempfile.TemporaryDirectory() as temporary:
+            result, store, install, build = self.run_auxiliary_install_case(
+                Path(temporary), AssertionError("npm ci ran for a rejected local Git dependency"),
+                package_updates={"dependencies": {"local": local_reference}},
+                lock_updates={
+                    "packages": {
+                        "": {"dependencies": {"local": local_reference}},
+                        "node_modules/local": {
+                            "version": "1.0.0", "resolved": local_reference,
+                            "integrity": "sha512-artificial-integrity-must-not-authorize-local-git",
+                        },
+                    },
+                },
+            )
+            persisted = store.load(result["run_id"])
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(
+                (persisted["error"]["stage"], persisted["error"]["code"]),
+                ("dependencies", "auxiliary_node_local_dependency_unsupported"),
+            )
+            install.assert_not_called()
+            build.assert_not_called()
+            self.assertFalse((Path(result["workspace"]) / "logs/commands/dependencies-001.json").exists())
+
+    def test_auxiliary_npm_ci_uses_real_runner_for_both_timeout_modes_and_descendants(self):
+        cases = (
+            (
+                "inactivity",
+                (
+                    "import os, subprocess, sys, time\n"
+                    "if sys.argv[1:] != ['ci']:\n"
+                    "    raise SystemExit(91)\n"
+                    "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+                    "open('dependency-processes.pid', 'w').write(f'{os.getpid()}\\n{child.pid}\\n')\n"
+                    "print('dependencies-inactivity-ready', flush=True)\n"
+                    "while True: time.sleep(60)\n"
+                ),
+                {"inactivity_timeout": 1, "maximum_runtime": 3},
+                "dependencies-inactivity-ready",
+                True,
+            ),
+            (
+                "maximum_runtime",
+                (
+                    "import sys, time\n"
+                    "if sys.argv[1:] != ['ci']:\n"
+                    "    raise SystemExit(91)\n"
+                    "while True:\n"
+                    "    print('dependencies-maximum-active', flush=True)\n"
+                    "    time.sleep(0.05)\n"
+                ),
+                {"inactivity_timeout": 3, "maximum_runtime": 1},
+                "dependencies-maximum-active",
+                False,
+            ),
+        )
+        for timeout_reason, source, limits, marker, has_descendant in cases:
+            with self.subTest(timeout_reason=timeout_reason), tempfile.TemporaryDirectory() as temporary:
+                result, store, install, build = self.run_auxiliary_install_case(
+                    Path(temporary), manager_source=source, build_updates=limits,
+                )
+                persisted = store.load(result["run_id"])
+                command = persisted["error"]["details"]["failed_command"]
+                self.assertIsNone(install)
+                self.assertEqual(result["status"], "failed")
+                self.assertEqual((persisted["error"]["stage"], persisted["error"]["code"]), ("dependencies", "auxiliary_node_install_timeout"))
+                self.assertTrue(command["timed_out"])
+                self.assertEqual(command["timeout_reason"], timeout_reason)
+                self.assertIn(marker, command["stdout"])
+                self.assertFalse(command["termination_error"])
+                self.assertTrue((Path(result["workspace"]) / "logs/commands/dependencies-001.json").is_file())
+                build.assert_not_called()
+                if has_descendant:
+                    pid_file = Path(result["workspace"]) / "source/frontend/dependency-processes.pid"
+                    self.assert_processes_gone([int(pid) for pid in pid_file.read_text().splitlines()])
+
+    def test_auxiliary_npm_ci_uses_real_runner_for_cancellation_and_descendants(self):
+        source = (
+            "import os, subprocess, sys, time\n"
+            "if sys.argv[1:] != ['ci']:\n"
+            "    raise SystemExit(91)\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            "open('dependency-processes.pid', 'w').write(f'{os.getpid()}\\n{child.pid}\\n')\n"
+            "print('dependencies-cancel-ready', flush=True)\n"
+            "while True: time.sleep(60)\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            control = CancellationControl()
+            original_output = build_pipeline._dependency_command_output
+
+            def cancel_on_ready(store, run, item):
+                original_output(store, run, item)
+                if "dependencies-cancel-ready" in item.get("text", ""):
+                    control.request_cancel(reason="dependencies_real_runner")
+
+            with patch.object(build_pipeline, "_dependency_command_output", side_effect=cancel_on_ready):
+                result, store, install, build = self.run_auxiliary_install_case(
+                    Path(temporary), manager_source=source, cancellation_control=control,
+                    build_updates={"inactivity_timeout": 3, "maximum_runtime": 5},
+                )
+            persisted = store.load(result["run_id"])
+            command = persisted["steps"][2]["details"]["auxiliary_node_install"]["commands"][0]
+            self.assertIsNone(install)
+            self.assertEqual(result["status"], "cancelled")
+            self.assertEqual(persisted["cancellation"]["stage"], "dependencies")
+            self.assertEqual(persisted["cancellation"]["reason"], "dependencies_real_runner")
+            self.assertEqual(command["status"], "cancelled")
+            self.assertTrue(command["cancellation_requested"])
+            self.assertIn("dependencies-cancel-ready", command["stdout"])
+            self.assertTrue((Path(result["workspace"]) / "logs/commands/dependencies-001.json").is_file())
+            build.assert_not_called()
+            pid_file = Path(result["workspace"]) / "source/frontend/dependency-processes.pid"
+            self.assert_processes_gone([int(pid) for pid in pid_file.read_text().splitlines()])
+
+    def test_auxiliary_npm_seals_fail_at_install_source_change_and_build_checkpoints(self):
+        success = {"command": "npm ci", "arguments": ["npm", "ci"], "configured_working_directory": "frontend", "working_directory": "frontend", "status": "success", "exit_code": 0, "stdout": "", "stderr": "", "duration": 0.01, "timed_out": False}
+        with tempfile.TemporaryDirectory() as temporary:
+            def mutate_install(_command, **kwargs):
+                path = Path(kwargs["workspace"]) / "frontend/package.json"
+                path.write_text(path.read_text() + " ")
+                return success
+            result, _store, _install, build = self.run_auxiliary_install_case(Path(temporary), mutate_install)
+            self.assertEqual((result["error"]["stage"], result["error"]["code"]), ("dependencies", "auxiliary_node_inputs_changed"))
+            build.assert_not_called()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            def mutate_source(source, _changes, on_applied=None):
+                path = Path(source) / "frontend/package-lock.json"
+                path.write_text(path.read_text() + " ")
+                return {"requested": 0, "applied_count": 0, "applied": []}
+            result, _store, _install, build = self.run_auxiliary_install_case(Path(temporary), lambda *_args, **_kwargs: success, change_applier=mutate_source)
+            self.assertEqual((result["error"]["stage"], result["error"]["code"]), ("source_changes", "auxiliary_node_inputs_changed"))
+            build.assert_not_called()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            def mutate_build(_recipe, _detection, source, **kwargs):
+                path = Path(source) / "frontend/package-lock.json"
+                path.write_text(path.read_text() + " ")
+                kwargs["on_result"]({"index": 1, "command": "true", "arguments": ["true"], "status": "success", "exit_code": 0, "stdout": "", "stderr": "", "duration": 0.01, "timed_out": False})
+            result, _store, _install, _build = self.run_auxiliary_install_case(Path(temporary), lambda *_args, **_kwargs: success, build_effect=mutate_build)
+            self.assertEqual((result["error"]["stage"], result["error"]["code"]), ("build", "auxiliary_node_inputs_changed"))
+
     def test_create_pipeline_run_persists_pending_run_without_execution(self):
         with tempfile.TemporaryDirectory() as temporary:
             store = BuildStore(Path(temporary) / "builds")
@@ -253,6 +588,480 @@ class BuildStoreTests(unittest.TestCase):
             self.assertEqual(persisted["steps"][4]["status"], "skipped")
             self.assertEqual([step["status"] for step in persisted["steps"][5:]], ["success", "success", "skipped", "skipped", "skipped"])
             self.assertEqual(result["detection"]["proposed_commands"], ["npm install", "npm run build"])
+
+    def test_python_auxiliary_node_project_uses_run_local_toolchain_through_build(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = BuildStore(root / "builds")
+            host_bin = root / "host-bin"
+            host_bin.mkdir()
+            host_selected = root / "host-tool-selected"
+
+            def executable(path, source):
+                path.write_text("#!/usr/bin/python3\n" + source)
+                path.chmod(0o700)
+
+            for name in ("node", "npm"):
+                executable(
+                    host_bin / name,
+                    "from pathlib import Path\n"
+                    f"Path({str(host_selected)!r}).write_text({name!r})\n"
+                    "print('99.0.0')\n",
+                )
+
+            def acquire(_recipe, workspace, token="", expected_identity=None):
+                source = Path(workspace) / "source"
+                (source / "frontend").mkdir()
+                (source / "pyproject.toml").write_text('[project]\nname = "demo"\n')
+                (source / "frontend/package.json").write_text(json.dumps({
+                    "packageManager": "npm@11.7.0",
+                    "engines": {"node": ">=24 <25", "npm": ">=11 <12"},
+                }))
+                return {
+                    "repository": "owner/demo", "ref": "v1.2.0", "tag": "v1.2.0",
+                    "upstream_version": "1.2.0", "debian_version": "1.2.0-1",
+                    "source_directory": str(source),
+                }
+
+            configured = recipe()
+            configured["build"] = {
+                "node_project_directory": "frontend",
+                "commands": ["npm run build"],
+                "environment": {
+                    "PATH": str(host_bin),
+                    "HOME": str(root / "recipe-home"),
+                    "npm_config_cache": str(root / "recipe-npm-cache"),
+                    "COREPACK_HOME": str(root / "recipe-corepack"),
+                    "COREPACK_ENABLE_DOWNLOAD_PROMPT": "1",
+                    "DEBBUILDER_TEST_MARKER": "hybrid-cp2",
+                },
+            }
+            identity = {
+                "node": {"version": "24.12.0"},
+                "package_manager": {"name": "npm", "version": "11.7.0"},
+            }
+            prepared_environments = []
+
+            def prepare_toolchain(_resolution, *, workspace, cache, checkpoint=None):
+                run_root = Path(workspace) / "toolchain"
+                bin_directory = run_root / "bin"
+                home = run_root / "home"
+                npm_cache = run_root / "npm-cache"
+                corepack_home = run_root / "corepack"
+                for directory in (bin_directory, home, npm_cache, corepack_home):
+                    directory.mkdir(parents=True, exist_ok=True)
+                executable(
+                    bin_directory / "node",
+                    "import os\n"
+                    "from pathlib import Path\n"
+                    "print('24.12.0')\n"
+                    "print(f'node-executable={Path(__file__).resolve()}')\n"
+                    "print(f'node-marker={os.environ.get(\"DEBBUILDER_TEST_MARKER\", \"\")}')\n",
+                )
+                executable(
+                    bin_directory / "npm",
+                    "import os\n"
+                    "import subprocess\n"
+                    "import sys\n"
+                    "from pathlib import Path\n"
+                    "if sys.argv[1:] == ['--version']:\n"
+                    "    print('11.7.0')\n"
+                    "    print(f'npm-executable={Path(__file__).resolve()}')\n"
+                    "else:\n"
+                    "    child = subprocess.run(['node', '--version'], check=False, capture_output=True, text=True)\n"
+                    "    print(f'npm-executable={Path(__file__).resolve()}')\n"
+                    "    for key in ('PATH', 'HOME', 'npm_config_cache', 'COREPACK_HOME', 'COREPACK_ENABLE_DOWNLOAD_PROMPT', 'DEBBUILDER_TEST_MARKER'):\n"
+                    "        print(f'{key}={os.environ.get(key, \"\")}')\n"
+                    "    print('child-output-begin')\n"
+                    "    print(child.stdout, end='')\n"
+                    "    print('child-output-end')\n"
+                    "    sys.exit(child.returncode)\n",
+                )
+                environment = {
+                    "PATH": f"{bin_directory}:{host_bin}:/usr/bin:/bin",
+                    "HOME": str(home),
+                    "npm_config_cache": str(npm_cache),
+                    "COREPACK_HOME": str(corepack_home),
+                    "COREPACK_ENABLE_DOWNLOAD_PROMPT": "0",
+                }
+                prepared_environments.append(environment)
+                return {"identity": identity, "environment": environment}
+
+            with (
+                patch.object(build_pipeline.node_toolchain, "resolve", return_value={"resolved": True}) as resolve,
+                patch.object(build_pipeline.node_toolchain, "prepare", side_effect=prepare_toolchain) as prepare,
+                patch.object(build_pipeline.node_toolchain.urllib.request, "urlopen", side_effect=AssertionError("offline Build attempted network acquisition")) as network,
+                patch.object(
+                    build_pipeline.debian_packaging, "prepare_staging",
+                    side_effect=build_pipeline.debian_packaging.PackagingError(
+                        "test_stop_after_build", "Controlled test stops after the real Build command",
+                    ),
+                ),
+            ):
+                result = build_pipeline.execute_pipeline_run(
+                    build_pipeline.create_pipeline_run(configured, store=store, dry_run=False)["id"],
+                    store=store, acquire=acquire,
+                )
+
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["error"]["stage"], "staging")
+            self.assertEqual(result["error"]["code"], "test_stop_after_build")
+            self.assertEqual(result["detection"]["project_type"], "python")
+            self.assertEqual(result["detection"]["auxiliary_node_project"]["project_directory"], "frontend")
+            resolve.assert_called_once()
+            self.assertEqual(resolve.call_args.args[0], {"node": ">=24 <25", "npm": "11.7.0"})
+            self.assertEqual(resolve.call_args.kwargs["package_manager"], "npm")
+            prepare.assert_called_once()
+            network.assert_not_called()
+            environment = prepared_environments[0]
+            checks = {row["tool"]: row for row in result["dependencies"]["tool_checks"]}
+            self.assertEqual(checks["node"]["path"], environment["PATH"].split(":", 1)[0] + "/node")
+            self.assertEqual(checks["node"]["version"], "24.12.0")
+            self.assertEqual(checks["npm"]["path"], environment["PATH"].split(":", 1)[0] + "/npm")
+            self.assertEqual(checks["npm"]["version"], "11.7.0")
+            command = result["build"]["commands"][0]
+            self.assertEqual(command["status"], "success")
+            output = command["stdout"]
+            run_bin = Path(environment["PATH"].split(":", 1)[0])
+            self.assertIn(f"npm-executable={run_bin / 'npm'}", output)
+            self.assertIn(f"PATH={environment['PATH']}", output)
+            self.assertIn(f"HOME={environment['HOME']}", output)
+            self.assertIn(f"npm_config_cache={environment['npm_config_cache']}", output)
+            self.assertIn(f"COREPACK_HOME={environment['COREPACK_HOME']}", output)
+            self.assertIn("COREPACK_ENABLE_DOWNLOAD_PROMPT=0", output)
+            self.assertIn("DEBBUILDER_TEST_MARKER=hybrid-cp2", output)
+            self.assertIn(f"node-executable={run_bin / 'node'}", output)
+            self.assertIn("node-marker=hybrid-cp2", output)
+            self.assertFalse(host_selected.exists())
+            self.assertEqual(store.load(result["run_id"])["toolchain"], identity)
+
+    def test_explicit_auxiliary_npm_ci_runs_once_in_dependencies_and_build_is_offline(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = BuildStore(root / "builds")
+
+            def acquire(_recipe, workspace, token="", expected_identity=None):
+                source = Path(workspace) / "source"
+                (source / "frontend").mkdir()
+                (source / "pyproject.toml").write_text('[project]\nname="demo"\n')
+                (source / "frontend/package.json").write_text(json.dumps({
+                    "packageManager": "npm@11.20.0", "engines": {"node": ">=24 <25", "npm": ">=11 <12"},
+                    "dependencies": {"pkg": "1.0.0"},
+                }))
+                (source / "frontend/package-lock.json").write_text(json.dumps({
+                    "name": "demo", "lockfileVersion": 3, "requires": True,
+                    "packages": {"": {"dependencies": {"pkg": "1.0.0"}}, "node_modules/pkg": {
+                        "version": "1.0.0", "resolved": "https://registry.npmjs.org/pkg/-/pkg-1.0.0.tgz", "integrity": "sha512-example",
+                    }},
+                }))
+                return {"repository": "owner/demo", "ref": "v1.2.0", "tag": "v1.2.0", "upstream_version": "1.2.0", "debian_version": "1.2.0-1", "source_directory": str(source)}
+
+            configured = recipe()
+            configured["build"] = {
+                "node_project_directory": "frontend", "auxiliary_node_install": "npm_ci",
+                "commands": ["npm --prefix frontend run build"],
+                "environment": {"NPM_CONFIG_REGISTRY": "https://evil.invalid", "KEEP_ME": "yes"},
+            }
+            available = lambda detected, manual, **_kwargs: {"detected": detected, "manually_added": manual, "required": [], "available": [], "missing": [], "checks": [], "available_tools": ["node", "npm"], "missing_tools": []}
+            toolchain_environment = {
+                "PATH": str(root / "run-toolchain/bin") + ":/usr/bin:/bin",
+                "HOME": str(root / "run-toolchain/home"),
+                "npm_config_cache": str(root / "run-toolchain/npm-cache"),
+            }
+            prepared = {"identity": {"node": {"version": "24.12.0"}, "package_manager": {"name": "npm", "version": "11.20.0"}}, "environment": toolchain_environment}
+            install_calls = []
+            build_environments = []
+
+            def install_runner(command, **kwargs):
+                install_calls.append((command, kwargs))
+                return {"command": command, "arguments": ["npm", "ci"], "working_directory": str(Path(kwargs["workspace"]) / kwargs["working_directory"]), "configured_working_directory": kwargs["working_directory"], "status": "success", "exit_code": 0, "stdout": "installed", "stderr": "", "duration": 0.01, "timed_out": False}
+
+            def execute_build(_recipe, _detection, _source, **kwargs):
+                build_environments.append(kwargs["environment"])
+                command = {"index": 1, "command": "npm --prefix frontend run build", "arguments": ["npm", "--prefix", "frontend", "run", "build"], "status": "success", "exit_code": 0, "stdout": "built", "stderr": "", "duration": 0.01, "timed_out": False}
+                kwargs["on_result"](command)
+                return {"executed": True, "reason": "build", "plan": {"commands": []}, "commands": [command], "output": {"mode": "source", "path": ""}}
+
+            with (
+                patch.object(build_pipeline.node_toolchain, "resolve", return_value={"resolved": True}),
+                patch.object(build_pipeline.node_toolchain, "prepare", return_value=prepared),
+                patch.object(build_pipeline.node_toolchain, "validate_prepared", return_value=toolchain_environment),
+                patch.object(build_pipeline.command_runner, "run_command", side_effect=install_runner),
+                patch.object(build_pipeline.build_executor, "execute_build", side_effect=execute_build),
+                patch.object(build_pipeline.debian_packaging, "prepare_staging", side_effect=build_pipeline.debian_packaging.PackagingError("test_stop_after_build", "stop")),
+            ):
+                result = build_pipeline.execute_pipeline_run(
+                    build_pipeline.create_pipeline_run(configured, store=store, dry_run=False)["id"],
+                    store=store, acquire=acquire, dependency_check=available,
+                )
+
+            self.assertEqual(result["error"]["stage"], "staging")
+            self.assertEqual(len(install_calls), 1)
+            command, kwargs = install_calls[0]
+            self.assertEqual(command, "npm ci")
+            self.assertEqual(kwargs["working_directory"], "frontend")
+            self.assertEqual(kwargs["environment"]["PATH"], toolchain_environment["PATH"])
+            self.assertEqual(kwargs["environment"]["HOME"], toolchain_environment["HOME"])
+            self.assertEqual(kwargs["environment"]["npm_config_cache"], toolchain_environment["npm_config_cache"])
+            self.assertNotIn("NPM_CONFIG_REGISTRY", kwargs["environment"])
+            self.assertEqual(kwargs["environment"]["KEEP_ME"], "yes")
+            self.assertNotIn("npm_config_offline", kwargs["environment"])
+            self.assertEqual(build_environments[0]["npm_config_offline"], "true")
+            self.assertNotIn("NPM_CONFIG_REGISTRY", build_environments[0])
+            self.assertTrue((Path(result["workspace"]) / "logs/commands/dependencies-001.json").is_file())
+            self.assertTrue((Path(result["workspace"]) / "logs/commands/001.json").is_file())
+            self.assertTrue(result["dependencies"]["auxiliary_node_install"]["executed"])
+            self.assertEqual(len(result["dependencies"]["auxiliary_node_install"]["commands"]), 1)
+            public = execution_service.get_execution(store, result["run_id"])
+            public_dependencies = next(step for step in public["steps"] if step["name"] == "dependencies")
+            public_install = public_dependencies["details"]["auxiliary_node_install"]
+            self.assertEqual(public_install["commands"][0]["command"], "npm ci")
+            self.assertEqual(public_install["commands"][0]["working_directory"], "frontend")
+            self.assertNotIn(str(Path(result["workspace"])), json.dumps(public_install))
+
+    def test_builtin_self_build_uses_manifest_requirements_and_one_toolchain_environment(self):
+        definition = builtin_recipe.load_builtin_definition()
+        resolved = {
+            "repository": "ProBatou/DebBuilder",
+            "ref": "v1.2.3",
+            "tag": "v1.2.3",
+            "upstream_version": "1.2.3",
+            "commit": "a" * 40,
+            "ref_object_sha": "b" * 40,
+            "release_id": 53,
+        }
+        expected_identity = source_archive_identity(definition, resolved, generated_release=True)
+        manifest = json.loads((REPOSITORY_ROOT / "frontend/package.json").read_text())
+        toolchain_environment = {
+            "PATH": "/run/toolchain/bin:/usr/bin:/bin",
+            "HOME": "/run/toolchain/home",
+            "npm_config_cache": "/run/toolchain/npm-cache",
+            "COREPACK_HOME": "/run/toolchain/corepack",
+            "COREPACK_ENABLE_DOWNLOAD_PROMPT": "0",
+        }
+        identity = {
+            "node": {"version": "24.21.0"},
+            "package_manager": {"name": "npm", "version": "11.20.0"},
+        }
+        dependency_environments = []
+        build_environments = []
+        install_environments = []
+
+        def acquire(_recipe, _workspace, token="", expected_identity=None):
+            return {
+                **resolved,
+                "debian_version": "1.2.3-1",
+                "source_directory": str(REPOSITORY_ROOT),
+                "upstream_identity": expected_identity,
+            }
+
+        def dependency_check(detected, manual, **kwargs):
+            dependency_environments.append(kwargs["environment"])
+            return {
+                "detected": detected,
+                "manually_added": manual,
+                "required": detected + manual,
+                "available": detected + manual,
+                "missing": [],
+                "available_tools": ["node", "npm"],
+                "missing_tools": [],
+                "tool_checks": [],
+                "installation_attempted": False,
+            }
+
+        def execute_build(recipe, detection, source_directory, **kwargs):
+            build_environments.append(kwargs["environment"])
+            self.assertEqual(recipe["build"]["commands"], definition["build"]["commands"])
+            self.assertEqual(detection["project_type"], "python")
+            self.assertEqual(Path(source_directory), REPOSITORY_ROOT)
+            return {
+                "executed": True,
+                "plan": {"commands": recipe["build"]["commands"]},
+                "commands": [],
+                "output": {"mode": "paths", "paths": []},
+            }
+
+        def install_runner(command, **kwargs):
+            install_environments.append(kwargs["environment"])
+            return {"command": command, "arguments": ["npm", "ci"], "working_directory": kwargs["working_directory"], "configured_working_directory": kwargs["working_directory"], "status": "success", "exit_code": 0, "stdout": "", "stderr": "", "duration": 0.01, "timed_out": False}
+
+        with tempfile.TemporaryDirectory() as temporary:
+            store = BuildStore(Path(temporary) / "builds")
+            run_id = build_pipeline.create_pipeline_run(
+                definition,
+                store=store,
+                dry_run=False,
+                manual_source_provenance=expected_identity,
+            )["id"]
+            with (
+                patch.object(build_pipeline.node_toolchain, "resolve", return_value={"resolved": True}) as resolve_toolchain,
+                patch.object(build_pipeline.node_toolchain, "prepare", return_value={
+                    "identity": identity, "environment": toolchain_environment,
+                }) as prepare_toolchain,
+                patch.object(build_pipeline.node_toolchain, "validate_prepared", return_value=toolchain_environment) as validate_toolchain,
+                patch.object(build_pipeline.dependency_checker, "check_dependencies", side_effect=dependency_check),
+                patch.object(build_pipeline.command_runner, "run_command", side_effect=install_runner),
+                patch.object(build_pipeline.build_executor, "execute_build", side_effect=execute_build),
+                patch.object(
+                    build_pipeline.debian_packaging,
+                    "prepare_staging",
+                    side_effect=build_pipeline.debian_packaging.PackagingError(
+                        "test_stop_after_build", "Controlled test stops after pipeline integration proof",
+                    ),
+                ),
+            ):
+                result = build_pipeline.execute_pipeline_run(run_id, store=store, acquire=acquire)
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error"]["code"], "test_stop_after_build")
+        self.assertEqual(result["detection"]["project_type"], "python")
+        auxiliary = result["detection"]["auxiliary_node_project"]
+        self.assertEqual(auxiliary["project_directory"], "frontend")
+        self.assertEqual(auxiliary["manifest"], "frontend/package.json")
+        self.assertEqual(auxiliary["node_version"], manifest["engines"]["node"])
+        self.assertEqual(auxiliary["npm_version"], manifest["engines"]["npm"])
+        self.assertEqual(auxiliary["package_manager_spec"], manifest["packageManager"])
+        self.assertEqual(auxiliary["package_manager_version"], "11.20.0")
+        resolve_toolchain.assert_called_once_with(
+            {"node": manifest["engines"]["node"], "npm": "11.20.0"},
+            package_manager="npm",
+            checkpoint=resolve_toolchain.call_args.kwargs["checkpoint"],
+        )
+        prepare_toolchain.assert_called_once()
+        self.assertEqual(validate_toolchain.call_count, 2)
+        self.assertEqual(dependency_environments, [toolchain_environment])
+        self.assertEqual(len(install_environments), 1)
+        self.assertEqual(install_environments[0]["PATH"], toolchain_environment["PATH"])
+        self.assertNotIn("npm_config_offline", install_environments[0])
+        self.assertEqual(build_environments[0]["PATH"], toolchain_environment["PATH"])
+        self.assertEqual(build_environments[0]["npm_config_offline"], "true")
+
+    def test_missing_prepared_auxiliary_toolchain_fails_before_build_without_host_fallback(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = BuildStore(root / "builds")
+            host_bin = root / "host-bin"
+            host_bin.mkdir()
+            host_selected = root / "host-tool-selected"
+
+            def executable(path, source):
+                path.write_text("#!/usr/bin/python3\n" + source)
+                path.chmod(0o700)
+
+            for name in ("node", "npm"):
+                executable(
+                    host_bin / name,
+                    "from pathlib import Path\n"
+                    f"Path({str(host_selected)!r}).write_text({name!r})\n"
+                    "print('99.0.0')\n",
+                )
+
+            def acquire(_recipe, workspace, token="", expected_identity=None):
+                source = Path(workspace) / "source"
+                (source / "frontend").mkdir()
+                (source / "pyproject.toml").write_text('[project]\nname = "demo"\n')
+                (source / "frontend/package.json").write_text(json.dumps({
+                    "packageManager": "npm@11.7.0",
+                    "engines": {"node": ">=24 <25", "npm": ">=11 <12"},
+                }))
+                return {
+                    "repository": "owner/demo", "ref": "v1", "tag": "v1",
+                    "upstream_version": "1.0", "debian_version": "1.0-1",
+                    "source_directory": str(source),
+                }
+
+            identity = {
+                "node": {"version": "24.12.0"},
+                "package_manager": {"name": "npm", "version": "11.7.0"},
+            }
+            prepared = {}
+
+            def prepare_toolchain(_resolution, *, workspace, cache, checkpoint=None):
+                bin_directory = Path(workspace) / "toolchain/bin"
+                bin_directory.mkdir(parents=True)
+                executable(bin_directory / "node", "print('24.12.0')\n")
+                executable(bin_directory / "npm", "print('11.7.0')\n")
+                environment = {
+                    "PATH": f"{bin_directory}:{host_bin}:/usr/bin:/bin",
+                    "HOME": str(Path(workspace) / "toolchain/home"),
+                    "npm_config_cache": str(Path(workspace) / "toolchain/npm-cache"),
+                    "COREPACK_HOME": str(Path(workspace) / "toolchain/corepack"),
+                    "COREPACK_ENABLE_DOWNLOAD_PROMPT": "0",
+                }
+                for name in ("home", "npm-cache", "corepack"):
+                    (Path(workspace) / "toolchain" / name).mkdir()
+                prepared.update({"identity": identity, "environment": environment})
+                return prepared
+
+            check_dependencies = build_pipeline.dependency_checker.check_dependencies
+
+            def check_then_remove(*args, **kwargs):
+                state = check_dependencies(*args, **kwargs)
+                Path(prepared["environment"]["PATH"].split(":", 1)[0], "npm").unlink()
+                return state
+
+            configured = recipe()
+            configured["build"] = {
+                "node_project_directory": "frontend",
+                "commands": ["npm run build"],
+                "environment": {"PATH": str(host_bin)},
+            }
+            with (
+                patch.object(build_pipeline.node_toolchain, "resolve", return_value={"resolved": True}),
+                patch.object(build_pipeline.node_toolchain, "prepare", side_effect=prepare_toolchain),
+                patch.object(build_pipeline.dependency_checker, "check_dependencies", side_effect=check_then_remove),
+                patch.object(build_pipeline.build_executor, "execute_build", wraps=build_pipeline.build_executor.execute_build) as execute_build,
+                patch.object(build_pipeline.node_toolchain.urllib.request, "urlopen", side_effect=AssertionError("offline Build attempted network acquisition")) as network,
+            ):
+                result = build_pipeline.execute_pipeline_run(
+                    build_pipeline.create_pipeline_run(configured, store=store, dry_run=False)["id"],
+                    store=store, acquire=acquire,
+                )
+
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["error"]["stage"], "build")
+            self.assertEqual(result["error"]["code"], "prepared_node_toolchain_missing")
+            execute_build.assert_not_called()
+            network.assert_not_called()
+            self.assertFalse(host_selected.exists())
+
+    def test_auxiliary_node_resolution_failure_preserves_primary_and_auxiliary_facts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = BuildStore(Path(temporary) / "builds")
+
+            def acquire(_recipe, workspace, token="", expected_identity=None):
+                source = Path(workspace) / "source"
+                (source / "frontend").mkdir()
+                (source / "pyproject.toml").write_text('[project]\nname = "demo"\n')
+                (source / "frontend/package.json").write_text(json.dumps({
+                    "packageManager": "npm@11.7.0",
+                    "engines": {"node": ">=24 <25", "npm": ">=11 <12"},
+                }))
+                return {
+                    "repository": "owner/demo", "ref": "v1", "tag": "v1",
+                    "upstream_version": "1.0", "debian_version": "1.0-1",
+                    "source_directory": str(source),
+                }
+
+            configured = recipe()
+            configured["build"] = {"node_project_directory": "frontend"}
+            failure = build_pipeline.node_toolchain.NodeToolchainError(
+                "node_toolchain_acquisition_failed", "Node metadata unavailable",
+                details={"source": "https://nodejs.invalid/dist/index.json"},
+            )
+            with patch.object(build_pipeline.node_toolchain, "resolve", side_effect=failure):
+                result = build_pipeline.execute_pipeline_run(
+                    build_pipeline.create_pipeline_run(configured, store=store, dry_run=True)["id"],
+                    store=store, acquire=acquire,
+                )
+
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["error"]["stage"], "dependencies")
+            self.assertEqual(result["error"]["code"], "node_toolchain_acquisition_failed")
+            requirement = result["error"]["details"]["project_requirement"]
+            self.assertEqual(requirement["project_type"], "python")
+            self.assertEqual(requirement["auxiliary_node_project"]["project_directory"], "frontend")
+            self.assertEqual(requirement["auxiliary_node_project"]["package_manager_spec"], "npm@11.7.0")
 
     def test_detection_failure_stops_before_dependencies(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -505,6 +1314,730 @@ class BuildStoreTests(unittest.TestCase):
             }
             self.assertIn("./opt/demo/packages/contracts/node_modules", inventory)
             self.assertIn("./opt/demo/apps/server/node_modules", inventory)
+
+
+class HybridLifecycleTests(unittest.TestCase):
+    @staticmethod
+    def _configured_recipe(name="hybrid", *, command="npm run build", output=None):
+        configured = recipe()
+        configured["name"] = name
+        configured["package"] = {**configured["package"], "name": name}
+        configured["build"] = {
+            "node_project_directory": "frontend",
+            "commands": [command],
+            **({"output": output} if output else {}),
+        }
+        return configured
+
+    @staticmethod
+    def _acquire_hybrid(_recipe, workspace, token="", expected_identity=None):
+        source = Path(workspace) / "source"
+        (source / "frontend").mkdir(exist_ok=True)
+        (source / "pyproject.toml").write_text('[project]\nname = "hybrid"\n')
+        (source / "frontend/package.json").write_text(json.dumps({
+            "packageManager": "npm@11.7.0",
+            "engines": {"node": ">=24 <25", "npm": ">=11 <12"},
+        }))
+        return {
+            "repository": "owner/hybrid", "ref": "v1", "tag": "v1",
+            "upstream_version": "1.0", "debian_version": "1.0-1",
+            "source_directory": str(source),
+        }
+
+    @staticmethod
+    def _identity(node="24.12.0", manager="npm", manager_version="11.7.0"):
+        return {
+            "schema_version": 1,
+            "requested_node_range": ">=24 <25" if node.startswith("24.") else "^22.19.0",
+            "node": {
+                "version": node, "platform": "linux", "architecture": "x64",
+                "archive": f"node-v{node}-linux-x64.tar.xz", "sha256": "a" * 64,
+                "source": f"https://nodejs.invalid/v{node}/node.tar.xz",
+            },
+            "package_manager": {
+                "name": manager, "version": manager_version,
+                "requested_range": manager_version, "integrity": "sha512-fixture",
+                "source": f"https://registry.invalid/{manager}.tgz",
+            },
+        }
+
+    @staticmethod
+    def _executable(path, source):
+        path.write_text("#!/usr/bin/python3\n" + source)
+        path.chmod(0o700)
+
+    def _prepare(self, workspace, *, node="24.12.0", manager="npm", manager_version="11.7.0", manager_source=None):
+        root = Path(workspace) / "toolchain"
+        bin_directory = root / "bin"
+        for directory in (bin_directory, root / "home", root / "npm-cache", root / "corepack"):
+            directory.mkdir(parents=True, exist_ok=True)
+        self._executable(bin_directory / "node", f"print({node!r})\n")
+        self._executable(
+            bin_directory / manager,
+            manager_source or f"print({manager_version!r})\n",
+        )
+        identity = self._identity(node, manager, manager_version)
+        (root / "manifest.json").write_text(json.dumps(identity))
+        return {"identity": identity, "environment": {
+            "PATH": f"{bin_directory}:/usr/bin:/bin",
+            "HOME": str(root / "home"),
+            "npm_config_cache": str(root / "npm-cache"),
+            "COREPACK_HOME": str(root / "corepack"),
+            "COREPACK_ENABLE_DOWNLOAD_PROMPT": "0",
+        }}
+
+    @staticmethod
+    def _shared_cache(root):
+        shared = Path(root) / "toolchains/node/linux-x64/24.12.0/manifest.json"
+        shared.parent.mkdir(parents=True, exist_ok=True)
+        shared.write_text("immutable shared cache")
+        return shared
+
+    def _assert_terminal_toolchain_cleanup(self, store, result, shared):
+        workspace = Path(result["workspace"])
+        before = store.load(result["run_id"])
+        identity = json.loads(json.dumps(before["toolchain"]))
+        error = json.loads(json.dumps(before.get("error")))
+        cancellation = json.loads(json.dumps(before.get("cancellation")))
+        step_history = [(step["name"], step["status"]) for step in before["steps"]]
+
+        self.assertIn(before["status"], {"success", "failed", "cancelled"})
+        self.assertTrue((workspace / "toolchain").is_dir())
+        self.assertTrue(shared.is_file())
+        self.assertTrue((workspace / "run.json").is_file())
+        if identity is not None:
+            self.assertTrue(identity["node"]["sha256"])
+            self.assertTrue(identity["package_manager"]["integrity"])
+
+        cleanup = workspace_cleanup.apply_retention(store)
+
+        self.assertEqual(cleanup["errors"], [])
+        self.assertFalse((workspace / "toolchain").exists())
+        self.assertEqual(shared.read_text(), "immutable shared cache")
+        self.assertTrue((workspace / "run.json").is_file())
+        durable = store.load(result["run_id"])
+        self.assertEqual(durable["status"], before["status"])
+        self.assertEqual(durable["toolchain"], identity)
+        self.assertEqual(durable.get("error"), error)
+        self.assertEqual(durable.get("cancellation"), cancellation)
+        self.assertEqual(
+            [(step["name"], step["status"]) for step in durable["steps"]],
+            step_history,
+        )
+
+    @staticmethod
+    def _payload_path_is_forbidden(path):
+        forbidden = {"frontend", "node_modules", "toolchain", "node", "npm", "pnpm"}
+        return any(component in forbidden for component in PurePosixPath(path).parts)
+
+    @staticmethod
+    def _available(detected, manual, **kwargs):
+        tools = list(kwargs.get("tools") or [])
+        return {
+            "detected": detected, "manually_added": manual,
+            "required": detected + manual, "available": detected + manual,
+            "missing": [], "available_tools": tools,
+            "missing_tools": [], "tool_checks": [], "checks": [],
+            "installation_attempted": False,
+        }
+
+    def test_cancellation_before_node_resolution_never_enters_dependencies(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = BuildStore(Path(temporary) / "builds")
+            control = CancellationControl()
+            detector = build_pipeline.project_detection.detect_project
+
+            def detect_then_cancel(*args, **kwargs):
+                detected = detector(*args, **kwargs)
+                control.request_cancel(reason="hybrid_before_resolution")
+                return detected
+
+            with patch.object(build_pipeline.node_toolchain, "resolve") as resolve:
+                result = build_pipeline.execute_pipeline_run(
+                    build_pipeline.create_pipeline_run(self._configured_recipe(), store=store, dry_run=False)["id"],
+                    store=store, acquire=self._acquire_hybrid, detector=detect_then_cancel,
+                    cancellation_control=control,
+                )
+
+            persisted = store.load(result["run_id"])
+            self.assertEqual(result["status"], "cancelled")
+            self.assertEqual(persisted["cancellation"]["reason"], "hybrid_before_resolution")
+            self.assertEqual(persisted["cancellation"]["stage"], "detection")
+            self.assertEqual(result["steps"][1]["status"], "cancelled")
+            self.assertEqual(result["steps"][2]["status"], "pending")
+            resolve.assert_not_called()
+
+    def test_cancellation_during_preparation_cleans_run_local_and_preserves_shared_cache(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = BuildStore(root / "builds")
+            control = CancellationControl()
+            shared = self._shared_cache(root)
+
+            def cancel_during_prepare(_resolution, *, workspace, cache, checkpoint=None):
+                (Path(workspace) / "toolchain/bin").mkdir(parents=True)
+                control.request_cancel(reason="hybrid_during_prepare")
+                checkpoint()
+
+            with (
+                patch.object(build_pipeline.node_toolchain, "resolve", return_value={"fixture": True}),
+                patch.object(build_pipeline.node_toolchain, "prepare", side_effect=cancel_during_prepare),
+                patch.object(build_pipeline.build_executor, "execute_build") as execute_build,
+            ):
+                result = build_pipeline.execute_pipeline_run(
+                    build_pipeline.create_pipeline_run(self._configured_recipe(), store=store, dry_run=False)["id"],
+                    store=store, acquire=self._acquire_hybrid, cancellation_control=control,
+                )
+
+            persisted = store.load(result["run_id"])
+            self.assertEqual(result["status"], "cancelled")
+            self.assertEqual(persisted["cancellation"]["reason"], "hybrid_during_prepare")
+            self.assertEqual(persisted["cancellation"]["stage"], "dependencies")
+            execute_build.assert_not_called()
+            self.assertTrue((Path(result["workspace"]) / "toolchain").is_dir())
+            self._assert_terminal_toolchain_cleanup(store, result, shared)
+
+    def test_cancellation_after_preparation_preserves_identity_and_never_starts_build(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = BuildStore(root / "builds")
+            control = CancellationControl()
+            shared = self._shared_cache(root)
+
+            def cancel_in_dependency_check(*args, **kwargs):
+                control.request_cancel(reason="hybrid_after_prepare")
+                return self._available(args[0], args[1], **kwargs)
+
+            with (
+                patch.object(build_pipeline.node_toolchain, "resolve", return_value={"fixture": True}) as resolve,
+                patch.object(build_pipeline.node_toolchain, "prepare", side_effect=lambda _r, **kw: self._prepare(kw["workspace"])),
+                patch.object(build_pipeline.dependency_checker, "check_dependencies", side_effect=cancel_in_dependency_check),
+                patch.object(build_pipeline.build_executor, "execute_build") as execute_build,
+                patch.object(build_pipeline.node_toolchain.urllib.request, "urlopen", side_effect=AssertionError("late network access")) as network,
+            ):
+                result = build_pipeline.execute_pipeline_run(
+                    build_pipeline.create_pipeline_run(self._configured_recipe(), store=store, dry_run=False)["id"],
+                    store=store, acquire=self._acquire_hybrid, cancellation_control=control,
+                )
+
+            persisted = store.load(result["run_id"])
+            self.assertEqual(result["status"], "cancelled")
+            self.assertEqual(persisted["cancellation"]["reason"], "hybrid_after_prepare")
+            self.assertEqual(persisted["cancellation"]["stage"], "dependencies")
+            self.assertEqual(persisted["toolchain"]["node"]["version"], "24.12.0")
+            resolve.assert_called_once()
+            execute_build.assert_not_called()
+            network.assert_not_called()
+            self._assert_terminal_toolchain_cleanup(store, result, shared)
+
+    def test_cancellation_during_npm_command_stops_command_and_skips_staging(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = BuildStore(root / "builds")
+            control = CancellationControl()
+            shared = self._shared_cache(root)
+            # Define the handler before installing it; the command emits the synchronization marker afterwards.
+            manager_source = (
+                "import signal, sys, time\n"
+                "if sys.argv[1:] == ['--version']:\n"
+                "    print('11.7.0')\n"
+                "    raise SystemExit(0)\n"
+                "def stop(*_args):\n"
+                "    print('npm-terminated', flush=True)\n"
+                "    raise SystemExit(0)\n"
+                "signal.signal(signal.SIGTERM, stop)\n"
+                "print('npm-ready', flush=True)\n"
+                "while True: time.sleep(60)\n"
+            )
+            real_execute = build_pipeline.build_executor.execute_build
+
+            def execute_with_synchronized_cancel(*args, **kwargs):
+                def runner(command, **runner_kwargs):
+                    pipeline_output = runner_kwargs.get("on_output")
+
+                    def output(item):
+                        if pipeline_output:
+                            pipeline_output(item)
+                        if "npm-ready" in item["text"]:
+                            control.request_cancel(reason="hybrid_during_npm")
+
+                    return command_runner.run_command(command, **{**runner_kwargs, "on_output": output})
+
+                return real_execute(*args, runner=runner, **kwargs)
+
+            with (
+                patch.object(build_pipeline.node_toolchain, "resolve", return_value={"fixture": True}),
+                patch.object(
+                    build_pipeline.node_toolchain, "prepare",
+                    side_effect=lambda _r, **kw: self._prepare(kw["workspace"], manager_source=manager_source),
+                ),
+                patch.object(build_pipeline.build_executor, "execute_build", side_effect=execute_with_synchronized_cancel),
+                patch.object(build_pipeline.debian_packaging, "prepare_staging") as prepare_staging,
+                patch.object(build_pipeline.node_toolchain.urllib.request, "urlopen", side_effect=AssertionError("late network access")) as network,
+            ):
+                result = build_pipeline.execute_pipeline_run(
+                    build_pipeline.create_pipeline_run(self._configured_recipe(), store=store, dry_run=False)["id"],
+                    store=store, acquire=self._acquire_hybrid, cancellation_control=control,
+                )
+
+            persisted = store.load(result["run_id"])
+            self.assertEqual(result["status"], "cancelled")
+            self.assertEqual(persisted["cancellation"]["reason"], "hybrid_during_npm")
+            self.assertEqual(persisted["cancellation"]["stage"], "build")
+            command = result["build"]["commands"][0]
+            self.assertEqual(command["status"], "cancelled")
+            self.assertIn("npm-ready", command["stdout"])
+            self.assertIn("npm-terminated", command["stdout"])
+            self.assertIsNone(command["termination_error"])
+            prepare_staging.assert_not_called()
+            network.assert_not_called()
+            self._assert_terminal_toolchain_cleanup(store, result, shared)
+
+    def test_cancellation_after_build_never_starts_packaging(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = BuildStore(root / "builds")
+            control = CancellationControl()
+            shared = self._shared_cache(root)
+
+            def complete_then_cancel(_recipe, _detection, source_directory, **_kwargs):
+                control.request_cancel(reason="hybrid_after_build")
+                return {
+                    "executed": True, "plan": {"commands": ["npm run build"]}, "commands": [],
+                    "output": {"mode": "source", "path": str(source_directory), "exists": True, "kind": "directory"},
+                }
+
+            with (
+                patch.object(build_pipeline.node_toolchain, "resolve", return_value={"fixture": True}),
+                patch.object(build_pipeline.node_toolchain, "prepare", side_effect=lambda _r, **kw: self._prepare(kw["workspace"])),
+                patch.object(build_pipeline.dependency_checker, "check_dependencies", side_effect=self._available),
+                patch.object(build_pipeline.build_executor, "execute_build", side_effect=complete_then_cancel),
+                patch.object(build_pipeline.debian_packaging, "prepare_staging") as prepare_staging,
+            ):
+                result = build_pipeline.execute_pipeline_run(
+                    build_pipeline.create_pipeline_run(self._configured_recipe(), store=store, dry_run=False)["id"],
+                    store=store, acquire=self._acquire_hybrid, cancellation_control=control,
+                )
+
+            persisted = store.load(result["run_id"])
+            self.assertEqual(result["status"], "cancelled")
+            self.assertEqual(persisted["cancellation"]["reason"], "hybrid_after_build")
+            self.assertEqual(persisted["cancellation"]["stage"], "build")
+            self.assertEqual(result["steps"][4]["status"], "cancelled")
+            self.assertEqual(result["steps"][5]["status"], "pending")
+            prepare_staging.assert_not_called()
+            self._assert_terminal_toolchain_cleanup(store, result, shared)
+
+    def test_hybrid_resolution_acquisition_preparation_and_dependency_failures_are_persisted(self):
+        cases = (
+            ("resolution", "node_range_unsatisfied"),
+            ("acquisition", "node_toolchain_acquisition_failed"),
+            ("preparation", "node_toolchain_invalid"),
+            ("dependency", "missing_build_dependencies"),
+        )
+        real_resolve = build_pipeline.node_toolchain.resolve
+
+        for point, code in cases:
+            with self.subTest(point=point), tempfile.TemporaryDirectory() as temporary:
+                store = BuildStore(Path(temporary) / "builds")
+
+                def resolve(requirements, *, package_manager, checkpoint=None):
+                    if point == "resolution":
+                        return real_resolve(
+                            requirements,
+                            package_manager=package_manager,
+                            releases=[{"version": "v23.0.0", "npm": "10.0.0", "files": ["linux-x64"]}],
+                            manager_metadata={"versions": {}},
+                            checkpoint=checkpoint,
+                        )
+                    if point == "acquisition":
+                        def unavailable(*_args, **_kwargs):
+                            raise OSError("fixture Node metadata unavailable")
+
+                        return real_resolve(
+                            requirements,
+                            package_manager=package_manager,
+                            opener=unavailable,
+                            checkpoint=checkpoint,
+                        )
+                    return {"fixture": True}
+
+                def prepare(_resolution, **kwargs):
+                    if point == "preparation":
+                        raise build_pipeline.node_toolchain.NodeToolchainError(
+                            "node_toolchain_invalid",
+                            "fixture prepared Node runtime is invalid",
+                            details={"phase": "prepare"},
+                        )
+                    return self._prepare(kwargs["workspace"])
+
+                def dependency(detected, manual, **kwargs):
+                    if point == "dependency":
+                        raise build_pipeline.dependency_checker.DependencyError(
+                            "missing_build_dependencies",
+                            "fixture dependency failed",
+                            details={"missing": ["python3"]},
+                        )
+                    return self._available(detected, manual, **kwargs)
+
+                with (
+                    patch.object(build_pipeline.node_toolchain, "resolve", side_effect=resolve),
+                    patch.object(build_pipeline.node_toolchain, "prepare", side_effect=prepare),
+                    patch.object(build_pipeline.dependency_checker, "check_dependencies", side_effect=dependency),
+                    patch.object(build_pipeline.build_executor, "execute_build") as execute_build,
+                ):
+                    result = build_pipeline.execute_pipeline_run(
+                        build_pipeline.create_pipeline_run(self._configured_recipe(), store=store, dry_run=False)["id"],
+                        store=store, acquire=self._acquire_hybrid,
+                    )
+
+                persisted = store.load(result["run_id"])
+                self.assertEqual(result["status"], "failed")
+                self.assertEqual(persisted["status"], "failed")
+                self.assertEqual(persisted["error"]["stage"], "dependencies")
+                self.assertEqual(persisted["error"]["code"], code)
+                self.assertEqual(
+                    next(row for row in persisted["steps"] if row["name"] == "dependencies")["status"],
+                    "failed",
+                )
+                self.assertTrue(all(
+                    row["status"] == "pending"
+                    for row in persisted["steps"]
+                    if row["name"] in {"source_changes", "build", "staging", "debian_metadata", "systemd", "package", "artifact"}
+                ))
+                self.assertEqual(persisted["steps"][1]["details"]["project_type"], "python")
+                self.assertEqual(
+                    persisted["steps"][1]["details"]["auxiliary_node_project"]["project_directory"],
+                    "frontend",
+                )
+                execute_build.assert_not_called()
+
+    def test_hybrid_real_nonzero_and_timeout_commands_are_persisted_and_cleaned(self):
+        cases = (
+            (
+                "nonzero",
+                (
+                    "import sys\n"
+                    "if sys.argv[1:] == ['--version']:\n"
+                    "    print('11.7.0')\n"
+                    "    raise SystemExit(0)\n"
+                    "print('real-build-nonzero', flush=True)\n"
+                    "raise SystemExit(7)\n"
+                ),
+                {},
+                "build_command_failed",
+                "real-build-nonzero",
+            ),
+            (
+                "timeout",
+                (
+                    "import os, sys, time\n"
+                    "from pathlib import Path\n"
+                    "if sys.argv[1:] == ['--version']:\n"
+                    "    print('11.7.0')\n"
+                    "    raise SystemExit(0)\n"
+                    "Path('timeout-process.pid').write_text(str(os.getpid()))\n"
+                    "print('real-build-timeout-started', flush=True)\n"
+                    "while True: time.sleep(60)\n"
+                ),
+                {"inactivity_timeout": 1, "maximum_runtime": 3},
+                "build_command_timeout",
+                "real-build-timeout-started",
+            ),
+        )
+        for point, manager_source, limits, code, marker in cases:
+            with self.subTest(point=point), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                store = BuildStore(root / "builds")
+                shared = self._shared_cache(root)
+                configured = self._configured_recipe()
+                configured["build"]["commands"] = ["npm run build", "npm must-not-run"]
+                configured["build"].update(limits)
+
+                with (
+                    patch.object(build_pipeline.node_toolchain, "resolve", return_value={"fixture": True}),
+                    patch.object(
+                        build_pipeline.node_toolchain,
+                        "prepare",
+                        side_effect=lambda _r, **kw: self._prepare(
+                            kw["workspace"], manager_source=manager_source,
+                        ),
+                    ),
+                    patch.object(build_pipeline.debian_packaging, "prepare_staging") as prepare_staging,
+                    patch.object(
+                        build_pipeline.node_toolchain.urllib.request,
+                        "urlopen",
+                        side_effect=AssertionError("late network access"),
+                    ) as network,
+                ):
+                    result = build_pipeline.execute_pipeline_run(
+                        build_pipeline.create_pipeline_run(configured, store=store, dry_run=False)["id"],
+                        store=store, acquire=self._acquire_hybrid,
+                    )
+
+                persisted = store.load(result["run_id"])
+                build_step = next(row for row in persisted["steps"] if row["name"] == "build")
+                failed_command = persisted["error"]["details"]["failed_command"]
+                self.assertEqual(result["status"], "failed")
+                self.assertEqual(persisted["status"], "failed")
+                self.assertEqual(persisted["error"]["stage"], "build")
+                self.assertEqual(persisted["error"]["code"], code)
+                self.assertEqual(build_step["status"], "failed")
+                self.assertEqual(len(build_step["details"]["commands"]), 1)
+                self.assertEqual(failed_command["index"], 1)
+                self.assertEqual(failed_command["status"], "failed")
+                self.assertIn(marker, failed_command["stdout"])
+                self.assertEqual(failed_command["timed_out"], point == "timeout")
+                if point == "nonzero":
+                    self.assertEqual(failed_command["exit_code"], 7)
+                else:
+                    self.assertEqual(failed_command["timeout_reason"], "inactivity")
+                    self.assertFalse(failed_command["termination_error"])
+                    pid = int((Path(result["workspace"]) / "source/timeout-process.pid").read_text())
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(pid, 0)
+                self.assertTrue(all(row["status"] == "pending" for row in persisted["steps"][5:]))
+                self.assertEqual(persisted["toolchain"]["node"]["version"], "24.12.0")
+                self.assertEqual(persisted["toolchain"]["package_manager"]["version"], "11.7.0")
+                self.assertEqual(persisted["steps"][1]["details"]["project_type"], "python")
+                self.assertEqual(
+                    persisted["steps"][1]["details"]["auxiliary_node_project"]["project_directory"],
+                    "frontend",
+                )
+                prepare_staging.assert_not_called()
+                network.assert_not_called()
+                self._assert_terminal_toolchain_cleanup(store, result, shared)
+
+    def test_concurrent_hybrid_primary_node_and_python_runs_keep_distinct_facts_and_environments(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = BuildStore(root / "builds")
+            recipes = {
+                "run-a": self._configured_recipe("run-a"),
+                "run-b": {**recipe(), "name": "run-b", "package": {**recipe()["package"], "name": "run-b"}},
+                "run-c": {**recipe(), "name": "run-c", "package": {**recipe()["package"], "name": "run-c"}},
+            }
+            for configured in recipes.values():
+                configured["build"] = configured.get("build", {}) | {"commands": ["true"]}
+            common_barrier = threading.Barrier(3, timeout=10)
+            node_barrier = threading.Barrier(2, timeout=10)
+            common_release = threading.Event()
+            all_common_active = threading.Event()
+            environments = {"dependencies": {}, "build": {}}
+            lock = threading.Lock()
+            common_active = set()
+            maximum_common_active = 0
+            resolution_requests = []
+            global_environment = dict(os.environ)
+
+            def acquire(configured, workspace, token="", expected_identity=None):
+                nonlocal maximum_common_active
+                source = Path(workspace) / "source"
+                if configured["name"] in {"run-a", "run-c"}:
+                    (source / "pyproject.toml").write_text('[project]\nname = "demo"\n')
+                if configured["name"] == "run-a":
+                    (source / "frontend").mkdir()
+                    (source / "frontend/package.json").write_text(json.dumps({
+                        "packageManager": "npm@11.7.0",
+                        "engines": {"node": ">=24 <25", "npm": ">=11 <12"},
+                    }))
+                if configured["name"] == "run-b":
+                    (source / "package.json").write_text(json.dumps({
+                        "packageManager": "pnpm@10.24.0", "engines": {"node": "^22.19.0"},
+                    }))
+                    (source / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
+                run_name = configured["name"]
+                with lock:
+                    common_active.add(run_name)
+                    maximum_common_active = max(maximum_common_active, len(common_active))
+                    if len(common_active) == 3:
+                        all_common_active.set()
+                try:
+                    common_barrier.wait()
+                    if not common_release.wait(10):
+                        raise TimeoutError("three-Run overlap was not released")
+                    return {
+                        "repository": "owner/demo", "ref": "v1", "tag": "v1",
+                        "upstream_version": "1.0", "debian_version": "1.0-1",
+                        "source_directory": str(source),
+                    }
+                finally:
+                    with lock:
+                        common_active.discard(run_name)
+
+            def resolve(requirements, *, package_manager, checkpoint=None):
+                with lock:
+                    resolution_requests.append((package_manager, dict(requirements)))
+                return {"manager": package_manager, "node": "24.12.0" if package_manager == "npm" else "22.21.1"}
+
+            def prepare(resolution, *, workspace, cache, checkpoint=None):
+                node_barrier.wait()
+                manager = resolution["manager"]
+                version = "11.7.0" if manager == "npm" else "10.24.0"
+                return self._prepare(workspace, node=resolution["node"], manager=manager, manager_version=version)
+
+            def dependency_check(detected, manual, **kwargs):
+                run_id = Path(kwargs["workspace"]).parent.name
+                with lock:
+                    environments["dependencies"][run_id] = dict(kwargs["environment"])
+                return self._available(detected, manual, **kwargs)
+
+            def execute_build(_recipe, _detection, source_directory, **kwargs):
+                run_id = Path(source_directory).parent.name
+                with lock:
+                    environments["build"][run_id] = dict(kwargs["environment"])
+                return {
+                    "executed": True, "plan": {"commands": ["true"]}, "commands": [],
+                    "output": {"mode": "source", "path": str(source_directory), "exists": True, "kind": "directory"},
+                }
+
+            runs = {
+                run_id: build_pipeline.create_pipeline_run(configured, store=store, dry_run=False, run_id=run_id)["id"]
+                for run_id, configured in recipes.items()
+            }
+            results = {}
+            errors = []
+
+            def run(run_id):
+                try:
+                    results[run_id] = build_pipeline.execute_pipeline_run(run_id, store=store, acquire=acquire)
+                except Exception as exc:  # pragma: no cover - asserted below with full error visibility
+                    with lock:
+                        errors.append((run_id, repr(exc)))
+
+            threads = []
+            reached_common_overlap = False
+            active_at_overlap = set()
+            alive_at_overlap = False
+            with (
+                patch.object(build_pipeline.node_toolchain, "resolve", side_effect=resolve),
+                patch.object(build_pipeline.node_toolchain, "prepare", side_effect=prepare),
+                patch.object(build_pipeline.dependency_checker, "check_dependencies", side_effect=dependency_check),
+                patch.object(build_pipeline.build_executor, "execute_build", side_effect=execute_build),
+                patch.object(
+                    build_pipeline.debian_packaging, "prepare_staging",
+                    side_effect=build_pipeline.debian_packaging.PackagingError("fixture_complete", "stop after isolation proof"),
+                ),
+            ):
+                threads = [threading.Thread(target=run, args=(run_id,)) for run_id in runs]
+                try:
+                    for thread in threads:
+                        thread.start()
+                    reached_common_overlap = all_common_active.wait(10)
+                    with lock:
+                        active_at_overlap = set(common_active)
+                    alive_at_overlap = all(thread.is_alive() for thread in threads)
+                    common_release.set()
+                    for thread in threads:
+                        thread.join(timeout=20)
+                finally:
+                    common_release.set()
+                    common_barrier.abort()
+                    node_barrier.abort()
+                    for thread in threads:
+                        if thread.is_alive():
+                            thread.join(timeout=2)
+
+            self.assertTrue(reached_common_overlap, errors)
+            self.assertEqual(active_at_overlap, set(runs))
+            self.assertEqual(maximum_common_active, 3)
+            self.assertTrue(alive_at_overlap)
+            for thread in threads:
+                self.assertFalse(thread.is_alive(), f"worker thread {thread.name} did not terminate")
+            self.assertEqual(
+                errors, [],
+                {run_id: (result["status"], result.get("error"), result.get("detection")) for run_id, result in results.items()},
+            )
+            self.assertEqual(set(results), set(runs))
+            self.assertEqual(results["run-a"]["detection"]["project_type"], "python")
+            self.assertEqual(results["run-a"]["detection"]["auxiliary_node_project"]["package_manager"], "npm")
+            self.assertEqual(results["run-b"]["detection"]["project_type"], "nodejs")
+            self.assertNotIn("auxiliary_node_project", results["run-b"]["detection"])
+            self.assertEqual(results["run-c"]["detection"]["project_type"], "python")
+            self.assertNotIn("auxiliary_node_project", results["run-c"]["detection"])
+            self.assertEqual(results["run-c"]["dependencies"]["available_tools"], [])
+            run_a_toolchain = store.load("run-a")["toolchain"]
+            run_b_toolchain = store.load("run-b")["toolchain"]
+            self.assertEqual(run_a_toolchain["node"]["version"], "24.12.0")
+            self.assertEqual(run_a_toolchain["package_manager"]["name"], "npm")
+            self.assertEqual(run_a_toolchain["package_manager"]["version"], "11.7.0")
+            self.assertEqual(run_b_toolchain["node"]["version"], "22.21.1")
+            self.assertEqual(run_b_toolchain["package_manager"]["name"], "pnpm")
+            self.assertEqual(run_b_toolchain["package_manager"]["version"], "10.24.0")
+            self.assertIsNone(store.load("run-c")["toolchain"])
+            self.assertEqual(
+                sorted(resolution_requests, key=lambda row: row[0]),
+                [
+                    ("npm", {"node": ">=24 <25", "npm": "11.7.0"}),
+                    ("pnpm", {"node": "^22.19.0", "pnpm": "10.24.0"}),
+                ],
+            )
+            for run_id in ("run-a", "run-b"):
+                self.assertEqual(environments["dependencies"][run_id], environments["build"][run_id])
+                self.assertTrue(environments["build"][run_id]["HOME"].startswith(results[run_id]["workspace"]))
+                self.assertTrue(environments["build"][run_id]["npm_config_cache"].startswith(results[run_id]["workspace"]))
+                self.assertTrue(environments["build"][run_id]["COREPACK_HOME"].startswith(results[run_id]["workspace"]))
+            for key in ("PATH", "HOME", "npm_config_cache", "COREPACK_HOME"):
+                self.assertNotEqual(environments["build"]["run-a"][key], environments["build"]["run-b"][key])
+            self.assertEqual(environments["build"]["run-c"], {})
+            self.assertEqual(dict(os.environ), global_environment)
+
+    @unittest.skipUnless(shutil.which("dpkg-deb"), "dpkg-deb unavailable")
+    def test_local_hybrid_fixture_builds_deb_without_frontend_or_toolchain_payload(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = BuildStore(root / "builds")
+            shared = self._shared_cache(root)
+
+            def acquire(*args, **kwargs):
+                source = Path(kwargs.get("workspace") or args[1]) / "source"
+                result = self._acquire_hybrid(*args, **kwargs)
+                (source / "payload/static").mkdir(parents=True)
+                (source / "payload/app.py").write_text("print('packaged')\n")
+                (source / "payload/static/index.html").write_text("built fixture\n")
+                (source / "frontend/node_modules/private-package").mkdir(parents=True)
+                (source / "frontend/node_modules/private-package/index.js").write_text("not packaged\n")
+                return result
+
+            configured = self._configured_recipe(
+                "hybrid-package", output={"mode": "path", "path": "payload"},
+            )
+            configured["package"]["runtime_dependencies"] = ["ca-certificates"]
+            with (
+                patch.object(build_pipeline.node_toolchain, "resolve", return_value={"fixture": True}) as resolve,
+                patch.object(build_pipeline.node_toolchain, "prepare", side_effect=lambda _r, **kw: self._prepare(kw["workspace"])),
+                patch.object(build_pipeline.node_toolchain.urllib.request, "urlopen", side_effect=AssertionError("network access")) as network,
+            ):
+                result = build_pipeline.execute_pipeline_run(
+                    build_pipeline.create_pipeline_run(configured, store=store, dry_run=False)["id"],
+                    store=store, acquire=acquire,
+                )
+
+            self.assertEqual(result["status"], "success")
+            self.assertTrue(Path(result["artifact"]["path"]).is_file())
+            self.assertEqual(result["artifact"]["inspection"]["package"], "hybrid-package")
+            self.assertEqual(result["artifact"]["inspection"]["depends"], "ca-certificates")
+            inventory = {
+                row["path"].rstrip("/")
+                for row in store.artifact_files(result["run_id"], result["artifact"]["inspection"])
+            }
+            self.assertIn("./opt/hybrid-package/app.py", inventory)
+            self.assertIn("./opt/hybrid-package/static/index.html", inventory)
+            self.assertFalse(any(self._payload_path_is_forbidden(path) for path in inventory))
+            for forbidden in ("frontend", "node_modules", "toolchain", "node", "npm", "pnpm"):
+                self.assertTrue(self._payload_path_is_forbidden(f"./opt/hybrid-package/{forbidden}"))
+            self.assertFalse(self._payload_path_is_forbidden("./opt/hybrid-package/node-helper.py"))
+            self.assertFalse(self._payload_path_is_forbidden("./opt/hybrid-package/npmrc"))
+            resolve.assert_called_once()
+            network.assert_not_called()
+
+            self._assert_terminal_toolchain_cleanup(store, result, shared)
+            durable = store.load(result["run_id"])
+            detection = next(step for step in durable["steps"] if step["name"] == "detection")["details"]
+            self.assertEqual(durable["status"], "success")
+            self.assertEqual(durable["toolchain"]["node"]["version"], "24.12.0")
+            self.assertEqual(detection["project_type"], "python")
+            self.assertEqual(detection["auxiliary_node_project"]["project_directory"], "frontend")
 
 
 if __name__ == "__main__":

@@ -170,6 +170,46 @@ def _copy_source_inputs(plan: dict, source_root: Path, workspace_source: Path) -
             shutil.copy2(source, destination)
 
 
+def _install_auxiliary_node_dependencies(recipe: dict, source_directory: Path) -> dict | None:
+    """Install an explicitly declared auxiliary npm project for a Release build."""
+    build = recipe["build"]
+    if build.get("auxiliary_node_install") != "npm_ci":
+        return None
+    directory = build["node_project_directory"]
+    seal = project_detection.auxiliary_npm_install_inputs(source_directory, directory)
+    result = run_command(
+        "npm ci",
+        workspace=source_directory,
+        working_directory=directory,
+        environment=build["environment"],
+        inactivity_timeout=build.get("inactivity_timeout", 300),
+        maximum_runtime=build.get("maximum_runtime"),
+    )
+    if result["status"] != "success":
+        timeout_reason = result.get("timeout_reason")
+        code = result.get("error_code") or (
+            "release_auxiliary_node_install_timeout"
+            if result.get("timed_out")
+            else "release_auxiliary_node_install_failed"
+        )
+        message = (
+            f"Auxiliary npm installation timed out ({timeout_reason})"
+            if result.get("timed_out") and timeout_reason
+            else "Auxiliary npm installation timed out"
+            if result.get("timed_out")
+            else f"Auxiliary npm installation failed with exit code {result.get('exit_code')}"
+        )
+        raise ReleaseBuildError(code, message, details={"command": result})
+    if result.get("arguments") != ["npm", "ci"]:
+        raise ReleaseBuildError(
+            "release_auxiliary_node_install_invalid",
+            "Auxiliary npm installation did not execute the canonical command",
+            details={"command": result},
+        )
+    project_detection.auxiliary_npm_install_inputs(source_directory, directory, expected=seal)
+    return result
+
+
 def _environment_values(path: Path) -> dict[str, str]:
     values = {}
     for line in path.read_text().splitlines():
@@ -392,6 +432,7 @@ def build_release_artifacts(
         else:
             image_target.write_text(json.dumps(images, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
         detection = project_detection.detect_project(workspace / "source", working_directory=recipe["build"]["working_directory"])
+        _install_auxiliary_node_dependencies(recipe, workspace / "source")
         build = build_executor.execute_build(recipe, detection, workspace / "source", dry_run=False)
         staging = debian_packaging.prepare_staging(
             recipe, {**build, "version": plan["debian_version"]}, workspace,

@@ -8,12 +8,15 @@ import urllib.error
 import urllib.request
 from unittest import TestCase, mock
 
-from debbuilder import __version__, app
+from debbuilder import __version__, app, execution_projection
 from debbuilder.api_errors import STABLE_ERROR_CODES, canonical_error_payload
 from debbuilder.api_routes import ADMIN_API_ROUTES, RouteEffect
 from debbuilder.build_models import RUN_STATUSES
 from debbuilder.openapi import OPERATION_DOCS, SCHEMAS, openapi_document, openapi_json
-from debbuilder.recipe_schema import AUTOMATION_POLICIES, SCHEMA_VERSION, recipe_document_for_storage
+from debbuilder.recipe_schema import (
+    AUTOMATION_POLICIES, MAX_NODE_PROJECT_DIRECTORY_LENGTH, SCHEMA_VERSION,
+    recipe_document_for_storage,
+)
 from debbuilder.workspace_cleanup import MAX_SAFE_JSON_INTEGER
 from tests.admin_api_case import AdminApiCase
 
@@ -133,6 +136,22 @@ class OpenApiContractTests(TestCase):
         self.assertEqual(schemas["PackageCreateInput"]["allOf"][1]["required"], ["name"])
         self.assertEqual(schemas["RunAdmissionResponse"]["required"], ["run_id", "status"])
         self.assertEqual(set(schemas["Execution"]["properties"]["status"]["enum"]), RUN_STATUSES)
+        node_project_directory = schemas["Recipe"]["properties"]["build"]["properties"]["node_project_directory"]
+        self.assertEqual(node_project_directory["maxLength"], MAX_NODE_PROJECT_DIRECTORY_LENGTH)
+        auxiliary_install = schemas["Recipe"]["properties"]["build"]["properties"]["auxiliary_node_install"]
+        self.assertEqual(auxiliary_install["enum"], ["npm_ci"])
+        self.assertEqual(
+            schemas["Execution"]["properties"]["steps"]["items"]["$ref"],
+            "#/components/schemas/ExecutionStep",
+        )
+        self.assertEqual(
+            schemas["ExecutionStep"]["properties"]["details"]["properties"]["auxiliary_node_project"]["$ref"],
+            "#/components/schemas/AuxiliaryNodeProject",
+        )
+        self.assertIn(
+            {"$ref": "#/components/schemas/NodeToolchainIdentity"},
+            schemas["Execution"]["properties"]["toolchain"]["oneOf"],
+        )
         self.assertEqual(
             set(schemas["WorkspaceCleanupPolicy"]["properties"]),
             {
@@ -162,6 +181,66 @@ class OpenApiContractTests(TestCase):
             "package": {"name": "api-docs-example"},
             "source": {"repository": "example/api-docs-example", "tracking": "latest_release"},
         })
+
+    def test_auxiliary_projection_preserves_openapi_required_core(self):
+        required = set(SCHEMAS["AuxiliaryNodeProject"]["required"])
+        complete = {
+            "project_directory": "frontend",
+            "manifest": "frontend/package.json",
+            "package_manager": "npm",
+            "node_version": ">=24 <25",
+        }
+        projected = execution_projection._public_auxiliary_node_project(complete)
+        self.assertIsNotNone(projected)
+        self.assertTrue(required <= set(projected))
+        for missing in required:
+            with self.subTest(missing=missing):
+                partial = dict(complete)
+                partial.pop(missing)
+                self.assertIsNone(execution_projection._public_auxiliary_node_project(partial))
+        self.assertIsNone(execution_projection._public_auxiliary_node_project({"diagnostics": ["partial"]}))
+        self.assertIsNone(execution_projection._public_auxiliary_node_project({"node_version": ">=24 <25"}))
+        invalid = (
+            {**complete, "project_directory": {"bad": 1}},
+            {**complete, "manifest": ["frontend/package.json"]},
+            {**complete, "project_directory": " ", "manifest": " /package.json"},
+            {**complete, "project_directory": "   ", "manifest": "   /package.json"},
+            {**complete, "project_directory": "\t\t", "manifest": "\t\t/package.json"},
+            {**complete, "project_directory": ".", "manifest": "./package.json"},
+            {**complete, "project_directory": "../frontend"},
+            {**complete, "project_directory": "/frontend", "manifest": "/frontend/package.json"},
+            {**complete, "project_directory": "C:\\private", "manifest": "C:\\private/package.json"},
+            {**complete, "project_directory": "front\\end", "manifest": "front\\end/package.json"},
+            {**complete, "project_directory": "front//end", "manifest": "front//end/package.json"},
+            {**complete, "manifest": "other/package.json"},
+            {**complete, "package_manager": "pnpm"},
+        )
+        for auxiliary in invalid:
+            with self.subTest(auxiliary=auxiliary):
+                self.assertIsNone(execution_projection._public_auxiliary_node_project(auxiliary))
+
+        private_optional = execution_projection._public_auxiliary_node_project({
+            **complete,
+            "package_manager_spec": "https://internal.example/private",
+            "package_manager_version": "https://operator:password@internal.example/npm",
+            "node_version": "/private/source/node-range",
+            "npm_version": "C:\\private\\npm-range",
+        })
+        self.assertTrue(required <= set(private_optional))
+        self.assertTrue({
+            "package_manager_spec", "package_manager_version", "node_version", "npm_version",
+        }.isdisjoint(private_optional))
+
+        legitimate = execution_projection._public_auxiliary_node_project({
+            **complete,
+            "package_manager_spec": "npm@11.20.0",
+            "package_manager_version": "11.20.0",
+            "npm_version": ">=11 <12",
+        })
+        self.assertEqual(legitimate["package_manager_spec"], "npm@11.20.0")
+        self.assertEqual(legitimate["package_manager_version"], "11.20.0")
+        self.assertEqual(legitimate["node_version"], ">=24 <25")
+        self.assertEqual(legitimate["npm_version"], ">=11 <12")
 
     def test_generation_is_byte_stable_and_contains_no_runtime_secrets(self):
         first = openapi_json().encode("utf-8")

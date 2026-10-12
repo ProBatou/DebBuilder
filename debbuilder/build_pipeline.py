@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import time
 from datetime import datetime
 from pathlib import Path
@@ -15,7 +17,7 @@ from .automation_identity import (
 from .build_store import BuildStore, canonical_recipe_sha256
 from .command_identity import clear_identity, persist_identity, recording_identities, update_identity
 from .execution_cancellation import SERVER_SHUTDOWN, CancellationControl, ExecutionCancelled
-from . import build_executor, deb_inspector, debian_packaging, dependency_checker, elf_toolchain, node_toolchain, project_detection, source_acquisition, source_changes, upstream_archive, upstream_artifact
+from . import build_executor, command_runner, deb_inspector, debian_packaging, dependency_checker, elf_toolchain, node_toolchain, project_detection, source_acquisition, source_changes, upstream_archive, upstream_artifact
 from .elf_dependency_resolution import ResolutionError
 from .dependency_preparation import DependencyPreparationError
 from .validation_oci import OciOwnershipError
@@ -34,6 +36,13 @@ class PipelineRunError(RuntimeError):
 
     def as_dict(self) -> dict:
         return {"code": self.code, "message": str(self), "details": self.details}
+
+
+class AuxiliaryNodeInstallError(RuntimeError):
+    def __init__(self, code: str, message: str, *, details: dict | None = None):
+        super().__init__(message)
+        self.code = code
+        self.details = details or {}
 
 
 def _step(run: dict, name: str) -> dict:
@@ -159,6 +168,52 @@ def _dependency_tool_facts(detection: dict) -> tuple[list[str], dict[str, str]]:
         tools.extend(["node", str(node_project.get("package_manager") or "npm")])
         requirements.update(node_project.get("tool_version_requirements", {}))
     return list(dict.fromkeys(tools)), requirements
+
+
+def _controlled_npm_environment(environment: dict, workspace: str | Path, *, offline: bool) -> dict:
+    controlled = {
+        key: value for key, value in environment.items()
+        if not key.casefold().startswith("npm_config_")
+    }
+    workspace_path = Path(workspace).resolve()
+    config_directory = workspace_path / "toolchain" / "npm-config"
+    config_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        config_directory.resolve(strict=True).relative_to(workspace_path)
+    except (OSError, ValueError) as exc:
+        raise AuxiliaryNodeInstallError(
+            "auxiliary_node_install_configuration_invalid",
+            "Run-local npm configuration directory is not safely confined",
+        ) from exc
+    user_config = config_directory / "user.npmrc"
+    global_config = config_directory / "global.npmrc"
+    for path in (user_config, global_config):
+        if not path.exists():
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            os.close(descriptor)
+        file_stat = path.lstat()
+        if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode) or file_stat.st_size != 0:
+            raise AuxiliaryNodeInstallError(
+                "auxiliary_node_install_configuration_invalid",
+                "Run-local npm configuration files must be empty regular files",
+            )
+    npm_cache = environment.get("npm_config_cache") or str(workspace_path / "toolchain" / "npm-cache")
+    controlled.update({
+        "npm_config_cache": str(npm_cache),
+        "npm_config_userconfig": str(user_config),
+        "npm_config_globalconfig": str(global_config),
+        "npm_config_audit": "false",
+        "npm_config_fund": "false",
+        "npm_config_update_notifier": "false",
+    })
+    if offline:
+        controlled["npm_config_offline"] = "true"
+    return controlled
+
+
+def _dependency_command_output(store: BuildStore, run: dict, item: dict) -> None:
+    for line in str(item.get("text") or "").splitlines():
+        store.append_log_line(run["id"], f"Dependencies command 1 {item.get('stream', 'output')}: {line}")
 
 
 def _finalize_execution_cancellation(run: dict, store: BuildStore, exc: ExecutionCancelled, lifecycle_callback=None, recipe: dict | None = None) -> dict:
@@ -382,7 +437,9 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
     archive_mode = canonical["artifact"]["mode"] == "upstream_archive"
     acquire = acquire or (upstream_archive.acquire if archive_mode else source_acquisition.acquire_source)
     detector = detector or project_detection.detect_project
-    prepare_detected_toolchain = dependency_check is None
+    auxiliary_install_requested = canonical["build"].get("auxiliary_node_install") == "npm_ci"
+    prepare_detected_toolchain = dependency_check is None or auxiliary_install_requested
+    auxiliary_install_seal = None
     dependency_check = dependency_check or dependency_checker.check_dependencies
     change_applier = change_applier or source_changes.apply_changes
     source_step, source_started = _start_step(run, store, "source")
@@ -432,6 +489,12 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
                 if "node_project_directory" in canonical["build"]:
                     detection_options["node_project_directory"] = canonical["build"]["node_project_directory"]
                 detection = detector(source["source_directory"], **detection_options)
+                if auxiliary_install_requested and detection.get("project_type") != "python":
+                    raise project_detection.DetectionError(
+                        "auxiliary_node_install_requires_python",
+                        "Auxiliary npm installation requires a primary Python project",
+                        details={"project_type": detection.get("project_type", "")},
+                    )
             _cancellation_checkpoint(control, run, store, "detection")
             summary = f"{detection['display_name']} from {', '.join(detection['detected_files'])}"
             _finish_step(run, store, detection_step, detection_started, status="success", summary=summary, details=detection)
@@ -477,6 +540,69 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
                     on_cancel=lambda: _observe_cancellation(control, run, store, "dependencies"),
                 )
                 _cancellation_checkpoint(control, run, store, "dependencies")
+                dependency_details = dict(dependencies)
+                if auxiliary_install_requested:
+                    if prepared_toolchain is None:
+                        raise AuxiliaryNodeInstallError(
+                            "auxiliary_node_toolchain_unavailable",
+                            "Auxiliary npm installation requires a prepared Run-local Node toolchain",
+                        )
+                    node_directory = canonical["build"]["node_project_directory"]
+                    auxiliary_install_seal = project_detection.auxiliary_npm_install_inputs(
+                        source["source_directory"], node_directory,
+                    )
+                    install_details = {
+                        "mode": "npm_ci", "executed": False,
+                        "project_directory": node_directory,
+                        "inputs": auxiliary_install_seal,
+                        "commands": [],
+                    }
+                    dependency_details["auxiliary_node_install"] = install_details
+                    dependencies_step["details"] = dependency_details
+                    if dry_run:
+                        install_details["reason"] = "dry_run"
+                        store.append_event(run, "Dry-run validated auxiliary npm ci inputs; installation was not executed.")
+                    else:
+                        install_environment = _controlled_npm_environment(
+                            build_environment, run["workspace"], offline=False,
+                        )
+                        try:
+                            install_result = command_runner.run_command(
+                                "npm ci",
+                                workspace=source["source_directory"],
+                                working_directory=node_directory,
+                                environment=install_environment,
+                                inactivity_timeout=canonical["build"].get("inactivity_timeout", 300),
+                                maximum_runtime=canonical["build"].get("maximum_runtime"),
+                                on_output=lambda item: _dependency_command_output(store, run, item),
+                                cancellation_event=control.event,
+                                on_cancel=lambda: _observe_cancellation(control, run, store, "dependencies"),
+                            )
+                        except ExecutionCancelled as exc:
+                            if exc.command_result is not None:
+                                install_result = {"index": 1, **exc.command_result}
+                                install_details["commands"].append(install_result)
+                                store.save_command_result(run["id"], install_result, namespace="dependencies")
+                                exc.command_result = install_result
+                            raise
+                        install_result = {"index": 1, **install_result}
+                        install_details["commands"].append(install_result)
+                        store.save_command_result(run["id"], install_result, namespace="dependencies")
+                        store.append_event(run, f"Dependencies command 1: {install_result['status']} (exit {install_result.get('exit_code')}, {install_result['duration']}s)")
+                        project_detection.auxiliary_npm_install_inputs(
+                            source["source_directory"], node_directory, expected=auxiliary_install_seal,
+                        )
+                        if install_result.get("status") != "success":
+                            code = install_result.get("error_code") or (
+                                "auxiliary_node_install_timeout" if install_result.get("timed_out")
+                                else "auxiliary_node_install_failed"
+                            )
+                            raise AuxiliaryNodeInstallError(
+                                code,
+                                "Auxiliary npm installation timed out" if install_result.get("timed_out") else "Auxiliary npm installation failed",
+                                details={"auxiliary_node_install": install_details, "failed_command": install_result},
+                            )
+                        install_details["executed"] = True
                 store.append_event(run, f"Build tools available: {', '.join(dependencies.get('available_tools', [])) or 'none'}")
                 store.append_event(run, f"Build tools unavailable: {', '.join(dependencies.get('missing_tools', [])) or 'none'}")
                 store.append_event(run, f"Dependencies detected: {', '.join(dependencies['detected']) or 'none'}")
@@ -484,8 +610,8 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
                 store.append_event(run, f"Dependencies available: {', '.join(dependencies['available']) or 'none'}")
                 store.append_event(run, f"Dependencies missing: {', '.join(dependencies['missing']) or 'none'}")
                 summary = f"{len(dependencies.get('available_tools', []))} tools available; {len(dependencies['available'])} system dependencies installed, {len(dependencies['missing'])} missing"
-                _finish_step(run, store, dependencies_step, dependencies_started, status="success", summary=summary, details=dependencies)
-            except (dependency_checker.DependencyError, node_toolchain.NodeToolchainError) as exc:
+                _finish_step(run, store, dependencies_step, dependencies_started, status="success", summary=summary, details=dependency_details)
+            except (dependency_checker.DependencyError, node_toolchain.NodeToolchainError, project_detection.DetectionError, AuxiliaryNodeInstallError) as exc:
                 project_requirement = {
                     key: detection.get(key, "")
                     for key in ("project_type", "package_manager", "package_manager_spec", "node_version")
@@ -501,7 +627,8 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
                         )
                         if auxiliary.get(key)
                     }
-                state = {**exc.details, "project_requirement": project_requirement}
+                prior_details = dependencies_step.get("details") or {}
+                state = {**prior_details, **exc.details, "project_requirement": project_requirement}
                 store.append_event(run, f"Build tools available: {', '.join(state.get('available_tools', [])) or 'none'}")
                 store.append_event(run, f"Build tools unavailable: {', '.join(state.get('missing_tools', [])) or 'none'}", level="error" if state.get("missing_tools") else "info")
                 store.append_event(run, f"Dependencies detected: {', '.join(state.get('detected', [])) or 'none'}")
@@ -527,11 +654,19 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
                     on_applied=change_applied,
                 )
                 _cancellation_checkpoint(control, run, store, "source_changes")
+                if auxiliary_install_requested:
+                    project_detection.auxiliary_npm_install_inputs(
+                        source["source_directory"], canonical["build"]["node_project_directory"],
+                        expected=auxiliary_install_seal,
+                    )
                 summary = f"{changes['applied_count']}/{changes['requested']} source changes applied"
                 _finish_step(run, store, changes_step, changes_started, status="success", summary=summary, details=changes)
-            except source_changes.SourceChangeError as exc:
-                error = {"stage": "source_changes", "code": exc.code, "message": str(exc), "change_index": exc.index, "details": exc.details}
-                details = {"requested": len(canonical["build"]["source_changes"]), "failed_index": exc.index, **exc.details}
+            except (source_changes.SourceChangeError, project_detection.DetectionError) as exc:
+                failed_index = getattr(exc, "index", None)
+                error = {"stage": "source_changes", "code": exc.code, "message": str(exc), "details": exc.details}
+                if failed_index is not None:
+                    error["change_index"] = failed_index
+                details = {"requested": len(canonical["build"]["source_changes"]), **({"failed_index": failed_index} if failed_index is not None else {}), **exc.details}
                 _finish_step(run, store, changes_step, changes_started, status="failed", summary=str(exc), details=details, error=error)
                 run.update({"status": "failed", "error": error})
     if run["status"] != "failed":
@@ -550,6 +685,14 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
                     if result.get("timed_out") and result.get("stderr"):
                         for line in str(result["stderr"]).splitlines():
                             store.append_log_line(run["id"], f"Build command {result['index']} timeout: {line}", level="error")
+                    if auxiliary_install_requested:
+                        try:
+                            project_detection.auxiliary_npm_install_inputs(
+                                source["source_directory"], canonical["build"]["node_project_directory"],
+                                expected=auxiliary_install_seal,
+                            )
+                        except project_detection.DetectionError as exc:
+                            raise build_executor.BuildError(exc.code, str(exc), details=exc.details) from exc
                 def command_output(index, item):
                     for line in str(item.get("text") or "").splitlines():
                         store.append_log_line(run["id"], f"Build command {index} {item.get('stream', 'output')}: {line}")
@@ -562,6 +705,10 @@ def _run_pipeline_locked(canonical: dict, run: dict, *, store: BuildStore, dry_r
                     _cancellation_checkpoint(control, run, store, "build")
                 if prepared_toolchain is not None:
                     build_environment.update(node_toolchain.validate_prepared(prepared_toolchain, workspace=run["workspace"]))
+                if auxiliary_install_requested and not dry_run:
+                    build_environment = _controlled_npm_environment(
+                        build_environment, run["workspace"], offline=True,
+                    )
                 build = build_executor.execute_build(
                     canonical, detection, source["source_directory"], dry_run=dry_run,
                     environment=build_environment,

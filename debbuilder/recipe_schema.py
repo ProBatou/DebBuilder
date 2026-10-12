@@ -171,6 +171,7 @@ def normalize_node_project_directory(value) -> str:
     parsed = PurePosixPath(value)
     if (
         not value
+        or not value.strip()
         or not parsed.parts
         or len(value) > MAX_NODE_PROJECT_DIRECTORY_LENGTH
         or any(unicodedata.category(character) in {"Cc", "Cs"} for character in value)
@@ -544,6 +545,8 @@ def normalize_recipe(workflow: dict) -> dict:
             "working_directory": str(build_in.get("working_directory") or "."),
             **({"node_project_directory": normalize_node_project_directory(build_in["node_project_directory"])}
                if "node_project_directory" in build_in else {}),
+            **({"auxiliary_node_install": build_in["auxiliary_node_install"]}
+               if "auxiliary_node_install" in build_in else {}),
             "output": {"mode": output_mode, "path": output_path, **({"paths": output_paths} if output_mode == "paths" else {})},
         },
         "install": {
@@ -665,6 +668,25 @@ def validate_recipe_metadata(workflow: dict) -> dict:
             "build.node_project_directory is supported only for source_build Recipes",
             path="$.build.node_project_directory",
         )
+    if "auxiliary_node_install" in build:
+        if build["auxiliary_node_install"] != "npm_ci":
+            raise RecipeDocumentError(
+                "auxiliary_node_install_invalid",
+                "build.auxiliary_node_install must be npm_ci",
+                path="$.build.auxiliary_node_install",
+            )
+        if artifact["mode"] != "source_build":
+            raise RecipeDocumentError(
+                "auxiliary_node_install_requires_source_build",
+                "build.auxiliary_node_install is supported only for source_build Recipes",
+                path="$.build.auxiliary_node_install",
+            )
+        if "node_project_directory" not in build:
+            raise RecipeDocumentError(
+                "auxiliary_node_install_requires_node_project",
+                "build.auxiliary_node_install requires build.node_project_directory",
+                path="$.build.auxiliary_node_install",
+            )
     if artifact["mode"] in {"source_build", "upstream_deb"} and artifact["type"] != "deb":
         raise ValueError("unsupported upstream artifact type")
     if artifact["mode"] == "upstream_archive" and artifact["type"] not in {"archive", "tar.gz", "tgz", "tar.xz", "zip"}:
@@ -734,6 +756,15 @@ def validate_recipe_metadata(workflow: dict) -> dict:
         if not isinstance(change, dict) or change.get("operation") not in SOURCE_CHANGE_TYPES:
             raise ValueError(f"source change {index} has an unsupported operation")
         _safe_relative(str(change.get("path") or ""), f"source change {index} path")
+        if build.get("auxiliary_node_install") == "npm_ci":
+            node_modules = PurePosixPath(build["node_project_directory"]) / "node_modules"
+            change_path = PurePosixPath(str(change.get("path") or ""))
+            if change_path == node_modules or node_modules in change_path.parents:
+                raise RecipeDocumentError(
+                    "auxiliary_node_modules_source_change_forbidden",
+                    "source_changes must not target the auxiliary node_modules directory",
+                    path=f"$.build.source_changes[{index - 1}].path",
+                )
     install = recipe["install"]
     if install["content"]["source"] == "configured_files":
         if install["destination"]:

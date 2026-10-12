@@ -23,6 +23,8 @@ const fieldNames = {
   'artifact.payload.exclude': ['Excluded files','Fichiers exclus','Ausgeschlossene Dateien','Archivos excluidos'],
   'build.commands': ['Build commands','Commandes de construction','Build-Befehle','Comandos de compilación'],
   'build.environment': ['Build environment','Environnement de construction','Build-Umgebung','Entorno de compilación'],
+  'build.node_project_directory': ['Auxiliary Node project','Projet Node auxiliaire','Zusätzliches Node-Projekt','Proyecto Node auxiliar'],
+  'build.auxiliary_node_install': ['Auxiliary Node install','Installation Node auxiliaire','Zusätzliche Node-Installation','Instalación Node auxiliar'],
   'build.output.mode': ['Build output','Sortie de construction','Build-Ausgabe','Salida de compilación'],
   'build.output.path': ['Output path','Chemin de sortie','Ausgabepfad','Ruta de salida'],
   'build.output.paths': ['Output paths','Chemins de sortie','Ausgabepfade','Rutas de salida'],
@@ -38,6 +40,9 @@ const fieldNames = {
 };
 
 const choices = {
+  'build.auxiliary_node_install': {
+    npm_ci: ['npm ci during Dependencies','npm ci pendant Dependencies','npm ci während Dependencies','npm ci durante Dependencies'],
+  },
   'source.tracking': {
     latest_release: ['Latest release','Dernière version publiée','Neueste Veröffentlichung','Última versión publicada'],
     tag: ['Git tag','Étiquette Git','Git-Tag','Etiqueta Git'],

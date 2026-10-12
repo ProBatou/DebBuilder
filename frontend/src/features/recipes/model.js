@@ -18,6 +18,8 @@ export function recipePlan(recipe) {
       ['Version policy', source.version, 'Configured'],
       ['Artifact mode', mode, artifact.mode ? 'Configured' : 'Unknown / pending'],
       ...(mode === 'source_build' ? [['Build strategy', build.commands?.length ? `${build.commands.length} configured commands` : 'No commands configured', 'Configured']] : []),
+      ...(mode === 'source_build' && build.node_project_directory ? [['Auxiliary Node project', build.node_project_directory, 'Configured']] : []),
+      ...(mode === 'source_build' && build.auxiliary_node_install ? [['Auxiliary Node install', build.auxiliary_node_install, 'Configured']] : []),
       ['Package', pkg.name, 'Configured'],
       ['Architecture', pkg.architecture, 'Configured'],
       ...(mode === 'source_build' ? [['Output', build.output, 'Configured']] : []),

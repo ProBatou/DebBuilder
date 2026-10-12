@@ -4,6 +4,7 @@ from __future__ import annotations
 import ast
 import configparser
 import glob
+import hashlib
 import json
 import os
 import re
@@ -16,6 +17,7 @@ from .recipe_schema import RecipeDocumentError, normalize_node_project_directory
 
 
 MAX_AUXILIARY_MANIFEST_BYTES = 1024 * 1024
+MAX_AUXILIARY_LOCK_BYTES = 16 * 1024 * 1024
 
 
 class DetectionError(RuntimeError):
@@ -288,6 +290,226 @@ def _detect_auxiliary_node(source: Path, directory: str) -> dict:
         "detected_files": [manifest],
         "diagnostics": [],
     }
+
+
+def _open_auxiliary_directory(source: Path, directory: str) -> int:
+    directory_fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for component in directory.split("/"):
+            component_stat = os.stat(component, dir_fd=directory_fd, follow_symlinks=False)
+            if stat.S_ISLNK(component_stat.st_mode) or not stat.S_ISDIR(component_stat.st_mode):
+                raise OSError("unsafe auxiliary project directory")
+            next_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        return directory_fd
+    except Exception:
+        os.close(directory_fd)
+        raise
+
+
+def _read_sealed_json(source: Path, directory: str, name: str, maximum_bytes: int) -> tuple[dict, dict]:
+    relative = f"{directory}/{name}"
+    directory_fd = None
+    file_fd = None
+    try:
+        directory_fd = _open_auxiliary_directory(source, directory)
+        before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+            raise _auxiliary_error(
+                "auxiliary_node_install_input_invalid",
+                f"The auxiliary {name} must be a regular non-symlink file",
+                directory, path=relative,
+            )
+        if before.st_size > maximum_bytes:
+            raise _auxiliary_error(
+                "auxiliary_node_install_input_too_large",
+                f"The auxiliary {name} exceeds the supported size limit",
+                directory, path=relative, maximum_bytes=maximum_bytes,
+            )
+        file_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
+        opened = os.fstat(file_fd)
+        if (opened.st_dev, opened.st_ino, opened.st_size) != (before.st_dev, before.st_ino, before.st_size):
+            raise OSError("input changed while opening")
+        chunks, size = [], 0
+        while chunk := os.read(file_fd, min(64 * 1024, maximum_bytes + 1 - size)):
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > maximum_bytes:
+                raise _auxiliary_error(
+                    "auxiliary_node_install_input_too_large",
+                    f"The auxiliary {name} exceeds the supported size limit",
+                    directory, path=relative, maximum_bytes=maximum_bytes,
+                )
+        after = os.fstat(file_fd)
+        if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != (
+            opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns
+        ):
+            raise OSError("input changed while reading")
+        raw = b"".join(chunks)
+    except FileNotFoundError as exc:
+        raise _auxiliary_error(
+            "auxiliary_node_install_input_missing",
+            f"The auxiliary npm installation requires {name}",
+            directory, path=relative,
+        ) from exc
+    except DetectionError:
+        raise
+    except (OSError, UnicodeError) as exc:
+        raise _auxiliary_error(
+            "auxiliary_node_install_input_inaccessible",
+            f"The auxiliary {name} cannot be read safely",
+            directory, path=relative,
+        ) from exc
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        if directory_fd is not None:
+            os.close(directory_fd)
+    try:
+        document = json.loads(raw.decode("utf-8", errors="strict"))
+    except (UnicodeError, ValueError, RecursionError) as exc:
+        raise _auxiliary_error(
+            "auxiliary_node_install_input_invalid",
+            f"The auxiliary {name} must be valid UTF-8 JSON",
+            directory, path=relative,
+        ) from exc
+    if not isinstance(document, dict):
+        raise _auxiliary_error(
+            "auxiliary_node_install_input_invalid",
+            f"The auxiliary {name} root must be an object",
+            directory, path=relative,
+        )
+    return document, {"path": relative, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def _local_npm_reference(value) -> bool:
+    if not isinstance(value, str):
+        return False
+    reference = value.strip()
+    scheme = re.match(r"^([a-z][a-z0-9+.-]*):", reference, re.IGNORECASE)
+    if scheme and scheme.group(1).casefold() in {"file", "link", "git+file"}:
+        return True
+    return reference.startswith(("./", "../", "/", "~/"))
+
+
+def _reject_local_dependency_values(value, directory: str, path: str) -> None:
+    if _local_npm_reference(value):
+        raise _auxiliary_error(
+            "auxiliary_node_local_dependency_unsupported",
+            "Local npm dependency references are not supported for auxiliary installation",
+            directory, field=path,
+        )
+    if isinstance(value, dict):
+        for key, child in value.items():
+            _reject_local_dependency_values(child, directory, f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            _reject_local_dependency_values(child, directory, f"{path}[{index}]")
+
+
+def _verify_absent_auxiliary_file(source: Path, directory: str, name: str) -> str:
+    relative = f"{directory}/{name}"
+    directory_fd = None
+    try:
+        directory_fd = _open_auxiliary_directory(source, directory)
+        os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return relative
+    except OSError as exc:
+        raise _auxiliary_error(
+            "auxiliary_node_install_input_inaccessible",
+            f"The absence of auxiliary {name} cannot be verified safely",
+            directory, path=relative,
+        ) from exc
+    finally:
+        if directory_fd is not None:
+            os.close(directory_fd)
+    raise _auxiliary_error(
+        "auxiliary_node_install_configuration_unsupported",
+        f"Auxiliary npm installation does not permit {name}",
+        directory, path=relative,
+    )
+
+
+def auxiliary_npm_install_inputs(
+    source_directory: str | Path,
+    directory: str,
+    *,
+    expected: dict | None = None,
+) -> dict:
+    """Validate and seal the two-file npm-ci contract for one auxiliary project."""
+    source = Path(source_directory).resolve()
+    directory = normalize_node_project_directory(directory)
+    try:
+        package, package_seal = _read_sealed_json(source, directory, "package.json", MAX_AUXILIARY_MANIFEST_BYTES)
+        lock, lock_seal = _read_sealed_json(source, directory, "package-lock.json", MAX_AUXILIARY_LOCK_BYTES)
+        absent = [
+            _verify_absent_auxiliary_file(source, directory, ".npmrc"),
+            _verify_absent_auxiliary_file(source, directory, "npm-shrinkwrap.json"),
+        ]
+        if "workspaces" in package:
+            raise _auxiliary_error(
+                "auxiliary_node_workspaces_unsupported",
+                "npm workspaces are not supported for auxiliary installation",
+                directory, field="package.json.workspaces",
+            )
+        for field in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies", "overrides"):
+            if field in package:
+                _reject_local_dependency_values(package[field], directory, f"package.json.{field}")
+        version = lock.get("lockfileVersion")
+        if isinstance(version, bool) or version not in {2, 3}:
+            raise _auxiliary_error(
+                "auxiliary_node_lockfile_version_unsupported",
+                "Auxiliary npm installation requires package-lock.json lockfileVersion 2 or 3",
+                directory, path=lock_seal["path"], lockfile_version=version,
+            )
+        packages = lock.get("packages")
+        if not isinstance(packages, dict):
+            raise _auxiliary_error(
+                "auxiliary_node_lockfile_invalid",
+                "The auxiliary package-lock.json must contain a packages object",
+                directory, path=lock_seal["path"],
+            )
+        for key, entry in packages.items():
+            if not isinstance(key, str) or not isinstance(entry, dict):
+                raise _auxiliary_error("auxiliary_node_lockfile_invalid", "The auxiliary lockfile packages graph is invalid", directory, path=lock_seal["path"])
+            if key and not key.startswith("node_modules/"):
+                raise _auxiliary_error("auxiliary_node_local_dependency_unsupported", "Local or workspace package entries are not supported", directory, field=f"package-lock.json.packages.{key}")
+            if entry.get("link") is True:
+                raise _auxiliary_error("auxiliary_node_local_dependency_unsupported", "Linked package entries are not supported", directory, field=f"package-lock.json.packages.{key}")
+            for field in ("version", "resolved"):
+                if _local_npm_reference(entry.get(field)):
+                    raise _auxiliary_error("auxiliary_node_local_dependency_unsupported", "Local package references are not supported", directory, field=f"package-lock.json.packages.{key}.{field}")
+            for field in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies", "overrides"):
+                if field in entry:
+                    _reject_local_dependency_values(entry[field], directory, f"package-lock.json.packages.{key}.{field}")
+            if key and (not isinstance(entry.get("integrity"), str) or not entry["integrity"].strip()):
+                raise _auxiliary_error("auxiliary_node_lockfile_integrity_missing", "Every registry package must have lockfile integrity", directory, field=f"package-lock.json.packages.{key}.integrity")
+        for field in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies", "overrides"):
+            if field in lock:
+                _reject_local_dependency_values(lock[field], directory, f"package-lock.json.{field}")
+        seal = {
+            "project_directory": directory,
+            "lockfile_version": version,
+            "files": [package_seal, lock_seal],
+            "absent": absent,
+        }
+    except (DetectionError, RecipeDocumentError) as exc:
+        if expected is not None:
+            raise _auxiliary_error(
+                "auxiliary_node_inputs_changed",
+                "Auxiliary npm inputs changed after they were sealed",
+                directory, cause_code=getattr(exc, "code", "auxiliary_node_install_input_invalid"),
+            ) from exc
+        raise
+    if expected is not None and seal != expected:
+        raise _auxiliary_error(
+            "auxiliary_node_inputs_changed",
+            "Auxiliary npm inputs changed after they were sealed",
+            directory,
+        )
+    return seal
 
 
 def _detect_node(source: Path, root: Path) -> dict | None:

@@ -41,7 +41,7 @@ class BuiltinRecipeTests(unittest.TestCase):
         self.assertEqual(canonical["name"], "debbuilder")
         self.assertEqual(canonical["management"], {
             "owner": "application", "builtin_id": "debbuilder",
-            "definition_version": 10, "operator_overrides": {},
+            "definition_version": 11, "operator_overrides": {},
         })
         self.assertEqual(builtin_recipe.OPERATOR_OVERRIDE_PATHS, (
             "active",
@@ -159,6 +159,7 @@ class BuiltinRecipeTests(unittest.TestCase):
         previous = self.definition()
         previous["management"]["definition_version"] = 9
         previous["build"].pop("node_project_directory")
+        previous["build"].pop("auxiliary_node_install")
         previous["package"]["description"] = "previous managed description"
         previous["active"] = False
         previous["package"]["maintainer"] = "Operator <operator@example.test>"
@@ -182,7 +183,7 @@ class BuiltinRecipeTests(unittest.TestCase):
 
         self.assertEqual(result.action, "upgraded")
         self.assertEqual(result.previous_definition_version, 9)
-        self.assertEqual(result.definition_version, 10)
+        self.assertEqual(result.definition_version, 11)
         self.assertFalse(result.recipe["active"])
         self.assertEqual(result.recipe["schema_version"], 5)
         self.assertEqual(result.recipe["build"]["node_project_directory"], "frontend")
@@ -205,10 +206,41 @@ class BuiltinRecipeTests(unittest.TestCase):
 
         result = builtin_recipe.reconcile_builtin_recipe(self.workflows)
 
-        self.assertEqual((result.action, result.previous_definition_version, result.definition_version), ("upgraded", 5, 10))
+        self.assertEqual((result.action, result.previous_definition_version, result.definition_version), ("upgraded", 5, 11))
         self.assertFalse(result.recipe["active"])
         self.assertIn("kmod", result.recipe["package"]["runtime_dependencies"])
         self.assertTrue(result.recipe["install"]["maintainer_scripts"]["postinst"].startswith("PYTHONDONTWRITEBYTECODE=1 "))
+
+    def test_definition_v10_upgrade_moves_npm_ci_to_dependencies_and_preserves_overrides(self):
+        previous = self.definition()
+        previous["management"]["definition_version"] = 10
+        previous["build"].pop("auxiliary_node_install")
+        previous["build"]["commands"].insert(1, "npm --prefix frontend ci")
+        previous["active"] = False
+        previous["package"]["maintainer"] = "Operator <operator@example.test>"
+        previous["build"]["environment"] = {"OPERATOR_MODE": "enabled"}
+        previous["build"]["inactivity_timeout"] = 420
+        previous["build"]["maximum_runtime"] = 1200
+        previous["resource_limits"]["tasks_max"] = 128
+        previous["management"]["operator_overrides"] = {
+            "active": False,
+            "package": {"maintainer": "Operator <operator@example.test>"},
+            "build": {"environment": {"OPERATOR_MODE": "enabled"}, "inactivity_timeout": 420, "maximum_runtime": 1200},
+            "resource_limits": copy.deepcopy(previous["resource_limits"]),
+        }
+        self.write(previous)
+
+        result = builtin_recipe.reconcile_builtin_recipe(self.workflows)
+
+        self.assertEqual((result.action, result.previous_definition_version, result.definition_version), ("upgraded", 10, 11))
+        self.assertEqual(result.recipe["build"]["auxiliary_node_install"], "npm_ci")
+        self.assertNotIn("npm --prefix frontend ci", result.recipe["build"]["commands"])
+        self.assertFalse(result.recipe["active"])
+        self.assertEqual(result.recipe["package"]["maintainer"], "Operator <operator@example.test>")
+        self.assertEqual(result.recipe["build"]["environment"], {"OPERATOR_MODE": "enabled"})
+        self.assertEqual(result.recipe["build"]["inactivity_timeout"], 420)
+        self.assertEqual(result.recipe["build"]["maximum_runtime"], 1200)
+        self.assertEqual(result.recipe["resource_limits"]["tasks_max"], 128)
 
     def test_cp3_definition_upgrade_installs_packaged_shutdown_policy(self):
         previous = self.definition()
@@ -225,7 +257,7 @@ class BuiltinRecipeTests(unittest.TestCase):
 
         self.assertEqual(result.action, "upgraded")
         self.assertEqual(result.previous_definition_version, 1)
-        self.assertEqual(result.definition_version, 10)
+        self.assertEqual(result.definition_version, 11)
         self.assertEqual(result.recipe["service"]["restart_sec"], "3s")
         self.assertEqual(result.recipe["service"]["timeout_stop_sec"], "20s")
         self.assertEqual(result.recipe["service"]["kill_signal"], "SIGTERM")
@@ -253,7 +285,7 @@ class BuiltinRecipeTests(unittest.TestCase):
 
         self.assertEqual(result.action, "upgraded")
         self.assertEqual(result.previous_definition_version, 2)
-        self.assertEqual(result.definition_version, 10)
+        self.assertEqual(result.definition_version, 11)
         self.assertEqual(result.recipe["service"]["environment_files"], ["/etc/debbuilder/debbuilder.env"])
         self.assertFalse(result.recipe["active"])
         self.assertEqual(result.recipe["package"]["maintainer"], "Operator <operator@example.test>")
@@ -262,7 +294,7 @@ class BuiltinRecipeTests(unittest.TestCase):
 
     def test_newer_persisted_definition_requires_review_without_rewrite(self):
         managed = self.definition()
-        managed["management"]["definition_version"] = 11
+        managed["management"]["definition_version"] = 12
         original = self.write(managed)
 
         with self.assertRaises(builtin_recipe.BuiltinRecipeError) as raised:
@@ -319,10 +351,10 @@ class BuiltinRecipeTests(unittest.TestCase):
         self.assertEqual(recipe["package"]["runtime_dependencies"], ["python3", "python3-dbus", "reprepro", "gnupg", "gpgv", "podman", "kmod", "ca-certificates", "binutils"])
         self.assertEqual(recipe["build"]["detected_project"], "python")
         self.assertEqual(recipe["build"]["node_project_directory"], "frontend")
+        self.assertEqual(recipe["build"]["auxiliary_node_install"], "npm_ci")
         self.assertEqual(recipe["build"]["working_directory"], ".")
         self.assertEqual(recipe["build"]["commands"], [
             "node frontend/scripts/check-toolchain.mjs",
-            "npm --prefix frontend ci",
             "npm --prefix frontend run build -- --outDir ../static --emptyOutDir",
         ])
         self.assertEqual(recipe["build"]["output"], {

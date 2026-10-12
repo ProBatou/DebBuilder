@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 
 from . import artifact_publication, package_store
 from .notifications import redact
+from .recipe_schema import RecipeDocumentError, normalize_node_project_directory
 from .resource_limits import FIELDS as RESOURCE_LIMIT_FIELDS
 
 
@@ -71,6 +72,20 @@ def _bounded_list(value, *, limit: int = MAX_ITEMS, text_limit: int = 240) -> li
     return [safe_text(item, limit=text_limit) for item in value[:limit] if item is not None]
 
 
+def _public_diagnostics(value, *, limit: int = MAX_ITEMS, text_limit: int = 240) -> list[str]:
+    """Return bounded public diagnostics without locations or secret-bearing URLs."""
+    if not isinstance(value, (list, tuple)):
+        return []
+    result = []
+    for item in value[:limit]:
+        if not isinstance(item, str):
+            continue
+        projected = _safe_error_message(item)[:text_limit]
+        if projected:
+            result.append(projected)
+    return result
+
+
 def _number(value):
     return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
@@ -93,6 +108,31 @@ def _relative_path(value) -> str:
     if path.is_absolute() or ".." in path.parts:
         return ""
     return path.as_posix()
+
+
+def _canonical_auxiliary_path(value) -> str:
+    """Return an already-canonical persisted POSIX path without coercion."""
+    if not isinstance(value, str) or re.match(r"^[A-Za-z]:", value):
+        return ""
+    try:
+        return normalize_node_project_directory(value)
+    except RecipeDocumentError:
+        return ""
+
+
+def _optional_auxiliary_text(value, *, limit: int) -> str:
+    """Project optional text only when the persisted value really is text."""
+    if not isinstance(value, str) or not value or value != value.strip() or any(
+        ord(character) < 32
+        or 127 <= ord(character) <= 159
+        or 0xD800 <= ord(character) <= 0xDFFF
+        for character in value
+    ):
+        return ""
+    projected = _safe_error_message(value)
+    if projected != value[:MAX_TEXT]:
+        return ""
+    return projected[:limit]
 
 
 def _relative_api_url(value) -> str:
@@ -294,6 +334,39 @@ def public_source(details) -> dict:
     return {key: value for key, value in result.items() if _present(value)}
 
 
+def _public_auxiliary_node_project(value) -> dict | None:
+    """Expose bounded manifest requirements without leaking source paths."""
+    if not isinstance(value, dict):
+        return None
+    project_directory = _canonical_auxiliary_path(value.get("project_directory"))
+    manifest = _canonical_auxiliary_path(value.get("manifest"))
+    package_manager = value.get("package_manager")
+    if (
+        not project_directory
+        or manifest != f"{project_directory}/package.json"
+        or not isinstance(package_manager, str)
+        or package_manager != "npm"
+    ):
+        return None
+    detected_files = value.get("detected_files")
+    result = {
+        "project_directory": project_directory,
+        "manifest": manifest,
+        "package_manager": package_manager,
+        "package_manager_spec": _optional_auxiliary_text(value.get("package_manager_spec"), limit=128),
+        "package_manager_version": _optional_auxiliary_text(value.get("package_manager_version"), limit=64),
+        "node_version": _optional_auxiliary_text(value.get("node_version"), limit=128),
+        "npm_version": _optional_auxiliary_text(value.get("npm_version"), limit=128),
+        "detected_files": [
+            path for item in (detected_files if isinstance(detected_files, (list, tuple)) else [])[:50]
+            if (path := _canonical_auxiliary_path(item))
+        ],
+        "diagnostics": _public_diagnostics(value.get("diagnostics"), limit=50),
+    }
+    projected = {key: item for key, item in result.items() if _present(item) and item != []}
+    return projected or None
+
+
 def _public_detection(details) -> dict:
     details = details if isinstance(details, dict) else {}
     selected = _public_asset(details.get("selected_asset"))
@@ -307,6 +380,7 @@ def _public_detection(details) -> dict:
         "file_count": _number(details.get("file_count")),
         "selected_asset": selected,
         "archive_payload": _public_archive_payload(details.get("archive_payload")),
+        "auxiliary_node_project": _public_auxiliary_node_project(details.get("auxiliary_node_project")),
     }
     return {key: value for key, value in result.items() if _present(value)}
 

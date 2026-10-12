@@ -5,10 +5,148 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from debbuilder.project_detection import MAX_AUXILIARY_MANIFEST_BYTES, DetectionError, detect_project
+from debbuilder.project_detection import MAX_AUXILIARY_MANIFEST_BYTES, DetectionError, auxiliary_npm_install_inputs, detect_project
 
 
 class ProjectDetectionTests(unittest.TestCase):
+    def write_npm_ci_inputs(self, root: Path, *, lockfile_version=3, package_updates=None, lock_updates=None):
+        frontend = root / "frontend"
+        frontend.mkdir(exist_ok=True)
+        package = self.auxiliary_manifest(dependencies={"demo-dependency": "1.0.0"})
+        package.update(package_updates or {})
+        lock = {
+            "name": "demo", "lockfileVersion": lockfile_version, "requires": True,
+            "packages": {
+                "": {"dependencies": {"demo-dependency": "1.0.0"}},
+                "node_modules/demo-dependency": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/demo-dependency/-/demo-dependency-1.0.0.tgz", "integrity": "sha512-example"},
+            },
+        }
+        lock.update(lock_updates or {})
+        (frontend / "package.json").write_text(json.dumps(package))
+        (frontend / "package-lock.json").write_text(json.dumps(lock))
+
+    def test_auxiliary_npm_inputs_accept_v2_v3_and_seal_files_and_absence(self):
+        for version in (2, 3):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self.write_npm_ci_inputs(root, lockfile_version=version)
+                seal = auxiliary_npm_install_inputs(root, "frontend")
+                self.assertEqual(seal["lockfile_version"], version)
+                self.assertEqual([row["path"] for row in seal["files"]], ["frontend/package.json", "frontend/package-lock.json"])
+                self.assertTrue(all(len(row["sha256"]) == 64 for row in seal["files"]))
+                self.assertEqual(seal["absent"], ["frontend/.npmrc", "frontend/npm-shrinkwrap.json"])
+
+    def test_auxiliary_npm_inputs_reject_unsupported_graph_and_detect_mutation(self):
+        cases = (
+            (1, None, None, "auxiliary_node_lockfile_version_unsupported"),
+            (3, {"workspaces": ["packages/*"]}, None, "auxiliary_node_workspaces_unsupported"),
+            (3, {"dependencies": {"local": "file:../local"}}, None, "auxiliary_node_local_dependency_unsupported"),
+            (3, {"overrides": {"local": "link:../local"}}, None, "auxiliary_node_local_dependency_unsupported"),
+            (3, None, {"packages": {"": {}, "node_modules/pkg": {"version": "file:../pkg", "link": True}}}, "auxiliary_node_local_dependency_unsupported"),
+            (3, None, {"packages": {"": {}, "node_modules/pkg": {"version": "1.0.0"}}}, "auxiliary_node_lockfile_integrity_missing"),
+        )
+        for version, package_updates, lock_updates, code in cases:
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self.write_npm_ci_inputs(root, lockfile_version=version, package_updates=package_updates, lock_updates=lock_updates)
+                with self.assertRaises(DetectionError) as raised:
+                    auxiliary_npm_install_inputs(root, "frontend")
+                self.assertEqual(raised.exception.code, code)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.write_npm_ci_inputs(root)
+            seal = auxiliary_npm_install_inputs(root, "frontend")
+            (root / "frontend/.npmrc").write_text("registry=https://example.invalid")
+            with self.assertRaises(DetectionError) as raised:
+                auxiliary_npm_install_inputs(root, "frontend", expected=seal)
+            self.assertEqual(raised.exception.code, "auxiliary_node_inputs_changed")
+
+    def test_auxiliary_npm_inputs_reject_git_file_references_even_with_integrity(self):
+        package_fields = ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies", "overrides")
+        for field in package_fields:
+            with self.subTest(location=f"package.json.{field}"), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self.write_npm_ci_inputs(root, package_updates={field: {"local": "Git+File:///tmp/local-package"}})
+                with self.assertRaises(DetectionError) as raised:
+                    auxiliary_npm_install_inputs(root, "frontend")
+                self.assertEqual(raised.exception.code, "auxiliary_node_local_dependency_unsupported")
+                self.assertEqual(raised.exception.details["field"], f"package.json.{field}.local")
+
+        for lockfile_version in (2, 3):
+            for field in ("version", "resolved"):
+                with self.subTest(lockfile_version=lockfile_version, field=field), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    entry = {
+                        "version": "1.0.0",
+                        "resolved": "https://registry.npmjs.org/pkg/-/pkg-1.0.0.tgz",
+                        "integrity": "sha512-artificial-integrity-must-not-authorize-local-git",
+                        field: "git+file:///tmp/local-package#0123456789abcdef",
+                    }
+                    self.write_npm_ci_inputs(root, lockfile_version=lockfile_version, lock_updates={
+                        "packages": {"": {}, "node_modules/pkg": entry},
+                    })
+                    with self.assertRaises(DetectionError) as raised:
+                        auxiliary_npm_install_inputs(root, "frontend")
+                    self.assertEqual(raised.exception.code, "auxiliary_node_local_dependency_unsupported")
+                    self.assertEqual(raised.exception.details["field"], f"package-lock.json.packages.node_modules/pkg.{field}")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.write_npm_ci_inputs(root, lockfile_version=2, lock_updates={
+                "dependencies": {
+                    "local": {
+                        "version": "git+file:///tmp/local-package#0123456789abcdef",
+                        "resolved": "git+file:///tmp/local-package#0123456789abcdef",
+                        "integrity": "sha512-artificial-integrity-must-not-authorize-local-git",
+                    },
+                },
+            })
+            with self.assertRaises(DetectionError) as raised:
+                auxiliary_npm_install_inputs(root, "frontend")
+            self.assertEqual(raised.exception.code, "auxiliary_node_local_dependency_unsupported")
+            self.assertEqual(raised.exception.details["field"], "package-lock.json.dependencies.local.version")
+
+    def test_auxiliary_npm_inputs_preserve_registry_and_real_frontend_lockfiles(self):
+        for lockfile_version in (2, 3):
+            with self.subTest(lockfile_version=lockfile_version), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self.write_npm_ci_inputs(root, lockfile_version=lockfile_version)
+                self.assertEqual(
+                    auxiliary_npm_install_inputs(root, "frontend")["lockfile_version"],
+                    lockfile_version,
+                )
+
+        repository = Path(__file__).resolve().parents[1]
+        self.assertEqual(auxiliary_npm_install_inputs(repository, "frontend")["lockfile_version"], 3)
+
+    def test_primary_node_project_is_not_subject_to_auxiliary_npm_reference_policy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "package.json").write_text(json.dumps({
+                "scripts": {"build": "vite build"},
+                "dependencies": {"local": "git+file:///tmp/local-package"},
+            }))
+            result = detect_project(root)
+        self.assertEqual(result["project_type"], "nodejs")
+        self.assertEqual(result["proposed_commands"][0], "npm install")
+
+    def test_auxiliary_npm_inputs_require_lock_and_reject_project_npm_configuration(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "frontend").mkdir()
+            (root / "frontend/package.json").write_text(json.dumps(self.auxiliary_manifest()))
+            with self.assertRaises(DetectionError) as raised:
+                auxiliary_npm_install_inputs(root, "frontend")
+            self.assertEqual(raised.exception.code, "auxiliary_node_install_input_missing")
+        for name in (".npmrc", "npm-shrinkwrap.json"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self.write_npm_ci_inputs(root)
+                (root / "frontend" / name).write_text("{}")
+                with self.assertRaises(DetectionError) as raised:
+                    auxiliary_npm_install_inputs(root, "frontend")
+                self.assertEqual(raised.exception.code, "auxiliary_node_install_configuration_unsupported")
+
     @staticmethod
     def python_project(root: Path) -> None:
         (root / "pyproject.toml").write_text('[project]\nname="demo"\n')

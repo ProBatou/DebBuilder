@@ -18,6 +18,32 @@ def current(name="demo", **values):
 
 
 class RecipeSchemaTests(unittest.TestCase):
+    def test_auxiliary_npm_install_is_closed_explicit_and_requires_node_source_build(self):
+        historical = recipe_document_for_storage(current())
+        self.assertNotIn("auxiliary_node_install", historical["build"])
+        configured = recipe_document_for_storage(current(build={
+            "node_project_directory": "frontend", "auxiliary_node_install": "npm_ci",
+        }))
+        self.assertEqual(configured["build"]["auxiliary_node_install"], "npm_ci")
+        for build, artifact, code in (
+            ({"node_project_directory": "frontend", "auxiliary_node_install": "npm install"}, None, "auxiliary_node_install_invalid"),
+            ({"auxiliary_node_install": "npm_ci"}, None, "auxiliary_node_install_requires_node_project"),
+            ({"node_project_directory": "frontend", "auxiliary_node_install": "npm_ci"}, {"mode": "upstream_deb"}, "auxiliary_node_project_requires_source_build"),
+        ):
+            with self.subTest(code=code), self.assertRaises(RecipeDocumentError) as raised:
+                recipe_document_for_storage(current(build=build, **({"artifact": artifact} if artifact else {})))
+            self.assertEqual(raised.exception.code, code)
+
+    def test_auxiliary_npm_install_alone_rejects_source_changes_below_node_modules(self):
+        change = {"operation": "create_file", "path": "frontend/node_modules/pkg/file.js", "content": "x"}
+        with self.assertRaises(RecipeDocumentError) as raised:
+            recipe_document_for_storage(current(build={
+                "node_project_directory": "frontend", "auxiliary_node_install": "npm_ci", "source_changes": [change],
+            }))
+        self.assertEqual(raised.exception.code, "auxiliary_node_modules_source_change_forbidden")
+        historical = recipe_document_for_storage(current(build={"source_changes": [change]}))
+        self.assertEqual(historical["build"]["source_changes"], [change])
+
     def test_auxiliary_node_project_is_optional_and_round_trips_without_schema_change(self):
         old = recipe_document_for_storage(current(build={"commands": ["python3 -m build"]}))
         self.assertEqual(old["schema_version"], 5)
@@ -31,7 +57,7 @@ class RecipeSchemaTests(unittest.TestCase):
 
     def test_auxiliary_node_project_path_is_one_bounded_canonical_posix_path(self):
         invalid = (
-            "", ".", "/frontend", "../frontend", "apps/../frontend", "frontend/./app",
+            "", " ", "   ", "\t\t", ".", "/frontend", "../frontend", "apps/../frontend", "frontend/./app",
             "frontend//app", "frontend/", "frontend\\app", "front\x00end", "front\x7fend",
             "front\ud800end", "a" * 1025, ["frontend", "admin"], None,
         )
@@ -44,6 +70,9 @@ class RecipeSchemaTests(unittest.TestCase):
         unicode_path = "interface/équipe"
         configured = recipe_document_for_storage(current(build={"node_project_directory": unicode_path}))
         self.assertEqual(configured["build"]["node_project_directory"], unicode_path)
+        spaced_path = "my frontend"
+        configured = recipe_document_for_storage(current(build={"node_project_directory": spaced_path}))
+        self.assertEqual(configured["build"]["node_project_directory"], spaced_path)
 
     def test_auxiliary_node_project_requires_a_source_build_recipe(self):
         configured = recipe_document_for_storage(current(

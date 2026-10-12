@@ -166,12 +166,12 @@ def seed_run(
             {"at": timestamp, "level": "info", "message": "Dependencies: resolved from the isolated fixture"},
         ],
     })
-    if recipe["name"] in {"seerr", "worker-agent"}:
+    if recipe["name"] in {"seerr", "worker-agent", "debbuilder"}:
         run["toolchain"] = {
             "schema_version": 1,
-            "requested_node_range": "^22.19.0",
-            "node": {"version": "22.21.1", "platform": "linux", "architecture": "x64", "sha256": "b" * 64},
-            "package_manager": {"name": "pnpm", "requested_range": "10.24.0", "version": "10.24.0", "integrity": "sha512-safe"},
+            "requested_node_range": ">=24 <25" if recipe["name"] == "debbuilder" else "^22.19.0",
+            "node": {"version": "24.21.0" if recipe["name"] == "debbuilder" else "22.21.1", "platform": "linux", "architecture": "x64", "sha256": "b" * 64},
+            "package_manager": {"name": "npm" if recipe["name"] == "debbuilder" else "pnpm", "requested_range": "11.20.0" if recipe["name"] == "debbuilder" else "10.24.0", "version": "11.20.0" if recipe["name"] == "debbuilder" else "10.24.0", "integrity": "sha512-safe"},
         }
     run_step(run, "source")["details"] = {
         "repository": recipe["source"]["repository"], "strategy": recipe["source"].get("tracking", "latest_release"),
@@ -191,6 +191,13 @@ def seed_run(
             "build_tools": ["python3"], "system_build_dependencies": ["python3", "python3-build"],
             "proposed_commands": ["python3 -m build --wheel"], "suggested_output_paths": ["dist"],
             "warnings": ["No locked Python dependency file was detected."],
+            "auxiliary_node_project": {
+                "project_directory": "frontend", "manifest": "frontend/package.json",
+                "package_manager": "npm", "package_manager_spec": "npm@11.20.0",
+                "package_manager_version": "11.20.0", "node_version": ">=24 <25",
+                "npm_version": ">=11 <12", "detected_files": ["frontend/package.json"],
+                "diagnostics": [],
+            },
         }
         run_step(run, "dependencies")["details"] = {
             "tools": ["python3"], "detected_tools": ["python3"], "available_tools": ["python3"], "missing_tools": [],

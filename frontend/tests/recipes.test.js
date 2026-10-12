@@ -8,12 +8,14 @@ test('managed identity depends on canonical metadata', () => {
 });
 
 test('Plan keeps authored values configured and does not invent Run evidence', () => {
-  const plan = recipePlan({source:{repository:'example/app',tracking:'manual'},artifact:{mode:'source_build'},build:{commands:['make'],output:{mode:'single',path:'out'}},package:{name:'app',architecture:'amd64',runtime_dependency_detection:{enabled:false,overrides:[{soname:'libx.so'}]}},install:{maintainer_scripts:{postinst:'true'}},service:{enabled:false}});
+  const plan = recipePlan({source:{repository:'example/app',tracking:'manual'},artifact:{mode:'source_build'},build:{commands:['make'],node_project_directory:'frontend',auxiliary_node_install:'npm_ci',output:{mode:'single',path:'out'}},package:{name:'app',architecture:'amd64',runtime_dependency_detection:{enabled:false,overrides:[{soname:'libx.so'}]}},install:{maintainer_scripts:{postinst:'true'}},service:{enabled:false}});
   assert.equal(plan.mode,'source_build');
   assert.equal(plan.summary.find(([name]) => name === 'Source')[2],'Configured');
   assert.deepEqual(plan.hooks,['postinst']);
   assert.equal(plan.sections.some(([name]) => name === 'Service'),false);
   assert.equal(plan.sections.some(([name]) => name === 'Build'),true);
+  assert.equal(plan.summary.find(([name]) => name === 'Auxiliary Node project')[1],'frontend');
+  assert.equal(plan.summary.find(([name]) => name === 'Auxiliary Node install')[1],'npm_ci');
 });
 
 test('ELF policy appears only for eligible Release archives while existing overrides remain in canonical data', () => {

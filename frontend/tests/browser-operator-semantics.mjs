@@ -35,6 +35,49 @@ try {
     await add.locator('xpath=ancestor::details[1]').locator('summary').click();
     await add.waitFor();
     assert.ok((await add.boundingBox()).width < 400);
+    await page.goto(`${base}/#/runs/ui-01-prepared`);
+    await page.locator('.run-main').waitFor();
+    assert.equal(await page.locator('.run-primary-project').innerText(),'Primary application\nPython');
+    assert.ok((await page.locator('.run-auxiliary-toolchain').innerText()).includes('Auxiliary build toolchain'));
+    assert.ok((await page.locator('.run-auxiliary-toolchain').innerText()).includes('Node/npm · frontend'));
+    await page.locator('.run-technical summary').click();
+    assert.ok((await page.locator('.run-technical').innerText()).includes('24.21.0'));
+    assert.ok((await page.locator('.run-technical').innerText()).includes('npm 11.20.0'));
+    const malformedAuxiliaryProjects = [
+      undefined,
+      {diagnostics:['partial historical data']},
+      {project_directory:{bad:1},manifest:'frontend/package.json',package_manager:'npm'},
+      {project_directory:'frontend',manifest:['frontend/package.json'],package_manager:'npm'},
+      {project_directory:' ',manifest:' /package.json',package_manager:'npm'},
+      {project_directory:'   ',manifest:'   /package.json',package_manager:'npm'},
+      {project_directory:'\t\t',manifest:'\t\t/package.json',package_manager:'npm'},
+      {project_directory:'C:\\private',manifest:'C:\\private/package.json',package_manager:'npm'},
+      {project_directory:'.',manifest:'./package.json',package_manager:'npm'},
+      {project_directory:'frontend',manifest:'other/package.json',package_manager:'npm'},
+    ];
+    let malformedAuxiliaryProject;
+    await page.route('**/api/executions/ui-01-prepared',async route => {
+      const response = await route.fetch();
+      const payload = await response.json();
+      const detection = payload.execution.steps.find(step => step.name === 'detection');
+      detection.details = {project_type:'python'};
+      if (malformedAuxiliaryProject !== undefined) detection.details.auxiliary_node_project = malformedAuxiliaryProject;
+      await route.fulfill({response,json:payload});
+    });
+    for (const auxiliary of malformedAuxiliaryProjects) {
+      malformedAuxiliaryProject = auxiliary;
+      await page.reload();
+      await page.locator('.run-main').waitFor();
+      assert.equal(await page.locator('.run-primary-project').innerText(),'Primary application\nPython');
+      assert.equal(await page.locator('.run-auxiliary-toolchain').count(),0);
+      const mainText = await page.locator('.run-main').innerText();
+      assert.equal(mainText.includes('undefined'),false);
+      assert.equal(mainText.includes('null'),false);
+      await page.locator('.run-technical summary').click();
+      assert.ok((await page.locator('.run-technical').innerText()).includes('24.21.0'));
+      assert.ok((await page.locator('.run-technical').innerText()).includes('npm 11.20.0'));
+    }
+    await page.unroute('**/api/executions/ui-01-prepared');
     await page.goto(`${base}/#/runs/ui-04-build-failed`);
     await page.locator('.run-main').waitFor();
     await page.locator('.run-diagnosis').waitFor();

@@ -143,6 +143,28 @@ class ExecutionProjectionTests(unittest.TestCase):
                 "anchor": "arbitrary-source-secret-marker", "anchor_truncated": False,
             }]},
         })
+        detection = run["steps"][1]
+        detection.update({
+            "status": "success",
+            "details": {
+                "project_type": "python",
+                "display_name": "Python · pyproject.toml",
+                "detected_files": ["pyproject.toml"],
+                "auxiliary_node_project": {
+                    "project_directory": "frontend",
+                    "manifest": "frontend/package.json",
+                    "package_manager": "npm",
+                    "package_manager_spec": "npm@11.20.0",
+                    "package_manager_version": "11.20.0",
+                    "node_version": ">=24 <25",
+                    "npm_version": ">=11 <12",
+                    "tool_version_requirements": {"node": ">=24 <25", "npm": "11.20.0"},
+                    "detected_files": ["frontend/package.json", "/private/manifest"],
+                    "diagnostics": [],
+                    "source_root": "/private/source",
+                },
+            },
+        })
         run["automation"] = {
             "policy": "full", "attempt_key": "automation-secret-marker",
             "expected_upstream_identity": {"future_seal": "automation-secret-marker"},
@@ -205,12 +227,203 @@ class ExecutionProjectionTests(unittest.TestCase):
             "node": {"requested_range": "^22.19.0", "version": "22.23.3", "platform": "linux", "architecture": "x64", "sha256": "b" * 64},
             "package_manager": {"name": "pnpm", "requested_range": "10.24.0", "version": "10.24.0", "integrity": "sha512-safe"},
         })
+        detection = next(step for step in detail["steps"] if step["name"] == "detection")
+        self.assertEqual(detection["details"]["project_type"], "python")
+        self.assertEqual(detection["details"]["auxiliary_node_project"], {
+            "project_directory": "frontend",
+            "manifest": "frontend/package.json",
+            "package_manager": "npm",
+            "package_manager_spec": "npm@11.20.0",
+            "package_manager_version": "11.20.0",
+            "node_version": ">=24 <25",
+            "npm_version": ">=11 <12",
+            "detected_files": ["frontend/package.json"],
+        })
+        self.assertNotIn("tool_version_requirements", encoded)
+        self.assertNotIn("source_root", encoded)
         self.assertNotIn("cache_path", encoded)
         self.assertEqual(detail["error"], {
             "code": "example_failure", "stage": "build",
             "message": "Safe failure at [redacted-path] and [redacted-url]",
             "suggested_action": "Inspect [redacted-path] or [redacted-url]",
         })
+
+    def test_auxiliary_diagnostics_are_publicly_sanitized_bounded_and_read_only(self):
+        run = self.populated_run()
+        auxiliary = next(step for step in run["steps"] if step["name"] == "detection")["details"]["auxiliary_node_project"]
+        auxiliary["diagnostics"] = [
+            "failed at /private/source/project",
+            "cache miss in /var/cache/debbuilder/npm/private-entry",
+            "fetch https://operator:password@internal.example/private",
+            "request token=recognizable-token-marker",
+            "Manifest constraints are compatible.",
+            "x" * 500,
+            {"message": "non-text-secret-marker"},
+            42,
+        ] + [f"bounded diagnostic {index}" for index in range(60)]
+        original = copy.deepcopy(run)
+
+        detail = execution_projection.public_detail(run)
+        projected = next(step for step in detail["steps"] if step["name"] == "detection")["details"]["auxiliary_node_project"]
+        diagnostics = projected["diagnostics"]
+        encoded = json.dumps(diagnostics)
+
+        self.assertLessEqual(len(diagnostics), 50)
+        self.assertEqual(diagnostics[0], "failed at [redacted-path]")
+        self.assertEqual(diagnostics[1], "cache miss in [redacted-path]")
+        self.assertEqual(diagnostics[2], "fetch [redacted-url]")
+        self.assertEqual(diagnostics[3], "request token=[redacted]")
+        self.assertEqual(diagnostics[4], "Manifest constraints are compatible.")
+        self.assertLessEqual(len(diagnostics[5]), 240)
+        for forbidden in (
+            "/private/source", "/var/cache/debbuilder", "operator:password",
+            "recognizable-token-marker", "non-text-secret-marker", "bounded diagnostic 59",
+        ):
+            self.assertNotIn(forbidden, encoded)
+        self.assertEqual(run, original)
+
+    def test_incomplete_auxiliary_projects_are_omitted_without_losing_primary_or_toolchain_facts(self):
+        complete = {
+            "project_directory": "frontend",
+            "manifest": "frontend/package.json",
+            "package_manager": "npm",
+            "node_version": ">=24 <25",
+            "diagnostics": ["Manifest constraints are compatible."],
+        }
+        cases = {
+            "diagnostics_only": {"diagnostics": ["partial"]},
+            "constraint_only": {"node_version": ">=24 <25"},
+            "project_directory_absent": {key: value for key, value in complete.items() if key != "project_directory"},
+            "manifest_absent": {key: value for key, value in complete.items() if key != "manifest"},
+            "package_manager_absent": {key: value for key, value in complete.items() if key != "package_manager"},
+            "historical_absent": None,
+        }
+        for status, auxiliary in (("failed", {"diagnostics": ["partial"]}), ("cancelled", {"node_version": ">=24 <25"})):
+            cases[f"{status}_partial"] = auxiliary
+
+        for name, auxiliary in cases.items():
+            with self.subTest(name=name):
+                run = self.populated_run()
+                run["status"] = name.split("_", 1)[0] if name.startswith(("failed_", "cancelled_")) else "success"
+                detection = next(step for step in run["steps"] if step["name"] == "detection")["details"]
+                if auxiliary is None:
+                    detection.pop("auxiliary_node_project")
+                else:
+                    detection["auxiliary_node_project"] = auxiliary
+                detail = execution_projection.public_detail(run)
+                projected = next(step for step in detail["steps"] if step["name"] == "detection")["details"]
+                self.assertEqual(projected["project_type"], "python")
+                self.assertNotIn("auxiliary_node_project", projected)
+                self.assertEqual(detail["toolchain"]["node"]["version"], "22.23.3")
+                self.assertEqual(detail["toolchain"]["package_manager"]["version"], "10.24.0")
+
+        run = self.populated_run()
+        detail = execution_projection.public_detail(run)
+        projected = next(step for step in detail["steps"] if step["name"] == "detection")["details"]["auxiliary_node_project"]
+        self.assertEqual(projected["project_directory"], "frontend")
+        self.assertEqual(projected["manifest"], "frontend/package.json")
+        self.assertEqual(projected["package_manager"], "npm")
+
+    def test_malformed_auxiliary_core_is_omitted_without_coercion_or_normalization(self):
+        complete = {
+            "project_directory": "frontend",
+            "manifest": "frontend/package.json",
+            "package_manager": "npm",
+            "diagnostics": ["Manifest constraints are compatible."],
+        }
+        cases = {
+            "project_directory_dict": {"project_directory": {"bad": 1}},
+            "project_directory_number": {"project_directory": 42},
+            "project_directory_boolean": {"project_directory": True},
+            "manifest_list": {"manifest": ["frontend/package.json"]},
+            "manifest_number": {"manifest": 42},
+            "manifest_boolean": {"manifest": False},
+            "empty": {"project_directory": ""},
+            "one_space": {"project_directory": " ", "manifest": " /package.json"},
+            "multiple_spaces": {"project_directory": "   ", "manifest": "   /package.json"},
+            "tabs": {"project_directory": "\t\t", "manifest": "\t\t/package.json"},
+            "dot": {"project_directory": ".", "manifest": "./package.json"},
+            "parent": {"project_directory": "apps/../frontend"},
+            "posix_absolute": {"project_directory": "/private/frontend", "manifest": "/private/frontend/package.json"},
+            "windows_backslash": {"project_directory": "C:\\private", "manifest": "C:\\private/package.json"},
+            "windows_drive": {"project_directory": "C:/private", "manifest": "C:/private/package.json"},
+            "backslash": {"project_directory": "front\\end", "manifest": "front\\end/package.json"},
+            "repeated_separator": {"project_directory": "front//end", "manifest": "front//end/package.json"},
+            "trailing_separator": {"project_directory": "frontend/", "manifest": "frontend//package.json"},
+            "control_character": {"project_directory": "front\x00end", "manifest": "front\x00end/package.json"},
+            "mismatched_manifest": {"manifest": "other/package.json"},
+            "wrong_package_manager": {"package_manager": "pnpm"},
+            "non_text_package_manager": {"package_manager": ["npm"]},
+        }
+
+        for name, updates in cases.items():
+            with self.subTest(name=name):
+                run = self.populated_run()
+                detection = next(step for step in run["steps"] if step["name"] == "detection")["details"]
+                detection["auxiliary_node_project"] = {**complete, **updates}
+                detail = execution_projection.public_detail(run)
+                projected = next(step for step in detail["steps"] if step["name"] == "detection")["details"]
+                self.assertEqual(projected["project_type"], "python")
+                self.assertNotIn("auxiliary_node_project", projected)
+                self.assertEqual(detail["toolchain"]["node"]["version"], "22.23.3")
+                self.assertEqual(detail["toolchain"]["package_manager"]["version"], "10.24.0")
+
+    def test_auxiliary_optional_values_require_text_and_detected_files_are_canonical(self):
+        auxiliary = {
+            "project_directory": "frontend",
+            "manifest": "frontend/package.json",
+            "package_manager": "npm",
+            "package_manager_spec": {"bad": "npm@11.20.0"},
+            "package_manager_version": ["11.20.0"],
+            "node_version": 24,
+            "npm_version": "11\x00.x",
+            "detected_files": [
+                "frontend/package.json", {"private": "/private/manifest"}, 42, True,
+                "/private/manifest", "C:\\private\\package.json", "../private/package.json",
+                "frontend//other.json", "frontend/other.json",
+            ],
+            "diagnostics": ["Manifest constraints are compatible.", {"private": "/private/manifest"}],
+        }
+
+        projected = execution_projection._public_auxiliary_node_project(auxiliary)
+
+        self.assertEqual(projected, {
+            "project_directory": "frontend",
+            "manifest": "frontend/package.json",
+            "package_manager": "npm",
+            "detected_files": ["frontend/package.json", "frontend/other.json"],
+            "diagnostics": ["Manifest constraints are compatible."],
+        })
+
+    def test_auxiliary_optional_values_omit_private_locations_and_preserve_constraints(self):
+        auxiliary = {
+            "project_directory": "my frontend",
+            "manifest": "my frontend/package.json",
+            "package_manager": "npm",
+            "package_manager_spec": "https://internal.example/private",
+            "package_manager_version": "https://operator:password@internal.example/npm",
+            "node_version": "/private/source/node-range",
+            "npm_version": "C:\\private\\npm-range",
+        }
+
+        projected = execution_projection._public_auxiliary_node_project(auxiliary)
+
+        self.assertEqual(projected, {
+            "project_directory": "my frontend",
+            "manifest": "my frontend/package.json",
+            "package_manager": "npm",
+        })
+        legitimate = execution_projection._public_auxiliary_node_project({
+            **auxiliary,
+            "package_manager_spec": "npm@11.20.0",
+            "package_manager_version": "11.20.0",
+            "node_version": ">=24 <25",
+            "npm_version": ">=11 <12",
+        })
+        self.assertEqual(legitimate["package_manager_spec"], "npm@11.20.0")
+        self.assertEqual(legitimate["package_manager_version"], "11.20.0")
+        self.assertEqual(legitimate["node_version"], ">=24 <25")
+        self.assertEqual(legitimate["npm_version"], ">=11 <12")
 
     def test_summary_has_consistent_version_semantics_and_no_internal_fields(self):
         run = self.populated_run()

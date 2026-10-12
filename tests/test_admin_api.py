@@ -630,6 +630,206 @@ class AdminApiTests(AdminApiCase):
                     self.assertNotIn("path", response["execution"]["artifact"])
                 self.assertEqual((store.run_dir(run["id"]) / "run.json").read_bytes(), before)
 
+    def test_execution_detail_projects_python_auxiliary_node_provenance(self):
+        store = BuildStore(server.DATA / "builds")
+        run = store.load("20260822-031400")
+        detection = next(step for step in run["steps"] if step["name"] == "detection")
+        detection["details"] = {
+            "project_type": "python",
+            "display_name": "Python · pyproject.toml",
+            "auxiliary_node_project": {
+                "project_directory": "frontend",
+                "manifest": "frontend/package.json",
+                "package_manager": "npm",
+                "package_manager_spec": "npm@11.20.0",
+                "package_manager_version": "11.20.0",
+                "node_version": ">=24 <25",
+                "npm_version": ">=11 <12",
+                "detected_files": ["frontend/package.json"],
+                "tool_version_requirements": {"node": ">=24 <25", "npm": "11.20.0"},
+            },
+        }
+        run["toolchain"] = {
+            "requested_node_range": ">=24 <25",
+            "node": {"version": "24.21.0", "platform": "linux", "architecture": "x64", "sha256": "a" * 64},
+            "package_manager": {"name": "npm", "requested_range": "11.20.0", "version": "11.20.0", "integrity": "sha512-safe"},
+        }
+        store.save(run)
+
+        _, response = self.request("GET", f"/api/executions/{run['id']}")
+        execution = response["execution"]
+        projected = next(step for step in execution["steps"] if step["name"] == "detection")["details"]
+        self.assertEqual(projected["project_type"], "python")
+        self.assertEqual(projected["auxiliary_node_project"]["project_directory"], "frontend")
+        self.assertEqual(projected["auxiliary_node_project"]["manifest"], "frontend/package.json")
+        self.assertNotIn("tool_version_requirements", projected["auxiliary_node_project"])
+        self.assertEqual(execution["toolchain"]["node"]["version"], "24.21.0")
+        self.assertEqual(execution["toolchain"]["package_manager"]["version"], "11.20.0")
+
+    def test_execution_detail_sanitizes_persisted_auxiliary_diagnostics_without_mutation(self):
+        store = BuildStore(server.DATA / "builds")
+        run = store.load("20260822-031400")
+        detection = next(step for step in run["steps"] if step["name"] == "detection")
+        detection["details"] = {
+            "project_type": "python",
+            "auxiliary_node_project": {
+                "project_directory": "frontend",
+                "manifest": "frontend/package.json",
+                "package_manager": "npm",
+                "diagnostics": [
+                    "failed at /private/source/project",
+                    "cache /var/cache/debbuilder/npm/private-entry",
+                    "fetch https://operator:password@internal.example/private",
+                    "token=recognizable-http-token",
+                    "Manifest constraints are compatible.",
+                    "x" * 500,
+                    {"message": "non-text-http-secret"},
+                ] + [f"HTTP bounded diagnostic {index}" for index in range(60)],
+            },
+        }
+        store.save(run)
+        run_path = store.run_dir(run["id"]) / "run.json"
+        before = run_path.read_bytes()
+
+        status, response = self.request("GET", f"/api/executions/{run['id']}")
+
+        self.assertEqual(status, 200)
+        auxiliary = next(step for step in response["execution"]["steps"] if step["name"] == "detection")["details"]["auxiliary_node_project"]
+        diagnostics = auxiliary["diagnostics"]
+        encoded = json.dumps(response)
+        self.assertLessEqual(len(diagnostics), 50)
+        self.assertEqual(diagnostics[0], "failed at [redacted-path]")
+        self.assertEqual(diagnostics[1], "cache [redacted-path]")
+        self.assertEqual(diagnostics[2], "fetch [redacted-url]")
+        self.assertEqual(diagnostics[3], "token=[redacted]")
+        self.assertEqual(diagnostics[4], "Manifest constraints are compatible.")
+        self.assertLessEqual(len(diagnostics[5]), 240)
+        for forbidden in (
+            "/private/source", "/var/cache/debbuilder", "operator:password",
+            "recognizable-http-token", "non-text-http-secret", "HTTP bounded diagnostic 59",
+        ):
+            self.assertNotIn(forbidden, encoded)
+        self.assertEqual(run_path.read_bytes(), before)
+
+    def test_execution_detail_omits_malformed_auxiliary_projects_from_real_http_responses(self):
+        store = BuildStore(server.DATA / "builds")
+        complete = {
+            "project_directory": "frontend",
+            "manifest": "frontend/package.json",
+            "package_manager": "npm",
+            "node_version": ">=24 <25",
+            "detected_files": ["frontend/package.json"],
+            "diagnostics": ["Manifest constraints are compatible."],
+        }
+        cases = {
+            "historical_absent": ("success", None),
+            "project_directory_absent": ("success", {key: value for key, value in complete.items() if key != "project_directory"}),
+            "manifest_absent": ("success", {key: value for key, value in complete.items() if key != "manifest"}),
+            "package_manager_incorrect": ("success", {**complete, "package_manager": "pnpm"}),
+            "project_directory_dict": ("success", {**complete, "project_directory": {"bad": 1}}),
+            "manifest_list": ("success", {**complete, "manifest": ["frontend/package.json"]}),
+            "one_space": ("success", {**complete, "project_directory": " ", "manifest": " /package.json"}),
+            "multiple_spaces": ("success", {**complete, "project_directory": "   ", "manifest": "   /package.json"}),
+            "tabs": ("success", {**complete, "project_directory": "\t\t", "manifest": "\t\t/package.json"}),
+            "dot": ("success", {**complete, "project_directory": ".", "manifest": "./package.json"}),
+            "parent": ("success", {**complete, "project_directory": "apps/../frontend"}),
+            "posix_absolute": ("success", {**complete, "project_directory": "/frontend", "manifest": "/frontend/package.json"}),
+            "windows_absolute": ("success", {**complete, "project_directory": "C:\\private", "manifest": "C:\\private/package.json"}),
+            "backslash": ("success", {**complete, "project_directory": "front\\end", "manifest": "front\\end/package.json"}),
+            "noncanonical": ("success", {**complete, "project_directory": "front//end", "manifest": "front//end/package.json"}),
+            "manifest_mismatch": ("success", {**complete, "manifest": "other/package.json"}),
+            "failed_partial": ("failed", {"diagnostics": ["failed at /private/source"]}),
+            "cancelled_partial": ("cancelled", {"node_version": ">=24 <25"}),
+        }
+
+        for name, (run_status, auxiliary) in cases.items():
+            with self.subTest(name=name):
+                run = store.load("20260822-031400")
+                run["status"] = run_status
+                detection = next(step for step in run["steps"] if step["name"] == "detection")
+                detection["details"] = {"project_type": "python", "display_name": "Python · pyproject.toml"}
+                if auxiliary is not None:
+                    detection["details"]["auxiliary_node_project"] = auxiliary
+                run["toolchain"] = {
+                    "requested_node_range": ">=24 <25",
+                    "node": {"version": "24.21.0", "platform": "linux", "architecture": "x64", "sha256": "a" * 64},
+                    "package_manager": {"name": "npm", "requested_range": "11.20.0", "version": "11.20.0", "integrity": "sha512-safe"},
+                }
+                store.save(run)
+                run_path = store.run_dir(run["id"]) / "run.json"
+                before = run_path.read_bytes()
+
+                status, response = self.request("GET", f"/api/executions/{run['id']}")
+
+                self.assertEqual(status, 200)
+                execution = response["execution"]
+                projected = next(step for step in execution["steps"] if step["name"] == "detection")["details"]
+                self.assertEqual(projected["project_type"], "python")
+                self.assertNotIn("auxiliary_node_project", projected)
+                self.assertEqual(execution["toolchain"]["node"]["version"], "24.21.0")
+                self.assertEqual(execution["toolchain"]["package_manager"]["version"], "11.20.0")
+                self.assertNotIn("/private/source", json.dumps(response))
+                self.assertEqual(run_path.read_bytes(), before)
+
+    def test_execution_detail_omits_private_auxiliary_values_without_mutation(self):
+        store = BuildStore(server.DATA / "builds")
+        run = store.load("20260822-031400")
+        detection = next(step for step in run["steps"] if step["name"] == "detection")
+        detection["details"] = {
+            "project_type": "python",
+            "display_name": "Python · pyproject.toml",
+            "auxiliary_node_project": {
+                "project_directory": "frontend",
+                "manifest": "frontend/package.json",
+                "package_manager": "npm",
+                "package_manager_spec": "https://internal.example/private",
+                "package_manager_version": "https://operator:password@internal.example/npm",
+                "node_version": "/private/source/node-range",
+                "npm_version": "C:\\private\\npm-range",
+            },
+        }
+        run["toolchain"] = {
+            "requested_node_range": ">=24 <25",
+            "node": {"version": "24.21.0", "platform": "linux", "architecture": "x64", "sha256": "a" * 64},
+            "package_manager": {"name": "npm", "requested_range": "11.20.0", "version": "11.20.0", "integrity": "sha512-safe"},
+        }
+        store.save(run)
+        run_path = store.run_dir(run["id"]) / "run.json"
+        before = run_path.read_bytes()
+
+        status, response = self.request("GET", f"/api/executions/{run['id']}")
+
+        self.assertEqual(status, 200)
+        execution = response["execution"]
+        projected = next(step for step in execution["steps"] if step["name"] == "detection")["details"]
+        self.assertEqual(projected["project_type"], "python")
+        auxiliary = projected["auxiliary_node_project"]
+        for key in ("package_manager_spec", "package_manager_version", "node_version", "npm_version"):
+            self.assertNotIn(key, auxiliary)
+        encoded = json.dumps(response)
+        for private in ("/private/source", "C:\\\\private", "internal.example", "operator:password"):
+            self.assertNotIn(private, encoded)
+        self.assertEqual(execution["toolchain"]["node"]["version"], "24.21.0")
+        self.assertEqual(execution["toolchain"]["package_manager"]["version"], "11.20.0")
+        self.assertEqual(run_path.read_bytes(), before)
+
+        persisted = store.load(run["id"])
+        persisted_auxiliary = next(step for step in persisted["steps"] if step["name"] == "detection")["details"]["auxiliary_node_project"]
+        persisted_auxiliary.update({
+            "package_manager_spec": "npm@11.20.0",
+            "package_manager_version": "11.20.0",
+            "node_version": ">=24 <25",
+            "npm_version": ">=11 <12",
+        })
+        store.save(persisted)
+        status, response = self.request("GET", f"/api/executions/{run['id']}")
+        self.assertEqual(status, 200)
+        auxiliary = next(step for step in response["execution"]["steps"] if step["name"] == "detection")["details"]["auxiliary_node_project"]
+        self.assertEqual(auxiliary["package_manager_spec"], "npm@11.20.0")
+        self.assertEqual(auxiliary["package_manager_version"], "11.20.0")
+        self.assertEqual(auxiliary["node_version"], ">=24 <25")
+        self.assertEqual(auxiliary["npm_version"], ">=11 <12")
+
     def test_execution_endpoints_project_every_canonical_lifecycle_transition(self):
         store, run, artifact = self.successful_build_run(run_id="lifecycle-run", package="lifecycle", version="2.0-1")
         run["artifact"]["sha256"] = hashlib.sha256(artifact.read_bytes()).hexdigest()

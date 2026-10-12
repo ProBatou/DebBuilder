@@ -5136,6 +5136,19 @@
                   "type": "string"
                 }
               },
+              "node_project_directory": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024,
+                "description": "Optional canonical relative POSIX path to one auxiliary npm project. Valid only for a Python source_build Recipe; recipe_schema.py enforces confinement and applicability."
+              },
+              "auxiliary_node_install": {
+                "type": "string",
+                "enum": [
+                  "npm_ci"
+                ],
+                "description": "Optional explicit npm ci during Dependencies for a Python source_build Recipe with node_project_directory. No installation is inferred when omitted."
+              },
               "environment": {
                 "type": "object",
                 "additionalProperties": {
@@ -5767,6 +5780,338 @@
         ],
         "description": "Projection of Recipe, Run and APT repository state."
       },
+      "AuxiliaryNodeProject": {
+        "type": "object",
+        "properties": {
+          "project_directory": {
+            "type": "string",
+            "description": "Canonical relative directory configured by build.node_project_directory."
+          },
+          "manifest": {
+            "type": "string",
+            "description": "Relative path to the auxiliary package.json."
+          },
+          "package_manager": {
+            "type": "string",
+            "enum": [
+              "npm"
+            ]
+          },
+          "package_manager_spec": {
+            "type": "string"
+          },
+          "package_manager_version": {
+            "type": "string"
+          },
+          "node_version": {
+            "type": "string",
+            "description": "engines.node requirement from the auxiliary package.json."
+          },
+          "npm_version": {
+            "type": "string",
+            "description": "engines.npm requirement from the auxiliary package.json."
+          },
+          "detected_files": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "diagnostics": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "project_directory",
+          "manifest",
+          "package_manager"
+        ],
+        "description": "Explicit auxiliary Node/npm build project detected for a primary Python application."
+      },
+      "NodeToolchainIdentity": {
+        "type": "object",
+        "properties": {
+          "node": {
+            "type": "object",
+            "properties": {
+              "requested_range": {
+                "type": "string"
+              },
+              "version": {
+                "type": "string"
+              },
+              "platform": {
+                "type": "string"
+              },
+              "architecture": {
+                "type": "string"
+              },
+              "sha256": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "version"
+            ]
+          },
+          "package_manager": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "requested_range": {
+                "type": "string"
+              },
+              "version": {
+                "type": "string"
+              },
+              "integrity": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "version"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "node",
+          "package_manager"
+        ],
+        "description": "Resolved immutable per-Run Node and package-manager provenance; cache and workspace paths are omitted."
+      },
+      "AuxiliaryNpmInstall": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "const": "npm_ci"
+          },
+          "executed": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "project_directory": {
+            "type": "string"
+          },
+          "inputs": {
+            "type": "object",
+            "properties": {
+              "lockfile_version": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "enum": [
+                  2,
+                  3,
+                  null
+                ]
+              },
+              "files": {
+                "type": "array",
+                "maxItems": 2,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "size": {
+                      "type": "integer"
+                    },
+                    "sha256": {
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": true
+                }
+              },
+              "absent": {
+                "type": "array",
+                "maxItems": 2,
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": true
+          },
+          "commands": {
+            "type": "array",
+            "maxItems": 1,
+            "items": {
+              "type": "object",
+              "properties": {
+                "index": {
+                  "type": "integer"
+                },
+                "command": {
+                  "type": "string"
+                },
+                "arguments": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "working_directory": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string"
+                },
+                "exit_code": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "duration": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "timed_out": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": true
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "mode",
+          "executed",
+          "project_directory",
+          "inputs",
+          "commands"
+        ],
+        "description": "Bounded public proof for the explicit npm ci command executed during Dependencies."
+      },
+      "ExecutionStep": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "enum": [
+              "source",
+              "detection",
+              "dependencies",
+              "source_changes",
+              "build",
+              "staging",
+              "debian_metadata",
+              "systemd",
+              "package",
+              "artifact"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "cancelled",
+              "failed",
+              "pending",
+              "running",
+              "skipped",
+              "success"
+            ]
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "duration": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "summary": {
+            "type": "string"
+          },
+          "error": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "type": "string"
+                  },
+                  "stage": {
+                    "type": "string"
+                  },
+                  "message": {
+                    "type": "string"
+                  },
+                  "suggested_action": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "code",
+                  "stage",
+                  "message"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "details": {
+            "type": "object",
+            "properties": {
+              "project_type": {
+                "type": "string",
+                "enum": [
+                  "nodejs",
+                  "python",
+                  "rust",
+                  "static",
+                  "upstream_archive"
+                ]
+              },
+              "auxiliary_node_project": {
+                "$ref": "#/components/schemas/AuxiliaryNodeProject"
+              },
+              "auxiliary_node_install": {
+                "$ref": "#/components/schemas/AuxiliaryNpmInstall"
+              }
+            },
+            "additionalProperties": true,
+            "description": "Stage-specific bounded facts. Detection uses project_type and optional auxiliary_node_project."
+          }
+        },
+        "additionalProperties": true,
+        "required": [
+          "name",
+          "status",
+          "details"
+        ]
+      },
       "Execution": {
         "type": "object",
         "properties": {
@@ -5860,13 +6205,21 @@
             },
             "additionalProperties": false
           },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExecutionStep"
+            }
+          },
           "toolchain": {
-            "type": [
-              "object",
-              "null"
-            ],
-            "description": "Resolved per-Run Node and package-manager identity when applicable.",
-            "additionalProperties": true
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/NodeToolchainIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "additionalProperties": true,

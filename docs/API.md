@@ -93,6 +93,23 @@ validator. Likewise, execution, automation, and storage projections have
 documented stable fields plus subsystem-dependent fields. Tests pin the
 important request fields and real response wrappers to the runtime.
 
+For a Python `source_build`, Recipe v5 may include the optional
+`build.node_project_directory` relative path. Backend validation remains the
+authority for path confinement and Python/source-build applicability. The
+separate optional `build.auxiliary_node_install: npm_ci` opt-in requires that
+directory and runs exactly `npm ci` there during Dependencies; omission never
+implies installation. A dry-run validates the sealed inputs but does not run
+the installing command. Build then reuses the prepared toolchain with npm's
+offline mode enabled and does not repeat installation. The
+Recipe GET returns that canonical authored field. After detection,
+`GET /api/executions/{run_id}` keeps `steps[].details.project_type` equal to
+`python` and may expose a bounded `auxiliary_node_project` with its relative
+directory, manifest, npm identity, and Node/npm requirements. The existing
+top-level `toolchain` contains the resolved per-Run versions and available
+integrities. Absolute workspace/cache paths, environment values, credentials,
+and command output are not part of these projections. OpenAPI documents these
+same structures; no auxiliary endpoint or schema-version increment is used.
+
 ## System diagnostics
 
 `GET /api/system/diagnostics` is a configured-admin, read-only snapshot for

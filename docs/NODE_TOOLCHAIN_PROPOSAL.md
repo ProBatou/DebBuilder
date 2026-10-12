@@ -39,3 +39,65 @@ Missing prepared files fail with `prepared_node_toolchain_missing`; no Node,
 npm, pnpm, or Corepack acquisition is attempted by the offline execution path.
 Existing command containment, cancellation checkpoints, and workspace cleanup
 remain authoritative.
+
+## Explicit auxiliary Node project for a Python source build
+
+A Recipe v5 may add `build.node_project_directory` to a `source_build` whose
+detected primary application is Python. The value is optional and names one
+canonical relative POSIX directory confined below the acquired source root;
+for DebBuilder itself it is `frontend`. Omission preserves historical Recipe
+behavior. DebBuilder does not search recursively, infer this directory, or
+support multiple auxiliary projects.
+
+The auxiliary directory must contain `package.json`. Its `engines.node`,
+`engines.npm`, and exact npm `packageManager` declaration provide the
+requirements; npm is the only supported auxiliary package manager. Detection
+keeps `project_type: python` and records the Node facts separately as
+`auxiliary_node_project`. The Dependencies stage resolves and prepares the
+same per-Run toolchain described above. Dependency checks and Build commands
+receive its Run-local `PATH`, HOME, npm cache, and Corepack state. Build and
+Packaging never acquire a replacement and never fall back to host Node/npm.
+
+Installation remains a second, explicit opt-in:
+`build.auxiliary_node_install: npm_ci`. It accepts only npm and requires a
+regular non-symlink `package-lock.json` at lockfile version 2 or 3. DebBuilder
+rejects project `.npmrc`, `npm-shrinkwrap.json`, workspaces, local `file:` or
+`link:` graphs, and registry entries without recorded integrity. It seals the
+relative paths, sizes, and SHA-256 values of `package.json` and the lockfile,
+plus the absence of both configuration alternatives, immediately before and
+after `npm ci`, after source changes, and after every Build command. A changed
+input fails the responsible stage; DebBuilder neither reinstalls nor silently
+adopts a new graph.
+
+The Dependencies command uses the prepared Run-local PATH, HOME and cache,
+empty Run-local user/global npm configuration, neutralizes inherited
+`npm_config_*` names case-insensitively, and disables audit, fund and update
+notices. It may reach the registry during Dependencies. Build receives the
+same toolchain with `npm_config_offline=true` and never runs a second install;
+this is an npm policy, not a general network sandbox. Dry-run seals and
+validates the inputs without executing `npm ci`. Cancellation, timeouts,
+descendant termination, durable command diagnostics, restart recovery, and
+#50 cleanup retain their existing Run semantics; cleanup removes Run-local
+state while preserving the shared verified toolchain cache.
+
+The managed DebBuilder definition is version 11. Its v10 migration adds the
+explicit install field and removes `npm --prefix frontend ci` from Build while
+preserving `active`, maintainer, Build environment/timeouts, and resource
+limit overrides. Both auxiliary fields are application-managed and are not
+operator overrides. The Build compiles the frontend into `static/` while the
+primary package remains Python. Neither Node/npm nor `node_modules` enters the
+Debian payload or runtime dependencies.
+
+`run.json` durably retains primary detection, auxiliary manifest requirements,
+resolved Node/npm identity and integrity, stage status, and diagnostics. The
+public Run projection exposes the bounded relative auxiliary facts and the
+existing toolchain identity without workspace/cache paths. Cancellation and
+restart recovery retain the normal Run semantics. Terminal cleanup removes
+Run-local toolchain state, while the shared verified cache and durable
+provenance remain.
+
+This contract does not add implicit configuration, recursive discovery,
+Docker execution, alternate Node package managers, or more than one auxiliary
+project. The official Release builder remains a separate host-qualified path:
+its caller provisions compatible Node/npm before invoking the same frontend
+commands; it is not migrated to Run-local acquisition.

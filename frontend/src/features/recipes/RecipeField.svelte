@@ -42,10 +42,14 @@
     {#if entry.path === 'service.enabled' && value === false && (editor.draft.service?.name || editor.draft.service?.command)}<small class="muted">{t('serviceDisabledKeepsDetails',language)}</small>{/if}
   {:else if entry.type === 'select'}
     <label>{label}<select value={value ?? ''} {disabled} aria-invalid={Boolean(fieldError)} aria-describedby={fieldError ? errorId : undefined} onchange={e => set(entry.path,e.currentTarget.value)}>{#each entry.options as option}<option value={option}>{recipeOptionLabel(entry.path,option,language)}</option>{/each}</select></label>
+  {:else if entry.type === 'optional-select'}
+    <label>{label}<select value={value ?? ''} {disabled} aria-invalid={Boolean(fieldError)} aria-describedby={fieldError ? errorId : undefined} onchange={e => e.currentTarget.value === '' ? update(remove(editor,entry.path)) : set(entry.path,e.currentTarget.value)}><option value="">—</option>{#each entry.options as option}<option value={option}>{recipeOptionLabel(entry.path,option,language)}</option>{/each}</select></label>
   {:else if entry.type === 'multiline'}
     <label>{label}<textarea value={value ?? ''} {disabled} aria-invalid={Boolean(fieldError)} aria-describedby={fieldError ? errorId : undefined} oninput={e => set(entry.path,e.currentTarget.value)}></textarea></label>
   {:else if entry.type === 'nullable-number'}
     <label>{label}<input type="number" value={value ?? ''} {disabled} aria-invalid={Boolean(fieldError)} aria-describedby={fieldError ? errorId : undefined} oninput={e => set(entry.path,e.currentTarget.value === '' ? null : Number(e.currentTarget.value))}></label>
+  {:else if entry.type === 'optional-text'}
+    <label>{label}<input value={value ?? ''} {disabled} aria-invalid={Boolean(fieldError)} aria-describedby={fieldError ? errorId : undefined} oninput={e => e.currentTarget.value === '' ? update(remove(editor,entry.path)) : set(entry.path,e.currentTarget.value)}></label>
   {:else if entry.type === 'strings' || entry.type === 'objects'}
     <fieldset aria-describedby={fieldError ? errorId : undefined}><legend>{label}</legend>
       {#if !(value || []).length}<p class="recipe-empty">{t('noItems',language)}</p>{/if}

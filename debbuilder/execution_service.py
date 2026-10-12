@@ -35,6 +35,16 @@ _NODE_TOOLCHAIN_ERRORS = (
     _NODE_REQUIREMENT_ERRORS | _NODE_INTEGRITY_ERRORS | _NODE_PREPARATION_ERRORS
     | _PACKAGE_MANAGER_REQUIREMENT_ERRORS | _PACKAGE_MANAGER_PREPARATION_ERRORS
 )
+_AUXILIARY_NPM_ERRORS = {
+    "auxiliary_node_install_input_missing", "auxiliary_node_install_input_invalid",
+    "auxiliary_node_install_input_inaccessible", "auxiliary_node_install_input_too_large",
+    "auxiliary_node_install_configuration_unsupported", "auxiliary_node_workspaces_unsupported",
+    "auxiliary_node_local_dependency_unsupported", "auxiliary_node_lockfile_version_unsupported",
+    "auxiliary_node_lockfile_invalid", "auxiliary_node_lockfile_integrity_missing",
+    "auxiliary_node_inputs_changed", "auxiliary_node_install_failed",
+    "auxiliary_node_install_timeout", "auxiliary_node_toolchain_unavailable",
+    "auxiliary_node_install_configuration_invalid",
+}
 
 
 def _private_environment_values(run: dict) -> tuple[str, ...]:
@@ -152,7 +162,24 @@ def execution_diagnostic(run: dict) -> dict | None:
     recipe_step = {"source": "source", "detection": "build", "dependencies": "build", "source_changes": "build", "build": "build", "staging": "install", "debian_metadata": "install", "systemd": "service", "package": "install", "artifact": "install"}.get(stage, "")
     where.append(_fact("Step", STAGE_LABELS.get(stage, stage.replace("_", " ").title())))
 
-    if code in _NODE_TOOLCHAIN_ERRORS:
+    if code in _AUXILIARY_NPM_ERRORS:
+        title = "Auxiliary npm installation failed"
+        install = details.get("auxiliary_node_install") if isinstance(details.get("auxiliary_node_install"), dict) else {}
+        command = _failed_command(details)
+        facts += filter(None, [
+            _fact("Auxiliary project", details.get("project_directory") or install.get("project_directory")),
+            _fact("Input", details.get("path") or details.get("field")),
+            _fact("Lockfile version", details.get("lockfile_version")),
+            _fact("Command", _command_text(command)),
+            _fact("Exit code", command.get("exit_code")),
+            _fact("Output", _output_excerpt(command)),
+        ])
+        next_action = "Restore a supported sealed package.json/package-lock.json pair and retry the Run."
+        if code in {"auxiliary_node_install_failed", "auxiliary_node_install_timeout"}:
+            next_action = "Review the recorded Dependencies command, registry availability, and Run-local npm configuration before retrying."
+        elif code == "auxiliary_node_inputs_changed":
+            next_action = "Prevent npm, source changes, or Build commands from changing the sealed npm inputs, then retry from a fresh Run."
+    elif code in _NODE_TOOLCHAIN_ERRORS:
         project = details.get("project_requirement") if isinstance(details.get("project_requirement"), dict) else {}
         requirements = details.get("requirements") if isinstance(details.get("requirements"), dict) else {}
         manager = details.get("package_manager") or project.get("package_manager")
@@ -346,6 +373,45 @@ def cancellation_projection(run: dict) -> dict | None:
     }
 
 
+def _public_auxiliary_npm_install(value) -> dict | None:
+    if not isinstance(value, dict) or value.get("mode") != "npm_ci":
+        return None
+    inputs = value.get("inputs") if isinstance(value.get("inputs"), dict) else {}
+    files = []
+    for row in (inputs.get("files") or [])[:2]:
+        if isinstance(row, dict):
+            files.append({
+                "path": safe_text(row.get("path"), limit=500),
+                "size": row.get("size") if isinstance(row.get("size"), int) else None,
+                "sha256": safe_text(row.get("sha256"), limit=128),
+            })
+    commands = []
+    for row in (value.get("commands") or [])[:1]:
+        if isinstance(row, dict):
+            commands.append({
+                "index": row.get("index") if isinstance(row.get("index"), int) else None,
+                "command": _command_text(row),
+                "arguments": [safe_text(item, limit=256) for item in (row.get("arguments") or [])[:16]],
+                "working_directory": safe_text(row.get("configured_working_directory"), limit=500),
+                "status": safe_text(row.get("status"), limit=32),
+                "exit_code": row.get("exit_code") if isinstance(row.get("exit_code"), int) else None,
+                "duration": row.get("duration") if isinstance(row.get("duration"), (int, float)) else None,
+                "timed_out": row.get("timed_out") is True,
+            })
+    return {
+        "mode": "npm_ci",
+        "executed": value.get("executed") is True,
+        "reason": safe_text(value.get("reason"), limit=64),
+        "project_directory": safe_text(value.get("project_directory"), limit=500),
+        "inputs": {
+            "lockfile_version": inputs.get("lockfile_version") if inputs.get("lockfile_version") in {2, 3} else None,
+            "files": files,
+            "absent": [safe_text(item, limit=500) for item in (inputs.get("absent") or [])[:2]],
+        },
+        "commands": commands,
+    }
+
+
 def list_executions(
     store: BuildStore,
     package_resolver: Callable[[dict], str],
@@ -373,6 +439,11 @@ def get_execution(store: BuildStore, run_id: str, *, run: dict | None = None) ->
     if not run or store.execution_history_deleted(run_id, run):
         return None
     detail = execution_projection.public_detail(run)
+    raw_dependencies = next((step for step in run.get("steps", []) if step.get("name") == "dependencies"), {})
+    public_dependencies = next((step for step in detail.get("steps", []) if step.get("name") == "dependencies"), {})
+    install = _public_auxiliary_npm_install((raw_dependencies.get("details") or {}).get("auxiliary_node_install"))
+    if install is not None:
+        public_dependencies.setdefault("details", {})["auxiliary_node_install"] = install
     detail["diagnostic"] = execution_diagnostic(run)
     detail["cancellation"] = cancellation_projection(run)
     return detail

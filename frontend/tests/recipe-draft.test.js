@@ -32,6 +32,8 @@ test('one field changes only its requested path and restoring it clears dirty', 
   for (const [path, value] of [
     ['package.description','Edited description'],['source.tracking','tag'],
     ['build.commands[0]','echo changed'],['build.environment.TEST_KEY','value'],
+    ['build.node_project_directory','frontend'],
+    ['build.auxiliary_node_install','npm_ci'],
     ['service.user','operator'],['resource_limits.tasks_max',16],
     ['automation.enabled',true],['install.maintainer_scripts.postinst','echo ready'],
   ]) {
@@ -106,6 +108,10 @@ test('managed allowlist is backend supplied and forbidden writes fail closed', (
   assert.deepEqual(candidate(editor),managed);
   assert.equal(ownership('source.repository',true,editablePaths),'READ_ONLY_MANAGED');
   assert.throws(() => change(editor,'source.repository','someone/else'),/read-only/);
+  assert.equal(ownership('build.node_project_directory',true,editablePaths),'READ_ONLY_MANAGED');
+  assert.throws(() => change(editor,'build.node_project_directory','other-frontend'),/read-only/);
+  assert.equal(ownership('build.auxiliary_node_install',true,editablePaths),'READ_ONLY_MANAGED');
+  assert.throws(() => remove(editor,'build.auxiliary_node_install'),/read-only/);
   assert.throws(() => remove(editor,'management.operator_overrides'),/read-only/);
   assert.throws(() => change(hydrate(simple),'source.provider','other'),/read-only/);
   const updated = change(editor,'active',!managed.active);

@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from debbuilder import __version__, builtin_recipe, debian_packaging, release_build
+from debbuilder import __version__, builtin_recipe, debian_packaging, node_toolchain, release_build
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -99,6 +99,127 @@ class ReleasePlanTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "release_validation_image_unproven")
 
 
+class AuxiliaryNodeReleaseInstallTests(unittest.TestCase):
+    @staticmethod
+    def _recipe() -> dict:
+        return release_build.check_plan()["recipe"]
+
+    @staticmethod
+    def _result(*, status="success", exit_code=0, timed_out=False, timeout_reason="") -> dict:
+        return {
+            "command": "npm ci", "arguments": ["npm", "ci"], "status": status,
+            "exit_code": exit_code, "stderr": "", "timed_out": timed_out,
+            "timeout_reason": timeout_reason, "error_code": "",
+        }
+
+    def test_explicit_npm_ci_uses_the_host_runner_once_in_the_auxiliary_directory(self):
+        recipe = self._recipe()
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "debbuilder.release_build.project_detection.auxiliary_npm_install_inputs",
+            side_effect=({"sealed": True}, {"sealed": True}),
+        ) as validate_inputs, mock.patch(
+            "debbuilder.release_build.run_command", return_value=self._result(),
+        ) as runner, mock.patch.object(node_toolchain, "resolve") as resolve, mock.patch.object(
+            node_toolchain, "prepare",
+        ) as prepare:
+            source = Path(temporary) / "source"
+            (source / "frontend").mkdir(parents=True)
+            result = release_build._install_auxiliary_node_dependencies(recipe, source)
+
+        self.assertEqual(result["arguments"], ["npm", "ci"])
+        runner.assert_called_once_with(
+            "npm ci", workspace=source, working_directory="frontend",
+            environment=recipe["build"]["environment"], inactivity_timeout=300,
+            maximum_runtime=None,
+        )
+        self.assertEqual(validate_inputs.call_count, 2)
+        self.assertEqual(validate_inputs.call_args_list[0], mock.call(source, "frontend"))
+        self.assertEqual(
+            validate_inputs.call_args_list[1],
+            mock.call(source, "frontend", expected={"sealed": True}),
+        )
+        resolve.assert_not_called()
+        prepare.assert_not_called()
+
+    def test_absent_auxiliary_install_preserves_the_historical_no_install_behavior(self):
+        recipe = self._recipe()
+        recipe["build"].pop("auxiliary_node_install")
+        with mock.patch(
+            "debbuilder.release_build.project_detection.auxiliary_npm_install_inputs",
+        ) as validate_inputs, mock.patch("debbuilder.release_build.run_command") as runner:
+            result = release_build._install_auxiliary_node_dependencies(recipe, Path("unused"))
+        self.assertIsNone(result)
+        validate_inputs.assert_not_called()
+        runner.assert_not_called()
+
+    def test_successful_install_precedes_the_first_build_command(self):
+        events = []
+
+        def install(*args, **kwargs):
+            events.append("npm_ci")
+            return self._result()
+
+        def build(*args, **kwargs):
+            events.append("build")
+            raise release_build.build_executor.BuildError("build_started", "stop after ordering proof")
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "debbuilder.release_build.run_command", side_effect=install,
+        ), mock.patch(
+            "debbuilder.release_build.build_executor.execute_build", side_effect=build,
+        ), mock.patch("debbuilder.release_build.debian_packaging.prepare_staging") as package:
+            root = Path(temporary)
+            output = root / "assets"
+            with self.assertRaises(release_build.build_executor.BuildError) as raised:
+                release_build.build_release_artifacts(
+                    tag=CURRENT_TAG, source_root=REPOSITORY_ROOT, output_directory=output,
+                    validation_images=fixture_images(root), _allow_test_image_fixture=True,
+                )
+
+        self.assertEqual(raised.exception.code, "build_started")
+        self.assertEqual(events, ["npm_ci", "build"])
+        package.assert_not_called()
+        self.assertFalse(output.exists())
+
+    def test_failed_install_stops_build_packaging_and_publication(self):
+        failed = self._result(status="failed", exit_code=7)
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "debbuilder.release_build.run_command", return_value=failed,
+        ) as runner, mock.patch(
+            "debbuilder.release_build.build_executor.execute_build",
+        ) as build, mock.patch(
+            "debbuilder.release_build.debian_packaging.prepare_staging",
+        ) as package, mock.patch("debbuilder.release_build.os.replace") as publish:
+            root = Path(temporary)
+            output = root / "assets"
+            with self.assertRaises(release_build.ReleaseBuildError) as raised:
+                release_build.build_release_artifacts(
+                    tag=CURRENT_TAG, source_root=REPOSITORY_ROOT, output_directory=output,
+                    validation_images=fixture_images(root), _allow_test_image_fixture=True,
+                )
+
+        self.assertEqual(raised.exception.code, "release_auxiliary_node_install_failed")
+        runner.assert_called_once()
+        build.assert_not_called()
+        package.assert_not_called()
+        publish.assert_not_called()
+        self.assertFalse(output.exists())
+
+    def test_install_timeout_preserves_the_release_timeout_contract(self):
+        recipe = self._recipe()
+        timed_out = self._result(
+            status="failed", exit_code=None, timed_out=True, timeout_reason="inactivity",
+        )
+        with mock.patch(
+            "debbuilder.release_build.project_detection.auxiliary_npm_install_inputs",
+            return_value={"sealed": True},
+        ), mock.patch("debbuilder.release_build.run_command", return_value=timed_out):
+            with self.assertRaises(release_build.ReleaseBuildError) as raised:
+                release_build._install_auxiliary_node_dependencies(recipe, Path("source"))
+        self.assertEqual(raised.exception.code, "release_auxiliary_node_install_timeout")
+        self.assertIn("inactivity", str(raised.exception))
+
+
 @unittest.skipUnless(shutil.which("dpkg-deb"), "dpkg-deb unavailable")
 class RealReleaseBuildTests(unittest.TestCase):
     def test_untagged_check_build_matches_release_build(self):
@@ -181,6 +302,11 @@ class RealReleaseBuildTests(unittest.TestCase):
             temporary_parent = root / "temporary"
             temporary_parent.mkdir()
             output = root / "release-assets"
+            frontend_inputs = {
+                name: (REPOSITORY_ROOT / "frontend" / name).read_bytes()
+                for name in ("package.json", "package-lock.json")
+            }
+            self.assertFalse((REPOSITORY_ROOT / "frontend/node_modules").exists())
 
             result = release_build.build_release_artifacts(
                 tag=CURRENT_TAG, source_root=REPOSITORY_ROOT,
@@ -202,6 +328,8 @@ class RealReleaseBuildTests(unittest.TestCase):
             self.assertRegex(contents, r"\./opt/debbuilder/static/assets/index-[A-Za-z0-9_-]+\.css")
             for unwanted in ("./opt/debbuilder/static/app.js", "./opt/debbuilder/static/.vite/", "./opt/debbuilder/frontend/", "/node_modules/"):
                 self.assertNotIn(unwanted, contents)
+            packaged_paths = [line.split()[-1] for line in contents.splitlines() if line.split()]
+            self.assertFalse(any(path.rstrip("/").endswith(("/node", "/npm")) for path in packaged_paths))
             control_dir = root / "control"
             subprocess.run(["dpkg-deb", "-e", str(artifact), str(control_dir)], check=True)
             postinst = (control_dir / "postinst").read_text()
@@ -225,6 +353,11 @@ class RealReleaseBuildTests(unittest.TestCase):
             self.assertEqual(result["artifact"]["sha256"], digest)
             self.assertEqual((output / "SHA256SUMS").read_text(), f"{digest}  {artifact.name}\n")
             self.assertEqual(list(temporary_parent.iterdir()), [])
+            self.assertEqual(frontend_inputs, {
+                name: (REPOSITORY_ROOT / "frontend" / name).read_bytes()
+                for name in frontend_inputs
+            })
+            self.assertFalse((REPOSITORY_ROOT / "frontend/node_modules").exists())
 
     def test_inconsistent_package_metadata_fails_without_publishing_assets(self):
         with tempfile.TemporaryDirectory() as temporary:

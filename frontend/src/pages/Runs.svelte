@@ -22,6 +22,29 @@
     es:{live:'● En directo',liveLabel:'Seguimiento del registro en directo',jump:'↓ Ir al más reciente',jumpLabel:'Ir al final del registro'},
   };
   const logCopy = key => (logText[language] || logText.en)[key];
+  const projectText = {
+    en:{primary:'Primary application',python:'Python',auxiliary:'Auxiliary build toolchain'},
+    fr:{primary:'Application principale',python:'Python',auxiliary:'Toolchain de construction auxiliaire'},
+    de:{primary:'Primäre Anwendung',python:'Python',auxiliary:'Zusätzliche Build-Toolchain'},
+    es:{primary:'Aplicación principal',python:'Python',auxiliary:'Toolchain de compilación auxiliar'},
+  };
+  const projectCopy = key => (projectText[language] || projectText.en)[key] || key;
+  const canonicalAuxiliaryPath = value => {
+    const characters = typeof value === 'string' ? [...value] : [];
+    if (typeof value !== 'string' || !value || !value.trim() || characters.length > 1024 || value.startsWith('/') || /^[A-Za-z]:/.test(value) || value.includes('\\')) return false;
+    if (characters.some(character => {
+      const codepoint = character.codePointAt(0);
+      return codepoint < 32 || (codepoint >= 127 && codepoint <= 159) || (codepoint >= 0xd800 && codepoint <= 0xdfff);
+    })) return false;
+    const parts = value.split('/');
+    return parts.every(part => part && part !== '.' && part !== '..');
+  };
+  const completeAuxiliaryNodeProject = value => value &&
+    typeof value === 'object' && !Array.isArray(value) &&
+    canonicalAuxiliaryPath(value.project_directory) &&
+    canonicalAuxiliaryPath(value.manifest) &&
+    value.manifest === `${value.project_directory}/package.json` &&
+    value.package_manager === 'npm' ? value : null;
   let navigationError = null;
   let actionDialog, actionCloseButton, actionTrigger, actionContext = null, actionError = null, actionResult = null;
   let actionLoading = false, actionPending = false, publishConfirmed = false, admittedRunId = '', actionController, actionRevision = 0;
@@ -280,6 +303,8 @@
   $: if (displayId !== selectedId) select(displayId);
   $: visible = rows.filter(row => matchesStatusFilter(row,filter) && `${row.package || ''} ${row.id} ${row.action || ''}`.toLowerCase().includes(query.toLowerCase()));
   $: dependency = run?.steps?.find(step => step.name === 'staging')?.details?.runtime_dependency_detection;
+  $: detection = run?.steps?.find(step => step.name === 'detection')?.details;
+  $: auxiliaryNodeProject = completeAuxiliaryNodeProject(detection?.auxiliary_node_project);
   $: failedStep = run?.steps?.find(step => step.status === 'failed');
   const technicalDiagnosticLabels = new Set(['Command','Exit code','Last command output','Timeout reason','Configured inactivity','Configured maximum runtime','Archive','Source','Expected SHA-256','Integrity identity']);
   $: diagnosisFacts = [...(run?.diagnostic?.where || []), ...(run?.diagnostic?.facts || [])].filter(fact => !technicalDiagnosticLabels.has(fact.label));
@@ -303,6 +328,8 @@
       <div class="detail-facts">
         <div><span>{t('started',language)}</span><strong>{when(run.started_at || run.created_at || run.updated,language)}</strong></div>
         {#if run.recipe_id || run.recipe}<div><span>{t('recipeFact',language)}</span><strong>{run.recipe_id || run.recipe}</strong></div>{/if}
+        {#if detection?.project_type}<div class="run-primary-project"><span>{projectCopy('primary')}</span><strong>{detection.project_type === 'python' ? projectCopy('python') : detection.display_name || detection.project_type}</strong></div>{/if}
+        {#if auxiliaryNodeProject}<div class="run-auxiliary-toolchain"><span>{projectCopy('auxiliary')}</span><strong>Node/npm · <code>{auxiliaryNodeProject.project_directory}</code></strong></div>{/if}
       </div>
       {#if run.recipe_id || run.recipe || nextAction || cancelTarget}<div class="detail-buttons">{#if run.recipe_id || run.recipe}<button class="button secondary" onclick={() => review(run.recipe_id || run.recipe)}>{t('reviewRecipe',language)}</button>{/if}{#if nextAction}<button class="button primary" onclick={event => openAction(nextAction,event.currentTarget)}>{t(nextAction === 'build' ? 'overviewStartBuild' : nextAction === 'validation' ? 'overviewStartValidation' : 'overviewPublishToApt',language)}</button>{/if}{#if cancelTarget}<button class="button secondary" onclick={event => openCancellation(event.currentTarget)}>{cancellationCopy(cancelTarget.kind)}</button>{/if}</div><ErrorNotice error={navigationError} {language}/>{/if}
     </section>
